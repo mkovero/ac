@@ -3,7 +3,8 @@
 //! (#376). Computed once here so `ac-cli`'s text read-out and
 //! `ac-scene`'s sweep-IR panel cannot disagree about a capture.
 
-use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport};
+use super::{GateParams, MeasurementData, MeasurementReport, ReferenceLatency};
+use crate::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
 /// reported as failed rather than as a result (#376). Below this floor
@@ -79,31 +80,21 @@ impl MeasurementReport {
         // replacing the other.
         let onset_floor = onset_floor(pre_region);
 
-        // The earliest sample known geometry admits as an onset (pure
-        // flight time, converted to a sample index) — only computable
-        // when both a measured τ and a recorded distance are present for
-        // this capture. `None` otherwise, and `estimate_onset`'s `rule`
-        // says so (#346 architect review, option A).
-        let min_admissible_index = match (
-            &self.interface_latency,
-            self.position.as_ref().and_then(|p| p.distance_m),
-        ) {
-            (Some(InterfaceLatency::Measured(tau)), Some(distance_m)) => {
-                let c = crate::shared::conversions::speed_of_sound_from_config(
-                    self.position.as_ref().and_then(|p| p.temperature_c),
-                );
-                let bound_offset = (tau.tau_s + distance_m / c) * *sample_rate_hz as f64;
-                Some((centre as f64 + bound_offset).round().max(0.0) as usize)
-            }
-            _ => None,
-        };
+        // The earliest sample the capture's own geometry admits as an onset
+        // (#460): pure flight time from the same-capture reference latency
+        // and the operator-entered distance, as a sample index. Never from
+        // the stored `interface_latency`: it re-picks by a multiple of the
+        // FireWire SYT interval on every device enumeration (#461), which
+        // exceeds the bound's margin, and it is resolved from calibration
+        // rather than measured with this IR.
+        let causal_bound = causal_bound(self, centre, *sample_rate_hz);
 
         let onset = crate::measurement::sweep::estimate_onset(
             linear_ir,
             peak_index,
             *sample_rate_hz,
             onset_floor,
-            min_admissible_index,
+            &causal_bound,
         );
         let onset_index = onset.index;
         let onset_rule = onset.rule;
@@ -129,6 +120,7 @@ impl MeasurementReport {
             peak_magnitude,
             onset_index,
             onset_rule,
+            causal_bound,
             delay_samples,
             arrival_s,
             pre_impulse_snr_db,
@@ -137,6 +129,54 @@ impl MeasurementReport {
             gate_window_kind,
             verdict,
         })
+    }
+}
+
+/// Build the onset search's causal bound for `report` (#460).
+///
+/// Enforced only when the report carries a measured same-capture
+/// [`ReferenceLatency`] *and* a finite, positive `position.distance_m`.
+/// Anything else is [`CausalBound::Unavailable`] naming what is missing. A
+/// report without the field (written before schema v7, or by a producer
+/// with no reference) counts as the reference missing. The stored
+/// `interface_latency` is deliberately not read: see #461.
+pub(super) fn causal_bound(
+    report: &MeasurementReport,
+    centre: usize,
+    sample_rate_hz: u32,
+) -> CausalBound {
+    let distance_m = report
+        .position
+        .as_ref()
+        .and_then(|p| p.distance_m)
+        .filter(|d| d.is_finite() && *d > 0.0);
+    let reference = match &report.reference_latency {
+        Some(ReferenceLatency::Measured(r)) => Ok(r.tau_s),
+        Some(ReferenceLatency::Unavailable { reason }) => Err(reason.clone()),
+        None => Err("no same-capture reference in this report".to_string()),
+    };
+    match (reference, distance_m) {
+        (Ok(reference_tau_s), Some(distance_m)) => {
+            let temperature_c = report.position.as_ref().and_then(|p| p.temperature_c);
+            let c = crate::shared::conversions::speed_of_sound_from_config(temperature_c);
+            let offset = (reference_tau_s + distance_m / c) * sample_rate_hz as f64;
+            CausalBound::Enforced {
+                index: (centre as f64 + offset).round().max(0.0) as usize,
+                inputs: BoundInputs {
+                    reference_tau_s,
+                    distance_m,
+                    speed_of_sound_m_s: c,
+                    temperature_c,
+                },
+            }
+        }
+        (Ok(_), None) => CausalBound::Unavailable(MissingBoundInput::Distance),
+        (Err(reason), Some(_)) => {
+            CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { reason })
+        }
+        (Err(reference_reason), None) => {
+            CausalBound::Unavailable(MissingBoundInput::Both { reference_reason })
+        }
     }
 }
 
@@ -293,6 +333,10 @@ pub struct IrStats {
     /// persisted onset can be told apart from a bare peak read a year
     /// later (#346 acceptance criterion 4).
     pub onset_rule: String,
+    /// The causal bound the onset search ran under, or which input it
+    /// lacked (#460). Carries the bound's inputs so a read-out prints them
+    /// rather than re-deriving them; `min_admissible_index()` is the index.
+    pub causal_bound: CausalBound,
     /// `peak_index - window_len / 2` — signed offset of the magnitude
     /// peak from the gate centre, in samples. Positive means the response
     /// arrived after the zero-delay reference position.
@@ -633,7 +677,7 @@ mod tests {
         assert!(stats.onset_rule.contains("no causal bound"));
     }
 
-    /// #346: when a report carries both a measured interface latency and
+    /// #346 / #460: when a report carries both a same-capture reference latency and
     /// a recorded `position.distance_m`, `ir_stats` must convert them
     /// into a causal bound and enforce it — proven with a capture whose
     /// unbounded answer is non-causal, so the bound actively changes the
@@ -646,7 +690,7 @@ mod tests {
     /// flight time allows — expressed against a window instead of a
     /// walk.
     #[test]
-    fn ir_stats_wires_a_causal_bound_from_position_and_interface_latency() {
+    fn ir_stats_wires_a_causal_bound_from_position_and_reference_latency() {
         let window_len = 1024;
         let sr = 48_000u32;
         let centre = window_len / 2;
@@ -686,9 +730,13 @@ mod tests {
             distance_m: Some(bound_offset_samples / sr as f64 * c),
             ..Default::default()
         });
-        r.interface_latency = Some(measured_tau(0.0));
+        r.reference_latency = Some(measured_reference(0.0));
 
         let bounded = r.ir_stats().unwrap();
+        assert_eq!(
+            bounded.causal_bound.min_admissible_index(),
+            Some(bound_index)
+        );
         assert!(
             bounded.onset_index >= bound_index,
             "causal bound must exclude the non-causal candidate, got {}",
@@ -699,6 +747,83 @@ mod tests {
         assert!(bounded
             .onset_rule
             .contains(&format!("window start at sample {bound_index}")));
+    }
+
+    /// #460 AC6, tested against the rejected implementation: a report that
+    /// carries a *stored* measured τ and a distance, but no same-capture
+    /// reference, must not get a bound. The bound the stored-τ wiring would
+    /// have built is computed here, and must not be the window start.
+    #[test]
+    fn ir_stats_never_builds_the_bound_from_stored_interface_latency() {
+        let window_len = 1024;
+        let sr = 48_000u32;
+        let centre = window_len / 2;
+        let peak_true = centre + 100;
+        let mut ir: Vec<f64> = (0..window_len)
+            .map(|i| {
+                let mut s = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                s ^= s >> 29;
+                ((s >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2e-4
+            })
+            .collect();
+        for (i, v) in ir
+            .iter_mut()
+            .enumerate()
+            .take(peak_true + 1)
+            .skip(peak_true - 7)
+        {
+            *v += 0.3 * (i + 8 - peak_true) as f64 / 8.0;
+        }
+        ir[peak_true] = 1.0;
+
+        let mut r = ir_report_with_custom_ir(ir, sr);
+        let distance_m = 0.05;
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some(distance_m),
+            ..Default::default()
+        });
+        let stored_tau_s = 0.001;
+        r.interface_latency = Some(measured_tau(stored_tau_s));
+        r.reference_latency = None;
+
+        // The rejected wiring: the pre-#460 bound built from the stored τ.
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        let stored_bound =
+            (centre as f64 + (stored_tau_s + distance_m / c) * sr as f64).round() as usize;
+        assert!(
+            stored_bound < peak_true,
+            "test setup: the stored-τ bound must be admissible, got {stored_bound}"
+        );
+
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.causal_bound.min_admissible_index(),
+            None,
+            "a stored τ must never enforce the bound"
+        );
+        assert!(
+            matches!(
+                stats.causal_bound,
+                CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { .. })
+            ),
+            "{:?}",
+            stats.causal_bound
+        );
+        assert!(
+            stats
+                .onset_rule
+                .contains("no causal bound (reference latency unavailable)"),
+            "{}",
+            stats.onset_rule
+        );
+        assert!(
+            !stats
+                .onset_rule
+                .contains(&format!("window start at sample {stored_bound}")),
+            "the stored-τ bound set the window: {}",
+            stats.onset_rule
+        );
     }
 
     /// #346 (QA on #352, correctness issue 2) / #353: `floor_rms`'s guard
@@ -916,8 +1041,15 @@ mod tests {
                  floor on an uncontaminated pre-impulse region"
             );
 
-            let picked_with_rms =
-                crate::measurement::sweep::estimate_onset(&ir, peak_true, sr, rms_floor, None);
+            let picked_with_rms = crate::measurement::sweep::estimate_onset(
+                &ir,
+                peak_true,
+                sr,
+                rms_floor,
+                &CausalBound::Unavailable(MissingBoundInput::Both {
+                    reference_reason: String::new(),
+                }),
+            );
             let r = ir_report_with_custom_ir(ir, sr);
             let stats = r.ir_stats().unwrap();
             assert_eq!(

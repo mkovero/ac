@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessScope};
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::rings::CaptureRings;
@@ -86,6 +86,14 @@ struct SharedState {
     one_shot_buf: ArcSwap<Vec<f32>>,
     one_shot_pos: AtomicUsize,
     one_shot_active: AtomicBool,
+    // Reference ports the RT handler has adopted from `ref_add_cons` (#460
+    // invariant d): a same-capture reference one-shot is not armed until its
+    // port is in the callback's list.
+    refs_adopted: AtomicUsize,
+    // Set by the consumer to abandon an armed reference one-shot (cancel or
+    // timeout). The callback drops it plus any queued start, then clears the
+    // flag as the acknowledgement.
+    ref_one_shot_abort: AtomicBool,
 }
 
 /// Main-thread → RT-handler hand-off for a freshly-registered ref input.
@@ -95,6 +103,30 @@ struct SharedState {
 struct RefAdd {
     port: jack::Port<AudioIn>,
     prod: HeapProd<f32>,
+}
+
+/// Main-thread → RT hand-off that arms a same-capture reference one-shot
+/// (#460). Everything the callback needs travels in the message, so arming,
+/// the stimulus's first output sample and both captures' first samples all
+/// happen in the one period that pops it: alignment by construction, not by
+/// ordering two statements on the consumer thread against the callback
+/// (#467).
+struct RefOneShotStart {
+    stimulus: Arc<Vec<f32>>,
+    ref_index: usize,
+    capture_len: usize,
+    meas: HeapProd<f32>,
+    reference: HeapProd<f32>,
+}
+
+/// A reference one-shot in progress, owned by the RT callback.
+struct RefOneShot {
+    stimulus: Arc<Vec<f32>>,
+    pos: usize,
+    ref_index: usize,
+    remaining: usize,
+    meas: HeapProd<f32>,
+    reference: HeapProd<f32>,
 }
 
 pub struct JackEngine {
@@ -115,6 +147,9 @@ pub struct JackEngine {
     /// Main-side producer of the on-demand port hand-off queue. `None`
     /// between `stop()` and the next `start()`.
     ref_add_prod: Option<HeapProd<RefAdd>>,
+    /// Main-side producer of the reference one-shot hand-off (#460). `None`
+    /// between `stop()` and the next `start()`.
+    ref_one_shot_prod: Option<HeapProd<RefOneShotStart>>,
 }
 
 impl JackEngine {
@@ -134,6 +169,8 @@ impl JackEngine {
                 one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
                 one_shot_pos: AtomicUsize::new(0),
                 one_shot_active: AtomicBool::new(false),
+                refs_adopted: AtomicUsize::new(0),
+                ref_one_shot_abort: AtomicBool::new(false),
             }),
             rings: CaptureRings::new(),
             _async_client: None,
@@ -141,6 +178,7 @@ impl JackEngine {
             input_port: None,
             ref_ports: Vec::new(),
             ref_add_prod: None,
+            ref_one_shot_prod: None,
         }
     }
 }
@@ -160,6 +198,10 @@ struct Process {
     ring_ref_prods: Vec<HeapProd<f32>>,
     /// Receives port hand-offs from the main thread; drained each period.
     ref_add_cons: HeapCons<RefAdd>,
+    /// The reference one-shot currently running, if any (#460).
+    ref_one_shot: Option<RefOneShot>,
+    /// Receives reference one-shot starts; popped at the top of a period.
+    ref_one_shot_cons: HeapCons<RefOneShotStart>,
 }
 
 /// Fill `out` from `tone`, wrapping at buffer boundary. Returns updated position.
@@ -177,6 +219,54 @@ fn fill_tone(out: &mut [f32], tone: &[f32], mut pos: usize) -> usize {
 
 /// Fill `out` from `buf` starting at `pos`, without wrapping. Zero-pads
 /// the tail if `buf` runs out mid-fill. Returns `(new_pos, exhausted)`.
+/// One period of a same-capture reference one-shot (#460), factored out of
+/// `Process::process` so its alignment is testable without a JACK server.
+///
+/// When `slot` is empty and `start` arrives, the one-shot begins in *this*
+/// period: the stimulus starts filling `out` here, and `meas_in` / `ref_in`
+/// from this same period are the first samples of both captures. Pushes stop
+/// once `capture_len` samples are in; the slot is then released. A missing
+/// `ref_in` (port not adopted) pushes nothing to the reference ring, so the
+/// consumer sees a short reference and refuses it rather than padding it.
+///
+/// Returns `true` when the one-shot owned `out` this period, so the caller
+/// must not overwrite it.
+fn ref_one_shot_period(
+    slot: &mut Option<RefOneShot>,
+    start: Option<RefOneShotStart>,
+    out: &mut [f32],
+    meas_in: &[f32],
+    ref_in: Option<&[f32]>,
+) -> bool {
+    if slot.is_none() {
+        if let Some(s) = start {
+            *slot = Some(RefOneShot {
+                stimulus: s.stimulus,
+                pos: 0,
+                ref_index: s.ref_index,
+                remaining: s.capture_len,
+                meas: s.meas,
+                reference: s.reference,
+            });
+        }
+    }
+    let Some(shot) = slot.as_mut() else {
+        return false;
+    };
+    let (pos, _) = fill_one_shot(out, &shot.stimulus, shot.pos);
+    shot.pos = pos;
+    let n = meas_in.len().min(shot.remaining);
+    shot.meas.push_slice(&meas_in[..n]);
+    if let Some(r) = ref_in {
+        shot.reference.push_slice(&r[..n.min(r.len())]);
+    }
+    shot.remaining -= n;
+    if shot.remaining == 0 {
+        *slot = None;
+    }
+    true
+}
+
 fn fill_one_shot(out: &mut [f32], buf: &[f32], pos: usize) -> (usize, bool) {
     let remaining = buf.len().saturating_sub(pos);
     let n = out.len().min(remaining);
@@ -195,27 +285,11 @@ impl jack::ProcessHandler for Process {
         let out_buf = self.out_port.as_mut_slice(scope);
         let in_buf = self.in_port.as_slice(scope);
 
-        if self.state.one_shot_active.load(Ordering::Acquire) {
-            let buf = self.state.one_shot_buf.load();
-            let pos = self.state.one_shot_pos.load(Ordering::Relaxed);
-            let (new_pos, done) = fill_one_shot(out_buf, &buf, pos);
-            self.state.one_shot_pos.store(new_pos, Ordering::Relaxed);
-            if done {
-                self.state.one_shot_active.store(false, Ordering::Release);
-            }
-        } else if self.state.silence.load(Ordering::Relaxed) {
-            out_buf.fill(0.0);
-        } else {
-            let tone = self.state.tone_buf.load();
-            if !tone.is_empty() {
-                self.tone_pos = fill_tone(out_buf, &tone, self.tone_pos);
-            } else {
-                out_buf.fill(0.0);
-            }
-        }
-
         // Drain any pending ref-port additions before reading capture data.
-        // Capacity was pre-reserved so `push` does not allocate.
+        // Capacity was pre-reserved so `push` does not allocate. Runs before
+        // the output fill (it used to run after it): a same-capture reference
+        // one-shot (#460) reads its port in this same period, so the port must
+        // already be in the list.
         while let Some(add) = self.ref_add_cons.try_pop() {
             if self.in_ref_ports.len() < self.in_ref_ports.capacity() {
                 self.in_ref_ports.push(add.port);
@@ -223,6 +297,57 @@ impl jack::ProcessHandler for Process {
             }
             // Silently drop if we somehow exceeded capacity — the main-side
             // guard prevents this, but dropping is still RT-safe.
+        }
+        self.state
+            .refs_adopted
+            .store(self.in_ref_ports.len(), Ordering::Relaxed);
+
+        // #460: abandon a reference one-shot and any queued start when the
+        // consumer asks, then acknowledge. The consumer keeps its ring halves
+        // and the stimulus alive until this acknowledgement, so dropping them
+        // here only decrements reference counts.
+        if self.state.ref_one_shot_abort.load(Ordering::Relaxed) {
+            self.ref_one_shot = None;
+            while self.ref_one_shot_cons.try_pop().is_some() {}
+            self.state
+                .ref_one_shot_abort
+                .store(false, Ordering::Relaxed);
+        }
+        let start = if self.ref_one_shot.is_none() {
+            self.ref_one_shot_cons.try_pop()
+        } else {
+            None
+        };
+        let ref_index = self
+            .ref_one_shot
+            .as_ref()
+            .map(|s| s.ref_index)
+            .or_else(|| start.as_ref().map(|s| s.ref_index));
+        let ref_in = ref_index
+            .and_then(|i| self.in_ref_ports.get(i))
+            .map(|p| p.as_slice(scope));
+        let ref_shot_owns_output =
+            ref_one_shot_period(&mut self.ref_one_shot, start, out_buf, in_buf, ref_in);
+
+        if !ref_shot_owns_output {
+            if self.state.one_shot_active.load(Ordering::Acquire) {
+                let buf = self.state.one_shot_buf.load();
+                let pos = self.state.one_shot_pos.load(Ordering::Relaxed);
+                let (new_pos, done) = fill_one_shot(out_buf, &buf, pos);
+                self.state.one_shot_pos.store(new_pos, Ordering::Relaxed);
+                if done {
+                    self.state.one_shot_active.store(false, Ordering::Release);
+                }
+            } else if self.state.silence.load(Ordering::Relaxed) {
+                out_buf.fill(0.0);
+            } else {
+                let tone = self.state.tone_buf.load();
+                if !tone.is_empty() {
+                    self.tone_pos = fill_tone(out_buf, &tone, self.tone_pos);
+                } else {
+                    out_buf.fill(0.0);
+                }
+            }
         }
 
         self.ring_prod.push_slice(in_buf);
@@ -328,6 +453,13 @@ impl AudioEngine for JackEngine {
         let (ref_add_prod, ref_add_cons) = HeapRb::<RefAdd>::new(REF_ADD_QUEUE_CAPACITY).split();
         self.ref_add_prod = Some(ref_add_prod);
 
+        // #460: hand-off for a same-capture reference one-shot. One runs at a
+        // time (the worker is serial); the second slot tolerates a start the
+        // callback has not yet dropped after an abort.
+        let (ref_one_shot_prod, ref_one_shot_cons) = HeapRb::<RefOneShotStart>::new(2).split();
+        self.ref_one_shot_prod = Some(ref_one_shot_prod);
+        self.state.refs_adopted.store(0, Ordering::Relaxed);
+
         let process = Process {
             out_port,
             in_port,
@@ -337,6 +469,8 @@ impl AudioEngine for JackEngine {
             ring_prod,
             ring_ref_prods,
             ref_add_cons,
+            ref_one_shot: None,
+            ref_one_shot_cons,
         };
         let async_client = client
             .activate_async(
@@ -375,6 +509,7 @@ impl AudioEngine for JackEngine {
         self.rings.teardown();
         self.ref_ports.clear();
         self.ref_add_prod = None;
+        self.ref_one_shot_prod = None;
     }
 
     fn sample_rate(&self) -> u32 {
@@ -450,6 +585,118 @@ impl AudioEngine for JackEngine {
         wait?;
 
         Ok(self.rings.capture_available(n_total))
+    }
+
+    fn supports_reference_capture(&self) -> bool {
+        true
+    }
+
+    fn play_and_capture_with_reference(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        reference_port: &str,
+        stop: &AtomicBool,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        if samples.is_empty() {
+            anyhow::bail!("play_and_capture_with_reference: empty stimulus");
+        }
+        if self._async_client.is_none() {
+            anyhow::bail!("play_and_capture_with_reference before start()");
+        }
+        self.add_ref_input(reference_port)?;
+        let ref_index = self
+            .ref_ports
+            .iter()
+            .position(|p| p == reference_port)
+            .ok_or_else(|| anyhow::anyhow!("reference port {reference_port} was not registered"))?;
+        // (d) The callback must hold the port before the one-shot is armed.
+        let adopt_deadline = Instant::now() + Duration::from_secs(2);
+        while self.state.refs_adopted.load(Ordering::Relaxed) <= ref_index {
+            if Instant::now() > adopt_deadline {
+                anyhow::bail!(
+                    "reference port {reference_port} was not adopted by the audio callback \
+                     within 2 s"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let sr = self.sample_rate as f64;
+        let tail_n = (tail_s.max(0.0) * sr) as usize;
+        let capture_len = samples.len() + tail_n;
+        // (c) Rings sized to this request, which the handler budget bounds.
+        let (meas_prod, mut meas_cons) = HeapRb::<f32>::new(capture_len).split();
+        let (ref_prod, mut ref_cons) = HeapRb::<f32>::new(capture_len).split();
+        let stimulus = Arc::new(samples.to_vec());
+        self.state.silence.store(true, Ordering::Relaxed);
+        self.state
+            .ref_one_shot_abort
+            .store(false, Ordering::Relaxed);
+        let start = RefOneShotStart {
+            stimulus: stimulus.clone(),
+            ref_index,
+            capture_len,
+            meas: meas_prod,
+            reference: ref_prod,
+        };
+        let Some(ref mut queue) = self.ref_one_shot_prod else {
+            anyhow::bail!("play_and_capture_with_reference before start()");
+        };
+        if queue.try_push(start).is_err() {
+            anyhow::bail!("reference one-shot queue full");
+        }
+
+        let duration_s = capture_len as f64 / sr;
+        let timeout = Instant::now() + Duration::from_secs_f64(duration_s + 2.0);
+        *self.state.waker.lock().unwrap() = Some(std::thread::current());
+        let wait = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Err(anyhow::anyhow!("play_and_capture cancelled"));
+            }
+            if meas_cons.occupied_len() >= capture_len && ref_cons.occupied_len() >= capture_len {
+                break Ok(());
+            }
+            if Instant::now() > timeout {
+                break Err(anyhow::anyhow!(
+                    "capture timeout after {duration_s:.1}s (measurement {} / reference {} of \
+                     {capture_len} samples)",
+                    meas_cons.occupied_len(),
+                    ref_cons.occupied_len()
+                ));
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        };
+        *self.state.waker.lock().unwrap() = None;
+        if let Err(e) = wait {
+            // Ask the callback to drop the one-shot, and hold the ring halves
+            // and stimulus until it acknowledges, so nothing is freed on the
+            // RT thread.
+            self.state.ref_one_shot_abort.store(true, Ordering::Relaxed);
+            let ack_deadline = Instant::now() + Duration::from_millis(500);
+            while self.state.ref_one_shot_abort.load(Ordering::Relaxed)
+                && Instant::now() < ack_deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.state.silence.store(true, Ordering::Relaxed);
+            drop(stimulus);
+            return Err(e);
+        }
+
+        // (a) Exact length on both, never padded.
+        let mut meas = vec![0.0f32; capture_len];
+        let got_meas = meas_cons.pop_slice(&mut meas);
+        let mut reference = vec![0.0f32; capture_len];
+        let got_ref = ref_cons.pop_slice(&mut reference);
+        drop(stimulus);
+        if got_meas != capture_len || got_ref != capture_len {
+            anyhow::bail!(
+                "reference one-shot returned {got_meas} measurement / {got_ref} reference \
+                 samples of {capture_len}"
+            );
+        }
+        Ok((meas, reference))
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
@@ -683,6 +930,150 @@ mod tests {
                  {n_total} samples, meas_ring_capacity returned only {cap}"
             );
         }
+    }
+
+    // ---- ref_one_shot_period (#460 invariant b; #467) ----
+
+    fn arm_ref_one_shot(
+        stimulus: &[f32],
+        capture_len: usize,
+    ) -> (RefOneShotStart, HeapCons<f32>, HeapCons<f32>) {
+        let (meas, meas_cons) = HeapRb::<f32>::new(capture_len).split();
+        let (reference, ref_cons) = HeapRb::<f32>::new(capture_len).split();
+        (
+            RefOneShotStart {
+                stimulus: Arc::new(stimulus.to_vec()),
+                ref_index: 0,
+                capture_len,
+                meas,
+                reference,
+            },
+            meas_cons,
+            ref_cons,
+        )
+    }
+
+    fn drain_all(c: &mut HeapCons<f32>) -> Vec<f32> {
+        let mut v = vec![0.0f32; c.occupied_len()];
+        let n = c.pop_slice(&mut v);
+        v.truncate(n);
+        v
+    }
+
+    /// A hardware loopback with exactly one period of latency feeds both
+    /// inputs: what the callback reads in period `p` is what it wrote in
+    /// `p - 1`. Whatever period pops the start, both captures must be equal
+    /// sample for sample, and the stimulus must land at exactly one period in.
+    #[test]
+    fn ref_one_shot_aligns_stimulus_and_both_captures_whatever_period_arms_it() {
+        const PERIOD: usize = 8;
+        let stimulus: Vec<f32> = (1..=20).map(|v| v as f32).collect();
+        let capture_len = stimulus.len() + 2 * PERIOD;
+        for arm_at in 0..4usize {
+            let (start, mut meas_cons, mut ref_cons) = arm_ref_one_shot(&stimulus, capture_len);
+            let mut start = Some(start);
+            let mut slot: Option<RefOneShot> = None;
+            let mut prev_out = vec![0.0f32; PERIOD];
+            for p in 0..(arm_at + capture_len / PERIOD + 2) {
+                let mut out = vec![0.0f32; PERIOD];
+                let msg = if p == arm_at { start.take() } else { None };
+                let input = prev_out.clone();
+                ref_one_shot_period(&mut slot, msg, &mut out, &input, Some(&input));
+                prev_out = out;
+            }
+            assert!(slot.is_none(), "arm_at {arm_at}: one-shot not released");
+            let meas = drain_all(&mut meas_cons);
+            let reference = drain_all(&mut ref_cons);
+            assert_eq!(meas.len(), capture_len, "arm_at {arm_at}");
+            assert_eq!(
+                meas, reference,
+                "arm_at {arm_at}: measurement and reference must be sample-aligned"
+            );
+            assert!(
+                meas[..PERIOD].iter().all(|&v| v == 0.0),
+                "arm_at {arm_at}: {meas:?}"
+            );
+            assert_eq!(
+                &meas[PERIOD..PERIOD + stimulus.len()],
+                &stimulus[..],
+                "arm_at {arm_at}: stimulus must land exactly one loopback period in"
+            );
+        }
+    }
+
+    /// The rejected implementation, computed here: the single-input one-shot
+    /// clears the ring and then enables playback from the consumer thread,
+    /// while the callback reads the enable flag at the top of a period and
+    /// pushes that period's input at the bottom. When both consumer
+    /// statements land inside one callback, a silent period is left at the
+    /// head of the capture and the stimulus reads exactly one period late.
+    /// `ref_one_shot_period` has no such interleaving: arming is one message
+    /// popped at the top of a period.
+    #[test]
+    fn clear_then_enable_puts_the_stimulus_one_period_late_when_it_races_the_callback() {
+        const PERIOD: usize = 8;
+        let stimulus: Vec<f32> = (1..=16).map(|v| v as f32).collect();
+        let first_stimulus_index = |raced: bool| -> usize {
+            let mut ring: Vec<f32> = Vec::new();
+            let mut active = false;
+            let mut pos = 0usize;
+            let mut prev_out = vec![0.0f32; PERIOD];
+            for p in 0..6 {
+                let checked_active = active; // callback top: flag read
+                if p == 1 && raced {
+                    // Consumer's clear + enable land inside this callback.
+                    ring.clear();
+                    active = true;
+                }
+                let mut out = vec![0.0f32; PERIOD];
+                if checked_active {
+                    let (np, _) = fill_one_shot(&mut out, &stimulus, pos);
+                    pos = np;
+                }
+                ring.extend_from_slice(&prev_out); // callback bottom: push input
+                if p == 1 && !raced {
+                    // Consumer runs between callbacks.
+                    ring.clear();
+                    active = true;
+                }
+                prev_out = out;
+            }
+            ring.iter()
+                .position(|&v| v == 1.0)
+                .expect("stimulus captured")
+        };
+        let clean = first_stimulus_index(false);
+        let raced = first_stimulus_index(true);
+        assert_eq!(
+            raced,
+            clean + PERIOD,
+            "the race must shift the stimulus by exactly one period (clean {clean}, raced {raced})"
+        );
+    }
+
+    /// Invariant (a) on the RT side: with the reference port absent, nothing
+    /// is pushed to the reference ring, so the consumer sees a short reference
+    /// and refuses it. It is never padded into a full-length buffer.
+    #[test]
+    fn ref_one_shot_without_its_port_leaves_the_reference_short() {
+        const PERIOD: usize = 8;
+        let stimulus = vec![1.0f32; PERIOD];
+        let capture_len = 3 * PERIOD;
+        let (start, meas_cons, ref_cons) = arm_ref_one_shot(&stimulus, capture_len);
+        let mut start = Some(start);
+        let mut slot: Option<RefOneShot> = None;
+        for _ in 0..4 {
+            let mut out = vec![0.0f32; PERIOD];
+            let input = vec![0.5f32; PERIOD];
+            ref_one_shot_period(&mut slot, start.take(), &mut out, &input, None);
+        }
+        assert!(slot.is_none());
+        assert_eq!(meas_cons.occupied_len(), capture_len);
+        assert_eq!(
+            ref_cons.occupied_len(),
+            0,
+            "a missing reference port must not be padded into a full-length buffer"
+        );
     }
 
     // ---- fill_one_shot ----
@@ -983,6 +1374,8 @@ mod tests {
             one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
             one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
+            refs_adopted: AtomicUsize::new(0),
+            ref_one_shot_abort: AtomicBool::new(false),
         });
         assert_eq!(state.xruns.load(Ordering::Relaxed), 0);
         state.xruns.fetch_add(1, Ordering::Relaxed);
@@ -1002,6 +1395,8 @@ mod tests {
             one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
             one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
+            refs_adopted: AtomicUsize::new(0),
+            ref_one_shot_abort: AtomicBool::new(false),
         };
         let mut out = [0.0f32; 2];
         fill_tone(&mut out, &state.tone_buf.load(), 0);

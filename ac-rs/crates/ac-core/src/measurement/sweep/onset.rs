@@ -23,6 +23,82 @@ pub struct OnsetEstimate {
     pub rule: String,
 }
 
+/// The earliest sample an onset may occupy, or why no such limit applies
+/// (#460). The onset search's lower window edge when enforced.
+///
+/// Built by [`crate::measurement::report::MeasurementReport::ir_stats`]
+/// from a same-capture reference latency and an operator-entered distance.
+/// A stored τ never feeds it: it re-picks by a multiple of the FireWire SYT
+/// interval on every device enumeration (#461), which is larger than the
+/// bound's margin.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CausalBound {
+    /// Pure flight time (reference τ + distance / c) as a sample index,
+    /// with the inputs it was built from so a read-out can print them
+    /// rather than re-derive them (#460 UX).
+    Enforced { index: usize, inputs: BoundInputs },
+    /// The bound could not be built. Names the missing input(s) (#460 AC3).
+    Unavailable(MissingBoundInput),
+}
+
+/// What an enforced [`CausalBound`] was computed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundInputs {
+    /// Same-capture reference latency, seconds: τ of the reference pair.
+    pub reference_tau_s: f64,
+    /// Operator-entered source-to-receiver distance, metres.
+    pub distance_m: f64,
+    /// Speed of sound the distance was converted with, m/s.
+    pub speed_of_sound_m_s: f64,
+    /// Temperature that set `speed_of_sound_m_s`. `None` means none was
+    /// configured and the default was assumed.
+    pub temperature_c: Option<f64>,
+}
+
+/// Which input(s) an unavailable [`CausalBound`] lacked.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MissingBoundInput {
+    /// A valid same-capture reference exists; no distance was given.
+    Distance,
+    /// A distance was given; no valid same-capture reference. `reason` is
+    /// the reference reading's own unavailable reason.
+    ReferenceLatency { reason: String },
+    /// Neither. `reference_reason` as above.
+    Both { reference_reason: String },
+}
+
+impl CausalBound {
+    /// The enforced index, or `None` when the bound is unavailable.
+    pub fn min_admissible_index(&self) -> Option<usize> {
+        match self {
+            CausalBound::Enforced { index, .. } => Some(*index),
+            CausalBound::Unavailable(_) => None,
+        }
+    }
+}
+
+impl MissingBoundInput {
+    /// The rule-string clause naming what is missing. Stable text: the
+    /// CLI read-out and tests match on it.
+    pub fn clause(&self) -> &'static str {
+        match self {
+            MissingBoundInput::Distance => "distance not given",
+            MissingBoundInput::ReferenceLatency { .. } => "reference latency unavailable",
+            MissingBoundInput::Both { .. } => "no distance, reference latency unavailable",
+        }
+    }
+
+    /// The reference reading's unavailable reason, when that input is
+    /// among the missing ones.
+    pub fn reference_reason(&self) -> Option<&str> {
+        match self {
+            MissingBoundInput::Distance => None,
+            MissingBoundInput::ReferenceLatency { reason } => Some(reason),
+            MissingBoundInput::Both { reference_reason } => Some(reference_reason),
+        }
+    }
+}
+
 /// Length of the onset picker's search window, in seconds.
 ///
 /// The window ends at the magnitude peak; its start is the later of this
@@ -58,8 +134,8 @@ fn segment_variance(prefix_sum: &[f64], prefix_sq: &[f64], from: usize, to: usiz
 /// Estimate the wavefront onset in a deconvolved impulse response `ir`,
 /// given its magnitude peak at `peak_index`, the capture's
 /// `sample_rate_hz`, a `gate_floor` (the pre-impulse median floor, see
-/// [`crate::measurement::report::MeasurementReport::ir_stats`]) and,
-/// where geometry is known, `min_admissible_index`.
+/// [`crate::measurement::report::MeasurementReport::ir_stats`]) and the
+/// capture's `causal_bound`.
 ///
 /// Not `argmax|h|` (issue #346): on a multi-way loudspeaker the sample of
 /// largest magnitude sits at a fixed group-delay offset past the
@@ -96,15 +172,16 @@ fn segment_variance(prefix_sum: &[f64], prefix_sq: &[f64], from: usize, to: usiz
 /// rescale — the direct level dropping with distance cannot move it.
 /// There is no threshold and no margin constant in the rule.
 ///
-/// `min_admissible_index`, when supplied, is the earliest sample the
-/// measurement's own known geometry allows an onset to occupy (pure
-/// flight time converted to a sample index). It is the search window's
-/// lower limit, so a bandlimited pre-ring that a floor-relative scan
-/// would return non-causally is outside the picker's reach entirely
-/// rather than being clamped after the fact. When it is `None` the bound
-/// cannot be enforced (no geometry known for this capture) and `rule`
-/// says so, so a reader can tell a geometry-checked onset from a
-/// best-effort one.
+/// `causal_bound`, when [`CausalBound::Enforced`], is the earliest sample
+/// the capture's own geometry allows an onset to occupy: same-capture
+/// reference τ plus distance over c, as a sample index (#460). It is the
+/// search window's lower limit, so a bandlimited pre-ring that a
+/// floor-relative scan would return non-causally is outside the picker's
+/// reach entirely rather than being clamped after the fact. A bound at or
+/// after the peak leaves nothing to search and is a named decline. When it
+/// is [`CausalBound::Unavailable`] the bound cannot be enforced and `rule`
+/// names the missing input, so a reader can tell a geometry-checked onset
+/// from a best-effort one.
 ///
 /// Breakdown (#378 acceptance criterion 3, extending #353's): unlike the
 /// backward walk the picker cannot fail to move, so the degenerate cases
@@ -121,9 +198,9 @@ fn segment_variance(prefix_sum: &[f64], prefix_sq: &[f64], from: usize, to: usiz
 ///   where the IR's variance changes, not on amplitude, so on a
 ///   band-limited deconvolution it reads the leading skirt of the main
 ///   lobe — earlier than the old level crossing did, and earlier than
-///   sound can have arrived. Only `min_admissible_index` can reject
-///   that, and it exists only when both a measured τ and a recorded
-///   distance are present. Where geometry is known this is the tighter
+///   sound can have arrived. Only an enforced `causal_bound` can reject
+///   that, and it exists only when both a valid same-capture reference and a
+///   recorded distance are present. Where geometry is known this is the tighter
 ///   limit and the case does not arise.
 /// - *A window with no pre-onset noise in it is uninformative.* If the
 ///   causal bound truncates the window past the true onset, the window
@@ -137,7 +214,7 @@ pub fn estimate_onset(
     peak_index: usize,
     sample_rate_hz: u32,
     gate_floor: f64,
-    min_admissible_index: Option<usize>,
+    causal_bound: &CausalBound,
 ) -> OnsetEstimate {
     let declined = |reason: &str| OnsetEstimate {
         index: peak_index.min(ir.len().saturating_sub(1)),
@@ -164,7 +241,15 @@ pub fn estimate_onset(
             .max(0.0) as usize
     };
     let span_start = end.saturating_sub(span);
-    let bound = min_admissible_index.map(|b| b.min(end));
+    let bound = causal_bound.min_admissible_index();
+    // A bound at or after the peak leaves no admissible sample before it.
+    // Named here rather than left to collapse the window to one sample and
+    // decline as "search window shorter than 2 samples", which reads as a
+    // gate or peak-position fault when it is the bound's own inputs
+    // (distance, reference latency) that put it there (#460).
+    if bound.is_some_and(|b| b >= end) {
+        return declined("causal bound at or after the peak");
+    }
     let window_start = bound.unwrap_or(0).max(span_start);
 
     let window = &ir[window_start..=end];
@@ -249,13 +334,19 @@ pub fn estimate_onset(
     }
 
     let window_ms = ONSET_SEARCH_WINDOW_S * 1000.0;
-    let limit = match bound {
+    let limit = match causal_bound {
         // Which limit actually set the window start is the operator's
         // next question when a pick sits on it, so the clause names the
         // binding one rather than only whether geometry was known.
-        Some(b) if b >= span_start => "causal bound enforced".to_string(),
-        Some(b) => format!("causal bound enforced at sample {b}, search span is the tighter limit"),
-        None => "no causal bound (geometry not known for this capture)".to_string(),
+        CausalBound::Enforced { index: b, .. } if *b >= span_start => {
+            "causal bound enforced".to_string()
+        }
+        CausalBound::Enforced { index: b, .. } => {
+            format!("causal bound enforced at sample {b}, search span is the tighter limit")
+        }
+        // Names the missing input (#460 AC3): "geometry not known" named
+        // neither input, so it told the operator nothing they could fix.
+        CausalBound::Unavailable(missing) => format!("no causal bound ({})", missing.clause()),
     };
     let mut rule = format!(
         "AIC change-point pick over a {window_ms:.1} ms window; window start at sample \
@@ -270,6 +361,27 @@ pub fn estimate_onset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unbounded search: neither a reference nor a distance.
+    fn unbounded() -> CausalBound {
+        CausalBound::Unavailable(MissingBoundInput::Both {
+            reference_reason: "no reference configured".into(),
+        })
+    }
+
+    /// A bound enforced at `index`. The inputs are nominal:
+    /// `estimate_onset` reads only the index.
+    fn bounded(index: usize) -> CausalBound {
+        CausalBound::Enforced {
+            index,
+            inputs: BoundInputs {
+                reference_tau_s: 0.0,
+                distance_m: 1.0,
+                speed_of_sound_m_s: 343.0,
+                temperature_c: None,
+            },
+        }
+    }
 
     // ─── estimate_onset (#346, #378) ───────────────────────────────────
 
@@ -352,7 +464,7 @@ mod tests {
             *v += 0.3;
         }
         ir[peak_index] = 1.0; // the actual magnitude maximum
-        let est = estimate_onset(&ir, peak_index, 48_000, floor, None);
+        let est = estimate_onset(&ir, peak_index, 48_000, floor, &unbounded());
         assert_eq!(est.index, onset_true);
         assert_ne!(
             est.index, peak_index,
@@ -384,14 +496,14 @@ mod tests {
         }
         ir[peak_index] = 1.0;
 
-        let unbounded = estimate_onset(&ir, peak_index, 48_000, sigma_n, None);
+        let unbounded = estimate_onset(&ir, peak_index, 48_000, sigma_n, &unbounded());
         assert!(
             unbounded.index < bound,
             "test setup: unbounded pick must land non-causally, got {}",
             unbounded.index
         );
 
-        let bounded = estimate_onset(&ir, peak_index, 48_000, sigma_n, Some(bound));
+        let bounded = estimate_onset(&ir, peak_index, 48_000, sigma_n, &bounded(bound));
         assert!(
             bounded.index >= bound,
             "causal bound must exclude the non-causal pre-ring, got {}",
@@ -408,8 +520,8 @@ mod tests {
     fn onset_rule_states_whether_a_causal_bound_was_enforced() {
         let sigma_n = 1e-4;
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
-        let with_bound = estimate_onset(&ir, peak_index, 96_000, sigma_n, Some(1500));
-        let without_bound = estimate_onset(&ir, peak_index, 96_000, sigma_n, None);
+        let with_bound = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(1500));
+        let without_bound = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded());
         assert_ne!(with_bound.rule, without_bound.rule);
         assert!(with_bound.rule.contains("causal bound enforced"));
         assert!(without_bound.rule.contains("no causal bound"));
@@ -424,7 +536,7 @@ mod tests {
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
         let span_start = peak_index - (ONSET_SEARCH_WINDOW_S * 96_000.0).round() as usize;
 
-        let spanned = estimate_onset(&ir, peak_index, 96_000, sigma_n, None);
+        let spanned = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded());
         assert!(spanned
             .rule
             .contains(&format!("window start at sample {span_start}")));
@@ -434,7 +546,7 @@ mod tests {
 
         // A causal bound looser than the search span does not move the
         // window start, and the rule must not imply that it did.
-        let loose = estimate_onset(&ir, peak_index, 96_000, sigma_n, Some(10));
+        let loose = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(10));
         assert!(loose
             .rule
             .contains(&format!("window start at sample {span_start}")));
@@ -466,7 +578,7 @@ mod tests {
         for &d in &directs {
             let (ir, onset_true, peak_index) = drr_fixture(d, sigma_n, tail);
             let r = rejected_level_crossing_rule(&ir, peak_index, sigma_n);
-            let p = estimate_onset(&ir, peak_index, 96_000, sigma_n, None).index;
+            let p = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded()).index;
             assert!(
                 r >= onset_true && p >= onset_true,
                 "test setup: neither rule may read before the true onset \
@@ -522,13 +634,13 @@ mod tests {
     fn onset_pick_is_exactly_invariant_to_a_uniform_rescale() {
         let sigma_n = 1e-4;
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
-        let base = estimate_onset(&ir, peak_index, 96_000, sigma_n, None).index;
+        let base = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded()).index;
         let base_rejected = rejected_level_crossing_rule(&ir, peak_index, sigma_n);
 
         let mut moved = false;
         for scale in [0.001, 0.5, 2.0, 1000.0] {
             let scaled: Vec<f64> = ir.iter().map(|v| v * scale).collect();
-            let est = estimate_onset(&scaled, peak_index, 96_000, sigma_n * scale, None);
+            let est = estimate_onset(&scaled, peak_index, 96_000, sigma_n * scale, &unbounded());
             assert_eq!(
                 est.index, base,
                 "pick must be exactly invariant to a uniform rescale by {scale}"
@@ -556,7 +668,7 @@ mod tests {
     fn onset_window_span_and_validity_gate_are_independent() {
         let sigma_n = 1e-4;
         let (ir, onset_true, peak_index) = drr_fixture(0.3, sigma_n, 0.05);
-        let reference = estimate_onset(&ir, peak_index, 96_000, sigma_n, None).index;
+        let reference = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded()).index;
 
         // Span varies 4.8x (480 → 2304 samples); every value brackets the
         // onset, which sits 110 samples before the peak.
@@ -566,7 +678,7 @@ mod tests {
                 span > peak_index - onset_true,
                 "test setup: span {span} must bracket the onset"
             );
-            let est = estimate_onset(&ir, peak_index, sr, sigma_n, None);
+            let est = estimate_onset(&ir, peak_index, sr, sigma_n, &unbounded());
             assert_eq!(
                 est.index, reference,
                 "pick must not depend on the window span (sample rate {sr}, span {span})"
@@ -576,7 +688,7 @@ mod tests {
         // Gate floor varies 1000x; every value leaves the gate open,
         // because the picker takes no threshold from it.
         for floor in [sigma_n * 0.01, sigma_n, sigma_n * 10.0] {
-            let est = estimate_onset(&ir, peak_index, 96_000, floor, None);
+            let est = estimate_onset(&ir, peak_index, 96_000, floor, &unbounded());
             assert_eq!(
                 est.index, reference,
                 "pick must not depend on the validity gate's floor ({floor})"
@@ -608,10 +720,21 @@ mod tests {
             },
             Case {
                 reason: "search window shorter than 2 samples",
-                ir: vec![0.01, 1.0, 0.01],
-                peak_index: 1,
+                ir: vec![],
+                peak_index: 0,
                 floor: 1e-6,
-                bound: Some(1),
+                bound: None,
+            },
+            Case {
+                reason: "causal bound at or after the peak",
+                ir: {
+                    let mut v = onset_noise(200, 1e-3, 5);
+                    v[150] = 1.0;
+                    v
+                },
+                peak_index: 150,
+                floor: 1e-4,
+                bound: Some(150),
             },
             Case {
                 reason: "zero variance in the search window",
@@ -647,7 +770,13 @@ mod tests {
             bound,
         } in cases
         {
-            let est = estimate_onset(&ir, peak_index, 48_000, floor, bound);
+            let est = estimate_onset(
+                &ir,
+                peak_index,
+                48_000,
+                floor,
+                &bound.map_or_else(unbounded, bounded),
+            );
             assert_eq!(
                 est.index, peak_index,
                 "{reason}: breakdown must degrade to the peak, not earlier"
@@ -670,7 +799,7 @@ mod tests {
         let sigma_n = 1e-4;
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
         for bound in [1500usize, 1750, 1850, 1900] {
-            let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, Some(bound));
+            let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(bound));
             assert!(
                 est.index >= bound,
                 "pick {} fell below the causal bound {bound}",
@@ -687,7 +816,7 @@ mod tests {
         let floor = 0.01;
         let mut ir = vec![floor; 200];
         ir[150] = 1.0;
-        let est = estimate_onset(&ir, 150, 48_000, floor, None);
+        let est = estimate_onset(&ir, 150, 48_000, floor, &unbounded());
         assert_eq!(est.index, 150);
         assert!(est.rule.contains("onset picker declined"));
     }
@@ -704,7 +833,7 @@ mod tests {
         let floor = 1.0; // nothing in the window clears it
         let mut ir = onset_noise(200, 1e-3, 3);
         ir[150] = 0.5;
-        let est = estimate_onset(&ir, 150, 48_000, floor, None);
+        let est = estimate_onset(&ir, 150, 48_000, floor, &unbounded());
         assert_eq!(est.index, 150);
         assert!(
             est.rule.contains("onset picker declined")
@@ -714,21 +843,77 @@ mod tests {
         );
     }
 
-    /// QA (PR #377), restated for #378: a causal bound sitting at the
-    /// peak also leaves the answer at the peak, and the decline text must
-    /// name the window that collapsed rather than implying the capture
-    /// carried nothing above the floor.
+    /// #460: a causal bound at or after the peak leaves the answer at the
+    /// peak, and the decline must name the bound rather than the collapsed
+    /// window it produced. The pre-#460 text ("search window shorter than
+    /// 2 samples") pointed the operator at gate length and peak position,
+    /// when what put the bound there is the distance and reference latency.
+    /// A real distance input makes this reachable: on the fake loopback the
+    /// reference τ equals the peak offset, so any distance > 0 lands here.
     #[test]
-    fn onset_rule_names_the_collapsed_window_not_a_missing_signal() {
+    fn onset_rule_names_a_bound_at_the_peak_not_a_collapsed_window() {
         let sigma_n = 1e-4;
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
-        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, Some(peak_index));
-        assert_eq!(est.index, peak_index);
-        assert!(
-            est.rule.contains("search window shorter than 2 samples"),
-            "collapsed-window decline mislabeled: {}",
-            est.rule
-        );
+        for bound in [peak_index, peak_index + 40] {
+            let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(bound));
+            assert_eq!(est.index, peak_index);
+            assert!(
+                est.rule.contains("causal bound at or after the peak"),
+                "bound {bound}: decline does not name the bound: {}",
+                est.rule
+            );
+            assert!(
+                !est.rule.contains("search window shorter than 2 samples"),
+                "bound {bound}: the pre-#460 collapsed-window text survives: {}",
+                est.rule
+            );
+        }
+    }
+
+    /// #460 AC3: an unavailable bound names which input was missing, and
+    /// the three cases read differently. "geometry not known" named neither.
+    #[test]
+    fn onset_rule_names_the_missing_bound_input() {
+        let sigma_n = 1e-4;
+        let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
+        let cases = [
+            (
+                MissingBoundInput::Distance,
+                "no causal bound (distance not given)",
+            ),
+            (
+                MissingBoundInput::ReferenceLatency {
+                    reason: "no reference configured".into(),
+                },
+                "no causal bound (reference latency unavailable)",
+            ),
+            (
+                MissingBoundInput::Both {
+                    reference_reason: "no reference configured".into(),
+                },
+                "no causal bound (no distance, reference latency unavailable)",
+            ),
+        ];
+        let mut rules = Vec::new();
+        for (missing, want) in cases {
+            let est = estimate_onset(
+                &ir,
+                peak_index,
+                96_000,
+                sigma_n,
+                &CausalBound::Unavailable(missing),
+            );
+            assert!(est.rule.contains(want), "{want:?} not in {:?}", est.rule);
+            assert!(
+                !est.rule.contains("geometry not known"),
+                "pre-#460 clause survives: {}",
+                est.rule
+            );
+            rules.push(est.rule);
+        }
+        assert_ne!(rules[0], rules[1]);
+        assert_ne!(rules[1], rules[2]);
+        assert_ne!(rules[0], rules[2]);
     }
 
     /// #378 / UX: a pick sitting on the window start is a stable,
@@ -743,7 +928,7 @@ mod tests {
         let sigma_n = 1e-4;
         let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
         let bound = peak_index - 1;
-        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, Some(bound));
+        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(bound));
         assert_eq!(est.index, bound);
         assert!(
             est.rule

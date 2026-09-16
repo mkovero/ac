@@ -57,6 +57,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
         // Second `Time` token, pulled after `duration` — same positional
         // pattern `plot level`'s start/stop `Level` pair uses.
         let tail_s = pull(&mut tokens, TokenKind::Time).map(|v| v.as_f64());
+        let distance_m = pull(&mut tokens, TokenKind::Distance).map(|v| v.as_f64());
         check_empty(&tokens)?;
         return Ok(ParsedCommand {
             cmd: CommandKind::PlotIr {
@@ -68,6 +69,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
                 n_harmonics,
                 window_len,
                 tail_s,
+                distance_m,
             },
             show_plot,
         });
@@ -217,8 +219,10 @@ mod tests {
                 n_harmonics,
                 window_len,
                 tail_s,
+                distance_m,
                 ..
             } => {
+                assert_eq!(distance_m, None);
                 assert!((f1 - 20.0).abs() < 1e-9);
                 assert!((f2 - 20000.0).abs() < 1e-9);
                 assert!((duration - 1.0).abs() < 1e-9);
@@ -244,7 +248,9 @@ mod tests {
                 n_harmonics,
                 window_len,
                 tail_s,
+                distance_m,
             } => {
+                assert_eq!(distance_m, None);
                 assert!((f1 - 20.0).abs() < 1e-9);
                 assert!((f2 - 20000.0).abs() < 1e-9);
                 assert!((duration - 1.0).abs() < 1e-9);
@@ -288,5 +294,48 @@ mod tests {
     #[test]
     fn test_plot_ir_bare_integer_is_not_harmonics() {
         assert!(parse(&args("plot ir 20hz 20khz 1s -6dbu 5")).is_err());
+    }
+
+    /// #460: `<N>m` is `plot ir`'s source-to-mic distance.
+    #[test]
+    fn test_plot_ir_distance_token() {
+        let p = parse(&args("plot ir 20hz 20khz 1s -6dbu 5harm 4096win 0.8s 1.5m")).unwrap();
+        match p.cmd {
+            CommandKind::PlotIr {
+                distance_m, tail_s, ..
+            } => {
+                assert_eq!(distance_m, Some(1.5));
+                assert_eq!(tail_s, Some(0.8));
+            }
+            other => panic!("expected PlotIr, got {other:?}"),
+        }
+    }
+
+    /// A distance that parses but is unusable is refused at parse time,
+    /// naming the token, before anything reaches the daemon.
+    #[test]
+    fn test_plot_ir_distance_must_be_finite_and_positive() {
+        for bad in ["0m", "-1m", "infm", "nanm"] {
+            let err = parse(&args(&format!("plot ir 20hz 20khz {bad}")))
+                .err()
+                .unwrap_or_else(|| panic!("{bad} must not parse"));
+            assert!(
+                err.contains("distance must be finite and > 0 m"),
+                "{bad}: {err}"
+            );
+            assert!(err.contains(bad), "{bad}: {err}");
+        }
+    }
+
+    /// Test against the rejected reading: `mm`, `cm` and `1ms` must not be
+    /// taken as a distance in metres. They fail to parse instead.
+    #[test]
+    fn test_plot_ir_other_m_suffixes_are_not_a_distance() {
+        for bad in ["5mm", "5cm", "1ms"] {
+            assert!(
+                parse(&args(&format!("plot ir 20hz 20khz {bad}"))).is_err(),
+                "{bad} must not parse"
+            );
+        }
     }
 }

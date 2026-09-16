@@ -15,7 +15,8 @@ use ac_core::shared::calibration::{compare_tau_readings, TauComparison, TauCondi
 
 use crate::audio::make_engine;
 
-use measure::{measure_tau, tau_snr_threshold_db, LowSnrRefusal};
+pub(crate) use measure::{analyse_tau_leg, EdgeRefusal, LowSnrRefusal, TailTooShort};
+use measure::{measure_tau, tau_snr_threshold_db};
 
 /// Method tag stored on every [`TauEntry`] this handler produces. Bumped
 /// to `_v2` by #340: the window-sizing change below means a τ captured

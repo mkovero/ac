@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
-    InterfaceLatency, MeasuredLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
-    MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams, SCHEMA_VERSION,
+    InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, MeasurementData,
+    MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain,
+    ReferenceLatency, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
@@ -29,10 +30,67 @@ use crate::server::ServerState;
 
 use super::super::{
     busy_guard, cal_guard, cfg_guard, emission_guard, emission_range_guard, make_engine_for_state,
-    resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame,
-    Tier1Ctx, MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
+    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
+    resolve_ref_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
+    MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
 };
+use crate::handlers::calibrate::{analyse_tau_leg, EdgeRefusal, LowSnrRefusal, TailTooShort};
 use crate::handlers::mic;
+
+/// Method tag on a same-capture reference reading (#460).
+const REFERENCE_LATENCY_METHOD: &str = "farina_same_capture_reference_v1";
+
+/// The reference leg of one `plot_ir` capture, before analysis (#460).
+enum ReferenceLeg {
+    Captured(Vec<f32>),
+    Unavailable(String),
+}
+
+/// τ of the reference pair from its captured leg, judged by the single-reading
+/// gates `calibrate` applies (#460). `xruns` is handled by the caller before
+/// this runs, so the SNR gate is never skipped here.
+fn reference_latency_from_leg(
+    reference: &[f32],
+    params: &SweepParams,
+    tail_s: f64,
+    output_port: &str,
+    input_port: &str,
+) -> ReferenceLatency {
+    match analyse_tau_leg(reference, params, tail_s, 0) {
+        Ok((tau_s, pre_impulse_snr_db)) => ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s,
+            // Infinite over a true-silent pre-impulse region, which JSON
+            // cannot carry; recorded as absent rather than as a number.
+            pre_impulse_snr_db: pre_impulse_snr_db.is_finite().then_some(pre_impulse_snr_db),
+            method: REFERENCE_LATENCY_METHOD.to_string(),
+            output_port: output_port.to_string(),
+            input_port: input_port.to_string(),
+        }),
+        Err(e) => ReferenceLatency::Unavailable {
+            reason: reference_unavailable_reason(&e),
+        },
+    }
+}
+
+/// Operator-facing reason for a refused reference reading (#460 UX): the
+/// observation, then `; check:` and the places to look. Never a cause.
+fn reference_unavailable_reason(e: &anyhow::Error) -> String {
+    if let Some(r) = e.downcast_ref::<LowSnrRefusal>() {
+        format!(
+            "peak SNR {:.1} dB, need {:.1} dB; check: reference loopback cable, ref input gain",
+            r.snr_db, r.threshold_db
+        )
+    } else if e.downcast_ref::<EdgeRefusal>().is_some() {
+        "peak at reference window edge; check: reference loopback routing, capture tail".to_string()
+    } else if let Some(t) = e.downcast_ref::<TailTooShort>() {
+        format!(
+            "tail {:.2} s, reference window needs {:.2} s; check: lengthen the tail token (e.g. 0.8s)",
+            t.tail_s, t.needed_s
+        )
+    } else {
+        format!("reference analysis failed: {e}")
+    }
+}
 
 fn request_error(cmd: &str, message: impl std::fmt::Display) -> Value {
     json!({
@@ -362,6 +420,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             // A stepped-sine sweep records no arrival, so there is
             // nothing here for a τ to correct (#283).
             interface_latency: None,
+            reference_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -693,6 +752,7 @@ fn emit_spectrum_bands(
         position,
         // Band levels carry no arrival for a τ to correct (#283).
         interface_latency: None,
+        reference_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -816,6 +876,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             Err(e) => return e,
         };
 
+    // #460: operator-entered source-to-receiver distance for the onset
+    // search's causal bound. Checked before port resolution, like the other
+    // budgets, so an unusable value is refused with no audio.
+    let distance_m = match cmd.get("distance_m") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(d) if d.is_finite() && d > 0.0 => Some(d),
+            _ => {
+                return request_error(
+                    "plot_ir",
+                    format!("distance_m must be finite and > 0 m, got {v}"),
+                )
+            }
+        },
+    };
+
     let cfg = state.cfg.lock().unwrap().clone();
     // #459: `plot_ir` had no ceiling check at all before #360, and #360's
     // clamp let it emit a flat-topped level nobody asked for. Refused here
@@ -829,6 +905,26 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    // #460: same-capture reference leg, from the config keys transfer_stream
+    // and test_dut already use. Not configured is a legitimate state (no
+    // bound, reason recorded). Configured but unresolvable is refused before
+    // any audio rather than silently run single-ended (#225).
+    let ref_in_port = match resolve_ref_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let ref_out_port = match &ref_in_port {
+        Some(_) => match resolve_ref_output(&cfg, state) {
+            Ok(p) => Some(p),
+            Err(e) => return json!({"ok": false, "error": e}),
+        },
+        None => None,
+    };
+    let ref_warning = ref_in_port
+        .as_ref()
+        .and_then(|_| ref_output_migration_warning(&cfg));
+    let ref_in_port_reply = ref_in_port.clone();
+    let ref_out_port_reply = ref_out_port.clone();
     let out_port_reply = out_port.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
@@ -858,7 +954,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // gate is anchored to.
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
 
-        if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
+        // #460: with a separate reference output the stimulus also leaves
+        // there, to drive the reference loopback. Equal ports are driven once.
+        let mut output_ports = vec![out_port.clone()];
+        if let Some(p) = ref_out_port.as_ref().filter(|p| **p != out_port) {
+            output_ports.push(p.clone());
+        }
+        if let Err(e) = eng.start(&output_ports, Some(&in_port)) {
             send_pub(
                 &pub_tx,
                 "error",
@@ -906,7 +1008,29 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs) as f32;
         let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
 
-        let capture = eng.play_and_capture_cancellable(&scaled, tail_s, &stop);
+        let xruns_before = eng.xruns();
+        let (capture, reference_leg) = match ref_in_port.as_deref() {
+            Some(ref_port) if eng.supports_reference_capture() => {
+                match eng.play_and_capture_with_reference(&scaled, tail_s, ref_port, &stop) {
+                    Ok((meas, reference)) => (Ok(meas), ReferenceLeg::Captured(reference)),
+                    Err(e) => (Err(e), ReferenceLeg::Unavailable(String::new())),
+                }
+            }
+            Some(_) => (
+                eng.play_and_capture_cancellable(&scaled, tail_s, &stop),
+                ReferenceLeg::Unavailable(format!(
+                    "backend {} cannot capture a reference",
+                    eng.backend_name()
+                )),
+            ),
+            None => (
+                eng.play_and_capture_cancellable(&scaled, tail_s, &stop),
+                ReferenceLeg::Unavailable(
+                    "no reference configured (ac setup reference)".to_string(),
+                ),
+            ),
+        };
+        let capture_xruns = eng.xruns().saturating_sub(xruns_before);
         eng.set_silence();
         eng.stop();
         let captured = match capture {
@@ -1083,11 +1207,32 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             }),
         };
 
-        let timestamp = ac_core::shared::time::now_utc_iso8601();
-        let position = temperature_c.map(|t| PositionSnapshot {
-            temperature_c: Some(t),
-            ..Default::default()
+        // #460: τ of the reference pair, read from the reference leg of this
+        // same capture with `calibrate`'s single-reading gates (SNR, window
+        // edge, xrun). It feeds only the onset search's causal bound.
+        let reference_latency = Some(match reference_leg {
+            ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
+            ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {
+                reason: "xrun during capture; check: JACK period size, system load".to_string(),
+            },
+            ReferenceLeg::Captured(reference) => reference_latency_from_leg(
+                &reference,
+                &params,
+                tail_s,
+                ref_out_port.as_deref().unwrap_or_default(),
+                ref_in_port.as_deref().unwrap_or_default(),
+            ),
         });
+
+        let timestamp = ac_core::shared::time::now_utc_iso8601();
+        // #460: `position` also carries the operator-entered distance, so it
+        // is present when either value is.
+        let position =
+            (temperature_c.is_some() || distance_m.is_some()).then(|| PositionSnapshot {
+                temperature_c,
+                distance_m,
+                ..Default::default()
+            });
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1113,6 +1258,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
             interface_latency,
+            reference_latency,
             data: vec![
                 MeasurementPayload {
                     data,
@@ -1190,13 +1336,25 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_ir".to_string(), worker);
     }
-    json!({
+    let mut reply = json!({
         "ok": true,
         "out_port": out_port_reply,
         "level_dbfs": level_dbfs,
         "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
-    })
+    });
+    // #460: every port the sweep leaves through or is referenced against,
+    // named before any result (UX: "Also driven" / "Ref input").
+    if let Some(p) = ref_in_port_reply {
+        reply["ref_in_port"] = json!(p);
+    }
+    if let Some(p) = ref_out_port_reply {
+        reply["ref_out_port"] = json!(p);
+    }
+    if let Some(w) = ref_warning {
+        reply["warnings"] = json!([w]);
+    }
+    reply
 }
 
 #[cfg(test)]

@@ -32,6 +32,9 @@ pub use mic_curve::{calibrate_mic_curve, set_mic_correction_enabled};
 pub use spl::calibrate_spl;
 
 use tau::{measure_tau_twice, tau_result, TAU_METHOD};
+// #460: `plot_ir`'s same-capture reference leg is judged by the same
+// single-reading gates as `calibrate`'s τ.
+pub(crate) use tau::{analyse_tau_leg, EdgeRefusal, LowSnrRefusal, TailTooShort};
 
 /// Channel pair a calibration command addresses: explicit fields win, the
 /// session config supplies the rest. Spelled once because all four

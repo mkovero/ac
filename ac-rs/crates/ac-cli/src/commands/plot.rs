@@ -153,28 +153,31 @@ pub fn run_level(
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
 pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s) = match cmd {
-        CommandKind::PlotIr {
-            f1,
-            f2,
-            duration,
-            level,
-            level_defaulted,
-            n_harmonics,
-            window_len,
-            tail_s,
-        } => (
-            *f1,
-            *f2,
-            *duration,
-            level,
-            *level_defaulted,
-            *n_harmonics,
-            *window_len,
-            *tail_s,
-        ),
-        _ => unreachable!(),
-    };
+    let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s, distance_m) =
+        match cmd {
+            CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                level_defaulted,
+                n_harmonics,
+                window_len,
+                tail_s,
+                distance_m,
+            } => (
+                *f1,
+                *f2,
+                *duration,
+                level,
+                *level_defaulted,
+                *n_harmonics,
+                *window_len,
+                *tail_s,
+                *distance_m,
+            ),
+            _ => unreachable!(),
+        };
 
     let cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -199,6 +202,13 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     );
     println!("\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {duration:.1}s");
     println!("  gate       {gate}");
+    // #460 UX: echo the typed distance before emission, so a token typo
+    // (`0.8m` meant as `0.8s`) is visible before the result, and state its
+    // absence rather than hide it.
+    match distance_m {
+        Some(d) => println!("  distance   {d} m"),
+        None => println!("  distance   not given"),
+    }
 
     let mut cmd_json = serde_json::json!({
         "cmd": "plot_ir",
@@ -216,6 +226,9 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     if let Some(v) = tail_s {
         cmd_json["tail_s"] = serde_json::json!(v);
     }
+    if let Some(v) = distance_m {
+        cmd_json["distance_m"] = serde_json::json!(v);
+    }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
     print_level(
@@ -225,8 +238,21 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
         cal.as_ref(),
         true,
     );
-    if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
-        println!("  Output: {p}");
+    let out_port = ack.get("out_port").and_then(|v| v.as_str());
+    if let Some(p) = out_port {
+        println!("  output     {p}");
+    }
+    // #460 UX: every port the sweep leaves through or is referenced against,
+    // printed before the result, on the same label grid as `gate` and
+    // `level`. A reference output equal to the main output drives nothing
+    // extra, so it is not named twice.
+    if let Some(p) = ack.get("ref_out_port").and_then(|v| v.as_str()) {
+        if Some(p) != out_port {
+            println!("  ref out    {p}");
+        }
+    }
+    if let Some(p) = ack.get("ref_in_port").and_then(|v| v.as_str()) {
+        println!("  ref in     {p}");
     }
     println!("  Running IR measurement...\n");
 
@@ -243,24 +269,38 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
 /// window start is a stable, repeatable, possibly wrong number, and it
 /// has to be visible on the line rather than inferable from the JSON.
 ///
-/// Returns 2 lines normally and 3 when the pick is pinned to the window
-/// start or when the picker declined. On a decline the second line is
+/// Returns 3 lines normally (intro, window start, and the causal-bound row
+/// built from `bound`'s own fields, #460) and 4 when the pick is pinned to
+/// the window start. On a decline it returns the decline line, the case, and
+/// a `check:` line — plus the bound row when the bound itself caused it. On a decline the second line is
 /// the degenerate case named in `rule`, printed verbatim from between
 /// its parentheses, so a case added in `ac-core` later reaches the
 /// terminal without a change here. Falls back to the full string
 /// verbatim if its shape ever changes underneath this, so a reader never
 /// sees nothing.
-fn short_onset_rule(rule: &str, onset_index: usize) -> Vec<String> {
+fn short_onset_rule(
+    rule: &str,
+    onset_index: usize,
+    bound: &ac_core::measurement::sweep::CausalBound,
+) -> Vec<String> {
     if rule.contains("picker declined") {
         let case = rule
             .split_once('(')
             .and_then(|(_, rest)| rest.split_once(')'))
             .map(|(inside, _)| inside.to_string());
         let mut lines = vec!["picker declined \u{2014} no onset estimate".to_string()];
+        let bound_caused_it = case.as_deref() == Some("causal bound at or after the peak");
         if let Some(case) = case {
             lines.push(case);
         }
-        lines.push("check: gate length, peak position in gate".to_string());
+        if bound_caused_it {
+            // #460: the bound's own inputs put it there, so those are what
+            // to check, not the gate.
+            lines.push(causal_bound_row(bound));
+            lines.push("check: typed distance, reference loopback routing".to_string());
+        } else {
+            lines.push("check: gate length, peak position in gate".to_string());
+        }
         return lines;
     }
     let Some(start) = rule.find("window start at sample ").map(|at| {
@@ -277,7 +317,7 @@ fn short_onset_rule(rule: &str, onset_index: usize) -> Vec<String> {
     } else if rule.contains("causal bound enforced") {
         "causal bound"
     } else if rule.contains("no causal bound") {
-        "search span, no geometry known"
+        "search span"
     } else {
         return vec![rule.to_string()];
     };
@@ -298,10 +338,75 @@ fn short_onset_rule(rule: &str, onset_index: usize) -> Vec<String> {
             format!("window start {start} ({limit}), pick {clear} clear")
         },
     ];
+    // #460 AC3 / UX row 3: what the bound was built from, or which input
+    // it lacked — always on the same row, so the eye finds the answer there.
+    lines.push(causal_bound_row(bound));
     if pinned {
         lines.push("onset may lie earlier than the window allows".to_string());
     }
     lines
+}
+
+/// Onset block row 3 (#460 UX), printed from the bound's own fields rather
+/// than parsed from `onset_rule`. An assumed speed of sound is said so: an
+/// unset temperature silently uses the default `c`.
+fn causal_bound_row(bound: &ac_core::measurement::sweep::CausalBound) -> String {
+    use ac_core::measurement::sweep::{CausalBound, MissingBoundInput};
+    match bound {
+        CausalBound::Enforced { inputs, .. } => {
+            let c = match inputs.temperature_c {
+                Some(t) => format!("c {:.1} m/s at {t:.1} \u{b0}C", inputs.speed_of_sound_m_s),
+                None => format!("c {:.1} m/s assumed", inputs.speed_of_sound_m_s),
+            };
+            format!("bound from ref latency + {} m, {c}", inputs.distance_m)
+        }
+        CausalBound::Unavailable(MissingBoundInput::Distance) => {
+            "no causal bound \u{2014} distance not given (token: 1m)".to_string()
+        }
+        CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { .. }) => {
+            "no causal bound \u{2014} ref latency unavailable (below)".to_string()
+        }
+        CausalBound::Unavailable(MissingBoundInput::Both { .. }) => {
+            "no causal bound \u{2014} no distance, ref latency unavailable".to_string()
+        }
+    }
+}
+
+/// The `ref latency` read-out (#460 UX), always printed: the same-capture
+/// reference τ in `calibrate`'s `Delay:` format, or its unavailable reason
+/// with any `; check: ` part on its own `check:` line.
+fn reference_latency_lines(
+    reference: Option<&ac_core::measurement::report::ReferenceLatency>,
+    sample_rate_hz: u32,
+) -> Vec<String> {
+    use ac_core::measurement::report::ReferenceLatency;
+    let unavailable = |reason: &str| match reason.split_once("; check: ") {
+        Some((observation, places)) => vec![
+            format!("  ref latency   unavailable \u{2014} {observation}"),
+            format!("                check: {places}"),
+        ],
+        None => vec![format!("  ref latency   unavailable \u{2014} {reason}")],
+    };
+    match reference {
+        Some(ReferenceLatency::Measured(m)) => {
+            let samples = m.tau_s * sample_rate_hz as f64;
+            let samples_txt = if (samples - samples.round()).abs() < 0.01 {
+                format!("{}", samples.round() as i64)
+            } else {
+                format!("{samples:.1}")
+            };
+            let snr = m
+                .pre_impulse_snr_db
+                .map(|v| format!("{v:.1} dB"))
+                .unwrap_or_else(|| "\u{221e} dB".to_string());
+            vec![format!(
+                "  ref latency   {:.4} ms  ({samples_txt} samples, SNR {snr}, same capture)",
+                m.tau_s * 1000.0
+            )]
+        }
+        Some(ReferenceLatency::Unavailable { reason }) => unavailable(reason),
+        None => unavailable("not recorded (report predates schema v7)"),
+    }
 }
 
 /// The read-out: arrival (samples and ms, re gate centre), peak,
@@ -362,7 +467,8 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         // `onset_rule` verbatim (the full sentence runs past 80 columns at
         // this indent); the untruncated rule still rides the persisted
         // JSON via `IrStats::onset_rule`.
-        let onset_lines = short_onset_rule(&stats.onset_rule, stats.onset_index);
+        let onset_lines =
+            short_onset_rule(&stats.onset_rule, stats.onset_index, &stats.causal_bound);
         println!("                onset: {}", onset_lines[0]);
         let continuation_indent = " ".repeat("                onset: ".len());
         for line in &onset_lines[1..] {
@@ -378,6 +484,9 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
                 stats.peak_index - stats.onset_index,
             );
         }
+    }
+    for line in reference_latency_lines(report.reference_latency.as_ref(), stats.sample_rate_hz) {
+        println!("{line}");
     }
     if stats.pre_impulse_snr_db.is_finite() {
         if matches!(stats.verdict, IrVerdict::Failed { .. }) {
@@ -620,7 +729,9 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_sweep_frames, short_onset_rule, SweepOutcome};
+    use super::{collect_sweep_frames, reference_latency_lines, short_onset_rule, SweepOutcome};
+    use ac_core::measurement::report::{MeasuredReferenceLatency, ReferenceLatency};
+    use ac_core::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
     use std::collections::VecDeque;
 
     fn point(freq_hz: f64) -> serde_json::Value {
@@ -680,6 +791,26 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    fn unbounded() -> CausalBound {
+        CausalBound::Unavailable(MissingBoundInput::Both {
+            reference_reason: "no reference configured (ac setup reference)".into(),
+        })
+    }
+
+    fn enforced(distance_m: f64, temperature_c: Option<f64>) -> CausalBound {
+        CausalBound::Enforced {
+            index: 1305,
+            inputs: BoundInputs {
+                reference_tau_s: 0.017_822_9,
+                distance_m,
+                speed_of_sound_m_s: ac_core::shared::conversions::speed_of_sound_from_config(
+                    temperature_c,
+                ),
+                temperature_c,
+            },
+        }
+    }
+
     /// QA (PR #377), carried into #378: `short_onset_rule`'s decline
     /// branch had no test naming its output — a typo in the
     /// `.contains("picker declined")` match here, or in the string it
@@ -690,7 +821,7 @@ mod tests {
     fn short_onset_rule_surfaces_the_decline_line() {
         let rule = "onset picker declined (search window shorter than 2 samples) — index is \
                     the peak, not an onset";
-        let lines = short_onset_rule(rule, 1479);
+        let lines = short_onset_rule(rule, 1479, &unbounded());
         assert_eq!(
             lines,
             vec![
@@ -708,33 +839,78 @@ mod tests {
     fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
         let rule = "onset picker declined (a case invented by this test) — index is the peak, \
                     not an onset";
-        let lines = short_onset_rule(rule, 1479);
+        let lines = short_onset_rule(rule, 1479, &unbounded());
         assert_eq!(lines[1], "a case invented by this test".to_string());
     }
 
+    /// #460 UX frame 5: a bound at or after the peak names the bound's inputs
+    /// and says to check them, not the gate.
     #[test]
-    fn short_onset_rule_reports_the_window_start_and_how_clear_the_pick_is() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
-                    causal bound enforced";
-        let lines = short_onset_rule(rule, 1369);
+    fn short_onset_rule_names_the_bound_inputs_when_the_bound_caused_the_decline() {
+        let rule = "onset picker declined (causal bound at or after the peak) — index is the \
+                    peak, not an onset";
+        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None));
         assert_eq!(
             lines,
             vec![
-                "AIC change-point pick, 10.0 ms window".to_string(),
-                "window start 1305 (causal bound), pick 64 clear".to_string(),
+                "picker declined — no onset estimate".to_string(),
+                "causal bound at or after the peak".to_string(),
+                "bound from ref latency + 3 m, c 343.0 m/s assumed".to_string(),
+                "check: typed distance, reference loopback routing".to_string(),
             ]
         );
     }
 
     #[test]
-    fn short_onset_rule_names_the_search_span_when_no_geometry_is_known() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
-                    no causal bound (geometry not known for this capture)";
-        let lines = short_onset_rule(rule, 519);
-        assert_eq!(
-            lines[1],
-            "window start 455 (search span, no geometry known), pick 64 clear".to_string()
+    fn short_onset_rule_reports_the_window_start_how_clear_the_pick_is_and_the_bound() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced";
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "AIC change-point pick, 10.0 ms window");
+        assert_eq!(lines[1], "window start 1305 (causal bound), pick 64 clear");
+        assert!(
+            lines[2].starts_with("bound from ref latency + 1 m, c ")
+                && lines[2].ends_with(" m/s at 21.5 °C"),
+            "{:?}",
+            lines[2]
         );
+    }
+
+    /// #460 AC3 / UX: the old `(search span, no geometry known)` named
+    /// neither input. The window line now says only which limit set it, and
+    /// row 3 names what was missing.
+    #[test]
+    fn short_onset_rule_names_the_missing_input_when_no_bound_applies() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
+                    no causal bound (distance not given)";
+        let cases = [
+            (
+                MissingBoundInput::Distance,
+                "no causal bound — distance not given (token: 1m)",
+            ),
+            (
+                MissingBoundInput::ReferenceLatency {
+                    reason: "no reference configured (ac setup reference)".into(),
+                },
+                "no causal bound — ref latency unavailable (below)",
+            ),
+            (
+                MissingBoundInput::Both {
+                    reference_reason: "no reference configured (ac setup reference)".into(),
+                },
+                "no causal bound — no distance, ref latency unavailable",
+            ),
+        ];
+        for (missing, row) in cases {
+            let lines = short_onset_rule(rule, 519, &CausalBound::Unavailable(missing));
+            assert_eq!(lines[1], "window start 455 (search span), pick 64 clear");
+            assert_eq!(lines[2], row);
+            assert!(
+                !lines.iter().any(|l| l.contains("no geometry known")),
+                "pre-#460 clause survives: {lines:?}"
+            );
+        }
     }
 
     /// A causal bound that did not set the window start must not read as
@@ -744,38 +920,89 @@ mod tests {
     fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
                     causal bound enforced at sample 10, search span is the tighter limit";
-        let lines = short_onset_rule(rule, 519);
+        let lines = short_onset_rule(rule, 519, &enforced(1.0, None));
         assert_eq!(
             lines[1],
             "window start 455 (search span), pick 64 clear".to_string()
         );
     }
 
-    /// The one case that costs a third line: a pick sitting on the window
-    /// start is a confident number that may be an artefact of the search
-    /// bounds, and it has to be distinguishable at a glance in a
-    /// scrollback of many runs.
+    /// The abnormal case keeps the extra line (#460 UX frame 6): rows 1–3
+    /// as normal, the pinned warning on row 4.
     #[test]
     fn short_onset_rule_flags_a_pick_pinned_to_the_window_start() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
                     causal bound enforced; pick landed on the window start — the true onset \
                     may lie earlier";
-        let lines = short_onset_rule(rule, 1305);
+        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None));
         assert_eq!(
             lines,
             vec![
                 "AIC change-point pick, 10.0 ms window".to_string(),
                 "window start 1305 (causal bound), pick ON start".to_string(),
+                "bound from ref latency + 1 m, c 343.0 m/s assumed".to_string(),
                 "onset may lie earlier than the window allows".to_string(),
             ]
         );
     }
 
-    /// Every line this function can emit must fit the 80-column budget at
-    /// the 16- and 23-column indents `print_ir_report` uses, at a 6-digit
-    /// sample index — the width check the #378 UX comment ran by hand.
+    /// #460 UX: the `ref latency` line in `calibrate`'s `Delay:` format, and
+    /// unavailable reasons with their `check:` part on its own line.
     #[test]
-    fn short_onset_rule_lines_fit_eighty_columns() {
+    fn reference_latency_lines_print_the_measured_tau_or_the_reason() {
+        let measured = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 1711.0 / 96_000.0,
+            pre_impulse_snr_db: Some(61.8),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "system:playback_2".into(),
+            input_port: "system:capture_2".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&measured), 96_000),
+            vec!["  ref latency   17.8229 ms  (1711 samples, SNR 61.8 dB, same capture)"]
+        );
+
+        let silent_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 20.0 / 48_000.0,
+            pre_impulse_snr_db: None,
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "fake:playback_1".into(),
+            input_port: "fake:capture_1".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&silent_floor), 48_000),
+            vec!["  ref latency   0.4167 ms  (20 samples, SNR ∞ dB, same capture)"]
+        );
+
+        let refused = ReferenceLatency::Unavailable {
+            reason:
+                "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain"
+                    .into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&refused), 96_000),
+            vec![
+                "  ref latency   unavailable — peak SNR 9.3 dB, need 24.0 dB",
+                "                check: reference loopback cable, ref input gain",
+            ]
+        );
+
+        let none_configured = ReferenceLatency::Unavailable {
+            reason: "no reference configured (ac setup reference)".into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&none_configured), 96_000),
+            vec!["  ref latency   unavailable — no reference configured (ac setup reference)"]
+        );
+        assert_eq!(reference_latency_lines(None, 96_000).len(), 1);
+    }
+
+    /// Every line the onset block and the `ref latency` read-out can emit must
+    /// fit 80 columns at the indents `print_ir_report` uses — at a 6-digit
+    /// sample index, the widest distance and temperature the #460 UX pass
+    /// measured, every decline case, and every reference reason.
+    #[test]
+    fn onset_and_reference_lines_fit_eighty_columns() {
         let mut rules = vec![
             "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
              causal bound enforced; pick landed on the window start — the true onset may \
@@ -783,6 +1010,9 @@ mod tests {
                 .to_string(),
             "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
              causal bound enforced at sample 9, search span is the tighter limit"
+                .to_string(),
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             no causal bound (no distance, reference latency unavailable)"
                 .to_string(),
         ];
         // Every decline case `estimate_onset` can name, so a new one that
@@ -793,19 +1023,62 @@ mod tests {
             "peak at sample 0",
             "nothing in the search window above the pre-impulse floor",
             "no change point earlier than the peak in the window",
+            "causal bound at or after the peak",
         ] {
             rules.push(format!(
                 "onset picker declined ({case}) — index is the peak, not an onset"
             ));
         }
+        let bounds = [
+            enforced(12.25, Some(-10.5)),
+            enforced(12.25, None),
+            CausalBound::Unavailable(MissingBoundInput::Distance),
+            CausalBound::Unavailable(MissingBoundInput::ReferenceLatency {
+                reason: String::new(),
+            }),
+            unbounded(),
+        ];
         for rule in &rules {
-            for (i, line) in short_onset_rule(rule, 262_144).iter().enumerate() {
-                let indent = if i == 0 { 16 + "onset: ".len() } else { 23 };
+            for bound in &bounds {
+                for (i, line) in short_onset_rule(rule, 262_144, bound).iter().enumerate() {
+                    let indent = if i == 0 { 16 + "onset: ".len() } else { 23 };
+                    assert!(
+                        indent + line.chars().count() <= 80,
+                        "line {:?} runs to {} columns",
+                        line,
+                        indent + line.chars().count()
+                    );
+                }
+            }
+        }
+
+        let long_tau = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 0.123_456_7,
+            pre_impulse_snr_db: Some(104.3),
+            method: String::new(),
+            output_port: String::new(),
+            input_port: String::new(),
+        });
+        let mut references = vec![long_tau];
+        for reason in [
+            "no reference configured (ac setup reference)",
+            "backend cpal cannot capture a reference",
+            "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain",
+            "peak at reference window edge; check: reference loopback routing, capture tail",
+            "xrun during capture; check: JACK period size, system load",
+            "tail 0.08 s, reference window needs 0.10 s; check: lengthen the tail token (e.g. 0.8s)",
+        ] {
+            references.push(ReferenceLatency::Unavailable {
+                reason: reason.to_string(),
+            });
+        }
+        for reference in &references {
+            for line in reference_latency_lines(Some(reference), 192_000) {
                 assert!(
-                    indent + line.chars().count() <= 80,
+                    line.chars().count() <= 80,
                     "line {:?} runs to {} columns",
                     line,
-                    indent + line.chars().count()
+                    line.chars().count()
                 );
             }
         }

@@ -43,8 +43,9 @@ pub use payload::{
     MeasurementPayload,
 };
 pub use provenance::{
-    CalibrationSnapshot, IntegrationParams, InterfaceLatency, MeasuredLatency, MeasurementMethod,
-    MicResponseRef, PositionSnapshot, ProcessingChain, StandardsCitation, StimulusParams,
+    CalibrationSnapshot, IntegrationParams, InterfaceLatency, MeasuredLatency,
+    MeasuredReferenceLatency, MeasurementMethod, MicResponseRef, PositionSnapshot, ProcessingChain,
+    ReferenceLatency, StandardsCitation, StimulusParams,
 };
 
 /// Current schema version. Bumped on any breaking field change.
@@ -81,7 +82,16 @@ pub use provenance::{
 ///   uncorrected arrival (#391 — the ms → m conversion this used to feed
 ///   is gone; τ itself, and this field, are not).
 /// - v6: optional capture `backend`; v1-v5 reports decode with it absent.
-pub const SCHEMA_VERSION: u32 = 6;
+/// - v7: optional `reference_latency: ReferenceLatency` records τ of the
+///   *reference* loopback pair, read from a reference leg captured in the
+///   same run (#460). It feeds only the onset search's causal bound and is
+///   never subtracted from the arrival (`interface_latency` is the capture
+///   pair's own τ). A stored τ cannot stand in for it: it re-picks by a
+///   multiple of the FireWire SYT interval on every device enumeration
+///   (#461). Also from v7, `position` may be present with only
+///   `distance_m`. v1-v6 reports decode with the field absent, which
+///   readers treat as no reference, so no causal bound.
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -114,6 +124,16 @@ pub struct MeasurementReport {
     /// never looked up at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_latency: Option<InterfaceLatency>,
+    /// Round-trip latency of the reference loopback pair, measured from a
+    /// reference leg captured in the same run as this report's IR (#460) —
+    /// or why no valid reading exists. τ of a *different* pair than
+    /// `interface_latency`: never subtract it from the arrival. Consumed
+    /// only by [`IrStats`]' causal bound. `plot_ir` always records it —
+    /// `unavailable` with a reason when no reference is configured — so
+    /// `None` means a report written before v7, or a producer that captures
+    /// no reference leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_latency: Option<ReferenceLatency>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,7 +205,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 6"));
+        assert!(json.contains("\"schema_version\": 7"));
     }
 
     #[test]
@@ -209,7 +229,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 6"));
+            assert!(json.contains("\"schema_version\": 7"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
