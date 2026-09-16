@@ -28,6 +28,11 @@
 #                        override one role; likewise TRIAGE, ARCHITECT, and UX.
 #                        Per-role settings win over AC_PROVIDER. QA remains
 #                        model-bound until its two approval labels are migrated.
+#   AC_CODEX_RECHECK=0   after a Codex fail and a revision, run full Claude QA
+#                        and then Codex again (old flow). Default 1: send the
+#                        revision straight back to Codex for a recheck of the
+#                        delta; Claude QA is not re-run, and its approval of the
+#                        failed tip is carried forward only if Codex passes.
 #   AC_WAIT_MERGE=1      wait at an epic child until its human merge, then
 #                        continue with the next child (default: stop and return)
 #   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
@@ -40,6 +45,7 @@ BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
 STEPS="${AC_STEPS:-8}"
+RECHECK="${AC_CODEX_RECHECK:-1}"
 DESIGN_PASSES="${AC_DESIGN_PASSES:-2}"
 UX_PASSES="${AC_UX_PASSES:-2}"
 
@@ -128,6 +134,15 @@ triage_evidence() {
 # that may already carry an approval of the design it replaced.
 qa_loop() {
   local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev pre post
+  # codex_base: the tip Claude QA approved and Codex then failed. While set,
+  # a revision goes back to Codex alone (AC_CODEX_RECHECK). Kept on disk so a
+  # rerun after a stop still knows which delta Claude has not seen.
+  local cbfile="$AC_LOG_DIR/codex-base-pr-$pr.sha" codex_base=""
+  [[ $RECHECK == 1 && -f $cbfile ]] && codex_base="$(cat "$cbfile")"
+  codex_failed_at() {
+    [[ $RECHECK == 1 ]] || return 0
+    codex_base="$1"; mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$1" > "$cbfile"
+  }
   # Not every exit path sets STATE, and drive() re-enters this function after a
   # handback. A STATE left over from the previous entry would read as a second
   # handback and loop until the step limit — which looks like cycling labels
@@ -169,16 +184,25 @@ qa_loop() {
       echo "  #$n PR #$pr: revising (round $qa_round)"
       pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — not starting a revise"; return 1; }
-      cpre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" \
+      # A run that stopped between the Codex fail and the revise, or one from
+      # before this flow existed, has no base on disk. claude-approved paired
+      # with needs-work is the Codex-fail state (qa.md step 5); confirm it from
+      # both records rather than from the labels alone.
+      if [[ $RECHECK == 1 && -z $codex_base ]] && has claude-approved "$ls" \
+          && [[ "$(newest_record "$pr" codex-qa)" == *"$pre"* \
+             && "$(newest_record "$pr" qa)" == *"$pre"* ]]; then
+        codex_failed_at "$pre"
+      fi
+      cpre=""$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" \
         || { echo "  #$n: cannot count PR comments — not starting a revise"; return 1; }
       local revise_rc=0 retry_head
-      "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+      AC_REVISE_MODE="${codex_base:+codex}" "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
       if (( revise_rc != 0 && revise_rc != 130 && revise_rc != 143 )); then
         retry_head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" || return 1
         if [[ $retry_head == "$pre" ]]; then
           echo "  #$n: revision worker exited before pushing — retrying once in the preserved worktree"
           revise_rc=0
-          "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+          AC_REVISE_MODE="${codex_base:+codex}" "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
         fi
       fi
       (( revise_rc == 0 )) || { echo "  #$n: revise failed"; return 1; }
@@ -247,6 +271,54 @@ qa_loop() {
       ls="$(pr_labels "$pr")"
     fi
 
+    # Codex recheck: the revision answers a Codex finding on a tip Claude QA
+    # approved. Codex reviews base..head and runs the workspace gate itself;
+    # Claude QA is not re-run. Only a Codex pass that names both SHAs lets the
+    # runner carry claude-approved forward — the label then means "Claude
+    # approved base, and the only commits since answer Codex and passed Codex".
+    if [[ -n $codex_base ]] && ! has needs-work "$ls" && ! has claude-approved "$ls"; then
+      head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
+        || { echo "  #$n: cannot read the tip — stopping"; return 1; }
+      if has requires-rig "$ls"; then
+        echo "  #$n PR #$pr: REQUIRES RIG — Codex cannot approve past it."
+        echo "     run the session, clear the label, rerun; the recheck of"
+        echo "     $codex_base..$head is still pending."
+        STATE=needs-rig; return 0
+      fi
+      if [[ $head != "$codex_base" ]]; then
+        echo "  #$n PR #$pr: Codex recheck of ${codex_base:0:8}..${head:0:8} (Claude QA not re-run)"
+        local rrc=0 crec
+        "$BIN/review.sh" --independent --recheck "$codex_base" "$pr" || rrc=$?
+        if (( rrc == 3 )); then
+          echo "  #$n PR #$pr: tip no longer descends from the approved base — full Claude QA"
+          codex_base=""; rm -f "$cbfile"; force=full
+        elif (( rrc != 0 )); then
+          echo "  #$n PR #$pr: Codex recheck failed to run"; return 1
+        else
+          ls="$(pr_labels "$pr")" || return 1
+          if has needs-work "$ls"; then
+            echo "  #$n PR #$pr: Codex recheck requested changes"
+            continue
+          fi
+          crec="$(newest_record "$pr" codex-qa)"
+          if ! has codex-approved "$ls" || [[ $crec != *"$head"* || $crec != *"$codex_base"* ]]; then
+            echo "  #$n PR #$pr: Codex recheck posted no approval naming both tips — stopping"
+            STATE=needs-human; return 0
+          fi
+          [[ "$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" == "$head" ]] \
+            || { echo "  #$n PR #$pr: tip moved during the recheck — stopping"; return 1; }
+          gh_retry gh pr edit "$pr" -R "$AC_REPO" --add-label claude-approved >/dev/null \
+            || { echo "  #$n PR #$pr: could not restore claude-approved — do it by hand"; return 1; }
+          gh_retry gh pr comment "$pr" -R "$AC_REPO" --body "<!-- agent: runner -->
+claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`; the commits since answer a Codex finding and passed a Codex recheck (AC_CODEX_RECHECK). Claude QA has not reviewed \`$codex_base..$head\`." >/dev/null || true
+          rm -f "$cbfile"
+          echo "  #$n PR #$pr: Codex recheck approved — claude-approved carried forward from ${codex_base:0:8}"
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge; return 0
+        fi
+      fi
+    fi
+
     head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
     mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
 
@@ -266,7 +338,7 @@ qa_loop() {
       fi
       if has claude-approved "$ls"; then
         if ! has codex-approved "$ls"; then
-          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && continue; return "$rc"; }
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
           ls="$(pr_labels "$pr")"
         fi
         if has codex-approved "$ls" && ! has needs-work "$ls"; then
@@ -280,6 +352,7 @@ qa_loop() {
 
     echo "  #$n PR #$pr: qa review${force:+ (full — design changed since the last pass)}"
     before="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
+    codex_base=""; rm -f "$cbfile"   # Claude sees the whole delta again
     "$BIN/review.sh" "$pr" ${force:+--full} $fg || { echo "  #$n: review failed"; return 1; }
     force=""   # one forced pass; later rounds go back to reviewing the delta
     after="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — review may have succeeded, check the PR"; return 1; }
@@ -313,7 +386,7 @@ qa_loop() {
         STATE=needs-rig
       elif has claude-approved "$ls"; then
         if ! has codex-approved "$ls"; then
-          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && continue; return "$rc"; }
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
           ls="$(pr_labels "$pr")"
         fi
         if has codex-approved "$ls" && ! has needs-work "$ls"; then

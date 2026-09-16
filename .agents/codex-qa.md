@@ -34,8 +34,10 @@ gh pr list --state open \
 `claude-approved` plus `needs-work` is the state immediately after a Codex
 failure. Exclude it so an unattended runner does not review the same rejected
 tip on every poll. The developer removes both labels when picking up the
-finding. After the revision, Claude QA re-reviews the new tip and restores
-`claude-approved`; that puts the PR back in this queue.
+finding. After the revision, the runner sends the PR straight back to you in
+recheck mode (below) — it does not return through this queue. With
+`AC_CODEX_RECHECK=0` the old flow applies instead: Claude QA re-reviews the new
+tip and restores `claude-approved`, which puts the PR back in this queue.
 
 There is no queue state anywhere but GitHub. `bin/review.sh --independent` walks this list
 and holds nothing.
@@ -94,6 +96,36 @@ That is worse than no review, because the merge gate reads as satisfied.
 removes it at re-review. This identity check is the third guard and catches a
 label that survived both without rejecting a valid review because of clock
 metadata.
+
+## recheck mode
+
+`bin/review.sh --independent --recheck <base> <pr>` — invoked by `master.sh`
+after a developer revision that answers **your** failing review. `<base>` is
+the tip you failed, which Claude QA had approved. Claude QA does not review the
+revision; you are the only reviewer of `<base>..<head>`.
+
+What changes:
+- **Pre-check.** The runner verifies that the newest `<!-- agent: qa -->` record
+  and your own newest record both name `<base>`, and that `<head>` descends
+  from it. `claude-approved` is absent by design (the developer removed it).
+  The stale-approval pre-check above does not apply.
+- **Read order.** Your own review at `<base>` comes first — it is the spec for
+  this pass. The independence rule still holds for Claude QA and UX records.
+- **Scope.** Every finding in your review at `<base>` is resolved at `<head>`,
+  or it is not. Then review the delta with steps 1–4 in full, including what
+  the delta breaks outside the lines it touches. A fix that adds a new code
+  path gets the same scrutiny a first review would give it — nobody else will.
+- **Gate.** There is no Claude gate at `<head>` to inherit. Run the full
+  workspace gate (step 3's three commands) yourself, in the foreground, and
+  record the result.
+- **Record.** Name both `<base>` and `<head>` in full. The runner will not act
+  on a pass that omits either.
+- **Labels.** As in a normal pass. Never touch `claude-approved`: on your pass
+  the runner restores it, with a comment saying Claude QA approved `<base>` and
+  did not review `<base>..<head>`.
+
+`requires-rig` still blocks: the runner does not start a recheck while it is
+set.
 
 ## what you must do
 

@@ -30,8 +30,20 @@ if [[ $(git rev-parse HEAD) != $(git rev-parse "origin/$branch") ]] \
 fi
 link_support "$wt"
 
+if [[ ${AC_REVISE_MODE:-} == codex ]]; then
+  # master.sh sets this when the finding came from Codex and the revision goes
+  # straight back to a Codex recheck (AC_CODEX_RECHECK). developer.md names
+  # this invocation "fix Codex findings on PR #N".
+  source_note="Fix Codex findings on PR #$n (developer.md → codex-finding mode). \
+The newest agent:codex-qa comment is the spec for this revision; Claude QA \
+approved the tip it failed and will not review your commits — Codex rechecks \
+them directly, so say in your PR comment what each commit answers."
+else
+  source_note="Read the agent:qa review comment on it and address every point raised."
+fi
+
 AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
-Read the agent:qa review comment on it and address every point raised. This is \
+$source_note This is \
 a revision: the branch and the PR already exist — commit and push to this \
 branch, do not open a new PR. Preserve PR labels except the mandatory removal \
 of claude-approved and codex-approved when the branch changes. If the finding is outside the \

@@ -134,10 +134,12 @@ found something.
 3. **Fix on the existing PR branch.** No new branch, no new PR — one PR per
    issue still holds. Normal hard constraints apply, and step 4's full verify
    gate runs again against the new tip.
-4. **Push. Restore no labels.** You do not re-apply `claude-approved`; only a
-   Claude QA re-review does, under the post-approval rule in `qa.md`. When it
-   does, the PR re-enters the Codex queue by itself, because the queue is
-   `claude-approved` and not `codex-approved`. There is nothing to notify and
+4. **Push. Restore no labels.** You do not re-apply `claude-approved`. The
+   runner sends your commits straight back to Codex (`codex-qa.md` → recheck
+   mode); Claude QA does not review them, so your PR comment must say what each
+   commit answers. On a Codex pass the runner restores `claude-approved`. With
+   `AC_CODEX_RECHECK=0`, Claude QA re-reviews instead and restores it under the
+   post-approval rule in `qa.md`. Either way there is nothing to notify and
    nothing to remember.
 
 **Disagreeing with a finding is a valid outcome, and it stops here.** Comment

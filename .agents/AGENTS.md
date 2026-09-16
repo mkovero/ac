@@ -11,7 +11,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 | `.agents/ux.md` | output-surface design — what the operator sees, and in what units | issue labeled `needs-ux` |
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
-| `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved` |
+| `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved`; or a runner recheck after a Codex-finding revision |
 | `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | manual invocation |
 
 ## routing logic
@@ -50,7 +50,7 @@ Always human-only:
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
 | `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
 | `in-review` | developer (via PR) | PR open |
-| `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed**, with no pending rig gate |
+| `claude-approved` | qa (step 5, approve verdict); runner after a Codex recheck pass | Claude QA passed **at the commit it reviewed**, with no pending rig gate — or at an earlier commit whose only successors answer a Codex finding and passed a Codex recheck (the runner's comment names both) |
 | `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed, with no pending rig gate |
 | `needs-work` | qa **or** codex-qa | PR has issues, developer must revise |
 | `blocked` | any agent | this issue waits on something else — see below |
@@ -67,6 +67,12 @@ Always human-only:
 `claude-approved` and `codex-approved` are set by different reviewers running
 under different models, and both must be present for a human to merge (see
 human gates). Neither agent may set the other's label.
+
+One carry-forward exists. After Codex fails a tip Claude approved, the
+revision goes back to Codex alone (`codex-qa.md` → recheck mode). On a recheck
+pass the runner restores `claude-approved` and comments that Claude QA
+approved the base commit and did not review the delta. `AC_CODEX_RECHECK=0`
+turns this off.
 
 Neither approval label may be applied while `requires-rig` is present. Tree QA
 defines the measurement and stops at the rig gate; after the measurement is
