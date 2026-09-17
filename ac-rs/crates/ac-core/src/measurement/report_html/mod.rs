@@ -514,6 +514,7 @@ mod tests {
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
+            voltage_check: None,
         });
         let html = render_html(&r);
         // Voltage cal still rendered.
@@ -553,6 +554,7 @@ mod tests {
             ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
+            voltage_check: None,
         });
         let html = render_html(&r);
         assert!(html.contains("not calibrated"), "SPL stub missing: {html}");

@@ -52,6 +52,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::epoch::{DeviceEpoch, EnumerationCheck, BOUNDARY_HOST_REBOOTED};
+use super::store::SESSION_REFUSALS_FILE;
 use super::tau::{compare_tau_readings, TauComparison, TauConditions};
 
 // ---------------------------------------------------------------------------
@@ -1005,9 +1006,41 @@ pub const NOT_CHECKED_STORED_AFTER: &str = "value stored after last check";
 /// The reason an unreadable refusal record gives every layer it hides.
 pub fn refusals_unreadable_reason(observation: &str) -> String {
     format!(
-        "session_refusals.json unreadable: {observation}; \
+        "{SESSION_REFUSALS_FILE} unreadable: {observation}; \
          check: its permissions and contents, beside cal.json"
     )
+}
+
+/// The head of an `unverified` verdict, as every surface prints it after
+/// `UNVERIFIED — `: `not_measured` says the check did not measure (the
+/// reason is the observation beneath it), `refusals_unreadable` names the
+/// file only, and every other cause prints its observation (the reason up to
+/// `; check: `). Chosen from `cause`, never by matching the reason.
+pub fn unverified_head(cause: UnverifiedCause, reason: &str) -> String {
+    match cause {
+        UnverifiedCause::NotMeasured => "check did not measure".to_string(),
+        UnverifiedCause::RefusalsUnreadable => format!("{SESSION_REFUSALS_FILE} unreadable"),
+        _ => split_check(reason).0.to_string(),
+    }
+}
+
+/// Split a reason on its `; check: ` separator.
+pub fn split_check(reason: &str) -> (&str, Option<&str>) {
+    match reason.split_once("; check: ") {
+        Some((obs, check)) => (obs, Some(check)),
+        None => (reason, None),
+    }
+}
+
+/// An RFC3339 timestamp to whole seconds, `2026-09-16T14:02:11Z`. Text
+/// that does not parse is returned unchanged.
+pub fn whole_seconds(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => t
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        Err(_) => ts.to_string(),
+    }
 }
 
 /// The verdict that applies to `target` now, from every record there is.
@@ -1832,6 +1865,22 @@ mod tests {
         let stale_pass = record("out1_in1", "2026-09-16T09:00:00.000Z", verified_v());
         let again = merge_refusals(&merged, &[stale_pass]);
         assert!(again.voltage.contains_key("out1_in1"));
+    }
+
+    #[test]
+    fn unverified_heads_are_chosen_by_cause() {
+        use UnverifiedCause::*;
+        assert_eq!(unverified_head(NotMeasured, "xrun during probe"), "check did not measure");
+        assert_eq!(
+            unverified_head(RefusalsUnreadable, &refusals_unreadable_reason("bad")),
+            "session_refusals.json unreadable"
+        );
+        assert_eq!(
+            unverified_head(NoBaseline, "[out1_in1] has no loop-gain baseline; check: x"),
+            "[out1_in1] has no loop-gain baseline"
+        );
+        assert_eq!(whole_seconds("2026-09-16T14:02:11.345Z"), "2026-09-16T14:02:11Z");
+        assert_eq!(whole_seconds("garbage"), "garbage");
     }
 
     #[test]

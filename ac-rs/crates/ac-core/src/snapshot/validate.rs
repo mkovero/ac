@@ -11,6 +11,10 @@
 //! 4. `session.delay_samples.len() == session.pairs.len()`.
 //! 5. Both inputs of every pair equal the `input_channel` of some
 //!    `per_channel` entry (rule 3 makes it the only one).
+//! 6. A channel whose `voltage_check` is refused carries no
+//!    `vrms_at_0dbfs_*` in its `calibration` (#466): a refused scale that
+//!    is still present would be applied by any reader that ignores the
+//!    verdict.
 //!
 //! Deliberately **not** rules, because the daemon writes both cases: unique
 //! roles (pairs `[[m,r1],[m,r2]]` give two `"ref"` channels) and
@@ -86,6 +90,16 @@ pub(super) fn validate_metadata(meta: &SnapshotMeta) -> Result<()> {
         }
     }
 
+    for (i, ch) in meta.per_channel.iter().enumerate() {
+        let refused = ch.voltage_check.as_ref().is_some_and(|v| v.is_refused());
+        if refused && ch.calibration.as_ref().is_some_and(|c| c.has_voltage()) {
+            return Err(anyhow!(
+                "per_channel[{i}].voltage_check is refused but per_channel[{i}].calibration \
+                 carries vrms_at_0dbfs"
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -124,6 +138,7 @@ mod tests {
             weighting: "Z".to_string(),
             integration: "fast".to_string(),
             calibration: None,
+            voltage_check: None,
         }
     }
 
@@ -338,6 +353,53 @@ mod tests {
             err.contains("per_channel[2].input_channel 4 duplicates per_channel[0].input_channel"),
             "error {err:?} does not name the duplicated input"
         );
+    }
+
+    fn refused_check() -> crate::shared::calibration::LayerVerdict {
+        use crate::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
+        crate::shared::calibration::LayerVerdict::Refused {
+            evidence: Evidence {
+                measured: 2.42,
+                stored: -0.6,
+                delta: 3.02,
+                tolerance: 0.1,
+                unit: VerdictUnit::Db,
+                stored_at: "2026-09-15T23:43:04Z".into(),
+                checked_at: "2026-09-16T14:02:11.000Z".into(),
+                source: CheckSource::Probe,
+            },
+            via: None,
+            delta_bound: None,
+        }
+    }
+
+    fn with_scale() -> crate::shared::calibration::Calibration {
+        let mut cal = crate::shared::calibration::Calibration::new(0, 0);
+        cal.vrms_at_0dbfs_in = Some(1.5);
+        cal
+    }
+
+    #[test]
+    fn read_and_write_reject_a_refused_check_beside_a_voltage_scale() {
+        let mut meta = control_meta();
+        meta.per_channel[1].voltage_check = Some(refused_check());
+        meta.per_channel[1].calibration = Some(with_scale());
+        let expected = "per_channel[1].voltage_check is refused but per_channel[1].calibration \
+                        carries vrms_at_0dbfs";
+        assert_read_rejects(&meta, 3, expected);
+        let err = match write_acsnap(&meta, &short_audio(3)) {
+            Ok(_) => panic!("write_acsnap wrote a refused scale"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(expected), "{err}");
+    }
+
+    #[test]
+    fn a_refused_check_with_the_scale_withheld_is_valid() {
+        let mut meta = control_meta();
+        meta.per_channel[1].voltage_check = Some(refused_check());
+        meta.per_channel[1].calibration = Some(with_scale().without_voltage());
+        write_acsnap(&meta, &short_audio(3)).expect("withheld scale must write");
     }
 
     #[test]

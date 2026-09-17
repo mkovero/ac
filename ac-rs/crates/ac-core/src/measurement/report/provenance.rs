@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::calibration::EnumerationCheck;
+use crate::shared::calibration::{EnumerationCheck, LayerVerdict};
 
 /// The measurement technique. `kind` is a discriminant so new methods
 /// (Farina sweep, pink-noise, etc.) extend the enum without breaking
@@ -223,6 +223,12 @@ pub struct CalibrationSnapshot {
     /// they're looking at were mic-corrected, and against which file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_response: Option<MicResponseRef>,
+    /// The session check's verdict on the voltage layer, frozen at capture
+    /// (#466, schema v11). When `refused`, both `vrms_at_0dbfs_*` are
+    /// `None`: the values in the report are in dBFS. Absent on v1-v10
+    /// reports, which readers show as "not recorded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage_check: Option<LayerVerdict>,
 }
 
 /// Pointer-style record of a mic-response curve attached to a channel
@@ -359,6 +365,10 @@ mod tests {
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
+            voltage_check: Some(crate::shared::calibration::LayerVerdict::unverified(
+                crate::shared::calibration::session::UnverifiedCause::NoLoopback,
+                "no reference loopback configured",
+            )),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: CalibrationSnapshot = serde_json::from_str(&json).unwrap();
@@ -379,10 +389,12 @@ mod tests {
             ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
+            voltage_check: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
         assert!(!json.contains("mic_response"), "{json}");
+        assert!(!json.contains("voltage_check"), "{json}");
     }
 
     // ─── ProcessingChain (#105) ─────────────────────────────────────────

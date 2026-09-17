@@ -120,7 +120,12 @@ pub use provenance::{
 ///   field matching, so a crossed boundary flags the value; it never
 ///   refuses it. Absent on v1-v9 reports, which readers treat as
 ///   `not_recorded`, never as `same`.
-pub const SCHEMA_VERSION: u32 = 10;
+/// - v11: `CalibrationSnapshot` gains optional `voltage_check: LayerVerdict`
+///   — the session check's verdict on the voltage layer, frozen at capture
+///   (#466). A refused verdict comes with both `vrms_at_0dbfs_*` absent, so
+///   the report's values are in dBFS. Absent on v1-v10 reports, which
+///   readers show as "not recorded", never as verified.
+pub const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -247,7 +252,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 10"));
+        assert!(json.contains("\"schema_version\": 11"));
     }
 
     #[test]
@@ -271,7 +276,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 10"));
+            assert!(json.contains("\"schema_version\": 11"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
@@ -343,6 +348,24 @@ mod tests {
         assert_eq!(r.schema_version, 1);
         assert_eq!(r.data.len(), 1);
         assert!(r.position.is_none());
+    }
+
+    /// #466: v11 freezes the voltage verdict with the snapshot, and a v10
+    /// snapshot without it decodes as "not recorded" (`None`).
+    #[test]
+    fn v11_voltage_check_round_trips_and_v10_decodes_without_it() {
+        let mut r = sample_report();
+        r.calibration = Some(refused_calibration());
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"voltage_check\""), "{json}");
+        assert!(json.contains("\"state\": \"refused\""), "{json}");
+        let back: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+
+        let v10 = r#"{"output_channel": 0, "input_channel": 0,
+            "vrms_at_0dbfs_in": 0.5, "ref_freq_hz": 1000.0, "ref_level_dbfs": -10.0}"#;
+        let snap: CalibrationSnapshot = serde_json::from_str(v10).unwrap();
+        assert_eq!(snap.voltage_check, None);
     }
 
     #[test]

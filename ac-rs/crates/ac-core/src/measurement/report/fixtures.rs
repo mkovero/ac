@@ -6,6 +6,36 @@
 
 use super::*;
 
+/// A calibration snapshot whose voltage layer the session check refused
+/// (#466): the scale is withheld, the verdict says why.
+pub(super) fn refused_calibration() -> CalibrationSnapshot {
+    use crate::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
+    CalibrationSnapshot {
+        output_channel: 1,
+        input_channel: 1,
+        vrms_at_0dbfs_out: None,
+        vrms_at_0dbfs_in: None,
+        ref_freq_hz: 1000.0,
+        ref_level_dbfs: -40.0,
+        mic_sensitivity_dbfs_at_94db_spl: None,
+        mic_response: None,
+        voltage_check: Some(crate::shared::calibration::LayerVerdict::Refused {
+            evidence: Evidence {
+                measured: 2.42,
+                stored: -0.60,
+                delta: 3.02,
+                tolerance: 0.10,
+                unit: VerdictUnit::Db,
+                stored_at: "2026-09-15T23:43:04Z".into(),
+                checked_at: "2026-09-16T14:02:11.000Z".into(),
+                source: CheckSource::Probe,
+            },
+            via: None,
+            delta_bound: None,
+        }),
+    }
+}
+
 pub(super) fn sample_report() -> MeasurementReport {
     MeasurementReport {
         schema_version: SCHEMA_VERSION,
