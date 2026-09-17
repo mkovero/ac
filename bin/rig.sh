@@ -181,8 +181,10 @@ within that consent when the check needs them: afterwards make JACK reachable
 the toggle writes in docs/rigs/$RIG.md, and confirm it by probe-outputs.sh at
 -60 dBFS before any capture; record each event with its time. The rig lock
 lives on disk and survives a reboot; the login banner does not. No interface
-power cycles and no physical changes (nobody is in the room): if the check
-needs one, record decline for that part and name the permission.
+power cycles and no physical changes (nobody is in the room). Such a part is
+a site-only step: run everything else, write it out exactly (setup, actions,
+falsification test), mark it 'not run — site visit', and if nothing else is
+unresolved use the decline-site verdict (rig.md → pipeline mode).
 
 Headless: run every command in the foreground, with a timeout. Write the
 full record to $record_in (the runner files it under \$AC_HOME/session and
@@ -209,6 +211,6 @@ if [[ -z $after || $after == "$before" || $after != *"$head"* ]]; then
   echo "rig session posted no record naming $head" >&2
   exit 1
 fi
-verdict="$(grep -oE '\*\*rig verdict:\*\* *(pass|fail|decline)' <<<"$after" | tail -1 | awk '{print $NF}' || true)"
+verdict="$(rig_verdict_of "$after")"
 echo "rig: record posted, verdict ${verdict:-missing}" >&2
 [[ -n $verdict ]] || exit 1

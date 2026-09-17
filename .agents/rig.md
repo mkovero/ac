@@ -207,6 +207,10 @@ check** (architect or triage).
   unchanged, including declining to conclude.
 - Stay inside the standing consent. If the check needs anything outside it,
   do not run that part: record `decline`, and say what permission is needed.
+  A part that only needs someone **at the rig** (an interface power cycle, a
+  cable or mic move) is a **site-only step**. Run everything else, mark those
+  steps `not run — site visit`, and write each one out exactly as it would be
+  run: setup, actions, the falsification test.
 - Write the full record to `rig-record.md` at the root of the worktree you
   were started in. The runner files it as
   `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>.md` and commits it; do not
@@ -214,10 +218,15 @@ check** (architect or triage).
 - Post one PR comment, first line `<!-- agent: rig -->`, that names the full
   head SHA, gives the result table, the confounds and what is not covered, and
   ends with exactly one line:
-  `**rig verdict:** pass` | `**rig verdict:** fail` | `**rig verdict:** decline`.
-  `pass` means every part of the named check ran and met its falsification
-  bar. `fail` means the data shows the claim is wrong. Everything else is
-  `decline`.
+  `**rig verdict:** pass` | `**rig verdict:** fail` |
+  `**rig verdict:** decline-site` | `**rig verdict:** decline`.
+  - `pass`: every part of the named check ran and met its falsification bar.
+  - `fail`: the data shows the claim is wrong.
+  - `decline-site`: every part that could run did run and met its bar, at
+    least one hardware part ran, and every part that did not run is a
+    site-only step written out as above. Nothing else is unresolved.
+  - `decline`: everything else, including a part that ran and is ambiguous,
+    and a part skipped for any reason other than needing someone on site.
 - Restore every rig config file you changed, and leave the rig as the final
   preflight shows it. Labels stay untouched: Claude QA reads the verdict.
 

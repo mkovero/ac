@@ -181,6 +181,14 @@ remove_worktree() {
   [[ -d $wt ]] || rm -rf "$t"
 }
 
+# rig_verdict_of <record text> — the last `**rig verdict:** X` line's X:
+# pass | fail | decline-site | decline, or empty. decline-site is listed first
+# so the plain `decline` alternative cannot claim its prefix.
+rig_verdict_of() {
+  grep -oE '\*\*rig verdict:\*\*[[:space:]]*(pass|fail|decline-site|decline)([^[:alnum:]-]|$)' <<<"$1" \
+    | tail -1 | sed -E 's/.*\*\*[[:space:]]*//; s/[^[:alnum:]-]+$//' || true
+}
+
 # provider_limit_check <file> <provider> <mode> — did the provider stop on an
 # account limit? mode `jsonl` reads only the provider's own result/error
 # records, `text` only the tail of plain output. In both, the phrase must START

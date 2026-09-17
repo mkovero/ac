@@ -322,8 +322,8 @@ at or below −40 dBFS (standing consent, `AGENTS.md`).
 The rig role produces the measurement record; you do not run the session. The
 runner (`bin/rig.sh`) runs it at the commit you reviewed and posts a
 `<!-- agent: rig -->` comment naming that commit and a **rig verdict**:
-`pass`, `fail` or `decline`. Your next pass is a full pass at the same commit,
-with the record as evidence:
+`pass`, `fail`, `decline-site` or `decline`. Your next pass is a full pass at
+the same commit, with the record as evidence:
 
 - **record at the current head, verdict `pass`, and it closes the named
   falsification test** → remove `requires-rig` from the PR **and** the issue,
@@ -332,6 +332,30 @@ with the record as evidence:
 - **verdict `fail`, and the record shows the code is wrong** →
   `request-changes`, `needs-work`, record cited as evidence. Leave
   `requires-rig`: the fix needs measuring too.
+- **verdict `decline-site` at the current head** → the remaining parts need
+  someone at the rig, and that must not hold the PR (operator, 2026-09-17,
+  #499 → #529). Check the record first: every part that ran met its bar, at
+  least one hardware part ran, and each unrun part is a site-only step written
+  out with its falsification test. If all of that holds:
+  1. file one follow-up issue, titled `rig: <what> (deferred from #<PR>)`,
+     labelled `requires-rig`, `site-visit` and the issue's scope label. It
+     carries the site-only steps verbatim, what the record already verified,
+     and "if this fails, the design returns to #<issue>". Link every related
+     issue and PR in its body;
+  2. make it a sub-issue of the open **Deferred site work** issue (labels
+     `site-visit` + `epic`), e.g.
+     `gh api -X POST repos/<repo>/issues/<umbrella>/sub_issues -F sub_issue_id=<follow-up's id>`.
+     If no such issue is open, create it first, modelled on #531;
+  3. remove `requires-rig` from the PR and the issue, citing the record and
+     the follow-up;
+  4. continue to your normal verdict.
+
+  Deferring blocks nothing by default. Whether other work should wait on the
+  deferred check depends on the case (operator, 2026-09-17). If something
+  should wait, apply `blocked` to *that* issue, naming the follow-up as its
+  lift condition, and say why.
+
+  If any of the checks fails, treat the record as `decline`.
 - **verdict `decline`, a record that does not close the named test, or no
   record at the current head** → stay `rig-pending` and leave the label. Say
   what is unresolved. That is a human's call, like any unmeasurable criterion.
@@ -373,7 +397,7 @@ them.
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
-- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, or when a push or the architect's `rig check: none` made the question moot (say why).
+- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, on a `decline-site` record after filing the follow-up issue, or when a push or the architect's `rig check: none` made the question moot (say why).
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.

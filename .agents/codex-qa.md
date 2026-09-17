@@ -145,7 +145,10 @@ record absent, is not a pass. Do not apply `codex-approved`. The runner does not
 send you such a PR; if one arrives, stop and say so. A record Claude QA
 accepted (it removed the label, citing a `<!-- agent: rig -->` record at the
 current head) is evidence you check like any other: does it measure what the
-named check says, at this commit?
+named check says, at this commit? For a `decline-site` record, also check the
+deferral: every part that ran met its bar, and the linked `site-visit`
+follow-up carries the unrun steps with their falsification test. A deferral
+that hides an ambiguous or failed part is a blocking finding.
 
 ### step 2 — the diff
 - **correctness** — does the implementation do what the spec says?
