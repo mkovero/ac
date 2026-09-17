@@ -203,12 +203,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             }
         }
         let sr = eng.sample_rate();
-        // Per-tick monotonic counter shared across all channels in the
-        // tick. Phase 0b: the UI's Goniometer / PhaseScope3D pair L and
-        // R scope frames by `frame_idx`, so it MUST increment exactly
-        // once per tick — not once per (tick, channel). Wraps on u64
-        // overflow (~600 years at 1 kHz tick rate; not a real concern).
-        let mut frame_idx: u64 = 0;
+        // Scope-frame counter: incremented once per emitted
+        // `visualize/scope` frame, so every frame has its own identity.
+        // Channels are captured one after another, so a per-tick value
+        // shared across channels would claim a simultaneity the capture
+        // does not have (#434). Wraps on u64 overflow.
+        let scope_frame_idx = std::cell::Cell::new(0u64);
 
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
@@ -303,14 +303,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
-            // Bump the per-tick counter and snapshot a tick-wide
-            // timestamp BEFORE the per-channel loop so every scope
-            // frame in this tick carries the same `frame_idx` /
-            // `tick_ts_ns`. The existing per-channel `ts_ns` calls in
-            // the loudness/spectrum branches stay as-is; only scope
-            // frames need tick-wide alignment.
-            frame_idx = frame_idx.wrapping_add(1);
-            let tick_ts_ns = now_ns();
             let (cur_interval, cur_fft_n, cur_lf_fft_n, cur_crossover_hz) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n, mp.lf_fft_n, mp.crossover_hz)
@@ -370,8 +362,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 n_channels,
                 sr,
                 backend,
-                frame_idx,
-                tick_ts_ns,
+                scope_frame_idx: &scope_frame_idx,
                 mic_corr_enabled: mic_corr_enabled.load(Ordering::Relaxed),
                 // Pace the ring-buffered modes to the UI's requested
                 // interval, clamped to [16 ms, 100 ms]. Pre-#109 this was
