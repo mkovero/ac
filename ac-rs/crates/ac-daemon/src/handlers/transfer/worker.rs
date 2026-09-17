@@ -193,7 +193,19 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
     // capped at `snapshot_ring_s` seconds. Crash-safety: wipe any
     // stale spool from a prior session before publishing this one's
     // ring handle (module doc, `handlers/snapshot.rs`).
-    crate::handlers::snapshot::reset_spool_dir(&plan.snapshot_spool_dir, snapshot_spool);
+    if let Err(r) =
+        crate::handlers::snapshot::reset_spool_dir(&plan.snapshot_spool_dir, snapshot_spool)
+    {
+        eng.stop();
+        *drive_state_slot.lock().unwrap() = None;
+        *relock_state_slot.lock().unwrap() = None;
+        send_pub(
+            pub_tx,
+            "error",
+            &json!({"cmd":"transfer_stream","message":r.message()}),
+        );
+        return;
+    }
     let snapshot_cap_samples = (plan.snapshot_ring_s * sr as f64).round() as usize;
     let snapshot_ring = std::sync::Arc::new(std::sync::Mutex::new(
         crate::handlers::snapshot::SnapshotRingState::new(

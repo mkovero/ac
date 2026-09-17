@@ -31,7 +31,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let fake_audio = args.iter().any(|a| a == "--fake-audio");
-    let local_only = args.iter().any(|a| a == "--local");
+    // #433: loopback is the default. `--public` is the only way to bind
+    // every interface; `--local` stays accepted as the explicit default.
+    let public = args.iter().any(|a| a == "--public");
+    if public && args.iter().any(|a| a == "--local") {
+        eprintln!("ac-daemon error: --public and --local are mutually exclusive");
+        std::process::exit(2);
+    }
+    let local_only = !public;
     // Internal flag — set by `ac-cli`'s `spawn_daemon()`, not documented as
     // an operator-facing flag. A hand-run `ac-daemon` is "manual" by
     // default (#385).

@@ -14,7 +14,9 @@
 //! (deliverable 2). As a crash-safety fallback (a killed daemon skips
 //! its own cleanup), the spool directory is also wiped at the *start* of
 //! every new `transfer_stream` session, so a stale file from a prior
-//! crashed session never outlives the next session's start.
+//! crashed session never outlives the next session's start. The spool is
+//! always a daemon-owned leaf beneath `~/.local/state/ac/snapshots` (#433,
+//! `ac_core::config::reset_snapshot_spool`); nothing else is ever emptied.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -202,13 +204,19 @@ pub struct SpoolEntry {
     pub channels: Vec<String>,
 }
 
-fn spool_dir(state: &ServerState) -> PathBuf {
+/// The configured spool leaf, confined and prepared (#433): created with
+/// its ownership marker if absent, refused if it is not daemon-owned.
+fn spool_dir(state: &ServerState) -> Result<PathBuf, ac_core::config::SpoolRejection> {
     let cfg = state.cfg.lock().unwrap().clone();
-    ac_core::config::snapshot_spool_dir(&cfg)
+    let leaf = ac_core::config::snapshot_spool_dir(&cfg)?;
+    ac_core::config::prepare_snapshot_spool(&ac_core::config::snapshot_spool_root(), &leaf)?;
+    Ok(leaf)
 }
 
-/// Wipe and recreate the spool directory. Called at the start of every
-/// `transfer_stream` session (crash-safety fallback — see module doc).
+/// Empty the spool leaf. Called at the start of every `transfer_stream`
+/// session (crash-safety fallback — see module doc). Only a daemon-owned
+/// leaf beneath the spool root is ever emptied; ownership is re-checked
+/// here, immediately before removal, and a refusal removes nothing (#433).
 /// Takes the resolved directory and spool map directly (not
 /// `&ServerState`) so it's callable from a `'static` worker closure,
 /// which only ever holds cloned `Arc`s / owned values, never a
@@ -217,10 +225,9 @@ fn spool_dir(state: &ServerState) -> PathBuf {
 pub fn reset_spool_dir(
     dir: &std::path::Path,
     spool: &Mutex<std::collections::HashMap<String, SpoolEntry>>,
-) {
-    let _ = fs::remove_dir_all(dir);
-    let _ = fs::create_dir_all(dir);
+) -> Result<(), ac_core::config::SpoolRejection> {
     spool.lock().unwrap().clear();
+    ac_core::config::reset_snapshot_spool(&ac_core::config::snapshot_spool_root(), dir)
 }
 
 /// Delete every spooled file from this session. Called when the
@@ -255,10 +262,10 @@ pub fn snapshot(state: &ServerState, _cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": format!("snapshot: {e}")}),
     };
 
-    let dir = spool_dir(state);
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return json!({"ok": false, "error": format!("snapshot: spool dir: {e}")});
-    }
+    let dir = match spool_dir(state) {
+        Ok(dir) => dir,
+        Err(r) => return json!({"ok": false, "error": r.message()}),
+    };
     let id = sha256.clone();
     let path = dir.join(format!("{id}.acsnap"));
     if let Err(e) = fs::write(&path, &bytes) {
