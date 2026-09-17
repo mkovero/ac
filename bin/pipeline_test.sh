@@ -191,6 +191,14 @@ check 'grep -qx "declined=" $T/r_verdict' "rig_verdict_of rejects a word that on
 check 'grep -qx "old=decline" $T/r_verdict' "control: the old grep would have read decline-site as decline"
 check '! grep -q "rig verdict:\\*\\* \*(pass|fail|decline)" "$BIN/rig.sh"' "rig.sh no longer parses the verdict inline"
 
+# --- 9: rig.sh's session prompt is one argument ---------------------------------
+# A stray double quote inside the prompt splits it into several words, which
+# run() would pass on as provider CLI arguments (caught while writing #530).
+prompt_quotes() {  # bare double quotes between the prompt's first and last line
+  sed -n '/run rig "Pipeline mode/,/ "\$@" || true$/p' "$1" | sed '1d;$d' | grep -c '"' || true
+}
+check '[[ $(prompt_quotes "$BIN/rig.sh") == 0 ]]' "rig.sh prompt body contains no bare double quote"
+
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
 

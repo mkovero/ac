@@ -183,7 +183,7 @@ the toggle writes in docs/rigs/$RIG.md, and confirm it by probe-outputs.sh at
 lives on disk and survives a reboot; the login banner does not. No interface
 power cycles and no physical changes (nobody is in the room). Such a part is
 a site-only step: run everything else, write it out exactly (setup, actions,
-falsification test), mark it "not run — site visit", and if nothing else is
+falsification test), mark it 'not run — site visit', and if nothing else is
 unresolved use the decline-site verdict (rig.md → pipeline mode).
 
 Headless: run every command in the foreground, with a timeout. Write the
