@@ -9,11 +9,18 @@ use serde_json::Value;
 
 use ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS;
 
+use super::super::wire;
+
+/// Refusal text for a malformed channel value in the request (#431).
+fn channel_refusal(e: &wire::WireError) -> String {
+    e.refusal("transfer_stream not started", &[("stimulus", "silent")])
+}
+
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
 /// `transfer_stream` into a canonical pair list. Returns an Err message
 /// suitable for `{"ok": false, "error": ...}` on malformed input.
 pub(super) fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
-    if let Some(arr) = cmd.get("pairs").and_then(Value::as_array) {
+    if let Some(arr) = wire::opt_array(cmd, "pairs").map_err(|e| channel_refusal(&e))? {
         if arr.is_empty() {
             return Err("pairs is empty".into());
         }
@@ -28,13 +35,11 @@ pub(super) fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, Strin
                     tuple.len()
                 ));
             }
-            let m = tuple[0]
-                .as_u64()
-                .ok_or_else(|| format!("pairs[{i}][0] must be unsigned int"))?;
-            let r = tuple[1]
-                .as_u64()
-                .ok_or_else(|| format!("pairs[{i}][1] must be unsigned int"))?;
-            out.push((m as u32, r as u32));
+            let m = wire::u32_value(&tuple[0], &format!("pairs[{i}][0]"))
+                .map_err(|e| channel_refusal(&e))?;
+            let r = wire::u32_value(&tuple[1], &format!("pairs[{i}][1]"))
+                .map_err(|e| channel_refusal(&e))?;
+            out.push((m, r));
         }
         // De-dup identical pairs — harmless but wasteful to publish twice.
         out.sort_unstable();
@@ -42,15 +47,13 @@ pub(super) fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, Strin
         return Ok(out);
     }
     // Legacy single-pair form.
-    let m = cmd
-        .get("meas_channel")
-        .and_then(Value::as_u64)
+    let m = wire::opt_u32(cmd, "meas_channel")
+        .map_err(|e| channel_refusal(&e))?
         .ok_or_else(|| "meas_channel required (or use pairs=[[m,r], ...])".to_string())?;
-    let r = cmd
-        .get("ref_channel")
-        .and_then(Value::as_u64)
+    let r = wire::opt_u32(cmd, "ref_channel")
+        .map_err(|e| channel_refusal(&e))?
         .ok_or_else(|| "ref_channel required (or use pairs=[[m,r], ...])".to_string())?;
-    Ok(vec![(m as u32, r as u32)])
+    Ok(vec![(m, r)])
 }
 
 /// Every `transfer_stream` launch parameter that comes from the request

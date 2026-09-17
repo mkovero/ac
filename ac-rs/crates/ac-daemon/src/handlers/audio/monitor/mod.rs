@@ -30,7 +30,7 @@ use crate::server::{MonitorParams, ServerState};
 
 use super::super::{
     busy_guard, cfg_guard, load_calibration_or_refuse, make_engine_for_state, resolve_input,
-    selected_backend_is_fake, send_pub, spawn_worker,
+    selected_backend_is_fake, send_pub, spawn_worker, wire,
 };
 
 use self::capture::{
@@ -60,6 +60,35 @@ fn dbfs_to_amplitude(dbfs: f64) -> f64 {
     10f64.powf(dbfs / 20.0)
 }
 
+/// The documented `fft_n` domain refusal (same text as `set_monitor_params`).
+const FFT_N_DOMAIN_ERROR: &str = "fft_n must be power of 2 in [256, 131072]";
+
+fn monitor_refusal(e: &wire::WireError) -> Value {
+    json!({"ok": false, "error": e.refusal("monitor not started", &[])})
+}
+
+/// `fake_tones`, positionally: every element must carry a finite `freq_hz`
+/// and `level_dbfs`, or the whole list is refused.
+fn parse_fake_tones(cmd: &Value) -> Result<Option<Vec<FakeTone>>, wire::WireError> {
+    let Some(arr) = wire::opt_array(cmd, "fake_tones")? else {
+        return Ok(None);
+    };
+    arr.iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let field = |name: &str| -> Result<f64, wire::WireError> {
+                let path = format!("fake_tones[{i}].{name}");
+                wire::finite_f64(t.get(name).unwrap_or(&Value::Null), &path)
+            };
+            Ok(FakeTone {
+                freq_hz: field("freq_hz")?,
+                level_dbfs: field("level_dbfs")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
     cfg_guard!(state);
@@ -69,19 +98,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     // is required to never touch physical hardware, so these are only
     // read/applied below when `state.fake_audio` is true.
     let amplitude = cmd.get("amplitude").and_then(Value::as_f64).unwrap_or(0.0);
-    let fake_tones: Option<Vec<FakeTone>> =
-        cmd.get("fake_tones").and_then(Value::as_array).map(|arr| {
-            arr.iter()
-                .filter_map(|t| {
-                    let freq_hz = t.get("freq_hz").and_then(Value::as_f64)?;
-                    let level_dbfs = t.get("level_dbfs").and_then(Value::as_f64)?;
-                    Some(FakeTone {
-                        freq_hz,
-                        level_dbfs,
-                    })
-                })
-                .collect()
-        });
+    // A tone with a missing or non-numeric field refuses the whole request
+    // (#431): silently dropping it would make the harness test fewer tones
+    // than it states.
+    let fake_tones: Option<Vec<FakeTone>> = match parse_fake_tones(cmd) {
+        Ok(t) => t,
+        Err(e) => return monitor_refusal(&e),
+    };
     let fake_noise_dbfs = cmd.get("fake_noise_dbfs").and_then(Value::as_f64);
 
     let defaults = MonitorParams::default();
@@ -89,33 +112,32 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         .get("interval")
         .and_then(Value::as_f64)
         .unwrap_or(defaults.interval);
-    let fft_n = cmd
-        .get("fft_n")
-        .and_then(Value::as_u64)
-        .unwrap_or(defaults.fft_n as u64) as u32;
+    // A present `fft_n` outside u32 is refused with the domain message
+    // below rather than wrapped into it (#431: 4294967552 used to become 256).
+    let fft_n = match wire::opt_u32(cmd, "fft_n") {
+        Ok(v) => v.unwrap_or(defaults.fft_n),
+        Err(_) => return json!({"ok": false, "error": FFT_N_DOMAIN_ERROR}),
+    };
 
     if !(interval > 0.0 && interval <= 60.0) {
         return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
     }
     if !fft_n.is_power_of_two() || !(256..=131_072).contains(&fft_n) {
-        return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
+        return json!({"ok": false, "error": FFT_N_DOMAIN_ERROR});
     }
 
     let lf_fft_n = defaults.lf_fft_n;
     let crossover_hz = defaults.crossover_hz;
     let cfg = state.cfg.lock().unwrap().clone();
 
-    let channels: Vec<u32> = cmd
-        .get("channels")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_u64)
-                .map(|v| v as u32)
-                .collect()
-        })
-        .filter(|v: &Vec<u32>| !v.is_empty())
-        .unwrap_or_else(|| vec![cfg.input_channel]);
+    // Absent, `null` or `[]` monitors the configured input; a list with any
+    // invalid element is refused, never narrowed to its valid part (#431).
+    let channels: Vec<u32> = match wire::opt_u32_array(cmd, "channels") {
+        Ok(v) => v
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![cfg.input_channel]),
+        Err(e) => return monitor_refusal(&e),
+    };
 
     // One bad channel fails the whole request rather than monitoring a
     // fabricated port alongside the good ones (#206).

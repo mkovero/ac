@@ -7,7 +7,26 @@ use ac_core::shared::calibration::Calibration;
 
 use crate::server::ServerState;
 
-use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache};
+use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache, wire};
+
+/// The four channel fields of a `setup` update, each validated (#431).
+/// Outer `None` = field absent (keep); the nullable references carry
+/// `Some(None)` for `null` (clear).
+struct SetupChannels {
+    output: Option<u32>,
+    input: Option<u32>,
+    reference: Option<Option<u32>>,
+    reference_output: Option<Option<u32>>,
+}
+
+fn parse_setup_channels(update: &Value) -> Result<SetupChannels, wire::WireError> {
+    Ok(SetupChannels {
+        output: wire::opt_u32(update, "output_channel")?,
+        input: wire::opt_u32(update, "input_channel")?,
+        reference: wire::opt_nullable_u32(update, "reference_channel")?,
+        reference_output: wire::opt_nullable_u32(update, "reference_output_channel")?,
+    })
+}
 
 pub fn status(state: &ServerState) -> Value {
     let workers = state.workers.lock().unwrap();
@@ -125,6 +144,17 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // #431: every channel field is parsed before the lock is taken, so a
+    // malformed one refuses the update with nothing applied — not even a
+    // valid sibling channel in the same request.
+    let channels = match parse_setup_channels(update) {
+        Ok(c) => c,
+        Err(e) => {
+            return json!({"ok": false,
+                "error": e.refusal("setup rejected", &[("config", "unchanged")])})
+        }
+    };
+
     let mut cfg = state.cfg.lock().unwrap();
 
     if let Some(dir) = report_dir_update {
@@ -136,34 +166,24 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     // new channel and routes audio to (or from) the wrong place.
     // `tests/it_loopback_ir.rs` seeds sticky ports directly into config.json
     // and never calls `setup`, so it's unaffected.
-    if let Some(v) = update.get("output_channel").and_then(Value::as_u64) {
-        cfg.output_channel = v as u32;
+    if let Some(v) = channels.output {
+        cfg.output_channel = v;
         cfg.output_port = None;
     }
-    if let Some(v) = update.get("input_channel").and_then(Value::as_u64) {
-        cfg.input_channel = v as u32;
+    if let Some(v) = channels.input {
+        cfg.input_channel = v;
         cfg.input_port = None;
     }
-    if let Some(v) = update.get("reference_channel") {
-        if v.is_null() {
-            cfg.reference_channel = None;
-            cfg.reference_port = None;
-        } else if let Some(n) = v.as_u64() {
-            cfg.reference_channel = Some(n as u32);
-            cfg.reference_port = None;
-        }
+    if let Some(v) = channels.reference {
+        cfg.reference_channel = v;
+        cfg.reference_port = None;
     }
     // The reference *output* leg is a playback index and is configured
     // separately from `reference_channel` (#225) — updating one must never
     // move the other.
-    if let Some(v) = update.get("reference_output_channel") {
-        if v.is_null() {
-            cfg.reference_output_channel = None;
-            cfg.reference_output_port = None;
-        } else if let Some(n) = v.as_u64() {
-            cfg.reference_output_channel = Some(n as u32);
-            cfg.reference_output_port = None;
-        }
+    if let Some(v) = channels.reference_output {
+        cfg.reference_output_channel = v;
+        cfg.reference_output_port = None;
     }
     if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {
         cfg.dbu_ref_vrms = v;
@@ -310,16 +330,21 @@ fn report_dir_refusal(path: &str, reason: &str) -> Value {
 }
 
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
-    let cfg = state.cfg.lock().unwrap();
-    let out_ch = cmd
-        .get("output_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch = cmd
-        .get("input_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.input_channel as u64) as u32;
-    drop(cfg);
+    let (cfg_out, cfg_in) = {
+        let cfg = state.cfg.lock().unwrap();
+        (cfg.output_channel, cfg.input_channel)
+    };
+    let pick = |field: &str, default: u32| wire::opt_u32(cmd, field).map(|v| v.unwrap_or(default));
+    let (out_ch, in_ch) = match (
+        pick("output_channel", cfg_out),
+        pick("input_channel", cfg_in),
+    ) {
+        (Ok(o), Ok(i)) => (o, i),
+        (Err(e), _) | (_, Err(e)) => {
+            return json!({"ok": false,
+                "error": e.refusal("calibration lookup rejected", &[])})
+        }
+    };
 
     match Calibration::load(out_ch, in_ch, None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
@@ -427,18 +452,20 @@ pub fn get_analysis_mode(state: &ServerState) -> Value {
 /// and the next `monitor_spectrum` tick picks it up live (no worker
 /// restart). Persists across worker restart, reset on daemon restart.
 pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
-    let bpo = match cmd.get("bpo").and_then(Value::as_u64) {
-        Some(v) => v as u32,
+    let raw = match cmd.get("bpo") {
+        Some(v) => v,
         None => return json!({"ok": false, "error": "missing 'bpo' field"}),
     };
-    let new = match bpo {
-        0 => None,
-        1 | 3 | 6 | 12 | 24 => Some(bpo),
+    // #431: checked, never narrowed — 4294967299 used to wrap to 3.
+    let new = match wire::u32_value(raw, "bpo") {
+        Ok(0) => None,
+        Ok(b @ (1 | 3 | 6 | 12 | 24)) => Some(b),
         _ => {
             return json!({"ok": false,
-            "error": format!("invalid bpo {bpo}: expected 0, 1, 3, 6, 12, or 24")})
+            "error": format!("invalid bpo {raw}: expected 0, 1, 3, 6, 12, or 24")})
         }
     };
+    let bpo = new.unwrap_or(0);
     *state.ioct_bpo.lock().unwrap() = new;
     json!({"ok": true, "bpo": bpo})
 }
@@ -533,7 +560,12 @@ pub fn reset_loudness(state: &ServerState) -> Value {
 /// change has nothing to pick up).
 pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
     let req_interval = cmd.get("interval").and_then(Value::as_f64);
-    let req_fft_n = cmd.get("fft_n").and_then(Value::as_u64).map(|v| v as u32);
+    // #431: a present `fft_n` that is not a u32 gets the domain refusal,
+    // ahead of the `no active monitor` check — 4294967552 used to wrap to 256.
+    let req_fft_n = match wire::opt_u32(cmd, "fft_n") {
+        Ok(n) => n,
+        Err(_) => return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"}),
+    };
 
     if let Some(i) = req_interval {
         if !(i > 0.0 && i <= 60.0) {
