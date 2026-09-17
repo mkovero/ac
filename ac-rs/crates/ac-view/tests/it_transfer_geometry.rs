@@ -49,6 +49,7 @@ fn masked_scene() -> TransferScene {
         column_bins: Vec::new(),
         stages: Vec::new(),
         fault: None,
+        calibration: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
@@ -166,6 +167,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         column_bins: Vec::new(),
         stages: Vec::new(),
         fault,
+        calibration: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
@@ -273,6 +275,7 @@ fn the_persistent_row_paints_its_instruction() {
             column_bins: Vec::new(),
             stages: Vec::new(),
             fault: inp_fault,
+            calibration: None,
         };
         TransferScene::from_input(
             &inp,
@@ -442,6 +445,7 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         column_bins: Vec::new(),
         stages,
         fault: None,
+        calibration: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(

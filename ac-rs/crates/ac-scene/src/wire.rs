@@ -150,6 +150,12 @@ pub struct WireFrame {
     pub spl_weighting: String,
     /// `"fast"` | `"slow"` — echoes the session's `integration` param.
     pub spl_integration: String,
+    /// `{meas, ref}` calibration tags (#466 reads `voltage` and
+    /// `voltage_check`). Held as a raw value so a malformed tag can never
+    /// drop the frame; [`crate::transfer::CalibrationReadout::from_cal_tags`]
+    /// converts it leniently.
+    #[serde(default)]
+    pub cal_tags: Option<serde_json::Value>,
 
     // ---- transfer view (§4.1) — the H grid, DISTINCT from `spec_freqs` ----
     /// H1 column centre frequencies. Not `spec_freqs`: that is the

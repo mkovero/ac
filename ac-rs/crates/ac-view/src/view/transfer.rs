@@ -305,13 +305,35 @@ fn draw_mag_annotations(
 
     // Absent when smoothing is off — an unaltered trace is the resting
     // state and needs no caption. The string is ac-scene's.
+    let row1 = layout.content.left_top() + egui::vec2(0.0, ROW_H);
+    let mut calibration_pos = row1;
     if let Some(label) = scene.smoothing_readout {
-        text(
-            painter,
-            layout.content.left_top() + egui::vec2(0.0, ROW_H),
+        let drawn = painter.text(
+            row1,
             Align2::LEFT_TOP,
             label,
+            FontId::default(),
             COLOR_LABEL,
+        );
+        calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
+    }
+
+    // #466: the session check's verdict on the applied voltage scale, on
+    // the same row. The weight comes from `state`, never from the text:
+    // verified is context grey like the smoothing caption, unverified is
+    // readout weight, refused is the fault colour.
+    if let Some(readout) = &scene.calibration_readout {
+        let color = match readout.state {
+            ac_scene::CalibrationState::Verified => COLOR_LABEL,
+            ac_scene::CalibrationState::Unverified => COLOR_VALUE,
+            ac_scene::CalibrationState::Refused => COLOR_SIGNAL,
+        };
+        text(
+            painter,
+            calibration_pos,
+            Align2::LEFT_TOP,
+            &readout.text,
+            color,
         );
     }
 }

@@ -451,6 +451,88 @@ pub struct TransferScene {
     /// the correct display for an idle session, a warming-up one, and a
     /// healthy one alike. See [`crate::fault`] for the table.
     pub fault: Option<Fault>,
+    /// Whether the voltage scale behind the spectra was verified by a
+    /// session check (#466), or `None` when nothing is scaled. The session
+    /// applies its gate once, at start, so this is static for the session.
+    pub calibration_readout: Option<CalibrationReadout>,
+}
+
+/// The session-check state of a readout. The renderer picks the weight from
+/// this, never from [`CalibrationReadout::text`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationState {
+    Verified,
+    Unverified,
+    Refused,
+}
+
+/// `voltage verified <time>`, `voltage unverified` or `voltage refused —
+/// dBFS` (#466 UX), with the state that selects its weight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalibrationReadout {
+    pub text: String,
+    pub state: CalibrationState,
+}
+
+impl CalibrationReadout {
+    /// The readout for a frame's `cal_tags` (#466 scene rule), over both
+    /// legs; the stronger state wins (refused > unverified > verified).
+    ///
+    /// - no `cal_tags` → `None`;
+    /// - a leg with `voltage: "none"` and no `voltage_check` → skipped
+    ///   (nothing is scaled);
+    /// - `verified` → `Verified`, with its check time;
+    /// - `refused` → `Refused`;
+    /// - `unverified`, an absent `voltage_check` under `voltage: "on"`, or a
+    ///   `voltage_check` that does not parse → `Unverified`. A malformed
+    ///   verdict never reads as verified.
+    pub fn from_cal_tags(tags: Option<&serde_json::Value>) -> Option<CalibrationReadout> {
+        use ac_core::shared::calibration::session::whole_seconds;
+        use ac_core::shared::calibration::LayerVerdict;
+        let tags = tags.filter(|t| t.is_object())?;
+        let mut state: Option<CalibrationState> = None;
+        let mut checked_at: Option<String> = None;
+        for leg in ["meas", "ref"] {
+            let Some(tag) = tags.get(leg) else {
+                continue;
+            };
+            let applied = tag.get("voltage").and_then(|v| v.as_str()) == Some("on");
+            let check = tag.get("voltage_check").filter(|v| !v.is_null());
+            let leg_state = match check {
+                None if !applied => continue,
+                None => CalibrationState::Unverified,
+                Some(v) => match serde_json::from_value::<LayerVerdict>(v.clone()) {
+                    Ok(LayerVerdict::Verified(e)) => {
+                        if checked_at.as_ref().is_none_or(|t| e.checked_at < *t) {
+                            checked_at = Some(e.checked_at);
+                        }
+                        CalibrationState::Verified
+                    }
+                    Ok(LayerVerdict::Refused { .. }) => CalibrationState::Refused,
+                    Ok(LayerVerdict::Unverified { .. }) | Err(_) => CalibrationState::Unverified,
+                },
+            };
+            state = Some(match (state, leg_state) {
+                (Some(CalibrationState::Refused), _) | (_, CalibrationState::Refused) => {
+                    CalibrationState::Refused
+                }
+                (Some(CalibrationState::Unverified), _) | (_, CalibrationState::Unverified) => {
+                    CalibrationState::Unverified
+                }
+                _ => CalibrationState::Verified,
+            });
+        }
+        let state = state?;
+        let text = match state {
+            CalibrationState::Verified => format!(
+                "voltage verified {}",
+                whole_seconds(checked_at.as_deref().unwrap_or("?"))
+            ),
+            CalibrationState::Unverified => "voltage unverified".to_string(),
+            CalibrationState::Refused => "voltage refused \u{2014} dBFS".to_string(),
+        };
+        Some(CalibrationReadout { text, state })
+    }
 }
 
 /// The transfer-view analogue of [`crate::scene::SceneInput`]: the
@@ -499,6 +581,9 @@ pub struct TransferInput {
     /// the indicator: a snapshot derivation has no live drive or lock state
     /// to report, and neither does a daemon predating the field.
     pub fault: Option<FaultFrame>,
+    /// The session check's verdict on the applied voltage scale (#466).
+    /// `None` for a snapshot derivation and for a frame with nothing scaled.
+    pub calibration: Option<CalibrationReadout>,
 }
 
 impl TransferInput {
@@ -563,6 +648,7 @@ impl TransferInput {
             column_bins,
             stages,
             fault: FaultFrame::from_wire_frame(frame),
+            calibration: CalibrationReadout::from_cal_tags(frame.cal_tags.as_ref()),
         }
     }
 
@@ -615,6 +701,8 @@ impl TransferInput {
             // and no lock being maintained, so there is nothing for the
             // indicator to say — the same reason its meters are `None`.
             fault: None,
+            // A snapshot replay carries no live session check to report.
+            calibration: None,
         }
     }
 
@@ -749,6 +837,7 @@ impl TransferScene {
             phase_axis: crate::ticks::phase_axis(),
             delay_readout: delay.delay_readout,
             smoothing_readout: modes.smoothing.label(),
+            calibration_readout: input.calibration.clone(),
             // Derived from the ladder alone, never from the frame's columns:
             // the same session yields the same labels on every frame, so
             // they sit still while the curve moves.
@@ -823,6 +912,103 @@ mod tests {
             }
             .tau_derot_ms(tau_sess),
             0.5
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Session-check readout (#466): one test per scene-rule branch
+    // ---------------------------------------------------------------
+
+    fn verdict(state: &str, checked_at: &str) -> serde_json::Value {
+        serde_json::json!({
+            "state": state, "measured": -0.61, "stored": -0.60, "delta": -0.01,
+            "tolerance": 0.10, "unit": "dB", "stored_at": "2026-09-15T23:43:04Z",
+            "checked_at": checked_at, "source": "probe",
+        })
+    }
+
+    fn readout(tags: serde_json::Value) -> Option<CalibrationReadout> {
+        CalibrationReadout::from_cal_tags(Some(&tags))
+    }
+
+    #[test]
+    fn calibration_readout_absent_without_cal_tags() {
+        assert_eq!(CalibrationReadout::from_cal_tags(None), None);
+        assert_eq!(
+            CalibrationReadout::from_cal_tags(Some(&serde_json::Value::Null)),
+            None
+        );
+    }
+
+    #[test]
+    fn calibration_readout_absent_when_nothing_is_scaled() {
+        assert_eq!(
+            readout(serde_json::json!({
+                "meas": {"voltage": "none", "spl": "on"},
+                "ref": {"voltage": "none"},
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn calibration_readout_verified_carries_its_check_time() {
+        let r = readout(serde_json::json!({
+            "meas": {"voltage": "on", "voltage_check": verdict("verified", "2026-09-16T14:02:11.345Z")},
+        }))
+        .unwrap();
+        assert_eq!(r.state, CalibrationState::Verified);
+        assert_eq!(r.text, "voltage verified 2026-09-16T14:02:11Z");
+    }
+
+    #[test]
+    fn calibration_readout_refused_names_the_unit_on_screen() {
+        let r = readout(serde_json::json!({
+            "meas": {"voltage": "none", "voltage_check": verdict("refused", "x")},
+            "ref": {"voltage": "on", "voltage_check": verdict("verified", "x")},
+        }))
+        .unwrap();
+        assert_eq!(r.state, CalibrationState::Refused);
+        assert_eq!(r.text, "voltage refused \u{2014} dBFS");
+    }
+
+    #[test]
+    fn calibration_readout_unverified_forms() {
+        let unverified = serde_json::json!({"state": "unverified", "cause": "no_loopback",
+            "reason": "no reference loopback configured"});
+        for tags in [
+            serde_json::json!({"meas": {"voltage": "on", "voltage_check": unverified}}),
+            // An applied scale with no verdict (an older daemon).
+            serde_json::json!({"meas": {"voltage": "on"}}),
+            // A verdict this build cannot parse never reads as verified.
+            serde_json::json!({"meas": {"voltage": "on", "voltage_check": {"state": "verified"}}}),
+            serde_json::json!({"meas": {"voltage": "on", "voltage_check": "garbage"}}),
+            // One unverified leg outweighs a verified one.
+            serde_json::json!({
+                "meas": {"voltage": "on", "voltage_check": verdict("verified", "x")},
+                "ref": {"voltage": "on"},
+            }),
+        ] {
+            let r = readout(tags.clone()).unwrap_or_else(|| panic!("{tags}"));
+            assert_eq!(r.state, CalibrationState::Unverified, "{tags}");
+            assert_eq!(r.text, "voltage unverified");
+        }
+    }
+
+    /// A malformed `cal_tags` never drops the frame.
+    #[test]
+    fn a_malformed_cal_tags_still_parses_the_frame() {
+        let frame = serde_json::json!({
+            "sr": 48000, "meas_channel": 0, "ref_channel": 1,
+            "spec_freqs": [], "meas_spectrum": [], "ref_spectrum": [],
+            "spl": null, "spl_weighting": "Z", "spl_integration": "fast",
+            "cal_tags": {"meas": {"voltage": 7, "voltage_check": [1]}},
+        });
+        let wire: WireFrame = serde_json::from_value(frame).expect("frame still parses");
+        let input = TransferInput::from_wire_frame(&wire);
+        assert_eq!(
+            input.calibration.map(|c| c.state),
+            Some(CalibrationState::Unverified)
         );
     }
 
@@ -961,6 +1147,7 @@ mod tests {
                 column_bins: Vec::new(),
                 stages: stages.clone(),
                 fault: None,
+                calibration: None,
             };
             let mut meters = (MeterState::default(), MeterState::default());
             TransferScene::from_input(
@@ -1122,6 +1309,7 @@ mod tests {
             column_bins: Vec::new(),
             stages: Vec::new(),
             fault: None,
+            calibration: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
@@ -1173,6 +1361,7 @@ mod tests {
             column_bins: Vec::new(),
             stages: Vec::new(),
             fault: None,
+            calibration: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
