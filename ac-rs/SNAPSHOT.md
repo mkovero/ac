@@ -110,6 +110,41 @@ Both entries are required; a reader must reject a file missing either one.
 | `daemon_version` | string | `ac-daemon`'s own version string. |
 | `ring_duration_s` | float | Actual captured duration in this file (≤ the session's configured `snapshot_ring_s` — shorter if the session hadn't run that long yet). |
 
+### Reader validation
+
+In format v1, a FLAC stream is linked to its metadata by position alone:
+`per_channel[i]` ↔ `channel_map[i]` ↔ decoded stream `i`. `read_acsnap`
+refuses a file that breaks any of these rules, and `write_acsnap` refuses
+to write one (`ac_core::snapshot::validate`, shared by both):
+
+1. `per_channel` and `channel_map` have the same length, and it equals
+   the number of streams in `audio.flac`.
+2. `per_channel[i].role == channel_map[i]` for every `i`.
+3. Every `per_channel[*].input_channel` is unique.
+4. `session.delay_samples` has exactly one entry per `session.pairs` entry.
+5. Both inputs of every pair equal the `input_channel` of some
+   `per_channel` entry. Rule 3 makes that entry the only one.
+
+The reader checks `format_version` first, then rules 2–5 and the
+metadata half of rule 1 before it decodes the audio, then the stream count.
+An error names the fields and indices that disagree.
+
+Two things are deliberately **not** rules, because the daemon writes both:
+
+- **Roles need not be unique.** Pairs `[[m,r1],[m,r2]]` produce two
+  channels with role `"ref"`. Roles are labels; `input_channel` is the key.
+- **A pair may use the same input for meas and ref**, e.g. `[[0,0]]`.
+
+**Not detected:** `channel_map` and `per_channel` permuted *together*
+against the audio. The file passes validation and streams are associated
+with the wrong metadata. Detecting that needs a per-stream identity, which
+v1 does not have.
+
+The daemon names roles by first occurrence: walking `pairs` in order, a
+channel takes `"meas_<pair index>"` or `"ref"` from the first leg it
+appears on and keeps it. Pairs `[[0,1],[1,2]]` therefore name channel 1
+`"ref"`. Channels that appear in no pair are named `"ch_<input>"`.
+
 ## Offline derivation
 
 `ac_core::snapshot::read_acsnap(bytes) -> Result<Snapshot>` decodes a
