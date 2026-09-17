@@ -90,6 +90,14 @@ impl SweepParams {
         if self.duration_s <= 0.0 {
             bail!("duration_s must be positive (got {})", self.duration_s);
         }
+        if self.n_samples() == 0 {
+            bail!(
+                "duration_s {} is shorter than half a sample at sample_rate {} Hz \
+                 (n_samples rounds to 0)",
+                self.duration_s,
+                self.sample_rate
+            );
+        }
         if self.f2_hz >= self.sample_rate as f64 * 0.5 {
             bail!(
                 "f2_hz must be below Nyquist ({} Hz); got {}",
@@ -263,6 +271,31 @@ mod tests {
         let mut p = p_default();
         p.f2_hz = 30_000.0; // above Nyquist/2
         assert!(p.validate().is_err());
+    }
+
+    /// A positive `duration_s` shorter than half a sample rounds
+    /// `n_samples()` to 0 and must be refused; exactly half a sample rounds
+    /// (half away from zero) to 1 and is accepted. Run at two rates so the
+    /// bound is shown to scale with `sample_rate`, not a fixed duration.
+    #[test]
+    fn params_validate_rejects_sub_half_sample_duration() {
+        for sr in [48_000u32, 96_000] {
+            let mut p = p_default();
+            p.sample_rate = sr;
+
+            p.duration_s = 0.49 / sr as f64;
+            assert_eq!(p.n_samples(), 0, "sr={sr}");
+            let err = p
+                .validate()
+                .expect_err("sub-half-sample duration must be refused")
+                .to_string();
+            assert!(err.contains("duration_s"), "sr={sr}: {err}");
+            assert!(err.contains(&sr.to_string()), "sr={sr}: {err}");
+
+            p.duration_s = 0.5 / sr as f64;
+            assert_eq!(p.n_samples(), 1, "sr={sr}");
+            assert!(p.validate().is_ok(), "sr={sr}");
+        }
     }
 
     #[test]
