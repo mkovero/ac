@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// The `ac setup` key that sets the report directory (#472). The `plot ir`
+/// "not saved" line names its remedy from this constant, and a test in
+/// `commands/plot.rs` feeds that rendered remedy back through [`parse`], so
+/// the note cannot name a command this parser does not accept.
+pub(crate) const REPORT_DIR_TOKEN: &str = "report-dir";
+
 pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
     let mut output = None;
     let mut input = None;
@@ -15,6 +21,7 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
     let mut range_stop = None;
     let mut server_idle_timeout_secs: Option<Option<u64>> = None;
     let mut temperature_c: Option<Option<f64>> = None;
+    let mut report_dir: Option<Option<String>> = None;
 
     let mut remaining: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -99,11 +106,23 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                         .map_err(|e| format!("setup {key}: {e} (got {val:?})"))?,
                 );
             }
+            // Where the daemon persists reports (#472). The value is taken
+            // raw — never `expand()`ed or lowercased, paths are
+            // case-sensitive. A directory literally named `none` is still
+            // reachable as `./none` or by its absolute path.
+            REPORT_DIR_TOKEN | "report_dir" | "reports" => {
+                let lower = val.to_lowercase();
+                if matches!(lower.as_str(), "none" | "off" | "disable" | "disabled") {
+                    report_dir = Some(None);
+                } else {
+                    report_dir = Some(Some(val.to_string()));
+                }
+            }
             _ => {
                 return Err(format!(
                     "setup: unknown key {key:?}  \
                      (output | input | reference | refout | device | dburef | dmm | gpio | \
-                     range | temp | server-timeout)"
+                     range | temp | {REPORT_DIR_TOKEN} | server-timeout)"
                 ))
             }
         }
@@ -123,6 +142,7 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
             range_stop,
             server_idle_timeout_secs,
             temperature_c,
+            report_dir,
         },
         show_plot: false,
     })
@@ -333,16 +353,82 @@ mod tests {
                 range_stop,
                 server_idle_timeout_secs,
                 temperature_c,
+                report_dir,
             } => {
                 assert!(output.is_none() && input.is_none() && reference.is_none());
                 assert!(reference_output.is_none() && device.is_none());
                 assert!(dbu_ref_vrms.is_none() && dmm_host.is_none() && gpio_port.is_none());
                 assert!(range_start.is_none() && range_stop.is_none());
                 assert!(server_idle_timeout_secs.is_none());
+                assert!(report_dir.is_none());
                 assert_eq!(temperature_c, Some(Some(24.0)));
             }
             other => panic!("expected Setup, got {other:?}"),
         }
+    }
+
+    fn report_dir_of(s: &str) -> Option<Option<String>> {
+        let p = parse(&args(s)).unwrap();
+        match p.cmd {
+            CommandKind::Setup { report_dir, .. } => report_dir,
+            other => panic!("expected Setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_setup_report_dir_sets_the_path_as_typed() {
+        assert_eq!(
+            report_dir_of("setup report-dir /home/mui/ac-reports"),
+            Some(Some("/home/mui/ac-reports".to_string()))
+        );
+        // Paths are case-sensitive: the value must not be lowercased.
+        assert_eq!(
+            report_dir_of("setup report-dir /mnt/RigData/Reports"),
+            Some(Some("/mnt/RigData/Reports".to_string()))
+        );
+        // The key is case-insensitive like every other setup key.
+        assert_eq!(
+            report_dir_of("setup REPORT-DIR ~/Reports"),
+            Some(Some("~/Reports".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_setup_report_dir_aliases() {
+        let want = Some(Some("/srv/r".to_string()));
+        assert_eq!(report_dir_of("setup report_dir /srv/r"), want);
+        assert_eq!(report_dir_of("setup reports /srv/r"), want);
+    }
+
+    #[test]
+    fn test_setup_report_dir_clear_words() {
+        for word in ["none", "off", "disable", "disabled", "NONE", "Off"] {
+            assert_eq!(
+                report_dir_of(&format!("setup report-dir {word}")),
+                Some(None),
+                "{word:?} must clear the report directory"
+            );
+        }
+    }
+
+    #[test]
+    fn test_setup_report_dir_dot_none_is_a_path() {
+        assert_eq!(
+            report_dir_of("setup report-dir ./none"),
+            Some(Some("./none".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_setup_report_dir_needs_a_value() {
+        let e = parse(&args("setup report-dir")).unwrap_err();
+        assert!(e.contains("needs a value"), "unhelpful error: {e}");
+    }
+
+    #[test]
+    fn test_setup_unknown_key_lists_report_dir() {
+        let e = parse(&args("setup wat 1")).unwrap_err();
+        assert!(e.contains("report-dir"), "unknown-key list omits it: {e}");
     }
 
     fn timeout_of(s: &str) -> Option<Option<u64>> {
@@ -410,12 +496,13 @@ mod tests {
                 range_stop,
                 server_idle_timeout_secs,
                 temperature_c,
+                report_dir,
             } => {
                 assert!(output.is_none() && input.is_none() && reference.is_none());
                 assert!(reference_output.is_none());
                 assert!(device.is_none() && dbu_ref_vrms.is_none() && dmm_host.is_none());
                 assert!(gpio_port.is_none() && range_start.is_none() && range_stop.is_none());
-                assert!(temperature_c.is_none());
+                assert!(temperature_c.is_none() && report_dir.is_none());
                 assert_eq!(server_idle_timeout_secs, Some(Some(300)));
             }
             other => panic!("expected Setup, got {other:?}"),

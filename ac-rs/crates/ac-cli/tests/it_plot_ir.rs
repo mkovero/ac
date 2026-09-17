@@ -72,15 +72,27 @@ impl Rig {
         self.home.join("reports")
     }
 
-    /// Run the real `ac` binary against this rig, returning its stdout.
-    fn run_ac(&self, args: &[&str]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_ac"))
+    /// Run the real `ac` binary against this rig in `cwd`, whatever its
+    /// exit status.
+    fn ac_output_in(&self, cwd: &Path, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ac"))
             .env("HOME", &self.home)
             .env("AC_CTRL_PORT", self.ctrl.to_string())
             .env("AC_DATA_PORT", self.data.to_string())
+            .current_dir(cwd)
             .args(args)
             .output()
-            .expect("run ac");
+            .expect("run ac")
+    }
+
+    /// Run the real `ac` binary against this rig, returning its stdout.
+    fn run_ac(&self, args: &[&str]) -> String {
+        self.run_ac_in(&self.home, args)
+    }
+
+    /// [`Self::run_ac`] from a chosen working directory.
+    fn run_ac_in(&self, cwd: &Path, args: &[&str]) -> String {
+        let out = self.ac_output_in(cwd, args);
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(
             out.status.success(),
@@ -537,5 +549,129 @@ fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
     assert!(
         !figures.is_empty() && figures.iter().all(|f| f == "0.05"),
         "only the typed distance may print as a metre figure, got {figures:?}:\n{stdout}"
+    );
+}
+
+/// The short `plot ir` run every #472 test uses.
+const QUICK_IR: &[&str] = &[
+    "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
+];
+
+/// The value printed on the `  report        ` line, if any.
+fn report_line(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("  report        "))
+}
+
+/// #472: `ac setup report-dir <dir>` (relative, resolved against the CLI's
+/// cwd for a local daemon) is shown in the read-out, and the next `plot ir`
+/// prints the report file the daemon wrote there.
+#[test]
+fn setup_report_dir_then_plot_ir_prints_the_written_report() {
+    let rig = Rig::start_with(serde_json::json!({ "report_dir": null }));
+    let dir = rig.home.join("archive");
+    fs::create_dir_all(&dir).unwrap();
+
+    let before = rig.run_ac(&["setup"]);
+    assert!(
+        before.contains("  Report dir:    (not set \u{2014} plot results are not saved)"),
+        "{before}"
+    );
+
+    let setup = rig.run_ac_in(&rig.home, &["setup", "report-dir", "archive"]);
+    assert!(
+        setup.contains(&format!("  Report dir:    {}\n", dir.display())),
+        "the read-out must show the resolved absolute path:\n{setup}"
+    );
+    assert!(!setup.contains("cannot write"), "{setup}");
+    assert!(setup.contains("  Saved."), "{setup}");
+
+    let stdout = rig.run_ac(QUICK_IR);
+    let report = report_line(&stdout).unwrap_or_else(|| panic!("no report line:\n{stdout}"));
+    assert!(
+        report.starts_with(dir.to_str().unwrap()) && report.ends_with("-plot_ir.json"),
+        "{report:?}"
+    );
+    assert!(Path::new(report).is_file(), "{report} not on disk");
+    assert!(!stdout.contains("not saved"), "{stdout}");
+    assert_eq!(files_with_extension(&dir, "json").len(), 1);
+    assert_eq!(files_with_extension(&dir, "csv").len(), 1);
+}
+
+/// #472: `ac setup report-dir none` clears a hand-seeded directory; `plot ir`
+/// then prints the not-saved line on stdout, naming the setup command, and
+/// writes nothing.
+#[test]
+fn setup_report_dir_none_then_plot_ir_prints_not_saved() {
+    let rig = Rig::start();
+    let setup = rig.run_ac(&["setup", "report-dir", "none"]);
+    assert!(
+        setup.contains("  Report dir:    (not set \u{2014} plot results are not saved)"),
+        "{setup}"
+    );
+
+    let stdout = rig.run_ac(QUICK_IR);
+    assert_eq!(
+        report_line(&stdout),
+        Some("not saved \u{2014} no report directory  (ac setup report-dir <dir>)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("  csv "), "{stdout}");
+    let dir = rig.report_dir();
+    assert!(files_with_extension(&dir, "json").is_empty());
+    assert!(files_with_extension(&dir, "csv").is_empty());
+}
+
+/// #472: a directory removed after it was configured is flagged by the
+/// read-out before a capture, and `plot ir` prints the write failure on the
+/// `report` line instead of a path to a file that does not exist.
+#[test]
+fn removed_report_dir_is_flagged_by_setup_and_by_plot_ir() {
+    let rig = Rig::start();
+    let dir = rig.report_dir();
+    fs::remove_dir(&dir).unwrap();
+
+    let setup = rig.run_ac(&["setup"]);
+    assert!(
+        setup.contains(&format!(
+            "  Report dir:    {}\n                 cannot write: No such file or directory (os error 2)",
+            dir.display()
+        )),
+        "{setup}"
+    );
+
+    let stdout = rig.run_ac(QUICK_IR);
+    let want = format!(
+        "  report        not saved \u{2014} write failed in {}\n                No such file or directory (os error 2)",
+        dir.display()
+    );
+    assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
+    assert!(!dir.exists(), "plot ir recreated the removed directory");
+}
+
+/// #472: a directory that does not exist is refused when typed, in the
+/// two-line form, and the old value stays in force.
+#[test]
+fn setup_refuses_a_missing_report_dir_and_keeps_the_old_one() {
+    let rig = Rig::start();
+    let typo = rig.home.join("reprots");
+    let out = rig.ac_output_in(&rig.home, &["setup", "report-dir", typo.to_str().unwrap()]);
+    assert!(!out.status.success(), "a missing directory must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let want = format!(
+        "  error: report-dir {}\n         No such file or directory (os error 2) \u{2014} setting not changed\n",
+        typo.display()
+    );
+    assert!(stderr.contains(&want), "missing {want:?}:\n{stderr}");
+    assert!(!typo.exists(), "a refused directory must not be created");
+
+    let setup = rig.run_ac(&["setup"]);
+    assert!(
+        setup.contains(&format!(
+            "  Report dir:    {}\n",
+            rig.report_dir().display()
+        )),
+        "the previous directory must still be in force:\n{setup}"
     );
 }

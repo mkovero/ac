@@ -355,6 +355,9 @@ pub enum CommandKind {
         /// Room air temperature in °C for the delay readout's ms → m
         /// conversion (#243) — `Some(None)` clears it back to 343 m/s.
         temperature_c: Option<Option<f64>>,
+        /// Directory the daemon persists reports into (#472) — the value
+        /// exactly as typed; `Some(None)` clears it.
+        report_dir: Option<Option<String>>,
     },
     Stop,
     SweepLevel {
@@ -714,6 +717,7 @@ use monitor::{parse_monitor, parse_transfer};
 use plot::parse_plot;
 use server::parse_server;
 use setup::parse_setup;
+pub(crate) use setup::REPORT_DIR_TOKEN;
 use sweep::parse_sweep;
 use test::parse_test;
 
@@ -730,6 +734,7 @@ Commands:
   setup           [output <N>] [input <N>] [reference <N>] [refout <N>|none]
                   [device <N>] [range <freqStart freqStop>] [dburef <vrms>]
                   [temp <°C>|none] [dmm <host>] [gpio <serialDevice>|off]
+                  [report-dir <dir>|none]
                   [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
   calibrate       [output <N>] [input <N>] [level] [show]             level calibration
   generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)

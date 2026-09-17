@@ -84,6 +84,7 @@ ac setup output 11 input 0          # tell ac which channels to use
 ac setup reference 1                # loopback reference leg — required by ac-view
 ac setup refout 6                   # reference stimulus leg — same converter as the main output
 ac setup temp 24                    # room °C — archived with a report (PositionSnapshot)
+ac setup report-dir ~/ac-reports    # where plot results are saved (none = don't save)
 ac calibrate                        # interactive level cal (enables dBu)
 ac calibrate spl input 0            # pistonphone SPL cal — readouts in dB SPL
 ac calibrate mic-curve mic.frd input 0   # attach mic frequency-response curve
@@ -161,7 +162,7 @@ still applies, when a matching τ was measured for that run.
 | Command | What it does |
 |---------|-------------|
 | `devices` | List audio ports |
-| `setup` | Configure hardware — device, output, input, reference, refout, dburef, range, temp, dmm, gpio, server-timeout |
+| `setup` | Configure hardware — device, output, input, reference, refout, dburef, range, temp, dmm, gpio, server-timeout, report-dir |
 | `calibrate` | Voltage cal (sine + DMM); `calibrate spl` adds 94 dB SPL pistonphone reference; `calibrate mic-curve <path>` attaches a mic response correction; `calibrate show` lists stored entries |
 | `generate` | Play a sine or pink noise tone; `generate level` / `generate frequency` for an output-only level ramp or frequency chirp (no capture) |
 | `plot` | Point-by-point THD vs frequency; `plot level` for THD vs level; `plot ir` for a Farina log-sweep impulse response + report. Writes CSV/report to the session directory |

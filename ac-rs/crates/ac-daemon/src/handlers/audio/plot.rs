@@ -1423,24 +1423,54 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // Persist alongside `plot`/`plot_level` when a report directory is
         // configured — before #282 nothing wrote `sweep_ir`'s report to
         // disk, so `ac report` had no Farina input to render.
-        if let Some(ref dir) = report_dir {
-            let stem = format!("{timestamp}-plot_ir").replace(':', "-");
-            let path = dir.join(format!("{stem}.json"));
-            if let Err(e) = report.write_to(&path) {
-                eprintln!("plot_ir: report write error ({}): {e}", path.display());
+        //
+        // #472: the outcome rides the `done` frame as `report_files`, so the
+        // client prints what was written rather than guessing from its own
+        // config. `write_to` is not used here: it creates missing parent
+        // directories, which would silently recreate a report directory
+        // removed after `setup` validated it.
+        let report_files = match report_dir {
+            None => json!({"dir": null}),
+            Some(ref dir) => {
+                let stem = format!("{timestamp}-plot_ir").replace(':', "-");
+                let path = dir.join(format!("{stem}.json"));
+                let json_outcome = match report
+                    .to_json()
+                    .map_err(|e| format!("{e:#}"))
+                    .and_then(|body| std::fs::write(&path, body).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => json!({"path": path.display().to_string()}),
+                    Err(e) => {
+                        eprintln!("plot_ir: report write error ({}): {e}", path.display());
+                        json!({"error": e})
+                    }
+                };
+                // CSV alongside the JSON, via the report's own IR branch —
+                // the same pair `plot`/`plot_level` leave behind, so a
+                // spreadsheet reader never has to go through `ac report`
+                // (#283).
+                let csv_path = dir.join(format!("{stem}.csv"));
+                let csv_outcome = match std::fs::write(&csv_path, report.to_csv()) {
+                    Ok(()) => json!({"path": csv_path.display().to_string()}),
+                    Err(e) => {
+                        eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
+                        json!({"error": e.to_string()})
+                    }
+                };
+                json!({
+                    "dir": dir.display().to_string(),
+                    "json": json_outcome,
+                    "csv": csv_outcome,
+                })
             }
-            // CSV alongside the JSON, via the report's own IR branch —
-            // the same pair `plot`/`plot_level` leave behind, so a
-            // spreadsheet reader never has to go through `ac report`
-            // (#283).
-            let csv_path = dir.join(format!("{stem}.csv"));
-            if let Err(e) = std::fs::write(&csv_path, report.to_csv()) {
-                eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
-            }
-        }
+        };
 
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"plot_ir","backend":backend}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"plot_ir","backend":backend,"report_files":report_files}),
+        );
     });
 
     {

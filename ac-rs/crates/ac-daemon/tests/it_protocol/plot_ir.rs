@@ -1114,3 +1114,85 @@ fn plot_ir_refuses_an_unusable_distance_before_any_audio() {
 // Time-integration — set_time_integration / get_time_integration / reset_leq.
 // See issue #62.
 // ---------------------------------------------------------------------------
+
+/// Run one `plot_ir` and return its `done` frame.
+fn done_frame_for(c: &Client) -> Value {
+    let reply = c.call(plot_ir_request(json!({})));
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(20))
+        .expect("plot_ir done frame");
+    assert_eq!(done["cmd"], json!("plot_ir"), "{done}");
+    done
+}
+
+/// Point the daemon's report directory at `dir` through `setup`.
+fn set_report_dir(c: &Client, dir: &std::path::Path) {
+    let r = c.call(json!({"cmd": "setup", "update": {"report_dir": dir.to_str().unwrap()}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+}
+
+/// #472 — with a report directory configured, `done.report_files` names the
+/// two files, and both exist on disk.
+#[test]
+fn plot_ir_done_frame_names_the_files_it_wrote() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    set_report_dir(&c, &dir);
+
+    let done = done_frame_for(&c);
+    let files = &done["report_files"];
+    assert_eq!(files["dir"], json!(dir.to_str().unwrap()), "{done}");
+    for (key, suffix) in [("json", "-plot_ir.json"), ("csv", "-plot_ir.csv")] {
+        let path = files[key]["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} has no path: {done}"));
+        assert!(path.ends_with(suffix), "{path}");
+        assert!(
+            std::path::Path::new(path).starts_with(&dir),
+            "{path} outside {}",
+            dir.display()
+        );
+        assert!(std::path::Path::new(path).is_file(), "{path} not on disk");
+        assert!(files[key].get("error").is_none(), "{done}");
+    }
+}
+
+/// #472 — with no report directory, `done.report_files` says so explicitly.
+#[test]
+fn plot_ir_done_frame_says_when_no_report_dir_is_configured() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let done = done_frame_for(&c);
+    assert_eq!(done["report_files"], json!({"dir": null}), "{done}");
+}
+
+/// #472 — a directory removed after `setup` accepted it: both writes report
+/// the OS error, and the directory is *not* recreated (the old `write_to`
+/// path ran `create_dir_all`, archiving into a place nobody chose).
+#[test]
+fn plot_ir_done_frame_reports_a_failed_write_and_does_not_recreate_the_dir() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    set_report_dir(&c, &dir);
+    std::fs::remove_dir(&dir).unwrap();
+
+    let done = done_frame_for(&c);
+    let files = &done["report_files"];
+    assert_eq!(files["dir"], json!(dir.to_str().unwrap()), "{done}");
+    for key in ["json", "csv"] {
+        let err = files[key]["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} carries no error: {done}"));
+        assert!(err.contains("os error 2"), "{key}: {err:?}");
+        assert!(files[key].get("path").is_none(), "{done}");
+    }
+    assert!(
+        !dir.exists(),
+        "plot_ir recreated the removed report directory"
+    );
+}
