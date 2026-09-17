@@ -149,6 +149,13 @@ check '[[ $(grep -c "^design" $T/calls) == 1 ]]' "one design preflight on a miss
 check 'grep -q "manifest is .none." $T/m5.out' "the stop names the architect's 'none' manifest"
 check '! grep -q "step limit" $T/m5.out' "the step limit is not what stopped it"
 
+# 5b: a site-visit issue is not driven
+M="$T/m5b"; mk_master "$M"
+printf '%s\n' requires-rig site-visit > "$T/labels5b"
+: > "$T/calls"
+( cd "$REPO" && GH_LABELS="$T/labels5b" GH_TRIAGE_COUNT=0 bash "$M/master.sh" 7 > "$T/m5b.out" 2>&1 )
+check '[[ ! -s $T/calls ]] && grep -q "site-visit" $T/m5b.out' "master.sh drives no role on a site-visit issue"
+
 # --- 4: triage evidence filter ------------------------------------------------
 # shellcheck disable=SC2034  # used inside the eval'd checks below
 filter="$(sed -n '/^triage_evidence()/,/^}/p' "$BIN/master.sh" | grep -o "\[\.comments.*length")"

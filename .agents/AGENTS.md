@@ -60,7 +60,7 @@ Always human-only:
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
 | `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. **Removed only** by qa (on a passing rig record; on a `decline-site` record once the follow-up exists; or as moot per a design's `rig check: none` or a later push) or by a human; triage, architect, developer and rig never remove it |
-| `site-visit` | qa (on a deferral follow-up), or a human | the issue's remaining rig check needs someone at the rig (a power cycle, a cable or mic move). Run it in a manual rig session when someone is there. Carries `requires-rig` too |
+| `site-visit` | qa (on a deferral follow-up), or a human | the issue's remaining rig check needs someone at the rig (a power cycle, a cable or mic move). Run it in a manual rig session when someone is there. Carries `requires-rig` too. Every such issue is a sub-issue of the open **Deferred site work** issue (#531), which also carries this label. Implies no blocking: an issue that must wait carries `blocked` itself. `master.sh` stops on it |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |

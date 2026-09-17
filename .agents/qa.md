@@ -340,10 +340,20 @@ the same commit, with the record as evidence:
   1. file one follow-up issue, titled `rig: <what> (deferred from #<PR>)`,
      labelled `requires-rig`, `site-visit` and the issue's scope label. It
      carries the site-only steps verbatim, what the record already verified,
-     and "if this fails, the design returns to #<issue>";
-  2. remove `requires-rig` from the PR and the issue, citing the record and
+     and "if this fails, the design returns to #<issue>". Link every related
+     issue and PR in its body;
+  2. make it a sub-issue of the open **Deferred site work** issue (labels
+     `site-visit` + `epic`), e.g.
+     `gh api -X POST repos/<repo>/issues/<umbrella>/sub_issues -F sub_issue_id=<follow-up's id>`.
+     If no such issue is open, create it first, modelled on #531;
+  3. remove `requires-rig` from the PR and the issue, citing the record and
      the follow-up;
-  3. continue to your normal verdict.
+  4. continue to your normal verdict.
+
+  Deferring blocks nothing by default. Whether other work should wait on the
+  deferred check depends on the case (operator, 2026-09-17). If something
+  should wait, apply `blocked` to *that* issue, naming the follow-up as its
+  lift condition, and say why.
 
   If any of the checks fails, treat the record as `decline`.
 - **verdict `decline`, a record that does not close the named test, or no

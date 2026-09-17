@@ -14,7 +14,8 @@
 # longer stands.
 #
 # It does NOT merge, close, or resolve a disagreement. Those are your gates.
-# It stops on needs-discussion, on needs-clarification, on blocked, on qa
+# It stops on needs-discussion, on needs-clarification, on blocked, on
+# site-visit (deferred site work), on qa
 # approval, and when a role leaves its own label in place.
 #
 #   AC_ROUNDS=3          max dev→qa cycles before handing back (default 3)
@@ -497,6 +498,8 @@ drive() {
     has blocked "$ls"          && { echo "  #$n: blocked — lift condition is in the comment that applied it"; STATE=blocked; return 0; }
     has needs-discussion "$ls" && { echo "  #$n: needs-discussion — yours to decide"; STATE=needs-human; return 0; }
     has needs-clarification "$ls" && { echo "  #$n: needs-clarification — triage is waiting on the reporter"; STATE=needs-human; return 0; }
+    # Deferred site work: a check for someone at the rig, nothing to implement.
+    has site-visit "$ls"       && { echo "  #$n: site-visit — needs someone at the rig (see Deferred site work)"; STATE=needs-rig; return 0; }
     has epic "$ls"             && { echo "  #$n: epic — children drive separately"; STATE=epic; return 0; }
 
     # Nothing has routed this issue and triage has never spoken on it. This is
