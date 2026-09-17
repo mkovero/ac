@@ -164,4 +164,15 @@ mod tests {
         assert!(x[0].abs() < 1e-6);
         assert!(x.iter().all(|v| v.is_finite()));
     }
+
+    /// Params whose `n_samples()` rounds to 0 reach `inverse_sweep` without
+    /// a caller-side `validate()`; it must refuse them rather than compute
+    /// `2 * n - 1` on `n = 0`.
+    #[test]
+    fn inverse_sweep_refuses_zero_length() {
+        let mut p = p_default();
+        p.duration_s = 0.49 / p.sample_rate as f64;
+        assert_eq!(p.n_samples(), 0);
+        assert!(inverse_sweep(&p).is_err());
+    }
 }
