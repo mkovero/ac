@@ -308,16 +308,22 @@ fn monitor_spectrum_fake_noise_stays_bounded() {
 
 #[test]
 fn monitor_spectrum_emits_scope_frames() {
-    // unified.md Phase 0b: the daemon must emit a `visualize/scope`
-    // sidecar frame per channel per tick alongside the spectrum frame.
-    // Both channels of one tick share the same `frame_idx` so the UI
-    // can pair L+R for the Goniometer view. Asserting on:
+    // The daemon emits a `visualize/scope` sidecar frame per channel
+    // capture. Multi-channel monitor captures channels one after another
+    // (reconnect, flush, block capture), so scope frames must NOT carry a
+    // shared identity or timestamp that would let a consumer pair them as
+    // simultaneous (#434). Asserting on:
     //   - frames arrive at all (regression catch if the emit is removed)
-    //   - non-empty f32 samples in [-1, 1]
-    //   - capped at SCOPE_MAX_SAMPLES = 2048
-    //   - both channels of a tick share frame_idx within 0 (strict)
-    //   - successive tick frame_idx values are monotonic (allowing for
-    //     channel interleaving so a single channel sees +1 / +2 jumps).
+    //   - non-empty f32 samples in [-1, 1], capped at SCOPE_MAX_SAMPLES
+    //   - every frame declares `capture_mode: "sequential"`
+    //   - `frame_idx` strictly increases in emission order, so no two
+    //     frames (in particular ch 0 and ch 1 of one round) share it
+    //   - when the channel changes between consecutive frames, the
+    //     timestamps are at least half a per-channel capture apart. The
+    //     fake engine's block capture sleeps for its full duration
+    //     (interval / n_channels = 50 ms here), so a sequential capture
+    //     puts ≥ 50 ms between the two channels' completion times, while
+    //     a simultaneous (or tick-wide) timestamp puts 0 there.
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
@@ -329,10 +335,9 @@ fn monitor_spectrum_emits_scope_frames() {
     }));
     assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
 
-    // Collect scope frames for ~3 s — that's ~30 ticks at 100 ms, more
-    // than enough to see several L+R pairs and detect missing emits.
-    let mut frames_by_idx: std::collections::HashMap<u64, Vec<Value>> =
-        std::collections::HashMap::new();
+    // Collect scope frames for ~3 s, in the order the daemon's single
+    // PUB socket delivered them — that is the emission order.
+    let mut frames: Vec<Value> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         let remaining = deadline
@@ -350,66 +355,81 @@ fn monitor_spectrum_emits_scope_frames() {
         if payload.get("type").and_then(Value::as_str) != Some("visualize/scope") {
             continue;
         }
-        let frame_idx = payload["frame_idx"].as_u64().expect("frame_idx u64");
-        frames_by_idx.entry(frame_idx).or_default().push(payload);
+        frames.push(payload);
     }
     let _ = c.call(json!({"cmd": "stop"}));
 
     assert!(
-        !frames_by_idx.is_empty(),
-        "expected visualize/scope frames; got none in 3 s",
+        frames.len() >= 6,
+        "expected ≥6 visualize/scope frames in 3 s; got {}",
+        frames.len(),
     );
 
-    // Every observed frame must carry samples in [-1, 1] and ≤2048 long.
-    for frames in frames_by_idx.values() {
-        for f in frames {
-            let samples = f["samples"].as_array().expect("samples array");
-            assert!(!samples.is_empty(), "samples must be non-empty: {f}");
+    for f in &frames {
+        assert_eq!(
+            f["capture_mode"],
+            json!("sequential"),
+            "scope frame must declare sequential capture: {f}",
+        );
+        let samples = f["samples"].as_array().expect("samples array");
+        assert!(!samples.is_empty(), "samples must be non-empty: {f}");
+        assert!(
+            samples.len() <= 2048,
+            "samples capped at 2048; got {} (frame: {f})",
+            samples.len(),
+        );
+        for s in samples {
+            let v = s.as_f64().expect("f64 sample");
             assert!(
-                samples.len() <= 2048,
-                "samples capped at 2048; got {} (frame: {f})",
-                samples.len(),
+                (-1.000_001..=1.000_001).contains(&v),
+                "sample out of [-1,1]: {v} (frame: {f})",
             );
-            for s in samples {
-                let v = s.as_f64().expect("f64 sample");
-                assert!(
-                    (-1.000_001..=1.000_001).contains(&v),
-                    "sample out of [-1,1]: {v} (frame: {f})",
-                );
-            }
         }
     }
 
-    // At least one tick must contain both channel 0 AND channel 1 with
-    // the SAME frame_idx — that's the L+R pairing the UI relies on.
-    let mut paired_ticks = 0;
-    for frames in frames_by_idx.values() {
-        let mut chans: Vec<u64> = frames
-            .iter()
-            .filter_map(|f| f["channel"].as_u64())
-            .collect();
-        chans.sort();
-        chans.dedup();
-        if chans.len() >= 2 && chans.contains(&0) && chans.contains(&1) {
-            paired_ticks += 1;
+    let mut chans: Vec<u64> = frames
+        .iter()
+        .map(|f| f["channel"].as_u64().expect("channel u64"))
+        .collect();
+    chans.sort();
+    chans.dedup();
+    assert_eq!(chans, vec![0, 1], "expected frames from both channels");
+
+    const MIN_CHANNEL_GAP_NS: u64 = 25_000_000;
+    let mut channel_switches = 0;
+    for pair in frames.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let (ia, ib) = (
+            a["frame_idx"].as_u64().expect("frame_idx u64"),
+            b["frame_idx"].as_u64().expect("frame_idx u64"),
+        );
+        assert!(
+            ib > ia,
+            "frame_idx must be unique and increasing per emitted frame: \
+             saw {ia} (ch {}) then {ib} (ch {})",
+            a["channel"],
+            b["channel"],
+        );
+        let (ta, tb) = (
+            a["timestamp"].as_u64().expect("timestamp u64"),
+            b["timestamp"].as_u64().expect("timestamp u64"),
+        );
+        if a["channel"] != b["channel"] {
+            channel_switches += 1;
+            assert!(
+                tb >= ta + MIN_CHANNEL_GAP_NS,
+                "sequential captures must carry their own completion times: \
+                 ch {} at {ta} then ch {} at {tb} (gap {} ns < {MIN_CHANNEL_GAP_NS})",
+                a["channel"],
+                b["channel"],
+                tb.saturating_sub(ta),
+            );
         }
     }
     assert!(
-        paired_ticks >= 3,
-        "expected ≥3 ticks with both ch 0 and ch 1 sharing frame_idx; got {paired_ticks}",
+        channel_switches >= 3,
+        "expected ≥3 channel switches in emission order; got {channel_switches}",
     );
-
-    // Tick counter must be monotonic (per-tick increment, not per-channel).
-    let mut idxs: Vec<u64> = frames_by_idx.keys().copied().collect();
-    idxs.sort();
-    let mut prev = idxs[0];
-    for &i in &idxs[1..] {
-        assert!(
-            i >= prev,
-            "frame_idx must be monotonic: saw {prev} then {i}",
-        );
-        prev = i;
-    }
 }
 
 #[test]

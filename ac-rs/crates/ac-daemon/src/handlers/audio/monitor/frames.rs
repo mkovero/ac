@@ -1,6 +1,8 @@
 //! The wire frames the monitor publishes, and the per-tick values every
 //! frame in one channel iteration shares.
 
+use std::cell::Cell;
+
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
@@ -54,29 +56,43 @@ pub(super) fn emit_loudness_frame(
 /// to watch for and would prompt a v2 decimator.
 pub(super) const SCOPE_MAX_SAMPLES: usize = 2048;
 
+/// The only `capture_mode` a `visualize/scope` frame carries. The worker
+/// captures one channel at a time (reconnect, flush, block capture), so
+/// two channels' frames never cover the same acquisition interval and
+/// must not be paired as simultaneous (#434).
+pub(super) const SCOPE_CAPTURE_MODE: &str = "sequential";
+
 /// Emit a `visualize/scope` sidecar frame for one channel — raw f32
-/// samples (no voltage / SPL / mic-curve calibration applied), used by
-/// the UI's Goniometer / PhaseScope3D trajectory views (`unified.md`
-/// Phase 0b / OQ7). `frame_idx` is the per-tick monotonic counter
-/// shared across both channels of a stereo pair; the UI uses it to
-/// confirm L and R came from the same capture before pairing them.
+/// samples (no voltage / SPL / mic-curve calibration applied).
+///
+/// Both callers invoke this straight after the channel's capture
+/// returns, so identity and time are assigned here: `frame_idx` is the
+/// next value of the worker's scope counter, unique per emitted frame
+/// (it identifies this one capture, not a worker tick), and `timestamp`
+/// is taken now, i.e. at capture completion. Neither is shared across
+/// channels: the captures are sequential, which `capture_mode` states on
+/// the wire.
 pub(super) fn emit_scope_frame(ch: &ChannelState, ctx: &TickCtx, samples: &[f32], xruns: u32) {
+    let ts_ns = now_ns();
+    let frame_idx = ctx.scope_frame_idx.get().wrapping_add(1);
+    ctx.scope_frame_idx.set(frame_idx);
     let tail = if samples.len() > SCOPE_MAX_SAMPLES {
         &samples[samples.len() - SCOPE_MAX_SAMPLES..]
     } else {
         samples
     };
     let frame = json!({
-        "type":       "visualize/scope",
-        "cmd":        "monitor_spectrum",
-        "channel":    ch.channel,
-        "n_channels": ctx.n_channels,
-        "sr":         ctx.sr,
-        "frame_idx":  ctx.frame_idx,
-        "samples":    tail,
-        "timestamp":  ctx.tick_ts_ns,
-        "xruns":      xruns,
-        "backend":    ctx.backend,
+        "type":         "visualize/scope",
+        "cmd":          "monitor_spectrum",
+        "channel":      ch.channel,
+        "n_channels":   ctx.n_channels,
+        "sr":           ctx.sr,
+        "frame_idx":    frame_idx,
+        "capture_mode": SCOPE_CAPTURE_MODE,
+        "samples":      tail,
+        "timestamp":    ts_ns,
+        "xruns":        xruns,
+        "backend":      ctx.backend,
     });
     send_pub(ctx.pub_tx, "data", &frame);
 }
@@ -99,11 +115,10 @@ pub(super) struct TickCtx<'a> {
     pub(super) n_channels: u32,
     pub(super) sr: u32,
     pub(super) backend: &'static str,
-    /// Per-tick monotonic counter; identical for every channel of a tick
-    /// so the UI can pair L and R scope frames.
-    pub(super) frame_idx: u64,
-    /// Tick-wide capture timestamp, for scope frames only.
-    pub(super) tick_ts_ns: u64,
+    /// Worker-lifetime scope-frame counter, advanced by
+    /// [`emit_scope_frame`] once per emitted frame. Lives outside the
+    /// per-tick context so it keeps counting across ticks.
+    pub(super) scope_frame_idx: &'a Cell<u64>,
     /// Snapshot of the global mic-correction toggle, read once per tick.
     pub(super) mic_corr_enabled: bool,
     /// Capture-block duration for the ring-buffered modes, already

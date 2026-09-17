@@ -321,34 +321,57 @@ subscribers that expect a linear spectrum should convert / branch.
 
 ### `visualize/scope` frame
 
-Emitted by `monitor_spectrum` once per channel per tick, **alongside**
-the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
-(not instead of it). Carries raw f32 audio samples — no calibration,
-no mic-curve, just the unmodified per-tick capture truncated to the
-newest 2048 samples. Intended for a client-side goniometer / trajectory
-view (`docs/superseded/unified.md` Phase 0b, resolves §9 OQ7); no current client
-subscribes to it since the ac-ui detach.
+Emitted by `monitor_spectrum` once per channel capture, **alongside**
+the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same
+capture (not instead of it). Carries raw f32 audio samples — no
+calibration, no mic-curve, just the unmodified per-channel capture
+truncated to the newest 2048 samples. Originally intended for a
+client-side goniometer / trajectory view (`docs/superseded/unified.md`
+Phase 0b, §9 OQ7); no current client subscribes to it since the ac-ui
+detach, and the current frames cannot feed a paired L/R view (see
+below).
 
 ```json
 {
-  "type":       "visualize/scope",
-  "cmd":        "monitor_spectrum",
-  "channel":    <int>,            // input channel index
-  "n_channels": <int>,            // total channels being monitored
-  "sr":         <int>,            // sample rate (Hz)
-  "frame_idx":  <int>,            // monotonic per-tick counter (see below)
-  "samples":    [<float>, ...],   // raw f32 in [-1, 1], length ≤ 2048
-  "timestamp":  <int>,            // tick-wide UNIX-epoch nanoseconds
-  "xruns":      <int>
+  "type":         "visualize/scope",
+  "cmd":          "monitor_spectrum",
+  "channel":      <int>,          // input channel index
+  "n_channels":   <int>,          // channels in the monitor request (context only)
+  "sr":           <int>,          // sample rate (Hz)
+  "frame_idx":    <int>,          // unique per emitted scope frame, increasing
+  "capture_mode": "sequential",   // always present; see below
+  "samples":      [<float>, ...], // raw f32 in [-1, 1], length ≤ 2048
+  "timestamp":    <int>,          // UNIX-epoch ns at this channel's capture completion
+  "xruns":        <int>,
+  "backend":      <string>
 }
 ```
 
-**`frame_idx` synchronization.** The counter increments exactly once
-per worker tick, so every channel's frame from the same capture tick
-shares the same `frame_idx`. Subscribers that need a synchronized L/R
-pair (Goniometer / PhaseScope3D) match frames by `frame_idx` rather
-than relying on receive-order or `timestamp` (which is also tick-wide
-but coarser).
+**Sequential capture — frames are not pairable (#434).** A
+multi-channel monitor captures its channels one after another:
+reconnect to the channel's input, flush, capture a block, then move to
+the next channel. Two channels' frames therefore never cover the same
+acquisition interval. The wire says so:
+
+- `frame_idx` increments once per emitted scope frame, across all
+  channels, so no two frames share a value. It orders frames; it is
+  not a pair key.
+- `timestamp` is the wall-clock time this channel's capture completed,
+  not a tick-wide value; consecutive channels' timestamps differ by at
+  least that channel's capture time.
+- `capture_mode` is `"sequential"` on every frame. `n_channels` is the
+  size of the monitor request, not a claim that the channels were
+  captured together.
+
+**Breaking semantic change.** Before #434, `frame_idx` and `timestamp`
+were shared by every channel of a worker tick and this section told
+subscribers to pair L/R frames by equal `frame_idx`. That pairing was
+never valid — the samples were captured sequentially — and equal
+`frame_idx` values no longer occur. A consumer that draws a paired
+trajectory (Goniometer, PhaseScope3D, any Lissajous of two channels)
+must check `capture_mode` and refuse any frame whose mode is not a
+simultaneous capture; no current mode is. A simultaneous
+multi-channel scope needs its own capture path and contract.
 
 **No calibration.** The trajectory consumers are dimensionless —
 displaying a Lissajous figure of `(L, R)` doesn't need voltage or SPL
