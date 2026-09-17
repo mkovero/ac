@@ -9,7 +9,26 @@ use ac_core::shared::calibration::{Calibration, DeviceEpoch, EnumerationCheck, T
 
 use crate::server::ServerState;
 
-use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache};
+use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache, wire};
+
+/// The four channel fields of a `setup` update, each validated (#431).
+/// Outer `None` = field absent (keep); the nullable references carry
+/// `Some(None)` for `null` (clear).
+struct SetupChannels {
+    output: Option<u32>,
+    input: Option<u32>,
+    reference: Option<Option<u32>>,
+    reference_output: Option<Option<u32>>,
+}
+
+fn parse_setup_channels(update: &Value) -> Result<SetupChannels, wire::WireError> {
+    Ok(SetupChannels {
+        output: wire::opt_u32(update, "output_channel")?,
+        input: wire::opt_u32(update, "input_channel")?,
+        reference: wire::opt_nullable_u32(update, "reference_channel")?,
+        reference_output: wire::opt_nullable_u32(update, "reference_output_channel")?,
+    })
+}
 
 pub fn status(state: &ServerState) -> Value {
     let workers = state.workers.lock().unwrap();
@@ -112,41 +131,80 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         None => return json!({"ok": false, "error": "missing 'update' field"}),
     };
 
-    let mut cfg = state.cfg.lock().unwrap();
+    // #472: the report directory is validated before anything else in the
+    // update is applied, so a refusal leaves the whole config as it was —
+    // "setting not changed" is true for every key in the command.
+    let report_dir_update: Option<Option<std::path::PathBuf>> = match update.get("report_dir") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => {
+            let raw = v.as_str().unwrap_or_default();
+            if let Err(reason) = validate_report_dir(raw) {
+                return report_dir_refusal(raw, &reason);
+            }
+            Some(Some(std::path::PathBuf::from(raw)))
+        }
+    };
+
+    // #433: a spool path is resolved beneath the daemon's own spool root and
+    // checked for ownership before anything else is applied. A refusal
+    // changes nothing and removes nothing.
+    let spool_update: Option<Option<std::path::PathBuf>> = match update.get("snapshot_spool_dir") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => {
+            let raw = v.as_str().unwrap_or_default();
+            match validate_spool_dir(raw) {
+                Ok(leaf) => Some(Some(leaf)),
+                Err(rejection) => return spool_dir_refusal(&rejection),
+            }
+        }
+    };
+
+    // #431: every channel field is parsed before the config is copied, so a
+    // malformed one refuses the update with nothing applied — not even a
+    // valid sibling channel in the same request.
+    let channels = match parse_setup_channels(update) {
+        Ok(c) => c,
+        Err(e) => {
+            return json!({"ok": false,
+                "error": e.refusal("setup rejected", &[("config", "unchanged")])})
+        }
+    };
+
+    // Every change is made on a copy and committed to `state.cfg` only after
+    // it is on disk (#430), so a failed save leaves memory and disk agreeing
+    // on the last-good config. The lock is not held across the save:
+    // `dispatch()` is the only writer of `state.cfg` and runs on one thread.
+    let mut cfg = state.cfg.lock().unwrap().clone();
+
+    if let Some(dir) = report_dir_update {
+        cfg.report_dir = dir;
+    }
 
     // Explicit channel selection invalidates any prior sticky port override.
     // Without this, a stale `*_port` in config.json silently overrides the
     // new channel and routes audio to (or from) the wrong place.
     // `tests/it_loopback_ir.rs` seeds sticky ports directly into config.json
     // and never calls `setup`, so it's unaffected.
-    if let Some(v) = update.get("output_channel").and_then(Value::as_u64) {
-        cfg.output_channel = v as u32;
+    if let Some(v) = channels.output {
+        cfg.output_channel = v;
         cfg.output_port = None;
     }
-    if let Some(v) = update.get("input_channel").and_then(Value::as_u64) {
-        cfg.input_channel = v as u32;
+    if let Some(v) = channels.input {
+        cfg.input_channel = v;
         cfg.input_port = None;
     }
-    if let Some(v) = update.get("reference_channel") {
-        if v.is_null() {
-            cfg.reference_channel = None;
-            cfg.reference_port = None;
-        } else if let Some(n) = v.as_u64() {
-            cfg.reference_channel = Some(n as u32);
-            cfg.reference_port = None;
-        }
+    if let Some(v) = channels.reference {
+        cfg.reference_channel = v;
+        cfg.reference_port = None;
     }
     // The reference *output* leg is a playback index and is configured
     // separately from `reference_channel` (#225) — updating one must never
     // move the other.
-    if let Some(v) = update.get("reference_output_channel") {
-        if v.is_null() {
-            cfg.reference_output_channel = None;
-            cfg.reference_output_port = None;
-        } else if let Some(n) = v.as_u64() {
-            cfg.reference_output_channel = Some(n as u32);
-            cfg.reference_output_port = None;
-        }
+    if let Some(v) = channels.reference_output {
+        cfg.reference_output_channel = v;
+        cfg.reference_output_port = None;
     }
     if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {
         cfg.dbu_ref_vrms = v;
@@ -185,12 +243,8 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
             cfg.snapshot_ring_s = v;
         }
     }
-    if let Some(v) = update.get("snapshot_spool_dir") {
-        if v.is_null() {
-            cfg.snapshot_spool_dir = None;
-        } else if let Some(s) = v.as_str() {
-            cfg.snapshot_spool_dir = Some(std::path::PathBuf::from(s));
-        }
+    if let Some(dir) = spool_update {
+        cfg.snapshot_spool_dir = dir;
     }
     // Room temperature for the delay readout's ms → m conversion (#243).
     // `null` clears it back to the conventional 343 m/s, which is a
@@ -203,10 +257,22 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
-    let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
-    if let Err(e) = ac_core::config::save(&cfg, None) {
-        eprintln!("setup: save failed: {e}");
+    // `update: {}` is a read (`ac generate`, the GPIO handler): it never
+    // writes, so it cannot fail on storage and cannot overwrite a config file
+    // the per-request reload found unreadable.
+    let has_updates = update.as_object().is_some_and(|m| !m.is_empty());
+    let mut saved_path = None;
+    if has_updates {
+        match ac_core::config::save(&cfg, Some(&state.config_path)) {
+            Ok(final_cfg) => {
+                *state.cfg.lock().unwrap() = final_cfg.clone();
+                cfg = final_cfg;
+                saved_path = Some(state.config_path.display().to_string());
+            }
+            Err(e) => return json!({"ok": false, "error": setup_not_saved(&e)}),
+        }
     }
+    let cfg_value = serde_json::to_value(&cfg).unwrap_or_default();
     // #459: the fixed emission maximum, at the top level (beside `config`,
     // not inside it — `config` is the config file, and the maximum is a
     // build constant; putting it there would make it look settable). This
@@ -214,10 +280,118 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     // emission — `setup` is never refused, retired key or not, so it stays
     // reachable exactly when an operator needs to find out what the
     // maximum is.
-    json!({
+    let mut reply = json!({
         "ok": true,
         "config": cfg_value,
         "max_dbfs": ac_core::shared::emission_level::MAX_EMISSION_DBFS,
+    });
+    if let Some(path) = saved_path {
+        reply["saved"] = json!(path);
+    }
+    // #472: whether the configured report directory can be written, beside
+    // `config` for the same reason as `max_dbfs` — it is not a config
+    // value. Checked on every call, so a directory removed after it was set
+    // shows up in the read-out before a capture, not after one.
+    if let Some(dir) = cfg.report_dir.as_ref() {
+        reply["report_dir_status"] = match probe_dir_writable(dir) {
+            Ok(()) => json!({"writable": true}),
+            Err(e) => json!({"writable": false, "error": e.to_string()}),
+        };
+    }
+    reply
+}
+
+/// Operator-facing refusal for a `setup` update that was not persisted
+/// (#430). Laid out like the `calibration unreadable` refusal: continuation
+/// lines are indented to sit under the text after `  error: `.
+fn setup_not_saved(e: &ac_core::config::SaveError) -> String {
+    use ac_core::config::SaveError;
+    match e {
+        SaveError::Write { .. } => format!(
+            "setup not saved \u{2014} configuration unchanged\n\
+             \x20        file   {}\n\
+             \x20        cause  {:#}",
+            e.path().display(),
+            e.cause()
+        ),
+        SaveError::Unreadable { .. } => format!(
+            "setup not saved \u{2014} existing configuration is unreadable\n\
+             \x20        file   {}\n\
+             \x20        cause  {:#}\n\
+             \x20        data   existing file preserved",
+            e.path().display(),
+            e.cause()
+        ),
+    }
+}
+
+/// Refusal reason for a non-absolute `report_dir`: a relative path or a `~`
+/// means nothing to a daemon that may not share the client's cwd or `$HOME`.
+const REPORT_DIR_NOT_ABSOLUTE: &str = "must be an absolute path on the daemon host";
+
+/// Whether `raw` can be stored as the report directory (#472): absolute,
+/// existing, and writable by this process. Never creates it — a typo must
+/// not become a working archive in the wrong place. The reason is the
+/// `std::io::Error` text as the OS gave it, so it names what was observed
+/// and nothing more.
+fn validate_report_dir(raw: &str) -> Result<(), String> {
+    let path = std::path::Path::new(raw);
+    if raw.is_empty() || !path.is_absolute() {
+        return Err(REPORT_DIR_NOT_ABSOLUTE.to_string());
+    }
+    probe_dir_writable(path).map_err(|e| e.to_string())
+}
+
+/// Write probe shared by setup-time validation and `report_dir_status`:
+/// `create_new` a dot-prefixed file in `dir`, then remove it (a failed
+/// removal is ignored — a leftover probe file is harmless and visible).
+fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::metadata(dir)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let probe = dir.join(format!(".ac-write-probe-{}-{nanos}", std::process::id()));
+    // On a plain file the open fails with the OS's own "Not a directory".
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    if !meta.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+    }
+    Ok(())
+}
+
+fn report_dir_refusal(path: &str, reason: &str) -> Value {
+    json!({
+        "ok": false,
+        "error": format!("report-dir {path}: {reason} \u{2014} setting not changed"),
+        "refused": {"key": "report_dir", "path": path, "reason": reason},
+    })
+}
+
+/// Resolve a requested `snapshot_spool_dir` to an absolute child of the
+/// spool root and check that an existing directory there is daemon-owned
+/// (#433). Inspects only; the leaf is created when a session first uses it.
+fn validate_spool_dir(raw: &str) -> Result<std::path::PathBuf, ac_core::config::SpoolRejection> {
+    let root = ac_core::config::snapshot_spool_root();
+    let leaf = ac_core::config::resolve_snapshot_spool_leaf(&root, std::path::Path::new(raw))?;
+    ac_core::config::inspect_snapshot_spool_leaf(&root, &leaf)?;
+    Ok(leaf)
+}
+
+fn spool_dir_refusal(r: &ac_core::config::SpoolRejection) -> Value {
+    json!({
+        "ok": false,
+        "error": r.message(),
+        "refused": {
+            "key": "snapshot_spool_dir",
+            "path": r.requested,
+            "reason": r.reason,
+            "allowed_root": r.allowed.display().to_string(),
+        },
     })
 }
 
@@ -244,16 +418,21 @@ fn tau_history_with_live_check(history: &[TauEntry]) -> Vec<Value> {
 }
 
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
-    let cfg = state.cfg.lock().unwrap();
-    let out_ch = cmd
-        .get("output_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch = cmd
-        .get("input_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.input_channel as u64) as u32;
-    drop(cfg);
+    let (cfg_out, cfg_in) = {
+        let cfg = state.cfg.lock().unwrap();
+        (cfg.output_channel, cfg.input_channel)
+    };
+    let pick = |field: &str, default: u32| wire::opt_u32(cmd, field).map(|v| v.unwrap_or(default));
+    let (out_ch, in_ch) = match (
+        pick("output_channel", cfg_out),
+        pick("input_channel", cfg_in),
+    ) {
+        (Ok(o), Ok(i)) => (o, i),
+        (Err(e), _) | (_, Err(e)) => {
+            return json!({"ok": false,
+                "error": e.refusal("calibration lookup rejected", &[])})
+        }
+    };
 
     match Calibration::load(out_ch, in_ch, None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
@@ -361,18 +540,24 @@ pub fn get_analysis_mode(state: &ServerState) -> Value {
 /// and the next `monitor_spectrum` tick picks it up live (no worker
 /// restart). Persists across worker restart, reset on daemon restart.
 pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
-    let bpo = match cmd.get("bpo").and_then(Value::as_u64) {
-        Some(v) => v as u32,
+    let raw = match cmd.get("bpo") {
+        Some(v) => v,
         None => return json!({"ok": false, "error": "missing 'bpo' field"}),
     };
-    let new = match bpo {
-        0 => None,
-        1 | 3 | 6 | 12 | 24 => Some(bpo),
-        _ => {
-            return json!({"ok": false,
-            "error": format!("invalid bpo {bpo}: expected 0, 1, 3, 6, 12, or 24")})
-        }
+    // #431: checked, never narrowed — 4294967299 used to wrap to 3.
+    // The echo comes from `WireError::received`, which is length-bounded;
+    // the raw value would copy an arbitrarily long string into the reply.
+    let refuse = |shown: String| {
+        json!({"ok": false,
+        "error": format!("invalid bpo {shown}: expected 0, 1, 3, 6, 12, or 24")})
     };
+    let new = match wire::u32_value(raw, "bpo") {
+        Ok(0) => None,
+        Ok(b @ (1 | 3 | 6 | 12 | 24)) => Some(b),
+        Ok(b) => return refuse(b.to_string()),
+        Err(e) => return refuse(e.received),
+    };
+    let bpo = new.unwrap_or(0);
     *state.ioct_bpo.lock().unwrap() = new;
     json!({"ok": true, "bpo": bpo})
 }
@@ -467,7 +652,12 @@ pub fn reset_loudness(state: &ServerState) -> Value {
 /// change has nothing to pick up).
 pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
     let req_interval = cmd.get("interval").and_then(Value::as_f64);
-    let req_fft_n = cmd.get("fft_n").and_then(Value::as_u64).map(|v| v as u32);
+    // #431: a present `fft_n` that is not a u32 gets the domain refusal,
+    // ahead of the `no active monitor` check — 4294967552 used to wrap to 256.
+    let req_fft_n = match wire::opt_u32(cmd, "fft_n") {
+        Ok(n) => n,
+        Err(_) => return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"}),
+    };
 
     if let Some(i) = req_interval {
         if !(i > 0.0 && i <= 60.0) {

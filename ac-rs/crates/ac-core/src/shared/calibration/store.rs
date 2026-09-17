@@ -12,8 +12,8 @@
 //!   already routes a save error to the operator as a terminal `error`
 //!   frame. Losing an hour of rig calibration silently is strictly worse
 //!   than a calibration run that refuses and says why.
-//! * **A write is all-or-nothing.** The file is written to a temporary in
-//!   the same directory and renamed over the target, so a crash or a full
+//! * **A write is all-or-nothing.** Writes go through
+//!   [`crate::shared::atomic_write::write_atomic`], so a crash or a full
 //!   disk leaves the previous file intact rather than a truncated one.
 
 use std::collections::HashMap;
@@ -53,25 +53,14 @@ fn read_all_entries(path: &Path) -> Result<HashMap<String, CalibrationEntry>> {
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Serialize `all` to `path` atomically: write a sibling temporary, then
-/// rename over the target. `rename(2)` within a directory is atomic, so a
-/// reader either sees the whole previous file or the whole new one.
+/// Serialize `all` to `path` atomically — see
+/// [`crate::shared::atomic_write`].
 fn write_all_entries(path: &Path, all: &HashMap<String, CalibrationEntry>) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let out = serde_json::to_string_pretty(all)?;
-    // Same directory as the target: `rename` across filesystems is not
-    // atomic (and on Linux fails outright), so a temp dir would not do.
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    std::fs::write(&tmp, out).with_context(|| format!("writing {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        // Leaving the temp behind would accumulate one file per failed
-        // save next to the real cal.json.
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
-    }
-    Ok(())
+    crate::shared::atomic_write::write_atomic(path, out.as_bytes())
 }
 
 impl Calibration {

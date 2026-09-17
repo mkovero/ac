@@ -98,6 +98,17 @@ impl SessionPlan {
         } = parse_params(cmd).map_err(|e| json!({"ok": false, "error": e}))?;
 
         let cfg = state.cfg.lock().unwrap().clone();
+        // #433: a spool outside the daemon's spool root (e.g. a config
+        // written before confinement) refuses the launch and is left alone.
+        let snapshot_spool_dir = ac_core::config::snapshot_spool_dir(&cfg)
+            .and_then(|leaf| {
+                ac_core::config::inspect_snapshot_spool_leaf(
+                    &ac_core::config::snapshot_spool_root(),
+                    &leaf,
+                )
+                .map(|_| leaf)
+            })
+            .map_err(|r| json!({"ok": false, "error": r.message()}))?;
         // #459: checked here, before the `DriveState::new` construction
         // below, so the stored state never holds an over-maximum value
         // regardless of whether `set_drive` is ever called in this
@@ -249,7 +260,7 @@ impl SessionPlan {
             pair_ctx,
             out_port,
             ref_out_port,
-            snapshot_spool_dir: ac_core::config::snapshot_spool_dir(&cfg),
+            snapshot_spool_dir,
             snapshot_ring_s: cfg.snapshot_ring_s,
             migration_warning: ref_output_migration_warning(&cfg),
         })

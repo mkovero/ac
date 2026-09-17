@@ -36,6 +36,7 @@ mod test_dut;
 mod test_hw;
 mod test_software;
 mod transfer;
+mod wire;
 
 pub use admin::{
     devices, dmm_read, get_analysis_mode, get_band_weighting, get_calibration,

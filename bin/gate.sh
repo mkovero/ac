@@ -28,8 +28,6 @@
 # on the dev VM, 2026-09-16). nextest does not run doctests, so
 # `cargo test --doc --workspace` runs after it. Without nextest the step is
 # plain `cargo test --workspace`; the record names which ran.
-# ac-rs/.config/nextest.toml holds the serial groups the port-allocating
-# ac-cli integration tests need.
 #
 # Exit: 0 all three pass, 1 any failed, 2 refused.
 # Output: one line per step, then the failing lines of any red step, then the

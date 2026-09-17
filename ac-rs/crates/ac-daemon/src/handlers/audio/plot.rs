@@ -17,8 +17,10 @@ use ac_core::measurement::report::{
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
-    gated_frequency_response, gated_response_citation, inverse_sweep, log_sweep,
-    noise_tail_start_s, SweepParams, LINEAR_DECONV_TAIL_NOTE,
+    gated_frequency_response, gated_response_citation, inverse_sweep, ir_default_window_len,
+    log_sweep, noise_tail_start_s, SweepParams, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
+    IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
+    LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, DeviceEpoch, ResolvedTau, TauConditions};
@@ -94,14 +96,27 @@ fn reference_latency_from_leg(
 
 /// Operator-facing reason for a refused reference reading (#460 UX): the
 /// observation, then `; check:` and the places to look. Never a cause.
+///
+/// #494: an edge refusal whose peak also failed the SNR gate names both
+/// observations and both check lists, window side first. SNR figures carry
+/// two decimals so a refused value just under a derived threshold cannot
+/// print equal to it.
 fn reference_unavailable_reason(e: &anyhow::Error) -> String {
     if let Some(r) = e.downcast_ref::<LowSnrRefusal>() {
         format!(
-            "peak SNR {:.1} dB, need {:.1} dB; check: reference loopback cable, ref input gain",
+            "peak SNR {:.2} dB, need {:.2} dB; check: reference loopback cable, ref input gain",
             r.snr_db, r.threshold_db
         )
-    } else if e.downcast_ref::<EdgeRefusal>().is_some() {
-        "peak at reference window edge; check: reference loopback routing, capture tail".to_string()
+    } else if let Some(r) = e.downcast_ref::<EdgeRefusal>() {
+        match r.snr {
+            Some(snr) if snr.below_threshold => format!(
+                "peak at reference window edge, SNR {:.2} dB, need {:.2} dB; check: reference \
+                 loopback routing, capture tail, reference loopback cable, ref input gain",
+                snr.snr_db, snr.threshold_db
+            ),
+            _ => "peak at reference window edge; check: reference loopback routing, capture tail"
+                .to_string(),
+        }
     } else if let Some(t) = e.downcast_ref::<TailTooShort>() {
         format!(
             "tail {:.2} s, reference window needs {:.2} s; check: lengthen the tail token (e.g. 0.8s)",
@@ -270,7 +285,14 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let cal = cal_guard!(out_ch, in_ch);
     // Processing-context shared state — same Arc clones the monitor
     // worker uses so #97 + #98 wire the same envelope onto Tier 1.
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    //
+    // Mic-correction enablement is snapshotted once, here, at command
+    // acceptance (#436): every point and the report's processing chain
+    // use this one value. A `set_mic_correction_enabled` toggle accepted
+    // after this reply applies to later measurements (and live monitor
+    // frames), never to this sweep — so one report cannot mix corrected
+    // and uncorrected points while claiming a single state.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
@@ -326,7 +348,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     // result in place — spectrum bins, fundamental, harmonics,
                     // THD recomputed. linear_rms / noise_floor untouched (see
                     // `mic::apply_mic_curve_to_analysis` doc).
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
                     if mc_enabled {
                         if let Some(curve) = &mic_curve_opt {
                             mic::apply_mic_curve_to_analysis(curve, &mut r);
@@ -405,8 +426,9 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         // re-loaded report tells the reader what was active during this
         // capture (#105). `mic_correction_applied` reads true exactly
         // when the per-point loop above ran `apply_mic_curve_to_analysis`
-        // — the same predicate as the wire frame's `mic_correction` tag.
-        let mc_applied = mic_curve_opt.is_some() && mic_corr_enabled.load(Ordering::Relaxed);
+        // — the same predicate, over the same `mc_enabled` snapshot
+        // (#436), as every point frame's `mic_correction` tag.
+        let mc_applied = mic_curve_opt.is_some() && mc_enabled;
         let chain = ProcessingChain {
             weighting: band_weighting_shared.lock().unwrap().clone(),
             smoothing_bpo: None,
@@ -570,7 +592,8 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    // One mic-correction state per measurement (#436) — see `plot`.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
@@ -622,7 +645,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
 
             match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
                 Ok(mut r) => {
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
                     if mc_enabled {
                         if let Some(curve) = &mic_curve_opt {
                             mic::apply_mic_curve_to_analysis(curve, &mut r);
@@ -876,9 +898,19 @@ fn resolve_tau(
 pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_ir");
     cfg_guard!(state);
-    let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
-    let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
-    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_ir") {
+    // #501: every default comes from `ac_core::measurement::sweep::defaults`,
+    // the single owner; the ack below echoes what was accepted so `ac-cli`
+    // keeps no copy of its own.
+    let f1_hz = cmd
+        .get("f1_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(IR_DEFAULT_F1_HZ);
+    let f2_hz = cmd
+        .get("f2_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(IR_DEFAULT_F2_HZ);
+    let duration = match bounded_duration(cmd, "duration", IR_DEFAULT_DURATION_S, false, "plot_ir")
+    {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -886,26 +918,39 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(DEFAULT_LEVEL_DBFS);
-    let tail_s = match bounded_duration(cmd, "tail_s", 0.5, true, "plot_ir") {
+    let tail_s = match bounded_duration(cmd, "tail_s", IR_DEFAULT_TAIL_S, true, "plot_ir") {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let n_harmonics = match bounded_usize(cmd, "n_harmonics", 5, 1, MAX_IR_HARMONICS, "plot_ir") {
+    let n_harmonics = match bounded_usize(
+        cmd,
+        "n_harmonics",
+        IR_DEFAULT_N_HARMONICS,
+        1,
+        MAX_IR_HARMONICS,
+        "plot_ir",
+    ) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // 4096 is a request, not a promise: `extract_irs` clamps each order's
+    // A typed `window_len` is a sample count, budget-checked here before
+    // port resolution. An omitted one stays `None` until the worker knows
+    // the engine rate, then becomes `IR_DEFAULT_WINDOW_S` in samples
+    // (#501): the default gate means the same time span at every rate.
+    //
+    // Either is a request, not a promise: `extract_irs` clamps each order's
     // gate down to the spacing of its own nearest neighbour, so the linear
-    // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
-    // away at these defaults) while the tighter high orders get 2818 /
-    // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
-    // the `measurement/impulse_response` envelope and, when any order was
+    // IR usually keeps the full request while the tighter high orders are
+    // shortened. Those lengths are not silent — they ride out in the
+    // `measurement/impulse_response` envelope and, when any order was
     // shortened, in the report notes. See issue #278.
-    let window_len =
-        match bounded_usize(cmd, "window_len", 4096, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
-            Ok(v) => v,
+    let window_len = match cmd.get("window_len") {
+        None => None,
+        Some(_) => match bounded_usize(cmd, "window_len", 1, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
+            Ok(v) => Some(v),
             Err(e) => return e,
-        };
+        },
+    };
 
     // #460: operator-entered source-to-receiver distance for the onset
     // search's causal bound. Checked before port resolution, like the other
@@ -992,7 +1037,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let device = cfg.device;
     let tau_out_port = out_port.clone();
     let tau_in_port = in_port.clone();
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    // One mic-correction state per measurement (#436) — see `plot`. Read
+    // at acceptance, not after capture, so a toggle during the capture
+    // cannot reach this report.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
@@ -1027,6 +1075,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         let sr = eng.sample_rate();
+        let window_len = window_len.unwrap_or_else(|| ir_default_window_len(sr));
         // #461: the device-enumeration epoch this capture runs in, sampled
         // once, after `start`, and used for both τ lookups below so the
         // capture pair and the reference pair are judged against one epoch.
@@ -1244,7 +1293,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // above (and the arrival/gate it was extracted with) is never
         // touched: by this point gating is already done, so there is no
         // time axis left for a FIR's group delay to disturb.
-        let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
         if mc_enabled {
             if let Some(curve) = &mic_curve_opt {
                 mic::apply_mic_curve_to_gated_response(curve, &mut gated_raw);
@@ -1399,24 +1447,54 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // Persist alongside `plot`/`plot_level` when a report directory is
         // configured — before #282 nothing wrote `sweep_ir`'s report to
         // disk, so `ac report` had no Farina input to render.
-        if let Some(ref dir) = report_dir {
-            let stem = format!("{timestamp}-plot_ir").replace(':', "-");
-            let path = dir.join(format!("{stem}.json"));
-            if let Err(e) = report.write_to(&path) {
-                eprintln!("plot_ir: report write error ({}): {e}", path.display());
+        //
+        // #472: the outcome rides the `done` frame as `report_files`, so the
+        // client prints what was written rather than guessing from its own
+        // config. `write_to` is not used here: it creates missing parent
+        // directories, which would silently recreate a report directory
+        // removed after `setup` validated it.
+        let report_files = match report_dir {
+            None => json!({"dir": null}),
+            Some(ref dir) => {
+                let stem = format!("{timestamp}-plot_ir").replace(':', "-");
+                let path = dir.join(format!("{stem}.json"));
+                let json_outcome = match report
+                    .to_json()
+                    .map_err(|e| format!("{e:#}"))
+                    .and_then(|body| std::fs::write(&path, body).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => json!({"path": path.display().to_string()}),
+                    Err(e) => {
+                        eprintln!("plot_ir: report write error ({}): {e}", path.display());
+                        json!({"error": e})
+                    }
+                };
+                // CSV alongside the JSON, via the report's own IR branch —
+                // the same pair `plot`/`plot_level` leave behind, so a
+                // spreadsheet reader never has to go through `ac report`
+                // (#283).
+                let csv_path = dir.join(format!("{stem}.csv"));
+                let csv_outcome = match std::fs::write(&csv_path, report.to_csv()) {
+                    Ok(()) => json!({"path": csv_path.display().to_string()}),
+                    Err(e) => {
+                        eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
+                        json!({"error": e.to_string()})
+                    }
+                };
+                json!({
+                    "dir": dir.display().to_string(),
+                    "json": json_outcome,
+                    "csv": csv_outcome,
+                })
             }
-            // CSV alongside the JSON, via the report's own IR branch —
-            // the same pair `plot`/`plot_level` leave behind, so a
-            // spreadsheet reader never has to go through `ac report`
-            // (#283).
-            let csv_path = dir.join(format!("{stem}.csv"));
-            if let Err(e) = std::fs::write(&csv_path, report.to_csv()) {
-                eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
-            }
-        }
+        };
 
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"plot_ir","backend":backend}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"plot_ir","backend":backend,"report_files":report_files}),
+        );
     });
 
     {
@@ -1429,7 +1507,21 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         "level_dbfs": level_dbfs,
         "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
+        // #501: the stimulus as accepted, defaults applied — what `ac-cli`
+        // prints before the result, so it never keeps its own copy.
+        "f1_hz": f1_hz,
+        "f2_hz": f2_hz,
+        "duration": duration,
+        "n_harmonics": n_harmonics,
+        "tail_s": tail_s,
     });
+    // The engine rate is not known yet, so a defaulted window can only be
+    // echoed in seconds; its sample count arrives in the
+    // `measurement/impulse_response` frame's `window_len_requested`.
+    match window_len {
+        Some(n) => reply["window_len"] = json!(n),
+        None => reply["window_default_s"] = json!(IR_DEFAULT_WINDOW_S),
+    }
     // #460: every port the sweep leaves through or is referenced against,
     // named before any result (UX: "Also driven" / "Ref input").
     if let Some(p) = ref_in_port_reply {
@@ -1442,6 +1534,65 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         reply["warnings"] = json!([w]);
     }
     reply
+}
+
+#[cfg(test)]
+mod reference_reason_tests {
+    use super::*;
+    use crate::handlers::calibrate::EdgeSnr;
+
+    fn edge(snr: Option<EdgeSnr>) -> anyhow::Error {
+        EdgeRefusal {
+            peak_idx: 4600,
+            window_len: 4800,
+            margin: 240,
+            snr,
+        }
+        .into()
+    }
+
+    /// #494 UX: the combined reference reason — edge and failed SNR gate on
+    /// the same peak — pinned here because the fake reference may not reach
+    /// it reliably.
+    #[test]
+    fn edge_refusal_below_threshold_names_both_observations() {
+        let e = edge(Some(EdgeSnr {
+            snr_db: 21.34,
+            threshold_db: 24.0,
+            below_threshold: true,
+        }));
+        assert_eq!(
+            reference_unavailable_reason(&e),
+            "peak at reference window edge, SNR 21.34 dB, need 24.00 dB; check: reference \
+             loopback routing, capture tail, reference loopback cable, ref input gain"
+        );
+    }
+
+    #[test]
+    fn edge_refusal_clearing_the_gate_or_after_an_xrun_is_edge_only() {
+        let edge_only = "peak at reference window edge; check: reference loopback routing, \
+                         capture tail";
+        let cleared = edge(Some(EdgeSnr {
+            snr_db: 26.41,
+            threshold_db: 24.0,
+            below_threshold: false,
+        }));
+        assert_eq!(reference_unavailable_reason(&cleared), edge_only);
+        assert_eq!(reference_unavailable_reason(&edge(None)), edge_only);
+    }
+
+    #[test]
+    fn low_snr_refusal_prints_two_decimals() {
+        let e: anyhow::Error = LowSnrRefusal {
+            snr_db: 23.96,
+            threshold_db: 24.0,
+        }
+        .into();
+        assert_eq!(
+            reference_unavailable_reason(&e),
+            "peak SNR 23.96 dB, need 24.00 dB; check: reference loopback cable, ref input gain"
+        );
+    }
 }
 
 #[cfg(test)]

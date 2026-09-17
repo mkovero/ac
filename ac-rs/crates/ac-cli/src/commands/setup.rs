@@ -1,6 +1,7 @@
 use super::check_ack;
 use crate::client::AcClient;
-use crate::parse::CommandKind;
+use crate::parse::{CommandKind, REPORT_DIR_TOKEN};
+use std::path::{Path, PathBuf};
 
 /// Print one reference leg's `channel  ->  sticky port` line.
 ///
@@ -39,7 +40,75 @@ fn print_leg(
     }
 }
 
-pub fn run(cmd: &CommandKind, client: &mut AcClient) {
+/// Resolve a `report-dir` value against this process, for a local daemon
+/// (#472): a leading `~` / `~/` takes `home`, a relative path joins `cwd`.
+/// `~user`, an empty value, or `~` with no `home` goes over unchanged — the
+/// daemon refuses anything that is not absolute, so none of them can be
+/// stored by accident. No `canonicalize`: a symlink or mount path stays the
+/// path the operator named. Only `.` components are dropped, so `./none`
+/// prints as `<cwd>/none`.
+fn resolve_local_report_dir(raw: &str, home: Option<&str>, cwd: &Path) -> String {
+    let expanded: PathBuf = match (raw, home) {
+        ("~", Some(h)) => PathBuf::from(h),
+        (r, Some(h)) if r.starts_with("~/") => {
+            // `~//x` must stay under `home`: joining an absolute `/x`
+            // would replace the base.
+            Path::new(h).join(r[2..].trim_start_matches('/'))
+        }
+        (r, _) if r.is_empty() || r.starts_with('~') => return raw.to_string(),
+        (r, _) => cwd.join(r),
+    };
+    expanded
+        .components()
+        .collect::<PathBuf>()
+        .display()
+        .to_string()
+}
+
+/// The two-line refusal `setup` prints when the daemon refused a
+/// `report_dir` (#472 UX), or `None` when the reply is not that refusal and
+/// the generic [`check_ack`] path should handle it.
+fn refusal_lines(reply: &serde_json::Value) -> Option<[String; 2]> {
+    if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    let refused = reply.get("refused")?;
+    if refused.get("key").and_then(|v| v.as_str()) != Some("report_dir") {
+        return None;
+    }
+    let path = refused.get("path").and_then(|v| v.as_str())?;
+    let reason = refused.get("reason").and_then(|v| v.as_str())?;
+    Some([
+        format!("  error: {REPORT_DIR_TOKEN} {path}"),
+        format!("         {reason} \u{2014} setting not changed"),
+    ])
+}
+
+/// The `Report dir:` read-out (#472 UX): the path the daemon holds, a
+/// `cannot write:` continuation when its probe failed, or the unset form
+/// naming the consequence. A reply without `report_dir_status` (an older
+/// daemon) prints the path alone.
+fn report_dir_lines(
+    srv_cfg: &serde_json::Value,
+    status: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let Some(dir) = srv_cfg.get("report_dir").and_then(|v| v.as_str()) else {
+        return vec!["  Report dir:    (not set \u{2014} plot results are not saved)".to_string()];
+    };
+    let mut lines = vec![format!("  Report dir:    {dir}")];
+    if let Some(status) = status {
+        if status.get("writable").and_then(|v| v.as_bool()) == Some(false) {
+            let err = status
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reason not reported");
+            lines.push(format!("                 cannot write: {err}"));
+        }
+    }
+    lines
+}
+
+pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let (
         output,
         input,
@@ -53,6 +122,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         range_stop,
         server_idle_timeout_secs,
         temperature_c,
+        report_dir,
     ) = match cmd {
         CommandKind::Setup {
             output,
@@ -67,6 +137,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             range_stop,
             server_idle_timeout_secs,
             temperature_c,
+            report_dir,
         } => (
             output,
             input,
@@ -80,6 +151,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             range_stop,
             server_idle_timeout_secs,
             temperature_c,
+            report_dir,
         ),
         _ => unreachable!(),
     };
@@ -134,12 +206,33 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         };
     }
 
-    let has_updates = !update.is_empty();
+    if let Some(v) = report_dir {
+        match v {
+            Some(dir) => {
+                // A remote daemon's filesystem is not this one: its path
+                // goes over exactly as typed, and the daemon refuses
+                // anything that is not absolute there.
+                let dir = if cfg.server_host.is_none() {
+                    let home = std::env::var("HOME").ok();
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    resolve_local_report_dir(dir, home.as_deref(), &cwd)
+                } else {
+                    dir.clone()
+                };
+                update.insert("report_dir".into(), dir.into())
+            }
+            None => update.insert("report_dir".into(), serde_json::Value::Null),
+        };
+    }
 
-    let ack = check_ack(
-        client.send_cmd(&serde_json::json!({"cmd": "setup", "update": update}), None),
-        "setup",
-    );
+    let reply = client.send_cmd(&serde_json::json!({"cmd": "setup", "update": update}), None);
+    if let Some(lines) = reply.as_ref().and_then(refusal_lines) {
+        for line in lines {
+            eprintln!("{line}");
+        }
+        std::process::exit(1);
+    }
+    let ack = check_ack(reply, "setup");
 
     let srv_cfg = ack.get("config").cloned().unwrap_or_default();
     let ref_vrms = srv_cfg
@@ -232,6 +325,10 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         None => println!("  Room temp:     (not set — c = {c:.1} m/s assumed)"),
     }
 
+    for line in report_dir_lines(&srv_cfg, ack.get("report_dir_status")) {
+        println!("{line}");
+    }
+
     let timeout = srv_cfg
         .get("server_idle_timeout_secs")
         .and_then(|v| v.as_u64());
@@ -240,8 +337,10 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         None => println!("  Server idle:   (no timeout)"),
     }
 
-    if has_updates {
-        println!("  Saved.");
+    // #430: the daemon names the file only after the update is on disk; a
+    // failed save never reaches here (`check_ack` prints it and exits).
+    if let Some(path) = ack.get("saved").and_then(|v| v.as_str()) {
+        println!("  saved            {path}");
     }
 
     if let Some(gp) = gpio_port {
@@ -266,4 +365,113 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{refusal_lines, report_dir_lines, resolve_local_report_dir};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn local_resolution_expands_home_and_joins_cwd() {
+        let cwd = Path::new("/work/rig");
+        let home = Some("/home/mui");
+        assert_eq!(resolve_local_report_dir("~", home, cwd), "/home/mui");
+        assert_eq!(
+            resolve_local_report_dir("~/ac-reports", home, cwd),
+            "/home/mui/ac-reports"
+        );
+        assert_eq!(
+            resolve_local_report_dir("reports", home, cwd),
+            "/work/rig/reports"
+        );
+        assert_eq!(
+            resolve_local_report_dir("./none", home, cwd),
+            "/work/rig/none"
+        );
+        assert_eq!(resolve_local_report_dir("/srv/r", home, cwd), "/srv/r");
+        // Case is preserved, and `..` is not resolved (no canonicalize).
+        assert_eq!(
+            resolve_local_report_dir("../Reports", home, cwd),
+            "/work/rig/../Reports"
+        );
+        // Extra slashes after `~` stay under home, not at the root.
+        assert_eq!(
+            resolve_local_report_dir("~//data", home, cwd),
+            "/home/mui/data"
+        );
+    }
+
+    #[test]
+    fn local_resolution_leaves_what_it_cannot_resolve_for_the_daemon_to_refuse() {
+        let cwd = Path::new("/work/rig");
+        assert_eq!(
+            resolve_local_report_dir("~other/r", Some("/home/mui"), cwd),
+            "~other/r"
+        );
+        assert_eq!(resolve_local_report_dir("~/r", None, cwd), "~/r");
+        assert_eq!(resolve_local_report_dir("", Some("/home/mui"), cwd), "");
+    }
+
+    #[test]
+    fn refusal_renders_two_lines_naming_the_token() {
+        let reply = json!({
+            "ok": false,
+            "error": "report-dir /home/mui/ac-reprots: No such file or directory (os error 2) \u{2014} setting not changed",
+            "refused": {
+                "key": "report_dir",
+                "path": "/home/mui/ac-reprots",
+                "reason": "No such file or directory (os error 2)",
+            },
+        });
+        let [a, b] = refusal_lines(&reply).expect("a report_dir refusal");
+        assert_eq!(a, "  error: report-dir /home/mui/ac-reprots");
+        assert_eq!(
+            b,
+            "         No such file or directory (os error 2) \u{2014} setting not changed"
+        );
+    }
+
+    #[test]
+    fn other_failures_fall_through_to_check_ack() {
+        assert!(refusal_lines(&json!({"ok": false, "error": "config not saved"})).is_none());
+        assert!(refusal_lines(&json!({"ok": true, "refused": {"key": "report_dir"}})).is_none());
+    }
+
+    #[test]
+    fn report_dir_readout_forms() {
+        assert_eq!(
+            report_dir_lines(&json!({"report_dir": null}), None),
+            vec!["  Report dir:    (not set \u{2014} plot results are not saved)"]
+        );
+        let cfg = json!({"report_dir": "/home/mui/ac-reports"});
+        assert_eq!(
+            report_dir_lines(&cfg, Some(&json!({"writable": true}))),
+            vec!["  Report dir:    /home/mui/ac-reports"]
+        );
+        assert_eq!(
+            report_dir_lines(&cfg, None),
+            vec!["  Report dir:    /home/mui/ac-reports"],
+            "an older daemon reports no status; the path prints alone"
+        );
+        assert_eq!(
+            report_dir_lines(
+                &cfg,
+                Some(
+                    &json!({"writable": false, "error": "No such file or directory (os error 2)"})
+                )
+            ),
+            vec![
+                "  Report dir:    /home/mui/ac-reports",
+                "                 cannot write: No such file or directory (os error 2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn report_dir_value_starts_at_the_shared_column() {
+        let line = &report_dir_lines(&json!({"report_dir": "/x"}), None)[0];
+        assert_eq!(line.find("/x"), Some("  Room temp:     ".len()));
+    }
 }

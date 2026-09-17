@@ -20,6 +20,7 @@ mod mode;
 mod reconnect;
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -27,10 +28,11 @@ use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::server::{MonitorParams, ServerState};
+use crate::workers::{with_unpoisoned, StoppingEngine};
 
 use super::super::{
     busy_guard, cfg_guard, load_calibration_or_refuse, make_engine_for_state, resolve_input,
-    selected_backend_is_fake, send_pub, spawn_worker,
+    selected_backend_is_fake, send_pub, spawn_worker, wire,
 };
 
 use self::capture::{
@@ -53,11 +55,70 @@ struct FakeTone {
     level_dbfs: f64,
 }
 
+/// Owns `MonitorParams::active` for one `monitor_spectrum` session (#432).
+///
+/// [`MonitorActiveGuard::activate`] is what sets `active: true`, and the
+/// guard is moved into the worker, so `active` returns to `false` on every
+/// way out of the thread — normal completion, an early `return` (engine
+/// start failure, reconnect give-up, a failed capture), or a panic
+/// unwinding the worker. `Drop` must not panic, so the lock is taken
+/// through `with_unpoisoned`.
+struct MonitorActiveGuard {
+    params: Arc<Mutex<MonitorParams>>,
+}
+
+impl MonitorActiveGuard {
+    fn activate(params: Arc<Mutex<MonitorParams>>, active: MonitorParams) -> MonitorActiveGuard {
+        with_unpoisoned(&params, |mp| {
+            *mp = MonitorParams {
+                active: true,
+                ..active
+            }
+        });
+        MonitorActiveGuard { params }
+    }
+}
+
+impl Drop for MonitorActiveGuard {
+    fn drop(&mut self) {
+        with_unpoisoned(&self.params, |mp| mp.active = false);
+    }
+}
+
 /// Full-scale dBFS → linear peak amplitude (0 dBFS = 1.0). Used only for
 /// the `--fake-audio` stimulus knobs below (#170 display-truth harness);
 /// real backends never see this.
 fn dbfs_to_amplitude(dbfs: f64) -> f64 {
     10f64.powf(dbfs / 20.0)
+}
+
+/// The documented `fft_n` domain refusal (same text as `set_monitor_params`).
+const FFT_N_DOMAIN_ERROR: &str = "fft_n must be power of 2 in [256, 131072]";
+
+fn monitor_refusal(e: &wire::WireError) -> Value {
+    json!({"ok": false, "error": e.refusal("monitor not started", &[])})
+}
+
+/// `fake_tones`, positionally: every element must carry a finite `freq_hz`
+/// and `level_dbfs`, or the whole list is refused.
+fn parse_fake_tones(cmd: &Value) -> Result<Option<Vec<FakeTone>>, wire::WireError> {
+    let Some(arr) = wire::opt_array(cmd, "fake_tones")? else {
+        return Ok(None);
+    };
+    arr.iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let field = |name: &str| -> Result<f64, wire::WireError> {
+                let path = format!("fake_tones[{i}].{name}");
+                wire::finite_f64(t.get(name).unwrap_or(&Value::Null), &path)
+            };
+            Ok(FakeTone {
+                freq_hz: field("freq_hz")?,
+                level_dbfs: field("level_dbfs")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
@@ -69,19 +130,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     // is required to never touch physical hardware, so these are only
     // read/applied below when `state.fake_audio` is true.
     let amplitude = cmd.get("amplitude").and_then(Value::as_f64).unwrap_or(0.0);
-    let fake_tones: Option<Vec<FakeTone>> =
-        cmd.get("fake_tones").and_then(Value::as_array).map(|arr| {
-            arr.iter()
-                .filter_map(|t| {
-                    let freq_hz = t.get("freq_hz").and_then(Value::as_f64)?;
-                    let level_dbfs = t.get("level_dbfs").and_then(Value::as_f64)?;
-                    Some(FakeTone {
-                        freq_hz,
-                        level_dbfs,
-                    })
-                })
-                .collect()
-        });
+    // A tone with a missing or non-numeric field refuses the whole request
+    // (#431): silently dropping it would make the harness test fewer tones
+    // than it states.
+    let fake_tones: Option<Vec<FakeTone>> = match parse_fake_tones(cmd) {
+        Ok(t) => t,
+        Err(e) => return monitor_refusal(&e),
+    };
     let fake_noise_dbfs = cmd.get("fake_noise_dbfs").and_then(Value::as_f64);
 
     let defaults = MonitorParams::default();
@@ -89,33 +144,33 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         .get("interval")
         .and_then(Value::as_f64)
         .unwrap_or(defaults.interval);
-    let fft_n = cmd
-        .get("fft_n")
-        .and_then(Value::as_u64)
-        .unwrap_or(defaults.fft_n as u64) as u32;
+    // A present `fft_n` that is not a u32 (`null` and strings included) is
+    // refused with the domain message
+    // below rather than wrapped into it (#431: 4294967552 used to become 256).
+    let fft_n = match wire::opt_u32(cmd, "fft_n") {
+        Ok(v) => v.unwrap_or(defaults.fft_n),
+        Err(_) => return json!({"ok": false, "error": FFT_N_DOMAIN_ERROR}),
+    };
 
     if !(interval > 0.0 && interval <= 60.0) {
         return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
     }
     if !fft_n.is_power_of_two() || !(256..=131_072).contains(&fft_n) {
-        return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
+        return json!({"ok": false, "error": FFT_N_DOMAIN_ERROR});
     }
 
     let lf_fft_n = defaults.lf_fft_n;
     let crossover_hz = defaults.crossover_hz;
     let cfg = state.cfg.lock().unwrap().clone();
 
-    let channels: Vec<u32> = cmd
-        .get("channels")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_u64)
-                .map(|v| v as u32)
-                .collect()
-        })
-        .filter(|v: &Vec<u32>| !v.is_empty())
-        .unwrap_or_else(|| vec![cfg.input_channel]);
+    // Absent, `null` or `[]` monitors the configured input; a list with any
+    // invalid element is refused, never narrowed to its valid part (#431).
+    let channels: Vec<u32> = match wire::opt_u32_array(cmd, "channels") {
+        Ok(v) => v
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![cfg.input_channel]),
+        Err(e) => return monitor_refusal(&e),
+    };
 
     // One bad channel fails the whole request rather than monitoring a
     // fabricated port alongside the good ones (#206).
@@ -145,10 +200,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
-        Ok(eng) => eng,
+        Ok(eng) => StoppingEngine::new(eng),
         Err(e) => return json!({"ok": false, "error": e}),
     };
-    let fake = selected_backend_is_fake(eng.as_ref());
+    let fake = selected_backend_is_fake(&*eng);
     let backend = eng.backend_name();
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
@@ -163,19 +218,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let loudness_reset_shared = state.loudness_reset_request.clone();
     let band_weighting_shared = state.band_weighting.clone();
 
-    {
-        let mut mp = state.monitor_params.lock().unwrap();
-        *mp = MonitorParams {
+    // Cleared by the guard's drop, whichever way the worker ends (#432).
+    let active_guard = MonitorActiveGuard::activate(
+        state.monitor_params.clone(),
+        MonitorParams {
             interval,
             fft_n,
             lf_fft_n,
             crossover_hz,
             active: true,
-        };
-    }
+        },
+    );
     let monitor_params_shared = state.monitor_params.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
+        // Every `return` and panic below drops both, stopping the engine and
+        // clearing `active`.
+        let active_guard = active_guard;
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
             send_pub(
@@ -203,12 +262,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             }
         }
         let sr = eng.sample_rate();
-        // Per-tick monotonic counter shared across all channels in the
-        // tick. Phase 0b: the UI's Goniometer / PhaseScope3D pair L and
-        // R scope frames by `frame_idx`, so it MUST increment exactly
-        // once per tick — not once per (tick, channel). Wraps on u64
-        // overflow (~600 years at 1 kHz tick rate; not a real concern).
-        let mut frame_idx: u64 = 0;
+        // Scope-frame counter: incremented once per emitted
+        // `visualize/scope` frame, so every frame has its own identity.
+        // Channels are captured one after another, so a per-tick value
+        // shared across channels would claim a simultaneity the capture
+        // does not have (#434). Wraps on u64 overflow.
+        let scope_frame_idx = std::cell::Cell::new(0u64);
 
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
@@ -303,14 +362,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
-            // Bump the per-tick counter and snapshot a tick-wide
-            // timestamp BEFORE the per-channel loop so every scope
-            // frame in this tick carries the same `frame_idx` /
-            // `tick_ts_ns`. The existing per-channel `ts_ns` calls in
-            // the loudness/spectrum branches stay as-is; only scope
-            // frames need tick-wide alignment.
-            frame_idx = frame_idx.wrapping_add(1);
-            let tick_ts_ns = now_ns();
             let (cur_interval, cur_fft_n, cur_lf_fft_n, cur_crossover_hz) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n, mp.lf_fft_n, mp.crossover_hz)
@@ -370,8 +421,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 n_channels,
                 sr,
                 backend,
-                frame_idx,
-                tick_ts_ns,
+                scope_frame_idx: &scope_frame_idx,
                 mic_corr_enabled: mic_corr_enabled.load(Ordering::Relaxed),
                 // Pace the ring-buffered modes to the UI's requested
                 // interval, clamped to [16 ms, 100 ms]. Pre-#109 this was
@@ -432,7 +482,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
                 if mode == Mode::Cwt {
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Cwt,
@@ -576,7 +626,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // bins above it produce earlier, but a partial column
                     // would confuse the waterfall.
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Cqt,
@@ -611,7 +661,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
                 if mode == Mode::Reassigned {
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Reassigned,
@@ -848,11 +898,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
             }
         }
-        eng.stop();
-        {
-            let mut mp = monitor_params_shared.lock().unwrap();
-            mp.active = false;
-        }
+        // Engine stopped, then `active` cleared, then `done` — dropped
+        // explicitly so `done` still follows the clear.
+        drop(eng);
+        drop(active_guard);
         send_pub(
             &pub_tx,
             "done",
@@ -875,4 +924,61 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         "lf_overlap_pct":  LF_OVERLAP * 100.0,
         "backend":         backend,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_params() -> MonitorParams {
+        MonitorParams {
+            active: false,
+            ..MonitorParams::default()
+        }
+    }
+
+    #[test]
+    fn activate_sets_active_and_drop_clears_it() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        assert!(params.lock().unwrap().active);
+        drop(guard);
+        assert!(!params.lock().unwrap().active);
+    }
+
+    /// #432: a monitor worker that panics must still leave `active` false.
+    #[test]
+    fn guard_in_a_panicking_thread_clears_active() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        let handle = std::thread::spawn(move || {
+            let _guard = guard;
+            panic!("monitor worker panic under test");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the worker thread must have panicked"
+        );
+        assert!(!params.lock().unwrap().active);
+    }
+
+    /// #432: a poisoned `monitor_params` must not turn the guard's drop into
+    /// a panic-in-panic, and must be left unpoisoned for `set_monitor_params`.
+    #[test]
+    fn guard_drop_tolerates_and_clears_a_poisoned_lock() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        let poison = params.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _held = poison.lock().unwrap();
+            panic!("poison monitor_params");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(params.is_poisoned());
+
+        drop(guard);
+
+        assert!(!params.is_poisoned(), "guard drop must clear the poison");
+        assert!(!params.lock().unwrap().active);
+    }
 }

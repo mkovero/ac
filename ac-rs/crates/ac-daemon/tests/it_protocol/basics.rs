@@ -366,6 +366,164 @@ fn plot_frames_carry_processing_context_envelope() {
     assert!(mr["imported_at"].is_string());
 }
 
+/// First array stored under key `key` anywhere in `v`, depth-first.
+fn find_array<'a>(v: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
+    match v {
+        Value::Object(m) => m
+            .get(key)
+            .and_then(Value::as_array)
+            .or_else(|| m.values().find_map(|x| find_array(x, key))),
+        Value::Array(a) => a.iter().find_map(|x| find_array(x, key)),
+        _ => None,
+    }
+}
+
+/// #436: mic-correction enablement is a process-wide toggle, but one
+/// measurement must use one state for every point and describe that state
+/// in its report. The toggle here lands mid-sweep — after point 0 is
+/// published and while later points are still pending — and must not
+/// reach this sweep.
+///
+/// A flat +6 dB curve makes the treatment observable in the numbers, not
+/// only the tag: the fake loopback is flat, so a sweep that switched
+/// correction off part-way would show a ~6 dB step in `fundamental_dbfs`
+/// between its points (the rejected per-point read), and its report would
+/// claim whichever state was current at the end.
+#[test]
+fn plot_mic_correction_toggle_mid_sweep_does_not_mix_points() {
+    const CURVE_DB: f64 = 6.0;
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let mut freqs = Vec::new();
+    let log_min = 100.0_f64.ln();
+    let log_max = 10_000.0_f64.ln();
+    for i in 0..24 {
+        let t = i as f64 / 23.0;
+        freqs.push((log_min + t * (log_max - log_min)).exp());
+    }
+    let r = c.call(json!({
+        "cmd":           "calibrate_mic_curve",
+        "op":            "set",
+        "input_channel": 0,
+        "freqs_hz":      freqs,
+        "gain_db":       vec![CURVE_DB; 24],
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.call(json!({"cmd": "set_mic_correction_enabled", "enabled": true}));
+    assert_eq!(r["enabled"], json!(true), "{r}");
+
+    // 200 Hz .. 2 kHz at 3 ppd: four points, each ≥ 0.4 s of fake capture
+    // (0.1 s warm-up + 0.3 s), so the sweep is still running well after
+    // the toggle below is acknowledged.
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   200.0,
+        "stop_hz":    2000.0,
+        "level_dbfs": -20.0,
+        "ppd":        3,
+        "duration":   0.3,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot ack: {r}");
+
+    let mut points: Vec<Value> = Vec::new();
+    let mut points_after_toggle = 0usize;
+    let mut toggled = false;
+    let mut report: Option<Value> = None;
+    let mut done: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && done.is_none() {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" => {
+                if v["type"] == json!("measurement/frequency_response/point") {
+                    points.push(v);
+                    if toggled {
+                        points_after_toggle += 1;
+                    } else {
+                        let r =
+                            c.call(json!({"cmd": "set_mic_correction_enabled", "enabled": false}));
+                        assert_eq!(r["ok"], json!(true), "toggle reply: {r}");
+                        assert_eq!(r["enabled"], json!(false), "toggle reply: {r}");
+                        toggled = true;
+                    }
+                } else if v["type"] == json!("measurement/report") {
+                    report = Some(v);
+                }
+            }
+            Some((t, v)) if t == "done" => done = Some(v),
+            Some((t, v)) if t == "error" => panic!("plot error: {v}"),
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let done = done.unwrap_or_else(|| panic!("plot never finished; saw {} points", points.len()));
+    let report = report.expect("missing measurement/report");
+    assert_eq!(done["n_points"], json!(points.len()), "{done}");
+    assert!(
+        points_after_toggle >= 2,
+        "toggle did not land mid-sweep: only {points_after_toggle} point(s) after it \
+         of {} total",
+        points.len()
+    );
+
+    // Uniform tag on every point: the state the sweep was accepted with.
+    for p in &points {
+        assert_eq!(p["mic_correction"], json!("on"), "point: {p}");
+    }
+
+    // Uniform treatment in the numbers: no ~CURVE_DB step between points.
+    let levels: Vec<f64> = points
+        .iter()
+        .map(|p| p["fundamental_dbfs"].as_f64().expect("fundamental_dbfs"))
+        .collect();
+    let lo = levels.iter().cloned().fold(f64::INFINITY, f64::min);
+    let hi = levels.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        hi - lo < CURVE_DB / 2.0,
+        "mixed correction across points: fundamental_dbfs = {levels:?}"
+    );
+
+    // The report describes exactly those points.
+    let rep = &report["report"];
+    assert_eq!(
+        rep["processing_chain"]["mic_correction_applied"],
+        json!(true),
+        "report processing_chain: {}",
+        rep["processing_chain"]
+    );
+    let rep_points = find_array(rep, "points").expect("report points");
+    assert_eq!(rep_points.len(), points.len());
+    for (rp, p) in rep_points.iter().zip(&points) {
+        assert_eq!(rp["fundamental_dbfs"], p["fundamental_dbfs"], "{rp} vs {p}");
+    }
+
+    // The accepted toggle applies to the next measurement.
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   1000.0,
+        "stop_hz":    1000.0,
+        "level_dbfs": -20.0,
+        "ppd":        1,
+        "duration":   0.1,
+    }));
+    assert_eq!(r["ok"], json!(true), "second plot ack: {r}");
+    let next = loop {
+        match c.recv_pub(10_000) {
+            Some((t, v))
+                if t == "data" && v["type"] == json!("measurement/frequency_response/point") =>
+            {
+                break v
+            }
+            Some(_) => continue,
+            None => panic!("second plot published no point"),
+        }
+    };
+    assert_eq!(next["mic_correction"], json!("off"), "{next}");
+}
+
 /// #428: `AudioEngine::xruns()` is cumulative "since start" (see the trait
 /// doc), so summing it once per sweep point double-, triple-, ...-counts
 /// every xrun that happened before the sweep's last point. One real xrun

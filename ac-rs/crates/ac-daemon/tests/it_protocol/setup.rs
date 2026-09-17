@@ -83,30 +83,32 @@ fn setup_channel_clears_sticky_port() {
 
 /// handoff: snapshot-backend M1 — `snapshot_ring_s`/`snapshot_spool_dir`
 /// round-trip through `setup` like every other config field, including
-/// persistence (a second `setup` read reflects the earlier write).
+/// persistence (a second `setup` read reflects the earlier write). Since
+/// #433 the spool is a child of the daemon's spool root, stored absolute.
 #[test]
 fn setup_updates_snapshot_ring_and_spool_dir() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
+    let leaf = spool_root(&d).join("bench");
+    let leaf_str = leaf.display().to_string();
 
     let r = c.call(json!({"cmd":"setup","update":{
         "snapshot_ring_s": 60.0,
-        "snapshot_spool_dir": "/tmp/custom-acsnap-spool",
+        "snapshot_spool_dir": "bench",
     }}));
     assert_eq!(r["ok"], json!(true), "setup: {r}");
     assert_eq!(r["config"]["snapshot_ring_s"], json!(60.0));
-    assert_eq!(
-        r["config"]["snapshot_spool_dir"],
-        json!("/tmp/custom-acsnap-spool")
-    );
+    assert_eq!(r["config"]["snapshot_spool_dir"], json!(leaf_str));
 
     // Persisted, not just echoed back.
     let r2 = c.call(json!({"cmd": "setup", "update": {}}));
     assert_eq!(r2["config"]["snapshot_ring_s"], json!(60.0));
-    assert_eq!(
-        r2["config"]["snapshot_spool_dir"],
-        json!("/tmp/custom-acsnap-spool")
-    );
+    assert_eq!(r2["config"]["snapshot_spool_dir"], json!(leaf_str));
+
+    // The absolute spelling of the same child is accepted too.
+    let r2b = c.call(json!({"cmd":"setup","update":{"snapshot_spool_dir": leaf_str}}));
+    assert_eq!(r2b["ok"], json!(true), "{r2b}");
+    assert_eq!(r2b["config"]["snapshot_spool_dir"], json!(leaf_str));
 
     // snapshot_ring_s <= 0 is ignored (invalid), not silently accepted.
     let r3 = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": -5.0}}));
@@ -121,6 +123,89 @@ fn setup_updates_snapshot_ring_and_spool_dir() {
     let r4 = c.call(json!({"cmd":"setup","update":{"snapshot_spool_dir": Value::Null}}));
     assert_eq!(r4["ok"], json!(true));
     assert!(r4["config"]["snapshot_spool_dir"].is_null());
+}
+
+fn spool_root(d: &Daemon) -> std::path::PathBuf {
+    d.home
+        .join(".local")
+        .join("state")
+        .join("ac")
+        .join("snapshots")
+}
+
+/// #433: every broad, foreign, or unowned spool target is refused with the
+/// allowed root named, the whole update is left unapplied, and nothing on
+/// disk changes — a later session start included.
+#[test]
+fn setup_refuses_spool_paths_outside_the_daemon_owned_root() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let root = spool_root(&d);
+    std::fs::create_dir_all(&root).unwrap();
+
+    // Out-of-scope data the refused targets would have reached.
+    let victim = d.home.join("measurements");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("keep.wav"), b"keep").unwrap();
+    let unowned = root.join("unowned");
+    std::fs::create_dir(&unowned).unwrap();
+    std::fs::write(unowned.join("keep"), b"keep").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    let home = d.home.display().to_string();
+    let root_s = root.display().to_string();
+    let targets = [
+        "/".to_string(),
+        home.clone(),
+        victim.display().to_string(),
+        format!("{home}/.local/state/ac"),
+        root_s.clone(),
+        format!("{root_s}/../../ac"),
+        format!("{root_s}/x/y"),
+        "..".to_string(),
+        "../x".to_string(),
+        "".to_string(),
+        unowned.display().to_string(),
+        "link".to_string(),
+    ];
+    for t in &targets {
+        let r = c.call(json!({"cmd":"setup","update":{
+            "snapshot_spool_dir": t,
+            "output_channel": 7,
+        }}));
+        assert_eq!(r["ok"], json!(false), "{t:?} must be refused: {r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(err.starts_with("snapshot spool path rejected"), "{err}");
+        assert!(
+            err.contains(&format!("allowed    child of {root_s}")),
+            "{err}"
+        );
+        assert!(err.contains("data       no directory removed"), "{err}");
+        assert_eq!(r["refused"]["key"], json!("snapshot_spool_dir"));
+        assert_eq!(r["refused"]["allowed_root"], json!(root_s));
+    }
+
+    let after = c.call(json!({"cmd":"setup","update":{}}));
+    assert!(after["config"]["snapshot_spool_dir"].is_null(), "{after}");
+    assert_ne!(after["config"]["output_channel"], json!(7));
+
+    // A session still runs on the default leaf and leaves everything else.
+    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":1}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = c.call(json!({"cmd":"stop"}));
+
+    assert_eq!(std::fs::read(victim.join("keep.wav")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(unowned.join("keep")).unwrap(), b"keep");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(root
+        .join("default")
+        .join(ac_core::config::SNAPSHOT_SPOOL_MARKER)
+        .is_file());
 }
 
 #[test]
@@ -327,4 +412,273 @@ fn sticky_reference_ports_without_their_channel_are_refused() {
         err2.contains("reference_port") && err2.contains("reference_channel"),
         "error must name both keys, got {err2:?}"
     );
+}
+
+/// The on-disk config the daemon persists under `home`.
+fn config_on_disk(home: &std::path::Path) -> Value {
+    let path = home.join(".config").join("ac").join("config.json");
+    serde_json::from_slice(&std::fs::read(&path).expect("read config.json"))
+        .expect("config.json decodes")
+}
+
+/// #472 — `report_dir` is set, read back with a writable status on every
+/// call (including the read-only one), and cleared, after which the status
+/// is absent rather than reporting on nothing.
+#[test]
+fn setup_report_dir_round_trips_with_a_writable_status() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_s = dir.to_str().unwrap();
+
+    let r = c.call(json!({"cmd": "setup", "update": {"report_dir": dir_s}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["config"]["report_dir"], json!(dir_s));
+    assert_eq!(r["report_dir_status"], json!({"writable": true}), "{r}");
+
+    let r2 = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r2["config"]["report_dir"], json!(dir_s));
+    assert_eq!(r2["report_dir_status"], json!({"writable": true}), "{r2}");
+    assert_eq!(config_on_disk(&d.home)["report_dir"], json!(dir_s));
+
+    // The probe leaves nothing behind.
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+    assert!(leftovers.is_empty(), "probe left files: {leftovers:?}");
+
+    let r3 = c.call(json!({"cmd": "setup", "update": {"report_dir": Value::Null}}));
+    assert_eq!(r3["ok"], json!(true), "{r3}");
+    assert!(r3["config"]["report_dir"].is_null(), "{r3}");
+    assert!(
+        r3.get("report_dir_status").is_none(),
+        "no status without a directory: {r3}"
+    );
+    assert!(config_on_disk(&d.home)["report_dir"].is_null());
+}
+
+/// #472 — a directory that is missing, relative, or a plain file is refused
+/// at setup time with a reason, and the refusal leaves the *whole* update
+/// unapplied: an `output_channel` in the same command does not land either.
+/// A missing directory is not created.
+#[test]
+fn setup_refuses_an_unusable_report_dir_and_changes_nothing() {
+    let d = Daemon::spawn_with_config(Some(json!({"output_channel": 3})));
+    let c = Client::new(&d);
+    let missing = d.home.join("ac-reprots");
+    let plain_file = d.home.join("not-a-dir");
+    std::fs::write(&plain_file, b"x").unwrap();
+
+    let cases = [
+        (missing.to_str().unwrap().to_string(), "os error 2"),
+        (
+            "reports".to_string(),
+            "must be an absolute path on the daemon host",
+        ),
+        (
+            "~/reports".to_string(),
+            "must be an absolute path on the daemon host",
+        ),
+        (String::new(), "must be an absolute path on the daemon host"),
+        (plain_file.to_str().unwrap().to_string(), "Not a directory"),
+    ];
+    for (bad, want_reason) in cases {
+        let r = c.call(json!({"cmd": "setup", "update": {
+            "output_channel": 5,
+            "report_dir": bad,
+        }}));
+        assert_eq!(r["ok"], json!(false), "{bad:?} must be refused: {r}");
+        assert_eq!(r["refused"]["key"], json!("report_dir"), "{r}");
+        assert_eq!(r["refused"]["path"], json!(bad), "{r}");
+        let reason = r["refused"]["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains(want_reason),
+            "{bad:?}: reason {reason:?} lacks {want_reason:?}"
+        );
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with(&format!("report-dir {bad}: ")) && err.ends_with("setting not changed"),
+            "generic error line: {err:?}"
+        );
+
+        let on_disk = config_on_disk(&d.home);
+        assert_eq!(on_disk["output_channel"], json!(3), "{bad:?}: {on_disk}");
+        assert!(on_disk["report_dir"].is_null(), "{bad:?}: {on_disk}");
+        let read = c.call(json!({"cmd": "setup", "update": {}}));
+        assert_eq!(read["config"]["output_channel"], json!(3), "{read}");
+    }
+    assert!(!missing.exists(), "a refused directory must not be created");
+}
+
+/// #472 — a directory removed after it was set is reported as not writable
+/// on the next read, before any capture runs, and is not recreated.
+#[test]
+fn setup_reports_a_removed_report_dir_as_not_writable() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_s = dir.to_str().unwrap();
+
+    let r = c.call(json!({"cmd": "setup", "update": {"report_dir": dir_s}}));
+    assert_eq!(r["report_dir_status"]["writable"], json!(true), "{r}");
+
+    std::fs::remove_dir(&dir).unwrap();
+    let r2 = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r2["ok"], json!(true), "{r2}");
+    assert_eq!(r2["config"]["report_dir"], json!(dir_s));
+    assert_eq!(r2["report_dir_status"]["writable"], json!(false), "{r2}");
+    let err = r2["report_dir_status"]["error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        err.contains("os error 2"),
+        "OS error text expected: {err:?}"
+    );
+    assert!(
+        !dir.exists(),
+        "the read-out must not recreate the directory"
+    );
+}
+
+/// #472 criterion 4 — a value set through `setup` is the one a restarted
+/// daemon on the same HOME holds.
+#[test]
+fn setup_report_dir_survives_a_daemon_restart() {
+    let mut d = Daemon::spawn();
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_s = dir.to_str().unwrap().to_string();
+    {
+        let c = Client::new(&d);
+        let r = c.call(json!({"cmd": "setup", "update": {"report_dir": dir_s}}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+    }
+    let home = d.home.clone();
+    d.kill_without_cleanup();
+    std::mem::forget(d);
+
+    let d2 = Daemon::spawn_at_home(home);
+    let c2 = Client::new(&d2);
+    let r = c2.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r["config"]["report_dir"], json!(dir_s), "{r}");
+    assert_eq!(r["report_dir_status"]["writable"], json!(true), "{r}");
+}
+
+/// #430 (was #472) — an update whose config save fails is refused on the
+/// wire, the file bytes are unchanged, and the next read reports the
+/// last-good value. The file stays readable here, so the per-request reload
+/// refreshes `state.cfg` from disk before that read: this test cannot see
+/// the in-memory half. `setup_refuses_to_overwrite_a_corrupt_config` can.
+#[test]
+fn setup_refuses_an_update_it_could_not_save() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = Daemon::spawn_with_config(Some(json!({"output_channel": 3})));
+    let c = Client::new(&d);
+    let cfg_dir = d.home.join(".config").join("ac");
+    let cfg_file = cfg_dir.join("config.json");
+    let before = std::fs::read(&cfg_file).expect("seeded config.json");
+    let set_mode = |p: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    set_mode(&cfg_dir, 0o555);
+
+    // A process that ignores permissions (root) cannot exercise this path;
+    // say so rather than pass without checking anything. The root-proof
+    // counterpart is `ac_core::config` `save_into_unwritable_storage_*`.
+    let probe = cfg_dir.join(".probe");
+    let probe_writable = std::fs::File::create(&probe).is_ok();
+    if probe_writable {
+        let _ = std::fs::remove_file(&probe);
+        set_mode(&cfg_dir, 0o755);
+        eprintln!("skipped: permissions are not enforced for this user");
+        return;
+    }
+
+    let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 5}}));
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    let after = std::fs::read(&cfg_file).expect("config.json after refusal");
+    set_mode(&cfg_dir, 0o755);
+
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    assert!(refused.get("config").is_none(), "no config echo: {refused}");
+    let err = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        err.starts_with("setup not saved \u{2014} configuration unchanged"),
+        "{err:?}"
+    );
+    assert!(
+        err.contains(&format!("file   {}", cfg_file.display())),
+        "{err:?}"
+    );
+    assert!(err.contains("cause  "), "{err:?}");
+    assert_eq!(
+        read["ok"],
+        json!(true),
+        "read-only setup must still answer: {read}"
+    );
+    assert_eq!(read["config"]["output_channel"], json!(3), "{read}");
+    assert_eq!(after, before, "config.json must be byte-identical");
+}
+
+/// #430 — a corrupt config.json is never replaced by defaults plus the
+/// patch: the update is refused, and neither it nor a following read-only
+/// `setup {}` (what `ac generate` sends) touches the file. The refused
+/// update also leaves the in-memory config at its last-good value. That is
+/// only observable here: the per-request reload cannot parse the file, so
+/// the read echoes `state.cfg` — a commit-before-save would show the
+/// refused 5, and a daemon that never loaded the seed would show 0.
+#[test]
+fn setup_refuses_to_overwrite_a_corrupt_config() {
+    const CORRUPT: &[u8] = b"{\"output_channel\": 3, \"input_chan";
+    let d = Daemon::spawn_with_config(Some(json!({"output_channel": 3})));
+    let c = Client::new(&d);
+    let cfg_file = d.home.join(".config").join("ac").join("config.json");
+
+    let first = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(first["config"]["output_channel"], json!(3), "{first}");
+    std::fs::write(&cfg_file, CORRUPT).unwrap();
+
+    let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 5}}));
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    let err = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        err.starts_with("setup not saved \u{2014} existing configuration is unreadable"),
+        "{err:?}"
+    );
+    assert!(
+        err.contains(&format!("file   {}", cfg_file.display())),
+        "{err:?}"
+    );
+    assert!(err.contains("data   existing file preserved"), "{err:?}");
+    assert_eq!(std::fs::read(&cfg_file).unwrap(), CORRUPT);
+
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(read["ok"], json!(true), "{read}");
+    assert!(read.get("saved").is_none(), "{read}");
+    assert_eq!(read["config"]["output_channel"], json!(3), "{read}");
+    assert_eq!(
+        std::fs::read(&cfg_file).unwrap(),
+        CORRUPT,
+        "a read-only setup must not rewrite the file"
+    );
+}
+
+/// #430 — a persisted update names the file it was written to, and its
+/// `config` is what is now on disk. A read-only call carries no `saved`.
+#[test]
+fn setup_success_reports_the_saved_path_and_the_disk_state() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let cfg_file = d.home.join(".config").join("ac").join("config.json");
+
+    let r = c.call(json!({"cmd": "setup", "update": {"output_channel": 2}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["saved"], json!(cfg_file.display().to_string()), "{r}");
+    assert_eq!(r["config"], config_on_disk(&d.home), "{r}");
+    assert_eq!(r["config"]["output_channel"], json!(2), "{r}");
+
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(read["ok"], json!(true), "{read}");
+    assert!(read.get("saved").is_none(), "{read}");
 }

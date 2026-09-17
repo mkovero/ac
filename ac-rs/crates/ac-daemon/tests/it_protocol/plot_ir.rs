@@ -27,6 +27,10 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
         "n_harmonics": 3,
     }));
     assert_eq!(r["ok"], json!(true));
+    // #501: a typed window is echoed in samples, and no default is claimed.
+    assert_eq!(r["window_len"], json!(1024), "{r}");
+    assert!(r.get("window_default_s").is_none(), "{r}");
+    assert_eq!(r["duration"], json!(0.5), "{r}");
 
     let mut got_ir = false;
     let mut got_report = false;
@@ -412,6 +416,57 @@ fn plot_ir_flags_a_stored_tau_from_another_device_enumeration() {
     }
     assert!(!same.ir_stats().unwrap().interface_latency_unverified());
     drop(d1);
+}
+
+/// #501: a bare request runs the `ac-core` default stimulus, the ack echoes
+/// every value it accepted, and the defaulted window — echoed in seconds,
+/// because the rate is unknown before the engine starts — arrives in the
+/// IR frame as `round(0.4 s × rate)` samples, unclamped. On the fake's clean
+/// loopback that default configuration clears the pre-impulse gate, which
+/// the pre-#501 defaults (1 s, 4096 samples) could not.
+#[test]
+fn plot_ir_bare_request_runs_and_echoes_the_core_defaults() {
+    use ac_core::measurement::sweep::{
+        ir_default_window_len, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
+        IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
+    };
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "plot_ir"}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["f1_hz"], json!(IR_DEFAULT_F1_HZ), "{r}");
+    assert_eq!(r["f2_hz"], json!(IR_DEFAULT_F2_HZ), "{r}");
+    assert_eq!(r["duration"], json!(IR_DEFAULT_DURATION_S), "{r}");
+    assert_eq!(r["duration"], json!(4.0), "{r}");
+    assert_eq!(r["n_harmonics"], json!(IR_DEFAULT_N_HARMONICS), "{r}");
+    assert_eq!(r["tail_s"], json!(IR_DEFAULT_TAIL_S), "{r}");
+    assert_eq!(r["window_default_s"], json!(IR_DEFAULT_WINDOW_S), "{r}");
+    assert!(r.get("window_len").is_none(), "{r}");
+
+    let expected = ir_default_window_len(FAKE_SR as u32);
+    assert_eq!(expected, 19_200);
+    let ir = c
+        .wait_for_topic("measurement/impulse_response", Duration::from_secs(30))
+        .expect("measurement/impulse_response frame");
+    assert_eq!(ir["window_len_requested"], json!(expected), "{ir}");
+    assert_eq!(
+        ir["window_len_used"][0],
+        json!(expected),
+        "the default linear gate must not be clamped"
+    );
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(30))
+        .expect("measurement/report frame");
+    let report: MeasurementReport =
+        serde_json::from_value(v["report"].clone()).expect("decode report");
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(
+        stats.verdict,
+        ac_core::measurement::report::IrVerdict::Ok,
+        "the default sweep must clear the gate on a clean loopback \
+         (pre-imp SNR {:.2} dB)",
+        stats.pre_impulse_snr_db
+    );
 }
 
 #[test]
@@ -981,6 +1036,11 @@ fn plot_ir_reports_an_xrun_during_capture_as_unavailable() {
 /// `half + delay`, so refusal needs `half + delay ≥ 4800 - 1 - 240`, i.e.
 /// `delay ≥ 2159`. 2200 clears that by 41 samples and still fits the
 /// capture.
+///
+/// #494: the edge check now runs first and the reason names a failed SNR
+/// gate beside it. This in-window peak clears its derived threshold, so the
+/// exact edge-only string below is what holds; the combined string is
+/// pinned by a unit test beside `reference_unavailable_reason`.
 #[test]
 fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
     let half = (0.05 * FAKE_SR).ceil() as usize;
@@ -1139,3 +1199,85 @@ fn plot_ir_refuses_an_unusable_distance_before_any_audio() {
 // Time-integration — set_time_integration / get_time_integration / reset_leq.
 // See issue #62.
 // ---------------------------------------------------------------------------
+
+/// Run one `plot_ir` and return its `done` frame.
+fn done_frame_for(c: &Client) -> Value {
+    let reply = c.call(plot_ir_request(json!({})));
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(20))
+        .expect("plot_ir done frame");
+    assert_eq!(done["cmd"], json!("plot_ir"), "{done}");
+    done
+}
+
+/// Point the daemon's report directory at `dir` through `setup`.
+fn set_report_dir(c: &Client, dir: &std::path::Path) {
+    let r = c.call(json!({"cmd": "setup", "update": {"report_dir": dir.to_str().unwrap()}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+}
+
+/// #472 — with a report directory configured, `done.report_files` names the
+/// two files, and both exist on disk.
+#[test]
+fn plot_ir_done_frame_names_the_files_it_wrote() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    set_report_dir(&c, &dir);
+
+    let done = done_frame_for(&c);
+    let files = &done["report_files"];
+    assert_eq!(files["dir"], json!(dir.to_str().unwrap()), "{done}");
+    for (key, suffix) in [("json", "-plot_ir.json"), ("csv", "-plot_ir.csv")] {
+        let path = files[key]["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} has no path: {done}"));
+        assert!(path.ends_with(suffix), "{path}");
+        assert!(
+            std::path::Path::new(path).starts_with(&dir),
+            "{path} outside {}",
+            dir.display()
+        );
+        assert!(std::path::Path::new(path).is_file(), "{path} not on disk");
+        assert!(files[key].get("error").is_none(), "{done}");
+    }
+}
+
+/// #472 — with no report directory, `done.report_files` says so explicitly.
+#[test]
+fn plot_ir_done_frame_says_when_no_report_dir_is_configured() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let done = done_frame_for(&c);
+    assert_eq!(done["report_files"], json!({"dir": null}), "{done}");
+}
+
+/// #472 — a directory removed after `setup` accepted it: both writes report
+/// the OS error, and the directory is *not* recreated (the old `write_to`
+/// path ran `create_dir_all`, archiving into a place nobody chose).
+#[test]
+fn plot_ir_done_frame_reports_a_failed_write_and_does_not_recreate_the_dir() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let dir = d.home.join("reports");
+    std::fs::create_dir_all(&dir).unwrap();
+    set_report_dir(&c, &dir);
+    std::fs::remove_dir(&dir).unwrap();
+
+    let done = done_frame_for(&c);
+    let files = &done["report_files"];
+    assert_eq!(files["dir"], json!(dir.to_str().unwrap()), "{done}");
+    for key in ["json", "csv"] {
+        let err = files[key]["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} carries no error: {done}"));
+        assert!(err.contains("os error 2"), "{key}: {err:?}");
+        assert!(files[key].get("path").is_none(), "{done}");
+    }
+    assert!(
+        !dir.exists(),
+        "plot_ir recreated the removed report directory"
+    );
+}

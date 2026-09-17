@@ -3,10 +3,13 @@
 //! Each audio command spawns a worker thread that owns the audio engine.
 //! The main thread can stop a worker by setting its stop flag.
 
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
+
+use crate::audio::AudioEngine;
 
 /// Drive drops if no `set_drive` arrives within this window (§4.3).
 pub const DRIVE_DEADMAN_MS: u64 = 1500;
@@ -158,6 +161,56 @@ impl Drop for WorkerHandle {
         self.stop();
         self.join();
     }
+}
+
+/// An audio engine that is stopped when it goes out of scope (#432).
+///
+/// A worker that owns its engine through this type stops it on every exit
+/// once the engine exists — normal completion, an early `return` on a
+/// setup failure, or a panic unwinding the worker thread — without each
+/// exit having to remember to. `AudioEngine::stop` is safe to call more than
+/// once on every backend, so an explicit stop ahead of the drop is harmless.
+pub struct StoppingEngine(Box<dyn AudioEngine>);
+
+impl StoppingEngine {
+    pub fn new(engine: Box<dyn AudioEngine>) -> StoppingEngine {
+        StoppingEngine(engine)
+    }
+}
+
+impl Deref for StoppingEngine {
+    type Target = dyn AudioEngine;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl DerefMut for StoppingEngine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut()
+    }
+}
+
+impl Drop for StoppingEngine {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
+/// Lock `slot`, apply `f`, release the lock, then clear any poison.
+///
+/// For teardown code that runs from `Drop`, possibly while a worker thread
+/// is unwinding (#432). A plain `lock().unwrap()` there would panic inside a
+/// panic and abort the daemon; accepting the poisoned guard cannot. Clearing
+/// the poison afterwards keeps a later CTRL handler's `lock().unwrap()` on
+/// the same slot from panicking the CTRL thread over a worker's panic.
+pub fn with_unpoisoned<T: ?Sized>(slot: &Mutex<T>, f: impl FnOnce(&mut T)) {
+    {
+        let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut guard);
+    }
+    slot.clear_poison();
 }
 
 /// Concurrency groups for the busy guard (mirrors Python engine.py).

@@ -20,7 +20,7 @@ wt="$WT_BASE/integrate-pr-$n"
 }
 
 require_space "$wt"
-git fetch -q origin main "$branch"
+git_retry git fetch -q origin main "$branch"
 [[ $(git rev-parse "origin/$branch") == "$old_head" ]] || {
   echo "PR #$n moved while preparing integration; retry" >&2
   exit 1
@@ -68,7 +68,7 @@ new_head="$(git rev-parse HEAD)"
   exit 1
 }
 
-git push origin "HEAD:$branch"
+git_retry git push origin "HEAD:$branch"
 remote_head=""
 for attempt in {1..10}; do
   remote_head="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
@@ -82,5 +82,5 @@ done
 
 gh_retry gh pr edit "$n" -R "$AC_REPO" --remove-label claude-approved \
   --remove-label codex-approved --remove-label needs-work --add-label in-review >/dev/null
-git worktree remove --force "$wt"
+remove_worktree "$wt"
 echo "<runner/integration> PR #$n integrated main at $new_head; QA approvals invalidated"

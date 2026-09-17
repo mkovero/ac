@@ -130,16 +130,18 @@ token="$(lock_take "pipeline rig.sh PR #$pr @ $rev ($(uname -n) pid $$)")" || ex
 wt="$WT_BASE/rig-pr-$pr"
 cleanup() {
   cd "$ROOT" || true
-  [[ -d $wt ]] && git worktree remove --force "$wt" >/dev/null 2>&1
+  [[ -d $wt ]] && remove_worktree "$wt"
   lock_release "$token" || echo "could not release the rig lock — token $token" >&2
 }
 trap cleanup EXIT
 
 require_space "$wt" || exit 1
-git fetch -q origin "pull/$pr/head"
-[[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr moved while preparing" >&2; exit 1; }
-[[ -e $wt ]] && git worktree remove --force "$wt" >/dev/null 2>&1
+# A private ref: FETCH_HEAD is shared by every process using this checkout.
+git_retry git fetch -q origin "+pull/$pr/head:refs/ac/rig/pr-$pr"
+[[ $(git rev-parse "refs/ac/rig/pr-$pr") == "$head" ]] || { echo "PR #$pr moved while preparing" >&2; exit 1; }
+[[ -e $wt ]] && remove_worktree "$wt"
 git worktree add --detach "$wt" "$head" >/dev/null
+git update-ref -d "refs/ac/rig/pr-$pr"   # the worktree now holds $head
 link_support "$wt"
 
 # Build and ship here, not in the session: both are mechanical, and a rig

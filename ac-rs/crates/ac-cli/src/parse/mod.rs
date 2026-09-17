@@ -301,6 +301,10 @@ fn extract_show(args: &[String]) -> (Vec<String>, bool) {
     (cleaned, show)
 }
 
+/// Expand a channel spec (`3`, `0,2,5`, `0-3,7`). Every part must be a
+/// channel in 0–4294967295 or an ascending range of them; anything else —
+/// an overflowing number, an empty part, a reversed range that would
+/// expand to nothing — is an error, never a default (#431).
 pub fn parse_channels(token: &str) -> Result<Vec<u32>, String> {
     let mut channels = std::collections::BTreeSet::new();
     for part in token.split(',') {
@@ -308,6 +312,9 @@ pub fn parse_channels(token: &str) -> Result<Vec<u32>, String> {
         if let Some((lo, hi)) = part.split_once('-') {
             let lo: u32 = lo.parse().map_err(|_| format!("bad channel: {part:?}"))?;
             let hi: u32 = hi.parse().map_err(|_| format!("bad channel: {part:?}"))?;
+            if lo > hi {
+                return Err(format!("bad channel range: {part:?}"));
+            }
             for ch in lo..=hi {
                 channels.insert(ch);
             }
@@ -355,6 +362,9 @@ pub enum CommandKind {
         /// Room air temperature in °C for the delay readout's ms → m
         /// conversion (#243) — `Some(None)` clears it back to 343 m/s.
         temperature_c: Option<Option<f64>>,
+        /// Directory the daemon persists reports into (#472) — the value
+        /// exactly as typed; `Some(None)` clears it.
+        report_dir: Option<Option<String>>,
     },
     Stop,
     SweepLevel {
@@ -375,14 +385,15 @@ pub enum CommandKind {
     // straight into `PlotIr` below (see `parse/sweep.rs`), not a second
     // command variant to keep in sync.
     /// `ac plot ir` — Farina log-sweep impulse response (#282; moved from
-    /// `ac sweep ir`, which is now a deprecated alias). Gate parameters
-    /// are `Option` — unset means "use the daemon's default", not "send a
-    /// hardcoded override" (the daemon already defaults them; see
-    /// `ZMQ.md`'s `plot_ir` request).
+    /// `ac sweep ir`, which is now a deprecated alias). Every stimulus
+    /// parameter is `Option` — unset means "use the daemon's default", not
+    /// "send a hardcoded override". The defaults live once, in
+    /// `ac_core::measurement::sweep::defaults`, and come back in the ack
+    /// (#501; see `ZMQ.md`'s `plot_ir` request).
     PlotIr {
-        f1: f64,
-        f2: f64,
-        duration: f64,
+        f1: Option<f64>,
+        f2: Option<f64>,
+        duration: Option<f64>,
         level: LevelSpec,
         level_defaulted: bool,
         n_harmonics: Option<u32>,
@@ -450,12 +461,12 @@ pub enum CommandKind {
         level: LevelSpec,
         level_defaulted: bool,
         freq: f64,
-        channels: Option<String>,
+        channels: Option<Vec<u32>>,
     },
     GeneratePink {
         level: LevelSpec,
         level_defaulted: bool,
-        channels: Option<String>,
+        channels: Option<Vec<u32>>,
     },
     Calibrate {
         level: LevelSpec,
@@ -713,6 +724,7 @@ use monitor::{parse_monitor, parse_transfer};
 use plot::parse_plot;
 use server::parse_server;
 use setup::parse_setup;
+pub(crate) use setup::REPORT_DIR_TOKEN;
 use sweep::parse_sweep;
 use test::parse_test;
 
@@ -729,6 +741,7 @@ Commands:
   setup           [output <N>] [input <N>] [reference <N>] [refout <N>|none]
                   [device <N>] [range <freqStart freqStop>] [dburef <vrms>]
                   [temp <°C>|none] [dmm <host>] [gpio <serialDevice>|off]
+                  [report-dir <dir>|none]
                   [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
   calibrate       [output <N>] [input <N>] [level] [show]             level calibration
   generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
@@ -975,6 +988,20 @@ mod tests {
         assert_eq!(parse_channels("0,2,5").unwrap(), vec![0, 2, 5]);
         assert_eq!(parse_channels("0-3").unwrap(), vec![0, 1, 2, 3]);
         assert_eq!(parse_channels("0-3,7").unwrap(), vec![0, 1, 2, 3, 7]);
+        assert_eq!(parse_channels("4294967295").unwrap(), vec![u32::MAX]);
+    }
+
+    /// #431: each of these passes `is_channel_spec`, so a lenient parse
+    /// downstream used to turn it into channel 0 or the configured output.
+    #[test]
+    fn test_channels_parsing_refuses_malformed_specs() {
+        for spec in ["4294967296", "5-3", "1,,2", "3-"] {
+            assert!(is_channel_spec(spec), "{spec} must reach parse_channels");
+            assert!(parse_channels(spec).is_err(), "{spec} must be refused");
+        }
+        assert!(parse_channels("5-3")
+            .unwrap_err()
+            .contains("bad channel range"));
     }
 
     #[test]

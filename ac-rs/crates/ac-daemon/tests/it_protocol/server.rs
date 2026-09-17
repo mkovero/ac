@@ -141,6 +141,171 @@ fn data_port_conflict_does_not_misreport_self_as_unidentified_incumbent() {
     let _ = fs::remove_dir_all(&home2);
 }
 
+/// A directly invoked `ac-daemon` with the given bind flags (#433),
+/// answering on loopback with its own pid. Killed and its HOME removed on
+/// drop.
+struct DirectDaemon {
+    child: std::process::Child,
+    home: std::path::PathBuf,
+    ctrl: u16,
+    log: std::path::PathBuf,
+}
+
+impl DirectDaemon {
+    fn spawn(flags: &[&str]) -> Self {
+        for _ in 0..5 {
+            let home = alloc_home();
+            let (ctrl, data) = alloc_ports();
+            let log = home.join("daemon.log");
+            let out = fs::File::create(&log).unwrap();
+            let mut child = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+                .env("HOME", &home)
+                .arg("--fake-audio")
+                .args(flags)
+                .args(["--ctrl-port", &ctrl.to_string()])
+                .args(["--data-port", &data.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(out)
+                .spawn()
+                .expect("spawn ac-daemon");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                if let Some(r) = raw_call("127.0.0.1", ctrl, json!({"cmd":"status"}), 300) {
+                    if r["pid"].as_u64() == Some(u64::from(child.id())) {
+                        return Self {
+                            child,
+                            home,
+                            ctrl,
+                            log,
+                        };
+                    }
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&home);
+        }
+        panic!("direct ac-daemon {flags:?} never came up");
+    }
+}
+
+impl Drop for DirectDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.home);
+    }
+}
+
+/// One REQ/REP round-trip to `host:port`; `None` if nothing answers.
+fn raw_call(host: &str, port: u16, cmd: Value, timeout_ms: i32) -> Option<Value> {
+    let ctx = zmq::Context::new();
+    let s = ctx.socket(zmq::REQ).ok()?;
+    s.set_linger(0).ok();
+    s.set_rcvtimeo(timeout_ms).ok();
+    s.set_sndtimeo(timeout_ms).ok();
+    s.connect(&format!("tcp://{host}:{port}")).ok()?;
+    s.send(cmd.to_string().as_bytes(), 0).ok()?;
+    let bytes = s.recv_bytes(0).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// #433: a hand-run daemon with no bind flag listens on loopback only — a
+/// client on another address (127.0.0.2 stands in for the network) gets no
+/// answer — and says so on startup.
+#[test]
+fn direct_daemon_binds_loopback_by_default() {
+    let d = DirectDaemon::spawn(&[]);
+    let s = raw_call("127.0.0.1", d.ctrl, json!({"cmd":"status"}), 1_000).unwrap();
+    assert_eq!(s["listen_mode"], json!("local"));
+    assert!(
+        raw_call("127.0.0.2", d.ctrl, json!({"cmd":"status"}), 500).is_none(),
+        "default daemon must not answer a non-loopback client"
+    );
+    let log = fs::read_to_string(&d.log).unwrap();
+    assert!(
+        log.contains(&format!("listen     local  tcp://127.0.0.1:{}", d.ctrl)),
+        "{log}"
+    );
+    assert!(!log.contains("WARNING"), "{log}");
+}
+
+/// #433: `--public` is the explicit opt-in; it warns on startup and reports
+/// public mode.
+#[test]
+fn public_flag_binds_all_interfaces_with_a_warning() {
+    let d = DirectDaemon::spawn(&["--public"]);
+    let s = raw_call("127.0.0.2", d.ctrl, json!({"cmd":"status"}), 1_000)
+        .expect("--public daemon must answer a non-loopback client");
+    assert_eq!(s["listen_mode"], json!("public"));
+    let log = fs::read_to_string(&d.log).unwrap();
+    assert!(
+        log.contains("WARNING  public daemon exposure enabled"),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("control  tcp://*:{}", d.ctrl)),
+        "{log}"
+    );
+    assert!(log.contains("spool    confined to "), "{log}");
+}
+
+#[test]
+fn public_and_local_flags_conflict() {
+    let home = alloc_home();
+    let status = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+        .env("HOME", &home)
+        .args(["--fake-audio", "--public", "--local"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// #433 network-boundary regression: even with the daemon deliberately
+/// public, a remote client cannot steer spool reset at a directory of its
+/// choosing — the setup is refused and a session start leaves it intact.
+#[test]
+fn remote_client_cannot_select_a_deletion_target() {
+    let d = DirectDaemon::spawn(&["--public"]);
+    let victim = d.home.join("victim");
+    fs::create_dir_all(victim.join("nested")).unwrap();
+    fs::write(victim.join("nested").join("data"), b"keep").unwrap();
+
+    let r = raw_call(
+        "127.0.0.2",
+        d.ctrl,
+        json!({"cmd":"setup","update":{"snapshot_spool_dir": victim.display().to_string()}}),
+        2_000,
+    )
+    .unwrap();
+    assert_eq!(r["ok"], json!(false), "{r}");
+
+    let r = raw_call(
+        "127.0.0.2",
+        d.ctrl,
+        json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":1}),
+        2_000,
+    )
+    .unwrap();
+    assert_eq!(r["ok"], json!(true), "{r}");
+    thread::sleep(Duration::from_millis(500));
+    let _ = raw_call("127.0.0.2", d.ctrl, json!({"cmd":"stop"}), 2_000);
+
+    assert_eq!(
+        fs::read(victim.join("nested").join("data")).unwrap(),
+        b"keep"
+    );
+}
+
 #[test]
 fn server_enable_reports_public_mode() {
     // server_enable reply lands before the main loop rebinds the

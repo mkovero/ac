@@ -395,7 +395,11 @@ pub fn make_engine(fake_audio: bool, required: Option<&str>) -> Result<Box<dyn A
         bail!("audio backend unavailable — required {required}; measurement not started");
     }
     match required.as_str() {
-        "fake" => Ok(Box::new(fake::FakeEngine::new())),
+        "fake" => {
+            // Inert unless `AC_FAKE_ENGINE_OPEN_FAIL_CALLS` is set (#432).
+            fake::engine_open_hook()?;
+            Ok(Box::new(fake::FakeEngine::new()))
+        }
         "jack" => {
             #[cfg(feature = "jack-audio")]
             {

@@ -21,7 +21,7 @@ use crate::server::ServerState;
 use super::{
     busy_guard, capture_rms, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms,
     resolve_input, resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
-    CalReply,
+    wire, CalReply,
 };
 
 mod mic_curve;
@@ -38,22 +38,24 @@ pub(crate) use tau::{
     analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
     TauLegReading,
 };
+// #494: `plot_ir`'s reason tests build an edge refusal with its SNR observation.
+#[cfg(test)]
+pub(crate) use tau::EdgeSnr;
 
 /// Channel pair a calibration command addresses: explicit fields win, the
 /// session config supplies the rest. Spelled once because all four
 /// handlers key the same `cal.json` entry, and a pair that disagreed
 /// between two of them would write one channel's reading under another's
 /// key.
-fn channels_from(cmd: &Value, cfg: &Config) -> (u32, u32) {
-    let out_ch = cmd
-        .get("output_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch = cmd
-        .get("input_channel")
-        .and_then(Value::as_u64)
-        .unwrap_or(cfg.input_channel as u64) as u32;
-    (out_ch, in_ch)
+///
+/// Only an *absent* field takes the config value. A present field that is
+/// not an integer in 0–4294967295 is an error (#431) — defaulting it would
+/// key the entry under a channel the request did not name, and narrowing it
+/// would key it under a different one.
+fn channels_from(cmd: &Value, cfg: &Config) -> Result<(u32, u32), wire::WireError> {
+    let out_ch = wire::opt_u32(cmd, "output_channel")?.unwrap_or(cfg.output_channel);
+    let in_ch = wire::opt_u32(cmd, "input_channel")?.unwrap_or(cfg.input_channel);
+    Ok((out_ch, in_ch))
 }
 
 /// Resolve the capture port for `in_ch`, ignoring any sticky
@@ -143,7 +145,13 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
     cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
-    let (out_ch, in_ch) = channels_from(cmd, &cfg);
+    let (out_ch, in_ch) = match channels_from(cmd, &cfg) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return json!({"ok": false, "error":
+                e.refusal("calibration not started", &[("stimulus", "silent")])})
+        }
+    };
     // #459: an omitted `ref_dbfs` takes the one named default
     // (`DEFAULT_LEVEL_DBFS`), same as every other emitting command — not
     // "whatever the ceiling is" (#360's shape, which tied the default to a

@@ -72,15 +72,27 @@ impl Rig {
         self.home.join("reports")
     }
 
-    /// Run the real `ac` binary against this rig, returning its stdout.
-    fn run_ac(&self, args: &[&str]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_ac"))
+    /// Run the real `ac` binary against this rig in `cwd`, whatever its
+    /// exit status.
+    fn ac_output_in(&self, cwd: &Path, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_ac"))
             .env("HOME", &self.home)
             .env("AC_CTRL_PORT", self.ctrl.to_string())
             .env("AC_DATA_PORT", self.data.to_string())
+            .current_dir(cwd)
             .args(args)
             .output()
-            .expect("run ac");
+            .expect("run ac")
+    }
+
+    /// Run the real `ac` binary against this rig, returning its stdout.
+    fn run_ac(&self, args: &[&str]) -> String {
+        self.run_ac_in(&self.home, args)
+    }
+
+    /// [`Self::run_ac`] from a chosen working directory.
+    fn run_ac_in(&self, cwd: &Path, args: &[&str]) -> String {
+        let out = self.ac_output_in(cwd, args);
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(
             out.status.success(),
@@ -255,6 +267,30 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     );
 
     // ── the rest of the printed summary ───────────────────────────────
+    // #501 UX: a pass states the threshold and its basis too — the margin
+    // is the reading — and the stimulus rows carry the typed values.
+    for want in [
+        "  IR sweep\n",
+        "  band       200 Hz \u{2192} 8000 Hz  (typed)",
+        "  length        0.50 s  (typed)",
+        "  window     4096 samples  (typed)",
+        "  harmonics     3 orders  (typed)",
+        "  tail          0.10 s  (typed)",
+        "  captured      0.60 s  (0.50 s sweep + 0.10 s tail)",
+        "(required \u{2265} 18.0 dB)",
+        "                fixed threshold, scored for the default sweep only",
+    ] {
+        assert!(
+            stdout.contains(want),
+            "passing run missing {want:?}:\n{stdout}"
+        );
+    }
+    for gone in ["  IR: ", "-sample window, ", "threshold set from rig data"] {
+        assert!(
+            !stdout.contains(gone),
+            "pre-#501 line {gone:?} must not print:\n{stdout}"
+        );
+    }
     for want in ["peak", "pre-imp SNR", "gate", "f_low"] {
         assert!(
             stdout.contains(want),
@@ -377,6 +413,39 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     );
 }
 
+/// #501 through the real binary: `ac plot ir` with no arguments runs the
+/// daemon's default stimulus, prints it from the ack with `(default)` tags,
+/// and passes on a clean loopback — the first-use case that used to print
+/// `DECONVOLUTION FAILED`. The window row is in seconds before emission and
+/// becomes 19200 samples (0.4 s at the fake's 48 kHz) in the result `gate`.
+#[test]
+fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
+    let rig = Rig::start();
+    let stdout = rig.run_ac(&["plot", "ir"]);
+    for want in [
+        "  band       20 Hz \u{2192} 20000 Hz  (default)",
+        "  length        4.00 s  (default)",
+        "  window        0.40 s  (default)",
+        "  harmonics     5 orders  (default)",
+        "  tail          0.50 s  (default)",
+        "  level       -40.0 dBFS  (default)",
+        "  captured      4.50 s  (4.00 s sweep + 0.50 s tail)",
+        "(required \u{2265} 18.0 dB)",
+        "fixed threshold, scored for the default sweep only",
+        "rectangular window, 19200 samples (400.00 ms)",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
+    }
+    assert!(
+        !stdout.contains("DECONVOLUTION FAILED"),
+        "the default sweep must pass on a clean loopback:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  arrival       "),
+        "a passing default run prints its arrival:\n{stdout}"
+    );
+}
+
 /// #376: a capture whose pre-impulse SNR does not clear the threshold is
 /// reported as a failed deconvolution, not as a result with a number in
 /// it — a short (1024-sample) gate window leaves too few pre-impulse
@@ -394,9 +463,18 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         stdout.contains("DECONVOLUTION FAILED"),
         "expected a failed-deconvolution banner:\n{stdout}"
     );
+    for want in [
+        "check: sweep length, band, window (above)",
+        "check: drive level, input gain, distance, room noise",
+    ] {
+        assert!(
+            stdout.contains(want),
+            "banner must name what to check ({want:?}):\n{stdout}"
+        );
+    }
     assert!(
-        stdout.contains("check: drive level, mic gain, distance, room noise"),
-        "banner must name what to check:\n{stdout}"
+        !stdout.contains("mic gain"),
+        "a cable has no mic; the check list says input gain:\n{stdout}"
     );
     // The exact plausible-looking-wrong-number shape #376 exists to
     // close: neither line may print on a failed verdict.
@@ -415,6 +493,14 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
     assert!(
         stdout.contains("required \u{2265} 18.0 dB"),
         "pre-imp SNR line must state the threshold it failed against:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("fixed threshold, scored for the default sweep only"),
+        "the threshold's basis must print under it:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  window     1024 samples  (typed)"),
+        "the typed window the check list points at must be above it:\n{stdout}"
     );
 
     let dir = rig.report_dir();
@@ -463,5 +549,135 @@ fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
     assert!(
         !figures.is_empty() && figures.iter().all(|f| f == "0.05"),
         "only the typed distance may print as a metre figure, got {figures:?}:\n{stdout}"
+    );
+}
+
+/// The short `plot ir` run every #472 test uses.
+const QUICK_IR: &[&str] = &[
+    "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
+];
+
+/// The value printed on the `  report        ` line, if any.
+fn report_line(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("  report        "))
+}
+
+/// #472: `ac setup report-dir <dir>` (relative, resolved against the CLI's
+/// cwd for a local daemon) is shown in the read-out, and the next `plot ir`
+/// prints the report file the daemon wrote there.
+#[test]
+fn setup_report_dir_then_plot_ir_prints_the_written_report() {
+    let rig = Rig::start_with(serde_json::json!({ "report_dir": null }));
+    let dir = rig.home.join("archive");
+    fs::create_dir_all(&dir).unwrap();
+
+    let before = rig.run_ac(&["setup"]);
+    assert!(
+        before.contains("  Report dir:    (not set \u{2014} plot results are not saved)"),
+        "{before}"
+    );
+
+    let setup = rig.run_ac_in(&rig.home, &["setup", "report-dir", "archive"]);
+    assert!(
+        setup.contains(&format!("  Report dir:    {}\n", dir.display())),
+        "the read-out must show the resolved absolute path:\n{setup}"
+    );
+    assert!(!setup.contains("cannot write"), "{setup}");
+    assert!(
+        setup.contains(&format!(
+            "  saved            {}",
+            rig.home.join(".config/ac/config.json").display()
+        )),
+        "{setup}"
+    );
+
+    let stdout = rig.run_ac(QUICK_IR);
+    let report = report_line(&stdout).unwrap_or_else(|| panic!("no report line:\n{stdout}"));
+    assert!(
+        report.starts_with(dir.to_str().unwrap()) && report.ends_with("-plot_ir.json"),
+        "{report:?}"
+    );
+    assert!(Path::new(report).is_file(), "{report} not on disk");
+    assert!(!stdout.contains("not saved"), "{stdout}");
+    assert_eq!(files_with_extension(&dir, "json").len(), 1);
+    assert_eq!(files_with_extension(&dir, "csv").len(), 1);
+}
+
+/// #472: `ac setup report-dir none` clears a hand-seeded directory; `plot ir`
+/// then prints the not-saved line on stdout, naming the setup command, and
+/// writes nothing.
+#[test]
+fn setup_report_dir_none_then_plot_ir_prints_not_saved() {
+    let rig = Rig::start();
+    let setup = rig.run_ac(&["setup", "report-dir", "none"]);
+    assert!(
+        setup.contains("  Report dir:    (not set \u{2014} plot results are not saved)"),
+        "{setup}"
+    );
+
+    let stdout = rig.run_ac(QUICK_IR);
+    assert_eq!(
+        report_line(&stdout),
+        Some("not saved \u{2014} no report directory  (ac setup report-dir <dir>)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("  csv "), "{stdout}");
+    let dir = rig.report_dir();
+    assert!(files_with_extension(&dir, "json").is_empty());
+    assert!(files_with_extension(&dir, "csv").is_empty());
+}
+
+/// #472: a directory removed after it was configured is flagged by the
+/// read-out before a capture, and `plot ir` prints the write failure on the
+/// `report` line instead of a path to a file that does not exist.
+#[test]
+fn removed_report_dir_is_flagged_by_setup_and_by_plot_ir() {
+    let rig = Rig::start();
+    let dir = rig.report_dir();
+    fs::remove_dir(&dir).unwrap();
+
+    let setup = rig.run_ac(&["setup"]);
+    assert!(
+        setup.contains(&format!(
+            "  Report dir:    {}\n                 cannot write: No such file or directory (os error 2)",
+            dir.display()
+        )),
+        "{setup}"
+    );
+
+    let stdout = rig.run_ac(QUICK_IR);
+    let want = format!(
+        "  report        not saved \u{2014} write failed in {}\n                No such file or directory (os error 2)",
+        dir.display()
+    );
+    assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
+    assert!(!dir.exists(), "plot ir recreated the removed directory");
+}
+
+/// #472: a directory that does not exist is refused when typed, in the
+/// two-line form, and the old value stays in force.
+#[test]
+fn setup_refuses_a_missing_report_dir_and_keeps_the_old_one() {
+    let rig = Rig::start();
+    let typo = rig.home.join("reprots");
+    let out = rig.ac_output_in(&rig.home, &["setup", "report-dir", typo.to_str().unwrap()]);
+    assert!(!out.status.success(), "a missing directory must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let want = format!(
+        "  error: report-dir {}\n         No such file or directory (os error 2) \u{2014} setting not changed\n",
+        typo.display()
+    );
+    assert!(stderr.contains(&want), "missing {want:?}:\n{stderr}");
+    assert!(!typo.exists(), "a refused directory must not be created");
+
+    let setup = rig.run_ac(&["setup"]);
+    assert!(
+        setup.contains(&format!(
+            "  Report dir:    {}\n",
+            rig.report_dir().display()
+        )),
+        "the previous directory must still be in force:\n{setup}"
     );
 }

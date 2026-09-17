@@ -14,7 +14,9 @@
 //! (deliverable 2). As a crash-safety fallback (a killed daemon skips
 //! its own cleanup), the spool directory is also wiped at the *start* of
 //! every new `transfer_stream` session, so a stale file from a prior
-//! crashed session never outlives the next session's start.
+//! crashed session never outlives the next session's start. The spool is
+//! always a daemon-owned leaf beneath `~/.local/state/ac/snapshots` (#433,
+//! `ac_core::config::reset_snapshot_spool`); nothing else is ever emptied.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -69,6 +71,10 @@ impl SnapshotRingState {
         unique_cals: Vec<Option<Calibration>>,
     ) -> Self {
         let n = unique_chans.len();
+        // One entry per pair from the start: the worker pushes samples
+        // before it first syncs delays, and a `snapshot` landing between
+        // the two must still write one delay per pair (#435).
+        let delay_samples = vec![None; pairs.len()];
         Self {
             sr,
             unique_chans,
@@ -77,7 +83,7 @@ impl SnapshotRingState {
                 .collect(),
             cap_samples,
             pairs,
-            delay_samples: Vec::new(),
+            delay_samples,
             weighting_tag,
             integration_tag,
             unique_cals,
@@ -122,11 +128,13 @@ impl SnapshotRingState {
         let n_frames = channels.first().map(Vec::len).unwrap_or(0);
         let duration_s = n_frames as f64 / self.sr as f64;
 
-        // Role naming: first occurrence of a channel as a pair's meas
-        // leg is "meas_<pair index>"; a channel that's only ever a ref
-        // leg is "ref". A channel used as meas in one pair and ref in
-        // another (unusual but not forbidden) keeps its meas name — the
-        // meas role is the more specific one to preserve.
+        // Role naming: walking pairs in order, a channel takes the role of
+        // its first occurrence — "meas_<pair index>" if that occurrence is
+        // a meas leg, "ref" if it is a ref leg — and later occurrences do
+        // not rename it. A channel used as meas in one pair and ref in
+        // another (unusual but not forbidden) therefore keeps whichever
+        // role comes first: pairs [[0,1],[1,2]] name channel 1 "ref".
+        // Roles are labels, not unique keys; `input_channel` is the key.
         let mut roles = vec![None; self.unique_chans.len()];
         for (pair_idx, &(meas, refch)) in self.pairs.iter().enumerate() {
             if let Some(pos) = self.unique_chans.iter().position(|&c| c == meas) {
@@ -202,13 +210,19 @@ pub struct SpoolEntry {
     pub channels: Vec<String>,
 }
 
-fn spool_dir(state: &ServerState) -> PathBuf {
+/// The configured spool leaf, confined and prepared (#433): created with
+/// its ownership marker if absent, refused if it is not daemon-owned.
+fn spool_dir(state: &ServerState) -> Result<PathBuf, ac_core::config::SpoolRejection> {
     let cfg = state.cfg.lock().unwrap().clone();
-    ac_core::config::snapshot_spool_dir(&cfg)
+    let leaf = ac_core::config::snapshot_spool_dir(&cfg)?;
+    ac_core::config::prepare_snapshot_spool(&ac_core::config::snapshot_spool_root(), &leaf)?;
+    Ok(leaf)
 }
 
-/// Wipe and recreate the spool directory. Called at the start of every
-/// `transfer_stream` session (crash-safety fallback — see module doc).
+/// Empty the spool leaf. Called at the start of every `transfer_stream`
+/// session (crash-safety fallback — see module doc). Only a daemon-owned
+/// leaf beneath the spool root is ever emptied; ownership is re-checked
+/// here, immediately before removal, and a refusal removes nothing (#433).
 /// Takes the resolved directory and spool map directly (not
 /// `&ServerState`) so it's callable from a `'static` worker closure,
 /// which only ever holds cloned `Arc`s / owned values, never a
@@ -217,16 +231,19 @@ fn spool_dir(state: &ServerState) -> PathBuf {
 pub fn reset_spool_dir(
     dir: &std::path::Path,
     spool: &Mutex<std::collections::HashMap<String, SpoolEntry>>,
-) {
-    let _ = fs::remove_dir_all(dir);
-    let _ = fs::create_dir_all(dir);
+) -> Result<(), ac_core::config::SpoolRejection> {
     spool.lock().unwrap().clear();
+    ac_core::config::reset_snapshot_spool(&ac_core::config::snapshot_spool_root(), dir)
 }
 
 /// Delete every spooled file from this session. Called when the
-/// `transfer_stream` worker stops.
+/// `transfer_stream` worker stops — including when it panicked, so a
+/// poisoned lock is accepted rather than unwrapped (a panic here, during
+/// unwinding, would abort the daemon; #432).
 pub fn clear_spool(spool: &Mutex<std::collections::HashMap<String, SpoolEntry>>) {
-    let mut spool = spool.lock().unwrap();
+    let mut spool = spool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for entry in spool.values() {
         let _ = fs::remove_file(&entry.path);
     }
@@ -255,10 +272,10 @@ pub fn snapshot(state: &ServerState, _cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": format!("snapshot: {e}")}),
     };
 
-    let dir = spool_dir(state);
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return json!({"ok": false, "error": format!("snapshot: spool dir: {e}")});
-    }
+    let dir = match spool_dir(state) {
+        Ok(dir) => dir,
+        Err(r) => return json!({"ok": false, "error": r.message()}),
+    };
     let id = sha256.clone();
     let path = dir.join(format!("{id}.acsnap"));
     if let Err(e) = fs::write(&path, &bytes) {
@@ -424,6 +441,30 @@ mod tests {
         }
         assert_eq!(ring.channels[0].len(), 10, "ring must cap at 10 samples");
         assert_eq!(ring.channels[1].len(), 10);
+    }
+
+    /// #435: the worker pushes samples before it first syncs delays. A
+    /// `snapshot` taken in that gap must still carry one delay per pair,
+    /// or `write_acsnap` refuses the metadata.
+    #[test]
+    fn snapshot_before_first_delay_sync_has_one_delay_per_pair() {
+        let mut ring = SnapshotRingState::new(
+            48_000,
+            vec![0, 1, 2],
+            1_000,
+            vec![(0, 1), (0, 2)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None, None],
+        );
+        ring.push_tick(&[vec![0.1; 64], vec![0.2; 64], vec![0.3; 64]]);
+        let (meta, channels) = ring.snapshot_meta_and_channels("test");
+        assert_eq!(
+            meta.session.delay_samples.len(),
+            meta.session.pairs.len(),
+            "delay_samples must have one entry per pair before the first sync"
+        );
+        build_acsnap(&meta, &channels).expect("first-tick snapshot must write");
     }
 
     /// AC #5 (ring correctness, wraparound): push distinguishable,

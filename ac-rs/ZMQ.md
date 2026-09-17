@@ -12,6 +12,11 @@ between any `ac` server (Python or Rust) and any `ac` client.
 | CTRL   | `tcp://127.0.0.1:5556` | `tcp://*:5556` | REP | client → server (request/reply) |
 | DATA   | `tcp://127.0.0.1:5557` | `tcp://*:5557` | PUB | server → client (push only) |
 
+A daemon binds the local addresses unless started with `--public` (or
+switched with `server_enable`); `--local` is the explicit form of the
+default. Public startup prints a `WARNING  public daemon exposure enabled`
+block naming both endpoints and the spool root on stderr.
+
 **CTRL** is a strict REQ/REP pair: the client sends one JSON object, waits
 for one JSON object reply. No pipelining.
 
@@ -52,6 +57,11 @@ but cannot be read or parsed. No worker starts and no measurement frames are
 published. The error string names the store and cause and confirms that the
 existing file was preserved; transfer refusals also state that the failure
 applies to all requested pairs.
+
+`setup` applies the same rule to `config.json`: an update is acknowledged
+only after it is on disk, the file is replaced atomically, and an existing
+file that cannot be read or parsed is refused and left as it was (see
+[`setup`](#setup)).
 
 ---
 
@@ -316,34 +326,57 @@ subscribers that expect a linear spectrum should convert / branch.
 
 ### `visualize/scope` frame
 
-Emitted by `monitor_spectrum` once per channel per tick, **alongside**
-the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
-(not instead of it). Carries raw f32 audio samples — no calibration,
-no mic-curve, just the unmodified per-tick capture truncated to the
-newest 2048 samples. Intended for a client-side goniometer / trajectory
-view (`docs/superseded/unified.md` Phase 0b, resolves §9 OQ7); no current client
-subscribes to it since the ac-ui detach.
+Emitted by `monitor_spectrum` once per channel capture, **alongside**
+the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same
+capture (not instead of it). Carries raw f32 audio samples — no
+calibration, no mic-curve, just the unmodified per-channel capture
+truncated to the newest 2048 samples. Originally intended for a
+client-side goniometer / trajectory view (`docs/superseded/unified.md`
+Phase 0b, §9 OQ7); no current client subscribes to it since the ac-ui
+detach, and the current frames cannot feed a paired L/R view (see
+below).
 
 ```json
 {
-  "type":       "visualize/scope",
-  "cmd":        "monitor_spectrum",
-  "channel":    <int>,            // input channel index
-  "n_channels": <int>,            // total channels being monitored
-  "sr":         <int>,            // sample rate (Hz)
-  "frame_idx":  <int>,            // monotonic per-tick counter (see below)
-  "samples":    [<float>, ...],   // raw f32 in [-1, 1], length ≤ 2048
-  "timestamp":  <int>,            // tick-wide UNIX-epoch nanoseconds
-  "xruns":      <int>
+  "type":         "visualize/scope",
+  "cmd":          "monitor_spectrum",
+  "channel":      <int>,          // input channel index
+  "n_channels":   <int>,          // channels in the monitor request (context only)
+  "sr":           <int>,          // sample rate (Hz)
+  "frame_idx":    <int>,          // unique per emitted scope frame, increasing
+  "capture_mode": "sequential",   // always present; see below
+  "samples":      [<float>, ...], // raw f32 in [-1, 1], length ≤ 2048
+  "timestamp":    <int>,          // UNIX-epoch ns at this channel's capture completion
+  "xruns":        <int>,
+  "backend":      <string>
 }
 ```
 
-**`frame_idx` synchronization.** The counter increments exactly once
-per worker tick, so every channel's frame from the same capture tick
-shares the same `frame_idx`. Subscribers that need a synchronized L/R
-pair (Goniometer / PhaseScope3D) match frames by `frame_idx` rather
-than relying on receive-order or `timestamp` (which is also tick-wide
-but coarser).
+**Sequential capture — frames are not pairable (#434).** A
+multi-channel monitor captures its channels one after another:
+reconnect to the channel's input, flush, capture a block, then move to
+the next channel. Two channels' frames therefore never cover the same
+acquisition interval. The wire says so:
+
+- `frame_idx` increments once per emitted scope frame, across all
+  channels, so no two frames share a value. It orders frames; it is
+  not a pair key.
+- `timestamp` is the wall-clock time this channel's capture completed,
+  not a tick-wide value; consecutive channels' timestamps differ by at
+  least that channel's capture time.
+- `capture_mode` is `"sequential"` on every frame. `n_channels` is the
+  size of the monitor request, not a claim that the channels were
+  captured together.
+
+**Breaking semantic change.** Before #434, `frame_idx` and `timestamp`
+were shared by every channel of a worker tick and this section told
+subscribers to pair L/R frames by equal `frame_idx`. That pairing was
+never valid — the samples were captured sequentially — and equal
+`frame_idx` values no longer occur. A consumer that draws a paired
+trajectory (Goniometer, PhaseScope3D, any Lissajous of two channels)
+must check `capture_mode` and refuse any frame whose mode is not a
+simultaneous capture; no current mode is. A simultaneous
+multi-channel scope needs its own capture path and contract.
 
 **No calibration.** The trajectory consumers are dimensionless —
 displaying a Lissajous figure of `(L, R)` doesn't need voltage or SPL
@@ -865,10 +898,95 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
     "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
-    "snapshot_spool_dir":"<path>" | null  // optional — see `snapshot`
+    "snapshot_spool_dir":"<leaf>" | "<absolute path>" | null, // optional — see below
+    "report_dir":        "<absolute path>" | null  // optional — null = do not persist
   }
 }
 ```
+
+The four channel fields follow **Error handling → Wire values**: all four
+are checked before anything is applied, so a malformed one leaves the whole
+config unchanged (`setup rejected — …`, `config  unchanged`).
+
+`snapshot_spool_dir` is confined to the daemon's spool root,
+`~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
+(`"bench"`) or an absolute path whose parent is exactly that root; it is
+stored as the absolute leaf. It is refused — before any other key in the
+update is applied, and without touching the filesystem — when it is the
+root itself, a parent of it, anywhere else, nested more than one level, has
+`.`/`..` components, is a symbolic link, or is an existing directory the
+daemon did not create (no `.ac-spool-owner` marker). `null` selects the
+`default` leaf.
+
+```json
+{ "ok": false,
+  "error": "snapshot spool path rejected\n         requested  /home/rig/measurements\n         reason     outside the spool root\n         allowed    child of /home/rig/.local/state/ac/snapshots\n         data       no directory removed",
+  "refused": { "key": "snapshot_spool_dir", "path": "/home/rig/measurements",
+               "reason": "outside the spool root",
+               "allowed_root": "/home/rig/.local/state/ac/snapshots" } }
+```
+
+A config file holding a spool path that fails these checks (e.g. one
+written before confinement) makes `transfer_stream` and `snapshot` refuse
+with the same `error` text; the path is left untouched.
+
+`report_dir` is validated **before any other key in the update is applied**:
+it must be an absolute path on the daemon host, name an existing directory,
+and accept a probe file (`<dir>/.ac-write-probe-<pid>-<nanos>`, created with
+`create_new` and removed at once). The directory is never created, and the
+path is stored as given (no canonicalisation). On failure nothing in the
+update is changed or saved:
+
+```json
+{ "ok": false,
+  "error": "report-dir /home/mui/ac-reprots: No such file or directory (os error 2) — setting not changed",
+  "refused": { "key": "report_dir", "path": "/home/mui/ac-reprots",
+               "reason": "No such file or directory (os error 2)" } }
+```
+
+`error` stays one line for generic clients; `refused` carries the parts
+separately. `reason` is either `must be an absolute path on the daemon host`
+(relative, `~`, or empty) or the OS error text as-is (`No such file or
+directory (os error 2)`, `Not a directory (os error 20)`, `Permission denied
+(os error 13)`, …). `ac setup report-dir` resolves `~` and relative paths
+against the client's own `$HOME` and cwd only when the daemon is local
+(`server_host` unset); to a remote daemon the value is sent as typed.
+
+**Read vs write.** An empty `update` object (`{}`), or an `update` that is
+not an object, is a read: it
+writes nothing, so it cannot fail on storage and cannot rewrite a config file
+the daemon found unreadable. `ac generate` and the GPIO handler send this form.
+A non-empty `update` is a write. (A request with no `update` key at all is
+refused with `missing 'update' field`.)
+
+A write is applied to a copy of the in-memory config, saved, and only then
+made current. The save merges into the file on disk, writes a sibling
+`config.json.tmp.<pid>`, `fsync`s it and renames it over `config.json`
+(best-effort `fsync` of the directory afterwards), so a reader never sees a
+partial file. If the existing `config.json` cannot be read or parsed, the save
+refuses before writing anything — it never falls back to defaults plus the
+update.
+
+When the save fails, the reply is a refusal with no `config` echo; the
+in-memory config and the file both stay at their last-good state. `error` is a
+multi-line block whose continuation lines are indented to sit under
+`  error: `. The write side (directory creation, temp write/sync, rename):
+
+```json
+{ "ok": false,
+  "error": "setup not saved — configuration unchanged\n         file   /home/mui/.config/ac/config.json\n         cause  <cause chain>" }
+```
+
+An existing file that cannot be read or parsed:
+
+```json
+{ "ok": false,
+  "error": "setup not saved — existing configuration is unreadable\n         file   /home/mui/.config/ac/config.json\n         cause  <cause chain>\n         data   existing file preserved" }
+```
+
+`cause` is the full error chain (e.g. `writing …/config.json.tmp.123:
+Permission denied (os error 13)`, `parsing …/config.json: EOF while parsing
+…`). An invalid `backend` value is still rejected before any save.
 
 `backend` is a requirement, not a preference. `null` selects the platform's
 real default and never falls back to fake. `fake` is the persistent explicit
@@ -894,12 +1012,24 @@ vice versa.
 {
   "ok":     true,
   "max_dbfs": 0.0,
-  "config": { /* full config dict, all keys */ }
+  "config": { /* full config dict, all keys */ },
+  "saved":  "/home/mui/.config/ac/config.json",  // only after a successful write
+  "report_dir_status": { "writable": true }   // only when config.report_dir is set
 }
 ```
 
+After a write, `config` is the merged config as now stored on disk and `saved`
+is the path it was written to. A read never carries `saved`.
+
 `max_dbfs` is the fixed build maximum, not a config setting. A retired
 `drive_max_dbfs` key remains inside `config` until the operator removes it.
+
+`report_dir_status` sits beside `config` for the same reason: it is not a
+config value. It is present only when `config.report_dir` is set, and is
+recomputed with the same write probe on every `setup` call, read-only calls
+included — `{"writable": true}` or `{"writable": false, "error": "<os error>"}`
+— so a directory removed or unmounted after it was set shows before a capture
+rather than after one.
 
 ---
 
@@ -1146,15 +1276,25 @@ a configured reference.
   "cmd":          "plot_ir",
   "f1_hz":        <float>,   // default 20
   "f2_hz":        <float>,   // default 20000 (must be < sr/2)
-  "duration":     <float>,   // seconds, default 1.0
+  "duration":     <float>,   // seconds, default 4.0
   "level_dbfs":   <float>,   // default -40
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
-  "window_len":   <int>,     // requested IR gate length in samples, default 4096
+  "window_len":   <int>,     // requested IR gate length in samples;
+                             // default round(0.4 s × engine sample rate)
   "distance_m":   <float>    // optional, metres source to receiver; feeds only the
                              // onset search's causal bound (#460)
 }
 ```
+
+The defaults (except `level_dbfs`) are owned by
+`ac_core::measurement::sweep::defaults` (#501); the daemon applies them and
+the CLI keeps no copy. The sweep length and window changed in #501 (from 1.0 s
+and 4096 samples) because the pre-impulse SNR gate refused a clean loopback at
+the old values. An omitted `window_len` is converted from 0.4 s once the engine
+reports its rate — 19200 samples at 48 kHz, 38400 at 96 kHz — so the default
+gate spans the same time at every rate. A typed `window_len` is still a sample
+count.
 
 Request budgets are enforced before port resolution or worker spawn:
 
@@ -1181,6 +1321,10 @@ also stated in the report `notes`.
 **Reply**
 ```json
 { "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": 0.0,
+  "f1_hz": <float>, "f2_hz": <float>, "duration": <float>,  // accepted, defaults applied
+  "n_harmonics": <int>, "tail_s": <float>,                  // accepted, defaults applied
+  "window_len": <int>,          // only when the request carried window_len
+  "window_default_s": 0.4,      // only when the request did not carry window_len
   "ref_in_port": "<reference-capture-port>",    // only when a reference is configured
   "ref_out_port": "<reference-playback-port>",  // only when a reference is configured
   "warnings": ["<#225 migration warning>"] }    // only when it applies
@@ -1188,6 +1332,15 @@ also stated in the report `notes`.
 
 `level_dbfs` in the reply equals the accepted request, and the report's
 `stimulus.level_dbfs` field is the same value.
+
+The stimulus echo (#501) is additive: `f1_hz`, `f2_hz`, `duration`,
+`n_harmonics` and `tail_s` carry the values the sweep will run with, defaults
+applied. A defaulted window cannot be echoed in samples, because the sample
+rate is unknown until the engine starts; the reply carries
+`window_default_s` instead, and the converted sample count arrives as
+`window_len_requested` on the `measurement/impulse_response` frame. Replies
+from daemons before #501 carry none of these fields; `ac-cli` prints
+`(not reported by this daemon)` for each.
 
 **Reference leg (#460).** `plot_ir` takes a same-capture reference from the
 config keys `transfer_stream` and `test_dut` already use: `reference_channel` /
@@ -1231,14 +1384,19 @@ has no reference configured.
 // window_len_used is indexed by order-1: [0] is the linear IR (order 1),
 // [i] is harmonic order i+1. Each entry is the gate length of the
 // corresponding IR in `data`, which may be below window_len_requested.
+// window_len_requested is the typed window_len, or the 0.4 s default
+// converted at the engine rate (here the defaults at 96 kHz).
 { "cmd": "plot_ir", "data": { "kind": "impulse_response", ... },
-  "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
+  "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
 { "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 10, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
-{ "cmd": "plot_ir" }
+{ "cmd": "plot_ir", "backend": "jack",
+  "report_files": { "dir": "/home/mui/ac-reports",
+                    "json": { "path": "/home/mui/ac-reports/2026-09-17T09-41-12Z-plot_ir.json" },
+                    "csv":  { "error": "No space left on device (os error 28)" } } }
 ```
 
 `notes` carries independent statements, **one per line**: the ISO 18233
@@ -1327,7 +1485,7 @@ FireWire SYT interval on every device enumeration (#461). Tagged union on
   "method": "farina_same_capture_reference_v1",
   "output_port": "system:playback_2", "input_port": "system:capture_2" }
 
-{ "state": "unavailable", "reason": "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain" }
+{ "state": "unavailable", "reason": "peak SNR 9.30 dB, need 24.00 dB; check: reference loopback cable, ref input gain" }
 ```
 
 `pre_impulse_snr_db` is omitted when the pre-impulse region measured true
@@ -1336,7 +1494,11 @@ silence (an infinite SNR, which JSON cannot carry). `pre_impulse_snr_floor_db`
 reading stays re-judgeable once the threshold is no longer a constant; it is
 absent on v7 reports and on a reading that fell back to the fixed 24 dB gate
 because no floor could be established. The `unavailable` reason keeps its exact
-shape — only the `need` figure now varies per run. `reason` names what was
+shape — only the `need` figure now varies per run. #494: SNR figures in it
+carry two decimals, and a reference peak that sits at the window edge *and*
+fails the SNR gate names both: `peak at reference window edge, SNR 21.34 dB,
+need 24.00 dB; check: reference loopback routing, capture tail, reference
+loopback cable, ref input gain`. `reason` names what was
 observed and, after `; check: `, where to look — never a cause. `plot_ir`
 always records the field, so `unavailable` with `no reference configured (ac
 setup reference)` is what no reference looks like; reports written before v7
@@ -1350,7 +1512,15 @@ supplied. It is an **input** to the causal bound, converted to seconds inside
 When `cfg.report_dir` is configured the daemon also writes the pair
 `<ISO8601>-plot_ir.json` and `<ISO8601>-plot_ir.csv` there (colons
 replaced with `-`), so the result survives the run without the client
-having to save anything.
+having to save anything. The directory is **never created**: one removed
+after `setup` accepted it makes both writes fail with the OS error.
+
+The `done` frame reports what was actually written, in `report_files` (#472):
+`{"dir": null}` when no report directory is configured; otherwise `dir` plus
+one entry each for `json` and `csv`, either `{"path": "<file>"}` or
+`{"error": "<err>"}`. A client prints these rather than building paths from
+its own config, which may not be the daemon's. `plot`, `plot_level` and the
+other `done` frames do not carry the field.
 
 ---
 
@@ -1503,6 +1673,10 @@ across `reconnect_input` can't be preserved).
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused. Any present `fft_n`
+that is not an integer in 0–4294967295 — `null` and strings included — gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
+missing `freq_hz` or `level_dbfs` refuses the whole request.
+
 Both `interval` and `fft_n` are live-reconfigurable — see
 `set_monitor_params` below.
 
@@ -1620,6 +1794,10 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+`channels` absent, `null` or `[]` plays on the configured output; a list
+with any invalid element is refused and nothing is emitted.
+
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
 
@@ -1652,6 +1830,8 @@ Plays continuous pink noise until stopped.
   "channels":   [<int>, ...]   // optional
 }
 ```
+
+`channels` is read exactly as in `generate`. See **Error handling → Wire values** for how a malformed field is refused.
 
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
@@ -1749,9 +1929,10 @@ reading either.
   "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
-  "tau_state":            "measured" | "not_measured_low_snr" | "error"
-                           | "disagree_period_shift" | "disagree_other" | "refused_xrun"
-                           | "disagree_declared_latency" | "refused_enumeration_changed",
+  "tau_state":            "measured" | "not_measured_low_snr" | "not_measured_window_edge"
+                           | "error" | "disagree_period_shift" | "disagree_other"
+                           | "refused_xrun" | "disagree_declared_latency"
+                           | "refused_enumeration_changed",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
@@ -1767,8 +1948,14 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", "disagree_other", or "disagree_declared_latency"
-  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_* / refused_enumeration_changed, absent on error and refused_xrun
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_* / refused_enumeration_changed, and on not_measured_window_edge when the refusing lifecycle had no xrun (#494: that lifecycle's own value); absent on error and refused_xrun
   "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
+  "tau_snr_below_threshold": <bool>,       // #494: whether the refused peak also failed the SNR gate, computed by the daemon — present only on not_measured_window_edge, and only together with the SNR pair
+  "tau_refused_reading":    <int>,         // #494: which lifecycle refused, 1 or 2 — present on not_measured_low_snr and not_measured_window_edge
+  "tau_peak_offset_samples": <int>,        // #494: the refused peak's signed offset from the window centre (peak index − half) — present only on not_measured_window_edge
+  "tau_window_first_offset_samples": <int>, // #494: the window's first sample as an offset (−half) — present only on not_measured_window_edge
+  "tau_window_last_offset_samples": <int>, // #494: the window's last sample as an offset (half − 1; the window is asymmetric by one sample) — present only on not_measured_window_edge
+  "tau_edge_margin_samples": <int>,        // #494: the edge margin the peak fell inside — present only on not_measured_window_edge
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
   "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
   "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
@@ -1815,13 +2002,14 @@ still-unity-keyed decision.
 | `tau_state` | meaning |
 |-------------|---------|
 | `measured` | two independent readings agreed to the whole sample and their average was appended to `tau_history` |
-| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR — not distinguishable from noise, so nothing was measured |
-| `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR, and clear of the window's edge margin. Nothing is stored. |
+| `not_measured_window_edge` | a lifecycle's deconvolved peak sat within `tau_edge_margin_samples` of either end of its analysis window (#494), so its position cannot be told apart from an arrival outside the window. Judged before the SNR gate on the same peak: a peak failing both is reported here with `tau_snr_below_threshold: true`, never as `not_measured_low_snr`. That combined case cannot say whether the peak is the skirt of an out-of-window arrival or a noise argmax that landed in the margin, and asserts neither. Carries no `tau_error`. Nothing is stored. |
+| `error` | a lifecycle's own measurement failed for a reason other than a gate refusal (`tau_error` names why, including which reading); since #494 an edge refusal is `not_measured_window_edge`, not `error`. The voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
 | `disagree_declared_latency` | the two lifecycles' `tau_reading{1,2}_declared_frames` differed (#363) — the graph's own account of the path moved between two readings of an unchanged graph, so the readings agreeing proves nothing. Compared as exact integer frames, no tolerance: these are counts the graph asserts, not measurements. Checked *after* `refused_xrun` and *before* the readings are compared. Nothing is stored. **This does not detect the failure #363 documents** — a shift the graph never declares stays invisible, and no reachable rig currently reproduces it; what this state catches is the subset that announces itself. |
 | `refused_enumeration_changed` | the device-enumeration epoch (#461, see `get_calibration`) sampled before reading 1's capture differed from the one sampled after reading 2's — a device boundary fell inside the run, so the two readings need not describe one epoch and their agreement proves nothing. Checked directly *after* `refused_xrun` and *before* `disagree_declared_latency` and the comparison. Carries the readings, xrun counts, declared frames, separation and the SNR pair; no `tau_error`. Nothing is stored. The two samples are compared as `get_calibration`'s check compares them — boot id, then the device-node map; the reported boot time alone never separates them. A daemon that survived the run cannot have seen a host reboot, so between two observed samples this only ever reflects a device-node change; it also fires when the probe was observable for one sample and not the other. |
-| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. An xrun-crossed lifecycle still runs the edge check, so it can end the run as `not_measured_window_edge` (without the SNR pair) before the second lifecycle runs; that state does not mention the xrun. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
@@ -1835,7 +2023,11 @@ never fire on that backend — any disagreement there is `disagree_other`).
 
 `tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
 every state where at least one lifecycle reached deconvolution
-(`measured`, `not_measured_low_snr`, `disagree_*`, `refused_enumeration_changed`), absent on `error`
+(`measured`, `not_measured_low_snr`, `disagree_*`,
+`refused_enumeration_changed`), and on
+`not_measured_window_edge` when the refusing lifecycle had no xrun (#494;
+there they are that lifecycle's own values, not the worse of two, and
+`tau_snr_below_threshold` travels with them), absent on `error`
 (which can fail before a peak was ever located), and **also absent on
 `refused_xrun`** (#369): an xrun-crossed lifecycle's SNR gate never runs
 (see the `refused_xrun` row above), so there is no SNR figure to report —
@@ -1847,7 +2039,10 @@ carried no xrun, would have produced `not_measured_low_snr` instead, and
 a lifecycle that did carry one would have diverted the whole run to
 `refused_xrun` before either `measured` or `disagree_*` could be reached
 — so this is a diagnostic figure alongside the result rather than a
-second gate. `tau_snr_threshold_db` is a derived constant (see
+second gate. On `not_measured_window_edge` the pair *is* a gate result the
+state reports beside the edge observation, which is why the daemon also
+sends the comparison as `tau_snr_below_threshold` rather than leaving a
+client to redo it. `tau_snr_threshold_db` is a derived constant (see
 `ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
 comment for its provenance), not measured on this exact sweep.
 
@@ -1976,6 +2171,8 @@ fields on the same entry stay untouched.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+
 **Request — clear**
 ```json
 {
@@ -1994,7 +2191,11 @@ fields on the same entry stay untouched.
 Validation: `freqs_hz` must be strictly increasing and finite, length
 in `[16, 4096]`; `gain_db` must match length and be finite. Failures
 return `{ "ok": false, "error": "<reason>" }` and leave the prior
-curve (if any) untouched.
+curve (if any) untouched. The arrays are read positionally: any invalid
+element (non-number, or not finite as a 32-bit float) rejects the whole
+upload, naming `freqs_hz[i]` / `gain_db[i]` and the partner value at the
+same index — elements are never dropped. A length mismatch names both
+lengths.
 
 ---
 
@@ -2051,7 +2252,9 @@ Takes 3 averaged AC Vrms readings from the configured Keysight 34461A DMM.
 ### `server_enable`
 
 Rebinds both sockets to `tcp://*` (all interfaces) for remote access.
-The reply is sent before the rebind happens.
+The reply is sent before the rebind happens. After a successful rebind the
+daemon prints the same `WARNING  public daemon exposure enabled` block as
+`--public` startup on stderr.
 
 **Request**
 ```json
@@ -2180,6 +2383,10 @@ in the list once per iteration and emits one `transfer_stream` DATA frame
 per pair (each tagged with its own `meas_channel` / `ref_channel`). The
 legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
 `pairs` must be non-empty and every channel index must be within range.
+See **Error handling → Wire values** for how a malformed field is refused:
+a malformed `pairs[i][j]`, `meas_channel` or `ref_channel` is refused as
+`transfer_stream not started`, and a non-array `pairs` is refused rather than
+falling back to the legacy form.
 `weighting`/`integration` apply to every pair in the session; invalid values
 reply `{"ok": false, "error": "..."}` before the worker spawns.
 
@@ -2863,9 +3070,15 @@ session is deleted when that session ends. As a crash-safety fallback (a
 killed daemon skips its own cleanup), the spool directory is also wiped
 at the *start* of every new `transfer_stream` session, so a stale file
 from a prior crashed session never outlives the next session's start.
-Spool location: `~/.config/ac/snapshots/` by default, overridable via
-`setup`'s `snapshot_spool_dir` (or `snapshot_ring_s` for the ring's
-retention window, default 30 s) — never exposed in any CTRL reply.
+Spool location: `~/.local/state/ac/snapshots/default/` by default; `setup`'s
+`snapshot_spool_dir` may select another daemon-owned child of
+`~/.local/state/ac/snapshots` only (see `setup`; `snapshot_ring_s` sets the
+ring's retention window, default 30 s). The wipe empties only a leaf the
+daemon created (it carries a `.ac-spool-owner` marker, which the wipe
+keeps), re-checking ownership immediately before removing anything, and
+never follows symbolic links. If the check fails the session does not
+start: `transfer_stream` publishes an `error` frame with the rejection text.
+The spool path is never exposed in a `snapshot` reply.
 
 ---
 
@@ -3143,6 +3356,51 @@ When the guard fires:
 ---
 
 ## Error handling
+
+### Wire values
+
+A value a request supplies is either exactly valid or the **whole request
+is refused** — no default, no worker, no write, no config change (#431).
+Applies to every channel field (`channels`, `output_channel`,
+`input_channel`, `reference_channel`, `reference_output_channel`,
+`pairs[i][j]`, `meas_channel`, `ref_channel`) and to the positional
+`calibrate_mic_curve` arrays.
+
+| wire value | meaning |
+|---|---|
+| field absent | configured default |
+| `channels`: `null` or `[]` | configured default |
+| `reference_channel` / `reference_output_channel`: `null` | clear |
+| integer in 0–4294967295 | that channel |
+| anything else present — string, float, negative, > 4294967295, `null` on a non-nullable scalar, non-array `channels`/`pairs`, any bad array element | refused |
+
+Values are never narrowed: 4294967296 is refused, not read as channel 0.
+`fft_n` (`monitor_spectrum`, `set_monitor_params`) and `bpo`
+(`set_ioct_bpo`) above u32 get their existing domain errors.
+
+Refusal layout — a headline, then 9-space-indented `label  value` lines,
+the first always `received` (the JSON text of the value, cut at 64
+characters with `…`):
+
+```text
+generate not started — channels[0] must be an integer
+         received  "bad"
+         stimulus  silent
+```
+
+`<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
+`must be a finite number`, `must be an array`.
+
+| command | headline | state line |
+|---|---|---|
+| `generate`, `generate_pink` | `<cmd> not started` | `stimulus  silent` |
+| `transfer_stream` | `transfer_stream not started` | `stimulus  silent` |
+| `calibrate` | `calibration not started` | `stimulus  silent` |
+| `calibrate_spl` | `SPL calibration not started` | — |
+| `calibrate_mic_curve` | `mic curve not saved` / `mic curve not cleared` | `data  existing curve unchanged` (plus `paired field  <other>[i] = <value>` when the partner element is valid) |
+| `monitor_spectrum` | `monitor not started` | — |
+| `setup` | `setup rejected` | `config  unchanged` |
+| `get_calibration` | `calibration lookup rejected` | — |
 
 ### Invalid JSON
 ```json
