@@ -480,8 +480,10 @@ fn setup_report_dir_survives_a_daemon_restart() {
 }
 
 /// #430 (was #472) — an update whose config save fails is refused on the
-/// wire, and neither memory nor disk moves: the next read still reports the
-/// last-good value and the file bytes are unchanged.
+/// wire, the file bytes are unchanged, and the next read reports the
+/// last-good value. The file stays readable here, so the per-request reload
+/// refreshes `state.cfg` from disk before that read: this test cannot see
+/// the in-memory half. `setup_refuses_to_overwrite_a_corrupt_config` can.
 #[test]
 fn setup_refuses_an_update_it_could_not_save() {
     use std::os::unix::fs::PermissionsExt;
@@ -536,15 +538,20 @@ fn setup_refuses_an_update_it_could_not_save() {
 
 /// #430 — a corrupt config.json is never replaced by defaults plus the
 /// patch: the update is refused, and neither it nor a following read-only
-/// `setup {}` (what `ac generate` sends) touches the file.
+/// `setup {}` (what `ac generate` sends) touches the file. The refused
+/// update also leaves the in-memory config at its last-good value. That is
+/// only observable here: the per-request reload cannot parse the file, so
+/// the read echoes `state.cfg` — a commit-before-save would show the
+/// refused 5, and a daemon that never loaded the seed would show 0.
 #[test]
 fn setup_refuses_to_overwrite_a_corrupt_config() {
     const CORRUPT: &[u8] = b"{\"output_channel\": 3, \"input_chan";
-    let d = Daemon::spawn();
+    let d = Daemon::spawn_with_config(Some(json!({"output_channel": 3})));
     let c = Client::new(&d);
-    let cfg_dir = d.home.join(".config").join("ac");
-    let cfg_file = cfg_dir.join("config.json");
-    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg_file = d.home.join(".config").join("ac").join("config.json");
+
+    let first = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(first["config"]["output_channel"], json!(3), "{first}");
     std::fs::write(&cfg_file, CORRUPT).unwrap();
 
     let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 5}}));
@@ -562,7 +569,9 @@ fn setup_refuses_to_overwrite_a_corrupt_config() {
     assert_eq!(std::fs::read(&cfg_file).unwrap(), CORRUPT);
 
     let read = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(read["ok"], json!(true), "{read}");
     assert!(read.get("saved").is_none(), "{read}");
+    assert_eq!(read["config"]["output_channel"], json!(3), "{read}");
     assert_eq!(
         std::fs::read(&cfg_file).unwrap(),
         CORRUPT,
