@@ -1982,7 +1982,7 @@ mod default_sweep_tests {
                 "{sr} Hz: the default linear gate was clamped"
             );
             assert!(
-                irs.clamp_note().map_or(true, |n| !n.contains("order 1 ")),
+                irs.clamp_note().is_none_or(|n| !n.contains("order 1 ")),
                 "{sr} Hz: the linear IR must not appear in a clamp note"
             );
             seen.push(snr);
