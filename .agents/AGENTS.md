@@ -40,7 +40,7 @@ Always human-only:
 - Merging PRs to main 
 - Deleting branches
 - Changing agent spec files
-- Removing `requires-rig` without a rig record that settles the named check. QA removes it on a record whose verdict is `pass` and that closes the named falsification test (`qa.md`). A record that fails or declines to conclude leaves the label for a human.
+- Removing `requires-rig` without a rig record that settles the named check. QA removes it on a record whose verdict is `pass` and that closes the named falsification test, or on a `decline-site` record after filing a `site-visit` follow-up that carries the unrun steps (`qa.md`). A record that fails or declines to conclude for any other reason leaves the label for a human.
 
 ## label schema
 
@@ -59,7 +59,8 @@ Always human-only:
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
-| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. **Removed only** by qa (on a passing rig record, or as moot per a design's `rig check: none` or a later push) or by a human; triage, architect, developer and rig never remove it |
+| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. **Removed only** by qa (on a passing rig record; on a `decline-site` record once the follow-up exists; or as moot per a design's `rig check: none` or a later push) or by a human; triage, architect, developer and rig never remove it |
+| `site-visit` | qa (on a deferral follow-up), or a human | the issue's remaining rig check needs someone at the rig (a power cycle, a cable or mic move). Run it in a manual rig session when someone is there. Carries `requires-rig` too |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |

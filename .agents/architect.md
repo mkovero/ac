@@ -93,6 +93,10 @@ issue. QA and the rig session run exactly this check before the first
 approval, so write it to be runnable: bands, levels ≤ −40 dBFS, repeat count,
 budget with provenance. If the fault cannot be reproduced on demand, say what
 synthetic injection stands in for it and what stays unmeasured.
+Mark every step that needs someone at the rig (an interface power cycle, a
+cable or mic move) with `(site)`, and write it so it can run on its own
+later: the pipeline runs the other steps and defers the `(site)` ones to a
+follow-up issue (`qa.md` → `decline-site`).
 When it is `none` on an issue that already carries `requires-rig`, give the
 reason (for example: the error can only point toward refusal, or the design no
 longer depends on the unmeasured value) and **leave the label**. QA clears it

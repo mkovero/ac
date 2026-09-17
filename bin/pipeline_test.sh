@@ -9,6 +9,7 @@
 #   4. triage_evidence counts a spec, not a scope-backfill one-liner.
 #   5. master.sh stops after one design preflight on a `none` manifest.
 #   6. git_retry retries a network failure and not a real error.
+#   8. rig verdicts, including decline-site, parse whole.
 #   7. nothing reads FETCH_HEAD, which concurrent fetches in the shared
 #      checkout overwrite.
 set -u
@@ -174,6 +175,21 @@ chmod +x "$T/stub/netgit"
 )
 check '[[ $(cat $T/r_g1) == "0 3" ]]' "git_retry retries a DNS failure until it clears"
 check '[[ $(cat $T/r_g2) == "128 1" ]]' "git_retry returns a real error at once"
+
+# --- 8: rig verdict parsing, incl. decline-site ----------------------------------
+(
+  cd "$REPO" && source "$BIN/common.sh"
+  for t in "pass" "fail" "decline" "decline-site"; do
+    printf '%s=%s\n' "$t" "$(rig_verdict_of "$(printf 'table\n\n**rig verdict:** %s\n' "$t")")"
+  done
+  printf 'declined=%s\n' "$(rig_verdict_of '**rig verdict:** declined')"
+  printf 'old=%s\n' "$(grep -oE '\*\*rig verdict:\*\* *(pass|fail|decline)' <<<'**rig verdict:** decline-site' | tail -1 | awk '{print $NF}')"
+) > "$T/r_verdict" 2>/dev/null
+check 'grep -qx "pass=pass" $T/r_verdict && grep -qx "fail=fail" $T/r_verdict && grep -qx "decline=decline" $T/r_verdict' "rig_verdict_of reads pass, fail and decline"
+check 'grep -qx "decline-site=decline-site" $T/r_verdict' "rig_verdict_of reads decline-site whole"
+check 'grep -qx "declined=" $T/r_verdict' "rig_verdict_of rejects a word that only starts with a verdict"
+check 'grep -qx "old=decline" $T/r_verdict' "control: the old grep would have read decline-site as decline"
+check '! grep -q "rig verdict:\\*\\* \*(pass|fail|decline)" "$BIN/rig.sh"' "rig.sh no longer parses the verdict inline"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
