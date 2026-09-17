@@ -949,14 +949,15 @@ impl Target<'_> {
         match self {
             Target::Voltage { key, baseline, .. } => {
                 // A value stored after the refusal is not the one refused.
-                let restored = baseline.is_some_and(|b| b.measured_at > record.ran_at);
+                let restored =
+                    baseline.is_some_and(|b| instant_cmp(&b.measured_at, &record.ran_at).is_gt());
                 !restored && record.reach.voltage.iter().any(|k| k == key)
             }
             Target::Latency {
                 key,
                 stored: Ok((s, c)),
             } => {
-                s.measured_at <= record.ran_at
+                instant_cmp(&s.measured_at, &record.ran_at).is_le()
                     && record.reach.latency.iter().any(|r| {
                         r.key == *key
                             && r.sample_rate == c.sample_rate
@@ -965,6 +966,20 @@ impl Target<'_> {
             }
             Target::Latency { .. } => false,
         }
+    }
+}
+
+/// Order two RFC3339 timestamps by the instant they name. A stored value's
+/// `measured_at` has whole seconds and a record's `ran_at` has milliseconds,
+/// so comparing the strings puts `…:30Z` after `…:30.950Z`. Text that does
+/// not parse falls back to string order.
+pub fn instant_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => a.cmp(b),
     }
 }
 
@@ -1909,6 +1924,18 @@ mod tests {
         let stale_pass = record("out1_in1", "2026-09-16T09:00:00.000Z", verified_v());
         let again = merge_refusals(&merged, &[stale_pass]);
         assert!(again.voltage.contains_key("out1_in1"));
+    }
+
+    /// A refusal made in the same second a τ was stored, after it, reaches
+    /// that τ. The string comparison the rule used before read `…:30Z` as
+    /// later than `…:30.950Z` and dropped the refusal.
+    #[test]
+    fn a_refusal_in_the_same_second_as_the_store_reaches_it() {
+        let measured_at = "2026-09-17T17:38:30Z";
+        let ran_at = "2026-09-17T17:38:30.950Z";
+        assert!(instant_cmp(measured_at, ran_at).is_le());
+        assert!(measured_at > ran_at, "the rejected string order");
+        assert!(instant_cmp("2026-09-17T17:38:31Z", ran_at).is_gt());
     }
 
     /// QA 3 on PR #534 (R6-6): a refusal this process already wrote is not

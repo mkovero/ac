@@ -1170,7 +1170,7 @@ pub(super) fn refusal_predates_line(
     let (Some(since), Some(checked)) = (since.as_deref(), checked_at) else {
         return None;
     };
-    if checked >= since {
+    if ac_core::shared::calibration::session::instant_cmp(checked, since).is_ge() {
         return None;
     }
     let noun = if boundary.starts_with(ac_core::shared::calibration::BOUNDARY_HOST_REBOOTED) {
