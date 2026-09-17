@@ -122,9 +122,9 @@ fn ac_refuses_and_never_quits_a_daemon_under_a_different_home() {
 /// mismatch check, which broke the shipped `ac server <remote-host>`
 /// workflow before this fix scoped the check to `is_local`.
 ///
-/// The daemon is spawned in public mode (`bind_host = "*"`, i.e. it binds
-/// every interface including loopback) rather than `--local`, and the
-/// client is pointed at `127.0.0.2` — a distinct address from the literal
+/// The daemon is switched to public mode (`bind_host = "*"`, i.e. it binds
+/// every interface including loopback) with `server_enable` — a direct
+/// daemon binds loopback only since #433 — and the client is pointed at `127.0.0.2` — a distinct address from the literal
 /// strings `ensure_server`'s `is_local` match checks for
 /// (`"localhost"`/`"127.0.0.1"`/`"::1"`) — so this exercises a genuinely
 /// `is_local == false` code path while staying host-local and portable for
@@ -133,9 +133,12 @@ fn ac_refuses_and_never_quits_a_daemon_under_a_different_home() {
 #[test]
 fn ac_proceeds_against_a_remote_host_with_a_different_home() {
     let remote_home = scratch_home("remote");
-    // Public mode (no `--local`), probed on 127.0.0.2 like the client below.
-    let daemon = support::spawn_daemon(&remote_home, false, "127.0.0.2", None);
+    // A direct daemon binds loopback only (#433), so start it local and turn
+    // public exposure on explicitly with `server_enable`; the client below
+    // then reaches it on 127.0.0.2.
+    let daemon = support::spawn_daemon(&remote_home, false, "127.0.0.1", None);
     let (ctrl_port, data_port) = (daemon.ctrl, daemon.data);
+    go_public(ctrl_port);
 
     let caller_home = scratch_home("remote-caller");
     fs::write(
@@ -173,6 +176,32 @@ fn ac_proceeds_against_a_remote_host_with_a_different_home() {
     drop(daemon);
     let _ = fs::remove_dir_all(&remote_home);
     let _ = fs::remove_dir_all(&caller_home);
+}
+
+/// Rebind a local daemon to every interface and wait until it answers on
+/// 127.0.0.2.
+fn go_public(ctrl_port: u16) {
+    let call = |host: &str, cmd: &[u8]| -> bool {
+        let ctx = zmq::Context::new();
+        let s = ctx.socket(zmq::REQ).unwrap();
+        s.set_linger(0).ok();
+        s.set_rcvtimeo(500).ok();
+        s.set_sndtimeo(500).ok();
+        s.connect(&format!("tcp://{host}:{ctrl_port}")).is_ok()
+            && s.send(cmd, 0).is_ok()
+            && s.recv_bytes(0).is_ok()
+    };
+    assert!(
+        call("127.0.0.1", br#"{"cmd":"server_enable"}"#),
+        "server_enable"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if call("127.0.0.2", br#"{"cmd":"status"}"#) {
+            return;
+        }
+    }
+    panic!("daemon never answered on 127.0.0.2 after server_enable");
 }
 
 /// Same-`HOME` case stays silent and proceeds — today's unchanged behaviour.

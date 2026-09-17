@@ -144,6 +144,21 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // #433: a spool path is resolved beneath the daemon's own spool root and
+    // checked for ownership before anything else is applied. A refusal
+    // changes nothing and removes nothing.
+    let spool_update: Option<Option<std::path::PathBuf>> = match update.get("snapshot_spool_dir") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => {
+            let raw = v.as_str().unwrap_or_default();
+            match validate_spool_dir(raw) {
+                Ok(leaf) => Some(Some(leaf)),
+                Err(rejection) => return spool_dir_refusal(&rejection),
+            }
+        }
+    };
+
     // #431: every channel field is parsed before the config is copied, so a
     // malformed one refuses the update with nothing applied — not even a
     // valid sibling channel in the same request.
@@ -226,12 +241,8 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
             cfg.snapshot_ring_s = v;
         }
     }
-    if let Some(v) = update.get("snapshot_spool_dir") {
-        if v.is_null() {
-            cfg.snapshot_spool_dir = None;
-        } else if let Some(s) = v.as_str() {
-            cfg.snapshot_spool_dir = Some(std::path::PathBuf::from(s));
-        }
+    if let Some(dir) = spool_update {
+        cfg.snapshot_spool_dir = dir;
     }
     // Room temperature for the delay readout's ms → m conversion (#243).
     // `null` clears it back to the conventional 343 m/s, which is a
@@ -356,6 +367,29 @@ fn report_dir_refusal(path: &str, reason: &str) -> Value {
         "ok": false,
         "error": format!("report-dir {path}: {reason} \u{2014} setting not changed"),
         "refused": {"key": "report_dir", "path": path, "reason": reason},
+    })
+}
+
+/// Resolve a requested `snapshot_spool_dir` to an absolute child of the
+/// spool root and check that an existing directory there is daemon-owned
+/// (#433). Inspects only; the leaf is created when a session first uses it.
+fn validate_spool_dir(raw: &str) -> Result<std::path::PathBuf, ac_core::config::SpoolRejection> {
+    let root = ac_core::config::snapshot_spool_root();
+    let leaf = ac_core::config::resolve_snapshot_spool_leaf(&root, std::path::Path::new(raw))?;
+    ac_core::config::inspect_snapshot_spool_leaf(&root, &leaf)?;
+    Ok(leaf)
+}
+
+fn spool_dir_refusal(r: &ac_core::config::SpoolRejection) -> Value {
+    json!({
+        "ok": false,
+        "error": r.message(),
+        "refused": {
+            "key": "snapshot_spool_dir",
+            "path": r.requested,
+            "reason": r.reason,
+            "allowed_root": r.allowed.display().to_string(),
+        },
     })
 }
 

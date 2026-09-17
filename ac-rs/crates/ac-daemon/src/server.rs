@@ -217,8 +217,6 @@ pub fn run(
         return Err(e).with_context(|| format!("bind DATA tcp://{bind_host}:{data_port}"));
     }
 
-    eprintln!("ac-daemon: CTRL tcp://{bind_host}:{ctrl_port}  DATA tcp://{bind_host}:{data_port}");
-
     let (pub_tx, pub_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
     let (rebind_tx, rebind_rx): (Sender<String>, Receiver<String>) = crossbeam_channel::unbounded();
 
@@ -233,6 +231,7 @@ pub fn run(
     let pid = std::process::id();
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let spawn_mode = if auto_spawned { "auto" } else { "manual" }.to_string();
+    announce_listen(&started_at, &bind_host, ctrl_port, data_port);
 
     let state = ServerState {
         cfg: Arc::new(Mutex::new(cfg)),
@@ -446,6 +445,34 @@ fn report_bind_conflict(ctrl_port: u16) {
     eprintln!("ac-daemon: existing listener: home {home}, pid {pid}, {spawn_label} {started_at}");
 }
 
+/// Startup banner (#433). Local mode names the loopback endpoints; public
+/// mode is a WARNING, never success language, and names both exposed
+/// endpoints. Both state the spool root — the only place a reset can empty.
+fn announce_listen(started_at: &str, bind_host: &str, ctrl_port: u16, data_port: u16) {
+    let spool = ac_core::config::snapshot_spool_root();
+    let ctrl = format!("tcp://{bind_host}:{ctrl_port}");
+    let data = format!("tcp://{bind_host}:{data_port}");
+    eprintln!("ac-daemon  {started_at}");
+    if bind_host == "*" {
+        announce_public(&ctrl, &data);
+    } else {
+        eprintln!("listen     local  {ctrl}  {data}");
+        eprintln!("spool      {}", spool.display());
+    }
+}
+
+/// The public-exposure warning, shared by `--public` startup and a
+/// `server_enable` rebind.
+fn announce_public(ctrl: &str, data: &str) {
+    eprintln!("WARNING  public daemon exposure enabled");
+    eprintln!("control  {ctrl}");
+    eprintln!("data     {data}");
+    eprintln!(
+        "spool    confined to {}",
+        ac_core::config::snapshot_spool_root().display()
+    );
+}
+
 fn apply_pending_rebind(
     rebind_rx: &Receiver<String>,
     ctrl: &zmq::Socket,
@@ -471,6 +498,9 @@ fn apply_pending_rebind(
         match (ctrl.bind(&new_ctrl), data.bind(&new_data)) {
             (Ok(_), Ok(_)) => {
                 eprintln!("ac-daemon: rebound → CTRL {new_ctrl}  DATA {new_data}");
+                if new_host == "*" {
+                    announce_public(&new_ctrl, &new_data);
+                }
                 *bind_host = new_host;
             }
             (Err(e), _) => eprintln!("ac-daemon: rebind CTRL {new_ctrl}: {e}"),

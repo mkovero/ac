@@ -12,6 +12,11 @@ between any `ac` server (Python or Rust) and any `ac` client.
 | CTRL   | `tcp://127.0.0.1:5556` | `tcp://*:5556` | REP | client → server (request/reply) |
 | DATA   | `tcp://127.0.0.1:5557` | `tcp://*:5557` | PUB | server → client (push only) |
 
+A daemon binds the local addresses unless started with `--public` (or
+switched with `server_enable`); `--local` is the explicit form of the
+default. Public startup prints a `WARNING  public daemon exposure enabled`
+block naming both endpoints and the spool root on stderr.
+
 **CTRL** is a strict REQ/REP pair: the client sends one JSON object, waits
 for one JSON object reply. No pipelining.
 
@@ -893,7 +898,7 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
     "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
-    "snapshot_spool_dir":"<path>" | null, // optional — see `snapshot`
+    "snapshot_spool_dir":"<leaf>" | "<absolute path>" | null, // optional — see below
     "report_dir":        "<absolute path>" | null  // optional — null = do not persist
   }
 }
@@ -902,6 +907,28 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 The four channel fields follow **Error handling → Wire values**: all four
 are checked before anything is applied, so a malformed one leaves the whole
 config unchanged (`setup rejected — …`, `config  unchanged`).
+
+`snapshot_spool_dir` is confined to the daemon's spool root,
+`~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
+(`"bench"`) or an absolute path whose parent is exactly that root; it is
+stored as the absolute leaf. It is refused — before any other key in the
+update is applied, and without touching the filesystem — when it is the
+root itself, a parent of it, anywhere else, nested more than one level, has
+`.`/`..` components, is a symbolic link, or is an existing directory the
+daemon did not create (no `.ac-spool-owner` marker). `null` selects the
+`default` leaf.
+
+```json
+{ "ok": false,
+  "error": "snapshot spool path rejected\n         requested  /home/rig/measurements\n         reason     outside the spool root\n         allowed    child of /home/rig/.local/state/ac/snapshots\n         data       no directory removed",
+  "refused": { "key": "snapshot_spool_dir", "path": "/home/rig/measurements",
+               "reason": "outside the spool root",
+               "allowed_root": "/home/rig/.local/state/ac/snapshots" } }
+```
+
+A config file holding a spool path that fails these checks (e.g. one
+written before confinement) makes `transfer_stream` and `snapshot` refuse
+with the same `error` text; the path is left untouched.
 
 `report_dir` is validated **before any other key in the update is applied**:
 it must be an absolute path on the daemon host, name an existing directory,
@@ -2167,7 +2194,9 @@ Takes 3 averaged AC Vrms readings from the configured Keysight 34461A DMM.
 ### `server_enable`
 
 Rebinds both sockets to `tcp://*` (all interfaces) for remote access.
-The reply is sent before the rebind happens.
+The reply is sent before the rebind happens. After a successful rebind the
+daemon prints the same `WARNING  public daemon exposure enabled` block as
+`--public` startup on stderr.
 
 **Request**
 ```json
@@ -2983,9 +3012,15 @@ session is deleted when that session ends. As a crash-safety fallback (a
 killed daemon skips its own cleanup), the spool directory is also wiped
 at the *start* of every new `transfer_stream` session, so a stale file
 from a prior crashed session never outlives the next session's start.
-Spool location: `~/.config/ac/snapshots/` by default, overridable via
-`setup`'s `snapshot_spool_dir` (or `snapshot_ring_s` for the ring's
-retention window, default 30 s) — never exposed in any CTRL reply.
+Spool location: `~/.local/state/ac/snapshots/default/` by default; `setup`'s
+`snapshot_spool_dir` may select another daemon-owned child of
+`~/.local/state/ac/snapshots` only (see `setup`; `snapshot_ring_s` sets the
+ring's retention window, default 30 s). The wipe empties only a leaf the
+daemon created (it carries a `.ac-spool-owner` marker, which the wipe
+keeps), re-checking ownership immediately before removing anything, and
+never follows symbolic links. If the check fails the session does not
+start: `transfer_stream` publishes an `error` frame with the rejection text.
+The spool path is never exposed in a `snapshot` reply.
 
 ---
 

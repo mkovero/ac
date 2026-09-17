@@ -23,12 +23,13 @@ cargo test --workspace
 ## ac-daemon binary
 
 ```
-ac-daemon [--local] [--fake-audio] [--ctrl-port N] [--data-port N]
+ac-daemon [--public | --local] [--fake-audio] [--ctrl-port N] [--data-port N]
 ```
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--local` | off | Bind to `127.0.0.1` only (auto-spawned with this flag) |
+| `--public` | off | Bind every interface (`tcp://*`). Prints a `WARNING  public daemon exposure enabled` block on stderr. Without it the daemon binds `127.0.0.1` only (#433) |
+| `--local` | — | Explicit form of the loopback default (auto-spawned with this flag); conflicts with `--public` |
 | `--fake-audio` | off | Use synthetic sine loopback instead of JACK |
 | `--ctrl-port N` | 5556 | ZMQ REP port |
 | `--data-port N` | 5557 | ZMQ PUB port |

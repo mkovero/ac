@@ -213,8 +213,13 @@ fn snapshot_spool_wiped_at_next_session_start_after_a_crash() {
     let r = c1.call(json!({"cmd": "snapshot"}));
     assert_eq!(r["ok"], json!(true), "snapshot: {r}");
 
-    let spool_dir = home.join(".config").join("ac").join("snapshots");
-    let leftover_files_before = fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    let spool_dir = home
+        .join(".local")
+        .join("state")
+        .join("ac")
+        .join("snapshots")
+        .join("default");
+    let leftover_files_before = count_acsnap(&spool_dir);
     assert_eq!(
         leftover_files_before, 1,
         "expected exactly one spooled .acsnap on disk"
@@ -230,7 +235,7 @@ fn snapshot_spool_wiped_at_next_session_start_after_a_crash() {
     // Leftover file must still be there — proving the crash really did
     // skip cleanup (otherwise this test would trivially pass for the
     // wrong reason).
-    let leftover_files_after_kill = fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    let leftover_files_after_kill = count_acsnap(&spool_dir);
     assert_eq!(
         leftover_files_after_kill, 1,
         "crash must leave the stale spool file behind"
@@ -244,17 +249,86 @@ fn snapshot_spool_wiped_at_next_session_start_after_a_crash() {
     assert_eq!(r["ok"], json!(true), "second session start: {r}");
     thread::sleep(Duration::from_millis(300));
 
-    let leftover_files_after_new_session =
-        fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    let leftover_files_after_new_session = count_acsnap(&spool_dir);
     assert_eq!(
         leftover_files_after_new_session, 0,
         "new session must wipe the stale spool from the crashed prior one"
     );
     let listed = c2.call(json!({"cmd": "snapshot_list"}));
     assert_eq!(listed["snapshots"].as_array().unwrap().len(), 0);
+    assert!(
+        spool_dir
+            .join(ac_core::config::SNAPSHOT_SPOOL_MARKER)
+            .is_file(),
+        "the wipe keeps the leaf's ownership marker"
+    );
 
     let _ = c2.call(json!({"cmd": "stop"}));
     let _ = fs::remove_dir_all(&home);
+}
+
+fn count_acsnap(dir: &std::path::Path) -> usize {
+    fs::read_dir(dir)
+        .map(|it| {
+            it.filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "acsnap"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// #433: a config written before spool confinement (an absolute path
+/// elsewhere) refuses the session launch and names the allowed root; the
+/// directory it names is never touched.
+#[test]
+fn legacy_spool_path_outside_root_refuses_session_and_is_left_intact() {
+    // The victim lives in a HOME of its own, outside the daemon's.
+    let other = alloc_home();
+    let victim = other.join("old-spool");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("keep.acsnap"), b"keep").unwrap();
+    let d = Daemon::spawn_with_config(Some(json!({
+        "snapshot_spool_dir": victim.display().to_string(),
+    })));
+
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let err = r["error"].as_str().unwrap();
+    assert!(err.starts_with("snapshot spool path rejected"), "{err}");
+    assert!(err.contains(".local/state/ac/snapshots"), "{err}");
+    assert!(err.contains("no directory removed"), "{err}");
+    assert_eq!(fs::read(victim.join("keep.acsnap")).unwrap(), b"keep");
+    let _ = fs::remove_dir_all(&other);
+}
+
+/// #433: a configured leaf that already exists but was not created by the
+/// daemon (no ownership marker) is refused at launch and left as it was.
+#[test]
+fn unowned_existing_spool_leaf_refuses_session_and_is_left_intact() {
+    let d = Daemon::spawn_with_config(Some(json!({"snapshot_spool_dir": "mine"})));
+    let leaf = d
+        .home
+        .join(".local")
+        .join("state")
+        .join("ac")
+        .join("snapshots")
+        .join("mine");
+    fs::create_dir_all(&leaf).unwrap();
+    fs::write(leaf.join("keep.acsnap"), b"keep").unwrap();
+
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("not created by the daemon"),
+        "{r}"
+    );
+    assert_eq!(fs::read(leaf.join("keep.acsnap")).unwrap(), b"keep");
+    assert!(!leaf.join(ac_core::config::SNAPSHOT_SPOOL_MARKER).exists());
 }
 
 /// Regression test (QA pass, M1): `snapshot` used to hold the ring's

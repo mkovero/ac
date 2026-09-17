@@ -83,30 +83,32 @@ fn setup_channel_clears_sticky_port() {
 
 /// handoff: snapshot-backend M1 — `snapshot_ring_s`/`snapshot_spool_dir`
 /// round-trip through `setup` like every other config field, including
-/// persistence (a second `setup` read reflects the earlier write).
+/// persistence (a second `setup` read reflects the earlier write). Since
+/// #433 the spool is a child of the daemon's spool root, stored absolute.
 #[test]
 fn setup_updates_snapshot_ring_and_spool_dir() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
+    let leaf = spool_root(&d).join("bench");
+    let leaf_str = leaf.display().to_string();
 
     let r = c.call(json!({"cmd":"setup","update":{
         "snapshot_ring_s": 60.0,
-        "snapshot_spool_dir": "/tmp/custom-acsnap-spool",
+        "snapshot_spool_dir": "bench",
     }}));
     assert_eq!(r["ok"], json!(true), "setup: {r}");
     assert_eq!(r["config"]["snapshot_ring_s"], json!(60.0));
-    assert_eq!(
-        r["config"]["snapshot_spool_dir"],
-        json!("/tmp/custom-acsnap-spool")
-    );
+    assert_eq!(r["config"]["snapshot_spool_dir"], json!(leaf_str));
 
     // Persisted, not just echoed back.
     let r2 = c.call(json!({"cmd": "setup", "update": {}}));
     assert_eq!(r2["config"]["snapshot_ring_s"], json!(60.0));
-    assert_eq!(
-        r2["config"]["snapshot_spool_dir"],
-        json!("/tmp/custom-acsnap-spool")
-    );
+    assert_eq!(r2["config"]["snapshot_spool_dir"], json!(leaf_str));
+
+    // The absolute spelling of the same child is accepted too.
+    let r2b = c.call(json!({"cmd":"setup","update":{"snapshot_spool_dir": leaf_str}}));
+    assert_eq!(r2b["ok"], json!(true), "{r2b}");
+    assert_eq!(r2b["config"]["snapshot_spool_dir"], json!(leaf_str));
 
     // snapshot_ring_s <= 0 is ignored (invalid), not silently accepted.
     let r3 = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": -5.0}}));
@@ -121,6 +123,89 @@ fn setup_updates_snapshot_ring_and_spool_dir() {
     let r4 = c.call(json!({"cmd":"setup","update":{"snapshot_spool_dir": Value::Null}}));
     assert_eq!(r4["ok"], json!(true));
     assert!(r4["config"]["snapshot_spool_dir"].is_null());
+}
+
+fn spool_root(d: &Daemon) -> std::path::PathBuf {
+    d.home
+        .join(".local")
+        .join("state")
+        .join("ac")
+        .join("snapshots")
+}
+
+/// #433: every broad, foreign, or unowned spool target is refused with the
+/// allowed root named, the whole update is left unapplied, and nothing on
+/// disk changes — a later session start included.
+#[test]
+fn setup_refuses_spool_paths_outside_the_daemon_owned_root() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let root = spool_root(&d);
+    std::fs::create_dir_all(&root).unwrap();
+
+    // Out-of-scope data the refused targets would have reached.
+    let victim = d.home.join("measurements");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("keep.wav"), b"keep").unwrap();
+    let unowned = root.join("unowned");
+    std::fs::create_dir(&unowned).unwrap();
+    std::fs::write(unowned.join("keep"), b"keep").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    let home = d.home.display().to_string();
+    let root_s = root.display().to_string();
+    let targets = [
+        "/".to_string(),
+        home.clone(),
+        victim.display().to_string(),
+        format!("{home}/.local/state/ac"),
+        root_s.clone(),
+        format!("{root_s}/../../ac"),
+        format!("{root_s}/x/y"),
+        "..".to_string(),
+        "../x".to_string(),
+        "".to_string(),
+        unowned.display().to_string(),
+        "link".to_string(),
+    ];
+    for t in &targets {
+        let r = c.call(json!({"cmd":"setup","update":{
+            "snapshot_spool_dir": t,
+            "output_channel": 7,
+        }}));
+        assert_eq!(r["ok"], json!(false), "{t:?} must be refused: {r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(err.starts_with("snapshot spool path rejected"), "{err}");
+        assert!(
+            err.contains(&format!("allowed    child of {root_s}")),
+            "{err}"
+        );
+        assert!(err.contains("data       no directory removed"), "{err}");
+        assert_eq!(r["refused"]["key"], json!("snapshot_spool_dir"));
+        assert_eq!(r["refused"]["allowed_root"], json!(root_s));
+    }
+
+    let after = c.call(json!({"cmd":"setup","update":{}}));
+    assert!(after["config"]["snapshot_spool_dir"].is_null(), "{after}");
+    assert_ne!(after["config"]["output_channel"], json!(7));
+
+    // A session still runs on the default leaf and leaves everything else.
+    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":1}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = c.call(json!({"cmd":"stop"}));
+
+    assert_eq!(std::fs::read(victim.join("keep.wav")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(unowned.join("keep")).unwrap(), b"keep");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(root
+        .join("default")
+        .join(ac_core::config::SNAPSHOT_SPOOL_MARKER)
+        .is_file());
 }
 
 #[test]

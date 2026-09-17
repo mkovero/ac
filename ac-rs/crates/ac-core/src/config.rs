@@ -144,7 +144,9 @@ pub struct Config {
 
     /// Daemon-local directory `.acsnap` files spool to before/while a
     /// client fetches them (handoff: snapshot-backend M1, deliverable 2).
-    /// `None` = `~/.config/ac/snapshots/`. Never exposed to clients — the
+    /// `None` = `~/.local/state/ac/snapshots/default`; a set value must be a
+    /// direct child of that root (#433, [`resolve_snapshot_spool_leaf`]).
+    /// Never exposed in a `snapshot` reply — the
     /// `snapshot` reply carries an opaque `id`, never a path (D6).
     #[serde(default)]
     pub snapshot_spool_dir: Option<PathBuf>,
@@ -204,16 +206,182 @@ impl Default for Config {
     }
 }
 
-/// Resolve the effective snapshot spool directory: `cfg.snapshot_spool_dir`
-/// if set, else `~/.config/ac/snapshots/`.
-pub fn snapshot_spool_dir(cfg: &Config) -> PathBuf {
-    cfg.snapshot_spool_dir.clone().unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".config")
-            .join("ac")
-            .join("snapshots")
-    })
+/// Leaf used when `snapshot_spool_dir` is unset (#433). The spool root
+/// itself is never a spool: reset only ever empties a marked child.
+pub const SNAPSHOT_SPOOL_DEFAULT_LEAF: &str = "default";
+
+/// Ownership marker the daemon writes into every spool leaf it creates
+/// (#433). Reset refuses any directory that does not carry it as a regular
+/// file, so a pre-existing directory is never emptied.
+pub const SNAPSHOT_SPOOL_MARKER: &str = ".ac-spool-owner";
+
+/// The only directory snapshot spools may live in (#433):
+/// `~/.local/state/ac/snapshots`. Derived from the daemon's own `$HOME`,
+/// never from anything a client sends.
+pub fn snapshot_spool_root() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("ac")
+        .join("snapshots")
+}
+
+/// Why a snapshot spool path was refused (#433). Rendered by
+/// [`SpoolRejection::message`] for the `  error: ` line of a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpoolRejection {
+    pub requested: String,
+    pub allowed: PathBuf,
+    pub reason: String,
+}
+
+impl SpoolRejection {
+    fn new(requested: &Path, allowed: &Path, reason: impl Into<String>) -> Self {
+        Self {
+            requested: requested.display().to_string(),
+            allowed: allowed.to_path_buf(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Operator-facing refusal. Continuation lines sit under the text that
+    /// follows `  error: `, like the other multi-line setup refusals.
+    pub fn message(&self) -> String {
+        format!(
+            "snapshot spool path rejected\n\
+             \x20        requested  {}\n\
+             \x20        reason     {}\n\
+             \x20        allowed    child of {}\n\
+             \x20        data       no directory removed",
+            self.requested,
+            self.reason,
+            self.allowed.display()
+        )
+    }
+}
+
+/// Resolve a requested spool path against `root` without touching the
+/// filesystem (#433). Accepts a single leaf name (`"bench"`) or an absolute
+/// path whose parent is exactly `root`; returns the absolute leaf. Anything
+/// else — the root itself, a parent of it, a path elsewhere, a nested path,
+/// `.`/`..` components — is refused.
+pub fn resolve_snapshot_spool_leaf(
+    root: &Path,
+    requested: &Path,
+) -> std::result::Result<PathBuf, SpoolRejection> {
+    use std::path::Component;
+    let reject = |reason: &str| SpoolRejection::new(requested, root, reason);
+    let name = if requested.is_absolute() {
+        let rest = requested
+            .strip_prefix(root)
+            .map_err(|_| reject("outside the spool root"))?;
+        if rest.as_os_str().is_empty() {
+            return Err(reject("is the spool root itself"));
+        }
+        rest
+    } else {
+        requested
+    };
+    let mut comps = name.components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(leaf)), None) => Ok(root.join(leaf)),
+        (None, _) => Err(reject("empty path")),
+        (Some(Component::Normal(_)), Some(_)) => {
+            Err(reject("not a direct child of the spool root"))
+        }
+        _ => Err(reject("relative components are not allowed")),
+    }
+}
+
+/// Resolve the effective snapshot spool leaf for `cfg` beneath
+/// [`snapshot_spool_root`]: the configured child if set, else
+/// [`SNAPSHOT_SPOOL_DEFAULT_LEAF`]. A stored path outside the root (a config
+/// written before #433) is refused, never used.
+pub fn snapshot_spool_dir(cfg: &Config) -> std::result::Result<PathBuf, SpoolRejection> {
+    let root = snapshot_spool_root();
+    match cfg.snapshot_spool_dir.as_deref() {
+        Some(p) => resolve_snapshot_spool_leaf(&root, p),
+        None => Ok(root.join(SNAPSHOT_SPOOL_DEFAULT_LEAF)),
+    }
+}
+
+/// Check that `leaf` (already lexically confined by
+/// [`resolve_snapshot_spool_leaf`]) is either absent or a daemon-owned
+/// spool: a real directory (not a symlink) carrying the ownership marker as
+/// a regular file, whose canonical parent is the canonical `root`. Never
+/// creates or removes anything. `Ok(false)` = absent.
+pub fn inspect_snapshot_spool_leaf(
+    root: &Path,
+    leaf: &Path,
+) -> std::result::Result<bool, SpoolRejection> {
+    let reject = |reason: String| SpoolRejection::new(leaf, root, reason);
+    let meta = match std::fs::symlink_metadata(leaf) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(reject(e.to_string())),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(reject("is a symbolic link".to_string()));
+    }
+    if !meta.is_dir() {
+        return Err(reject("is not a directory".to_string()));
+    }
+    match std::fs::symlink_metadata(leaf.join(SNAPSHOT_SPOOL_MARKER)) {
+        Ok(m) if m.file_type().is_file() => {}
+        _ => {
+            return Err(reject(
+                "pre-existing directory not created by the daemon".to_string(),
+            ))
+        }
+    }
+    let canon_root = std::fs::canonicalize(root).map_err(|e| reject(e.to_string()))?;
+    let canon_leaf = std::fs::canonicalize(leaf).map_err(|e| reject(e.to_string()))?;
+    if canon_leaf.parent() != Some(canon_root.as_path()) {
+        return Err(reject("resolves outside the spool root".to_string()));
+    }
+    Ok(true)
+}
+
+/// Make `leaf` a usable daemon-owned spool: validate it, and if absent
+/// create the root, the leaf (non-recursively) and the ownership marker.
+pub fn prepare_snapshot_spool(root: &Path, leaf: &Path) -> std::result::Result<(), SpoolRejection> {
+    if inspect_snapshot_spool_leaf(root, leaf)? {
+        return Ok(());
+    }
+    let reject = |e: std::io::Error| SpoolRejection::new(leaf, root, e.to_string());
+    std::fs::create_dir_all(root).map_err(reject)?;
+    std::fs::create_dir(leaf).map_err(reject)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(leaf.join(SNAPSHOT_SPOOL_MARKER))
+        .map_err(reject)?;
+    inspect_snapshot_spool_leaf(root, leaf).map(|_| ())
+}
+
+/// Empty a daemon-owned spool leaf, keeping the leaf and its marker (#433).
+/// Ownership is re-validated immediately before anything is removed; a
+/// refusal removes nothing. Entries are unlinked without following
+/// symlinks (`remove_file` on a link removes the link; `remove_dir_all`
+/// does not descend through links).
+pub fn reset_snapshot_spool(root: &Path, leaf: &Path) -> std::result::Result<(), SpoolRejection> {
+    prepare_snapshot_spool(root, leaf)?;
+    let reject = |e: std::io::Error| SpoolRejection::new(leaf, root, e.to_string());
+    for entry in std::fs::read_dir(leaf).map_err(reject)? {
+        let entry = entry.map_err(reject)?;
+        if entry.file_name() == SNAPSHOT_SPOOL_MARKER {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map_err(reject)?.is_dir();
+        let _ = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+    Ok(())
 }
 
 /// Return the default config file path: `~/.config/ac/config.json`.
@@ -422,6 +590,142 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&saved).unwrap(),
             serde_json::to_value(&reread).unwrap()
+        );
+    }
+
+    // ---- #433: snapshot spool confinement ----
+
+    fn spool_root(dir: &tempfile::TempDir) -> PathBuf {
+        let root = dir.path().join("state").join("ac").join("snapshots");
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn spool_leaf_accepts_only_a_direct_child_of_the_root() {
+        let root = Path::new("/home/rig/.local/state/ac/snapshots");
+        assert_eq!(
+            resolve_snapshot_spool_leaf(root, Path::new("bench")).unwrap(),
+            root.join("bench")
+        );
+        assert_eq!(
+            resolve_snapshot_spool_leaf(root, &root.join("bench")).unwrap(),
+            root.join("bench")
+        );
+        for bad in [
+            "/",
+            "/home/rig",
+            "/home/rig/measurements",
+            "/home/rig/.local/state/ac",
+            "/home/rig/.local/state/ac/snapshots",
+            "/home/rig/.local/state/ac/snapshots/",
+            "/home/rig/.local/state/ac/snapshots/../other",
+            "/home/rig/.local/state/ac/snapshots/a/b",
+            "/home/rig/.local/state/ac/snapshots-evil/x",
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a/..",
+        ] {
+            let err = resolve_snapshot_spool_leaf(root, Path::new(bad))
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert_eq!(err.allowed, root);
+            let msg = err.message();
+            assert!(msg.starts_with("snapshot spool path rejected\n"), "{msg}");
+            assert!(msg.contains("no directory removed"), "{msg}");
+            assert!(
+                msg.contains(&format!("child of {}", root.display())),
+                "{msg}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spool_reset_empties_only_a_daemon_created_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = spool_root(&dir);
+        let leaf = root.join("bench");
+        reset_snapshot_spool(&root, &leaf).unwrap();
+        assert!(leaf.join(SNAPSHOT_SPOOL_MARKER).is_file());
+
+        // Outside file a symlink inside the spool points at must survive.
+        let outside = dir.path().join("keep");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("precious"), b"x").unwrap();
+        std::fs::write(leaf.join("a.acsnap"), b"snap").unwrap();
+        std::fs::create_dir(leaf.join("sub")).unwrap();
+        std::fs::write(leaf.join("sub").join("b"), b"b").unwrap();
+        std::os::unix::fs::symlink(&outside, leaf.join("link")).unwrap();
+
+        reset_snapshot_spool(&root, &leaf).unwrap();
+        let left: Vec<_> = std::fs::read_dir(&leaf)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from(SNAPSHOT_SPOOL_MARKER)]);
+        assert_eq!(std::fs::read(outside.join("precious")).unwrap(), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spool_reset_refuses_unowned_and_symlinked_leaves_and_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = spool_root(&dir);
+
+        // Pre-existing directory without the marker.
+        let unowned = root.join("unowned");
+        std::fs::create_dir(&unowned).unwrap();
+        std::fs::write(unowned.join("data"), b"d").unwrap();
+        let err = reset_snapshot_spool(&root, &unowned).unwrap_err();
+        assert!(err.reason.contains("not created by the daemon"), "{err:?}");
+        assert_eq!(std::fs::read(unowned.join("data")).unwrap(), b"d");
+
+        // A marked directory reached through a symlink: the link is refused
+        // even though its target carries a marker.
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join(SNAPSHOT_SPOOL_MARKER), b"").unwrap();
+        std::fs::write(target.join("data"), b"d").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = reset_snapshot_spool(&root, &link).unwrap_err();
+        assert!(err.reason.contains("symbolic link"), "{err:?}");
+        assert_eq!(std::fs::read(target.join("data")).unwrap(), b"d");
+
+        // Marker present but as a symlink, not a regular file.
+        let fake = root.join("fake-marker");
+        std::fs::create_dir(&fake).unwrap();
+        std::os::unix::fs::symlink(
+            target.join(SNAPSHOT_SPOOL_MARKER),
+            fake.join(SNAPSHOT_SPOOL_MARKER),
+        )
+        .unwrap();
+        std::fs::write(fake.join("data"), b"d").unwrap();
+        assert!(reset_snapshot_spool(&root, &fake).is_err());
+        assert_eq!(std::fs::read(fake.join("data")).unwrap(), b"d");
+
+        // A plain file where the leaf should be.
+        let file = root.join("file");
+        std::fs::write(&file, b"f").unwrap();
+        assert!(reset_snapshot_spool(&root, &file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"f");
+    }
+
+    #[test]
+    fn spool_dir_refuses_a_legacy_absolute_path_outside_the_root() {
+        let cfg = Config {
+            snapshot_spool_dir: Some(PathBuf::from("/tmp/custom-acsnap-spool")),
+            ..Config::default()
+        };
+        let err = snapshot_spool_dir(&cfg).unwrap_err();
+        assert_eq!(err.requested, "/tmp/custom-acsnap-spool");
+        assert_eq!(err.allowed, snapshot_spool_root());
+        assert_eq!(
+            snapshot_spool_dir(&Config::default()).unwrap(),
+            snapshot_spool_root().join(SNAPSHOT_SPOOL_DEFAULT_LEAF)
         );
     }
 }
