@@ -1926,16 +1926,91 @@ mod tests {
         assert!(again.voltage.contains_key("out1_in1"));
     }
 
-    /// A refusal made in the same second a τ was stored, after it, reaches
-    /// that τ. The string comparison the rule used before read `…:30Z` as
-    /// later than `…:30.950Z` and dropped the refusal.
+    /// A latency refusal made later in the same second a τ was stored
+    /// reaches that τ through the full rule. `measured_at` has whole
+    /// seconds and `ran_at` has milliseconds; the string comparison the
+    /// rule used before read the store as later and dropped the refusal.
     #[test]
-    fn a_refusal_in_the_same_second_as_the_store_reaches_it() {
-        let measured_at = "2026-09-17T17:38:30Z";
-        let ran_at = "2026-09-17T17:38:30.950Z";
-        assert!(instant_cmp(measured_at, ran_at).is_le());
-        assert!(measured_at > ran_at, "the rejected string order");
-        assert!(instant_cmp("2026-09-17T17:38:31Z", ran_at).is_gt());
+    fn a_same_second_latency_refusal_reaches_the_entry_through_effective() {
+        let cond = dummy_conditions();
+        let mut acoustic = dummy_conditions();
+        acoustic.input_port = "fake:capture_1".to_string();
+        let mut r = record("out0_in0", "2026-09-16T14:02:11.950Z", verified_v());
+        r.voltage = None;
+        r.latency = Some(judge_latency(
+            Ok(&StoredTau {
+                tau_s: 0.01,
+                measured_at: "2026-09-15T00:00:00Z".to_string(),
+            }),
+            Ok(0.02),
+            48_000,
+            Some(1024),
+            &ctx("out0_in0"),
+        ));
+        assert!(r.latency.as_ref().unwrap().is_refused());
+        r.judged.latency = Some(LatencyIdentity {
+            measured_at: "2026-09-15T00:00:00Z".to_string(),
+            tau_s: 0.01,
+            conditions: cond.clone(),
+        });
+        let entries = vec![
+            StoredEntry {
+                key: "out0_in0",
+                has_voltage: false,
+                tau_conditions: vec![&cond],
+            },
+            StoredEntry {
+                key: "out0_in1",
+                has_voltage: false,
+                tau_conditions: vec![&acoustic],
+            },
+        ];
+        propagate(&mut r, &entries);
+
+        // Stored at 14:02:11.x, truncated to whole seconds; refused at .950.
+        let stored = StoredTau {
+            tau_s: 0.004,
+            measured_at: "2026-09-16T14:02:11Z".to_string(),
+        };
+        // The rejected rule: string order reads the store as after the refusal.
+        assert!(stored.measured_at.as_str() > r.ran_at.as_str());
+
+        let now = epoch_a();
+        let recs = [r];
+        let eff = effective(
+            Target::Latency {
+                key: "out0_in1",
+                stored: Ok((&stored, &acoustic)),
+            },
+            RecordSet {
+                process: &recs,
+                file: Ok(&SessionRefusals::default()),
+            },
+            scope(Some("out0_in0"), &now),
+        );
+        match eff.verdict {
+            LayerVerdict::Refused { via, .. } => assert_eq!(via.as_deref(), Some("out0_in0")),
+            other => panic!("a same-second refusal did not reach the entry: {other:?}"),
+        }
+
+        // A τ stored in the next second is a new value; the refusal stays
+        // behind it.
+        let restored = StoredTau {
+            tau_s: stored.tau_s,
+            measured_at: "2026-09-16T14:02:12Z".to_string(),
+        };
+        let eff = effective(
+            Target::Latency {
+                key: "out0_in1",
+                stored: Ok((&restored, &acoustic)),
+            },
+            RecordSet {
+                process: &recs,
+                file: Ok(&SessionRefusals::default()),
+            },
+            scope(Some("out0_in0"), &now),
+        );
+        assert!(!eff.verdict.is_refused(), "{:?}", eff.verdict);
     }
 
     /// QA 3 on PR #534 (R6-6): a refusal this process already wrote is not

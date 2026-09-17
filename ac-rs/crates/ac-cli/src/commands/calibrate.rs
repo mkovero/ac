@@ -2586,4 +2586,26 @@ mod tests {
         );
         assert_eq!(check_status(&serde_json::json!({})), 2);
     }
+
+    /// A check that ran later in the boundary's second does not predate it.
+    /// `since` has whole seconds and `checked_at` has milliseconds, so the
+    /// string order reads the check as earlier; the line must not print.
+    #[test]
+    fn a_check_in_the_boundary_second_does_not_predate_it() {
+        use ac_core::shared::calibration::EnumerationCheck;
+        let crossed = EnumerationCheck::Crossed {
+            boundary: ac_core::shared::calibration::BOUNDARY_HOST_REBOOTED.to_string(),
+            since: Some("2026-09-16T15:10:03Z".to_string()),
+        };
+        let checked = "2026-09-16T15:10:03.400Z";
+        assert!(
+            checked < "2026-09-16T15:10:03Z",
+            "the rejected string order"
+        );
+        assert_eq!(refusal_predates_line(Some(&crossed), Some(checked)), None);
+        assert_eq!(
+            refusal_predates_line(Some(&crossed), Some("2026-09-16T15:10:02.999Z")).as_deref(),
+            Some("refusal predates the reboot; stands until a check passes")
+        );
+    }
 }
