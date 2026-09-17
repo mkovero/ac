@@ -26,6 +26,10 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
         "n_harmonics": 3,
     }));
     assert_eq!(r["ok"], json!(true));
+    // #501: a typed window is echoed in samples, and no default is claimed.
+    assert_eq!(r["window_len"], json!(1024), "{r}");
+    assert!(r.get("window_default_s").is_none(), "{r}");
+    assert_eq!(r["duration"], json!(0.5), "{r}");
 
     let mut got_ir = false;
     let mut got_report = false;
@@ -326,6 +330,57 @@ fn assert_calibrated_tau_pairs_with_plot_ir(
          residual is only {rejected_residual} samples on f1={f1_hz} \
          f2={f2_hz} window_len={window_len} — too small to demonstrate \
          #351's divergence on this fixture"
+    );
+}
+
+/// #501: a bare request runs the `ac-core` default stimulus, the ack echoes
+/// every value it accepted, and the defaulted window — echoed in seconds,
+/// because the rate is unknown before the engine starts — arrives in the
+/// IR frame as `round(0.4 s × rate)` samples, unclamped. On the fake's clean
+/// loopback that default configuration clears the pre-impulse gate, which
+/// the pre-#501 defaults (1 s, 4096 samples) could not.
+#[test]
+fn plot_ir_bare_request_runs_and_echoes_the_core_defaults() {
+    use ac_core::measurement::sweep::{
+        ir_default_window_len, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
+        IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
+    };
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "plot_ir"}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["f1_hz"], json!(IR_DEFAULT_F1_HZ), "{r}");
+    assert_eq!(r["f2_hz"], json!(IR_DEFAULT_F2_HZ), "{r}");
+    assert_eq!(r["duration"], json!(IR_DEFAULT_DURATION_S), "{r}");
+    assert_eq!(r["duration"], json!(4.0), "{r}");
+    assert_eq!(r["n_harmonics"], json!(IR_DEFAULT_N_HARMONICS), "{r}");
+    assert_eq!(r["tail_s"], json!(IR_DEFAULT_TAIL_S), "{r}");
+    assert_eq!(r["window_default_s"], json!(IR_DEFAULT_WINDOW_S), "{r}");
+    assert!(r.get("window_len").is_none(), "{r}");
+
+    let expected = ir_default_window_len(FAKE_SR as u32);
+    assert_eq!(expected, 19_200);
+    let ir = c
+        .wait_for_topic("measurement/impulse_response", Duration::from_secs(30))
+        .expect("measurement/impulse_response frame");
+    assert_eq!(ir["window_len_requested"], json!(expected), "{ir}");
+    assert_eq!(
+        ir["window_len_used"][0],
+        json!(expected),
+        "the default linear gate must not be clamped"
+    );
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(30))
+        .expect("measurement/report frame");
+    let report: MeasurementReport =
+        serde_json::from_value(v["report"].clone()).expect("decode report");
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(
+        stats.verdict,
+        ac_core::measurement::report::IrVerdict::Ok,
+        "the default sweep must clear the gate on a clean loopback \
+         (pre-imp SNR {:.2} dB)",
+        stats.pre_impulse_snr_db
     );
 }
 

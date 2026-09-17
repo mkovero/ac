@@ -39,6 +39,7 @@ use anyhow::{bail, Result};
 use crate::measurement::report::StandardsCitation;
 
 mod deconv;
+mod defaults;
 mod floor;
 mod gated;
 mod harmonics;
@@ -47,6 +48,10 @@ mod peak;
 mod tail_decay;
 
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
+pub use defaults::{
+    ir_default_window_len, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
+    IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
+};
 pub use floor::pre_impulse_snr_floor_db;
 pub use gated::{gated_frequency_response, tukey_window, GatedResponsePoint};
 pub use harmonics::{

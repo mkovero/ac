@@ -24,7 +24,8 @@
 //! forward verbatim; this module is where they become plain data.
 
 use ac_core::measurement::report::{
-    ArrivalCheck, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_BASIS,
+    PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -124,6 +125,11 @@ pub enum SweepIrFault {
     },
 }
 
+/// Where to look when the pre-impulse gate refuses a capture — the sweep
+/// first, then the capture chain; the same places `ac plot ir` names.
+const LOW_SNR_CHECKS: &str =
+    "sweep length, band, window, drive level, input gain, distance, room noise";
+
 impl SweepIrFault {
     /// Header line — occupies the same panel-geometry slot the success
     /// frame's header does, so nothing jumps when a bad file replaces a
@@ -156,8 +162,10 @@ impl SweepIrFault {
     /// Names what to check; never asserts a cause — same rule
     /// [`crate::fault::Fault::detail`] documents for `NO LOCK`. The
     /// loader cannot know whether a bad file is a live snapshot, a
-    /// report from an ungated measurement, a stale format, low drive
-    /// level, mic gain, distance, or room noise.
+    /// report from an ungated measurement, a stale format, a sweep
+    /// configuration the threshold was not scored for, low drive level,
+    /// input gain, distance, or room noise. The check list and the
+    /// threshold's basis are the ones `ac plot ir` prints (#501).
     pub fn detail(&self) -> String {
         match self {
             SweepIrFault::NotASweepDerivedIr => {
@@ -177,13 +185,13 @@ impl SweepIrFault {
                 if pre_impulse_snr_db.is_finite() {
                     format!(
                         "pre-impulse SNR {pre_impulse_snr_db:.1} dB below required \
-                         {PRE_IMPULSE_SNR_MIN_DB:.1} dB — check drive level, mic gain, \
-                         distance, room noise"
+                         {PRE_IMPULSE_SNR_MIN_DB:.1} dB ({PRE_IMPULSE_SNR_BASIS}) \
+                         — check {LOW_SNR_CHECKS}"
                     )
                 } else {
                     // Same `reason` text as `header()` above, not a
                     // hardcoded "(silence)" — see that arm's comment.
-                    format!("{reason} — check drive level, mic gain, distance, room noise")
+                    format!("{reason} — check {LOW_SNR_CHECKS}")
                 }
             }
         }
@@ -895,7 +903,14 @@ mod tests {
         assert!(fault.header().contains("18.0 dB threshold"));
         assert!(fault.detail().contains("9.7 dB"));
         assert!(fault.detail().contains("required 18.0 dB"));
-        assert!(fault.detail().contains("check drive level"));
+        // #501 UX: the exact GUI form of the CLI's basis row and check rows.
+        assert_eq!(
+            fault.detail(),
+            "pre-impulse SNR 9.7 dB below required 18.0 dB (fixed threshold, scored for \
+             the default sweep only) — check sweep length, band, window, drive level, \
+             input gain, distance, room noise"
+        );
+        assert!(!fault.detail().contains("mic gain"));
     }
 
     /// The non-finite branch has two distinguishable causes — no signal
@@ -925,8 +940,14 @@ mod tests {
         assert!(guard_band
             .detail()
             .contains("peak too close to the start of the gated window"));
-        assert!(no_signal.detail().contains("check drive level"));
-        assert!(guard_band.detail().contains("check drive level"));
+        assert_eq!(
+            no_signal.detail(),
+            "no signal captured (linear IR is all zero) — check sweep length, band, \
+             window, drive level, input gain, distance, room noise"
+        );
+        assert!(guard_band.detail().ends_with(
+            " — check sweep length, band, window, drive level, input gain, distance, room noise"
+        ));
         // The two causes must not collapse into one string, and neither
         // may claim silence — the peak was measurable in both cases.
         assert_ne!(no_signal.header(), guard_band.header());

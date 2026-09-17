@@ -38,15 +38,11 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
     if args.first().map(|a| expand(a)) == Some("ir") {
         args.remove(0);
         let mut tokens = classify_all(args)?;
-        let f1 = pull(&mut tokens, TokenKind::Freq)
-            .map(|v| v.as_f64())
-            .unwrap_or(20.0);
-        let f2 = pull(&mut tokens, TokenKind::Freq)
-            .map(|v| v.as_f64())
-            .unwrap_or(20_000.0);
-        let duration = pull(&mut tokens, TokenKind::Time)
-            .map(|v| v.as_f64())
-            .unwrap_or(1.0);
+        // Unset stays unset: the daemon applies `ac-core`'s defaults and
+        // echoes them in the ack (#501).
+        let f1 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
+        let f2 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
+        let duration = pull(&mut tokens, TokenKind::Time).map(|v| v.as_f64());
         let level_arg = pull(&mut tokens, TokenKind::Level);
         let level_defaulted = level_arg.is_none();
         let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
@@ -223,9 +219,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(distance_m, None);
-                assert!((f1 - 20.0).abs() < 1e-9);
-                assert!((f2 - 20000.0).abs() < 1e-9);
-                assert!((duration - 1.0).abs() < 1e-9);
+                assert_eq!(f1, Some(20.0));
+                assert_eq!(f2, Some(20000.0));
+                assert_eq!(duration, Some(1.0));
                 assert!(matches!(level, LevelSpec::Dbu(v) if (v - (-6.0)).abs() < 1e-9));
                 assert_eq!(n_harmonics, Some(5));
                 assert_eq!(window_len, Some(4096));
@@ -251,9 +247,11 @@ mod tests {
                 distance_m,
             } => {
                 assert_eq!(distance_m, None);
-                assert!((f1 - 20.0).abs() < 1e-9);
-                assert!((f2 - 20000.0).abs() < 1e-9);
-                assert!((duration - 1.0).abs() < 1e-9);
+                // Unset — the daemon applies `ac-core`'s defaults (#501),
+                // so the CLI holds no copy that could drift from them.
+                assert_eq!(f1, None);
+                assert_eq!(f2, None);
+                assert_eq!(duration, None);
                 assert_eq!(
                     level,
                     LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)

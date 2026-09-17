@@ -188,35 +188,21 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     }
     let level_db = level_to_dbfs(level, cal.as_ref());
 
-    let gate = format!(
-        "{} harmonics, {} window, {} tail",
-        n_harmonics
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "default".into()),
-        window_len
-            .map(|v| format!("{v}-sample"))
-            .unwrap_or_else(|| "default".into()),
-        tail_s
-            .map(|v| format!("{v:.2}s"))
-            .unwrap_or_else(|| "default".into()),
-    );
-    println!("\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {duration:.1}s");
-    println!("  gate       {gate}");
-    // #460 UX: echo the typed distance before emission, so a token typo
-    // (`0.8m` meant as `0.8s`) is visible before the result, and state its
-    // absence rather than hide it.
-    match distance_m {
-        Some(d) => println!("  distance   {d} m"),
-        None => println!("  distance   not given"),
-    }
-
+    // Only typed fields go on the wire: the daemon applies `ac-core`'s
+    // defaults to the rest and echoes what it accepted (#501).
     let mut cmd_json = serde_json::json!({
         "cmd": "plot_ir",
-        "f1_hz": f1,
-        "f2_hz": f2,
-        "duration": duration,
         "level_dbfs": level_db,
     });
+    if let Some(v) = f1 {
+        cmd_json["f1_hz"] = serde_json::json!(v);
+    }
+    if let Some(v) = f2 {
+        cmd_json["f2_hz"] = serde_json::json!(v);
+    }
+    if let Some(v) = duration {
+        cmd_json["duration"] = serde_json::json!(v);
+    }
     if let Some(v) = n_harmonics {
         cmd_json["n_harmonics"] = serde_json::json!(v);
     }
@@ -231,6 +217,27 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
+    // #501 UX: the whole stimulus block prints after the ack, because
+    // every value in it is the daemon's echo, defaults applied.
+    let typed = IrTyped {
+        f1: f1.is_some(),
+        f2: f2.is_some(),
+        duration: duration.is_some(),
+        window: window_len.is_some(),
+        n_harmonics: n_harmonics.is_some(),
+        tail: tail_s.is_some(),
+    };
+    println!();
+    for line in ir_stimulus_lines(&ack, typed) {
+        println!("{line}");
+    }
+    // #460 UX: echo the typed distance before emission, so a token typo
+    // (`0.8m` meant as `0.8s`) is visible before the result, and state its
+    // absence rather than hide it.
+    match distance_m {
+        Some(d) => println!("  distance   {d} m"),
+        None => println!("  distance   not given"),
+    }
     print_level(
         ack.get("level_dbfs").and_then(|v| v.as_f64()),
         level_defaulted,
@@ -243,8 +250,8 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
         println!("  output     {p}");
     }
     // #460 UX: every port the sweep leaves through or is referenced against,
-    // printed before the result, on the same label grid as `gate` and
-    // `level`. A reference output equal to the main output drives nothing
+    // printed before the result, on the same label grid as the stimulus
+    // rows and `level`. A reference output equal to the main output drives nothing
     // extra, so it is not named twice.
     if let Some(p) = ack.get("ref_out_port").and_then(|v| v.as_str()) {
         if Some(p) != out_port {
@@ -257,9 +264,133 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     println!("  Running IR measurement...\n");
 
     let (ir_frame, report_frame) = collect_ir(client, "plot_ir");
-    print_ir_result(ir_frame.as_ref(), report_frame.as_ref(), duration, tail_s);
+    print_ir_result(
+        ir_frame.as_ref(),
+        report_frame.as_ref(),
+        ack.get("duration").and_then(|v| v.as_f64()),
+        ack.get("tail_s").and_then(|v| v.as_f64()),
+    );
     print_ir_report(report_frame.as_ref(), cfg);
     print_ir_notes(report_frame.as_ref());
+}
+
+/// Which `plot ir` stimulus fields the operator typed; the rest are the
+/// daemon's defaults (#501).
+#[derive(Debug, Clone, Copy, Default)]
+struct IrTyped {
+    f1: bool,
+    f2: bool,
+    duration: bool,
+    window: bool,
+    n_harmonics: bool,
+    tail: bool,
+}
+
+/// The `level` block's fallback for an ack field an older daemon does not
+/// send, verbatim.
+const NOT_REPORTED: &str = "(not reported by this daemon)";
+
+fn origin_tag(typed: bool) -> &'static str {
+    if typed {
+        "(typed)"
+    } else {
+        "(default)"
+    }
+}
+
+/// The `IR sweep` block printed before emission (#501 UX): band, length,
+/// window, harmonics and tail, each read from the `plot_ir` ack's echo and
+/// tagged `typed` or `default`. Decimal points sit on `level`'s column.
+/// A defaulted window is shown in seconds, the quantity the daemon holds
+/// before the engine rate is known; a typed one in the samples typed.
+fn ir_stimulus_lines(ack: &serde_json::Value, typed: IrTyped) -> Vec<String> {
+    let f64_of = |key: &str| ack.get(key).and_then(|v| v.as_f64());
+    let u64_of = |key: &str| ack.get(key).and_then(|v| v.as_u64());
+    let row = |label: &str, value: Option<String>| {
+        format!(
+            "  {label:<11}{}",
+            value.unwrap_or_else(|| NOT_REPORTED.to_string())
+        )
+    };
+
+    let band_tag = match (typed.f1, typed.f2) {
+        (true, true) => "(typed)",
+        (false, false) => "(default)",
+        (true, false) => "(start typed, stop default)",
+        (false, true) => "(start default, stop typed)",
+    };
+    let band = match (f64_of("f1_hz"), f64_of("f2_hz")) {
+        (Some(f1), Some(f2)) => Some(format!("{f1} Hz \u{2192} {f2} Hz  {band_tag}")),
+        _ => None,
+    };
+    let length = f64_of("duration").map(|d| format!("{d:>7.2} s  {}", origin_tag(typed.duration)));
+    let window = match (u64_of("window_len"), f64_of("window_default_s")) {
+        (Some(n), _) => Some(format!("{n:>4} samples  {}", origin_tag(typed.window))),
+        (None, Some(s)) => Some(format!("{s:>7.2} s  {}", origin_tag(typed.window))),
+        (None, None) => None,
+    };
+    let harmonics = u64_of("n_harmonics").map(|n| {
+        let unit = if n == 1 { "order" } else { "orders" };
+        format!("{n:>4} {unit}  {}", origin_tag(typed.n_harmonics))
+    });
+    let tail = f64_of("tail_s").map(|t| format!("{t:>7.2} s  {}", origin_tag(typed.tail)));
+
+    vec![
+        "  IR sweep".to_string(),
+        row("band", band),
+        row("length", length),
+        row("window", window),
+        row("harmonics", harmonics),
+        row("tail", tail),
+    ]
+}
+
+/// The `captured` row: sweep plus tail as the daemon accepted them (#501 —
+/// no CLI-side default that could drift from the daemon's).
+fn captured_line(duration: Option<f64>, tail_s: Option<f64>) -> String {
+    match (duration, tail_s) {
+        (Some(d), Some(t)) => format!(
+            "  captured      {:.2} s  ({d:.2} s sweep + {t:.2} s tail)",
+            d + t
+        ),
+        _ => format!("  captured      {NOT_REPORTED}"),
+    }
+}
+
+/// The failed-deconvolution banner (#376), with the places to check
+/// (#501 UX): the sweep rows printed above, then the capture chain.
+fn deconvolution_failed_lines(reason: &str) -> Vec<String> {
+    vec![
+        format!("  DECONVOLUTION FAILED \u{2014} {reason}"),
+        format!("{CONT_INDENT}check: sweep length, band, window (above)"),
+        format!("{CONT_INDENT}check: drive level, input gain, distance, room noise"),
+    ]
+}
+
+/// The `pre-imp SNR` rows. A finite figure is shown next to the threshold
+/// it was compared against, pass or fail, with the threshold's basis under
+/// it (#501). A non-finite figure has no comparison to qualify.
+fn pre_impulse_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
+    use ac_core::measurement::report::{IrVerdict, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB};
+    if stats.pre_impulse_snr_db.is_finite() {
+        vec![
+            format!(
+                "  pre-imp SNR   {:.1} dB  (required \u{2265} {:.1} dB)",
+                stats.pre_impulse_snr_db, PRE_IMPULSE_SNR_MIN_DB,
+            ),
+            format!("{CONT_INDENT}{PRE_IMPULSE_SNR_BASIS}"),
+        ]
+    } else if let IrVerdict::Failed { reason } = &stats.verdict {
+        // Non-finite here means `ir_stats` had nothing to measure a floor
+        // from at all (see the reason already printed in the banner
+        // above) — restate it rather than a generic "silence" that would
+        // misdescribe a zero-peak or guard-band-exhausted capture alike.
+        vec![format!("  pre-imp SNR   {reason}")]
+    } else {
+        // Non-finite but `Ok`: a zero floor against a nonzero peak is the
+        // best possible capture, not an unmeasurable one.
+        vec!["  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string()]
+    }
 }
 
 /// The edge guard's outcome, in the shape [`short_onset_rule`] takes, read
@@ -889,7 +1020,7 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
 /// numbers by construction. No distance figure — #391 removed the
 /// ms → m conversion this used to also print.
 fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::config::Config) {
-    use ac_core::measurement::report::{IrVerdict, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB};
+    use ac_core::measurement::report::{IrVerdict, MeasurementReport};
 
     let Some(value) = report_frame.and_then(|f| f.get("report")) else {
         eprintln!("  !! no measurement/report frame — nothing to summarise");
@@ -912,8 +1043,9 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     // that is the exact plausible-looking wrong-number shape the issue
     // exists to close.
     if let IrVerdict::Failed { reason } = &stats.verdict {
-        println!("  DECONVOLUTION FAILED \u{2014} {reason}");
-        println!("                check: drive level, mic gain, distance, room noise");
+        for line in deconvolution_failed_lines(reason) {
+            println!("{line}");
+        }
         println!();
     } else {
         println!(
@@ -996,25 +1128,8 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     for line in arrival_check_lines(&stats.arrival_check, stored_period_size) {
         println!("{line}");
     }
-    if stats.pre_impulse_snr_db.is_finite() {
-        if matches!(stats.verdict, IrVerdict::Failed { .. }) {
-            println!(
-                "  pre-imp SNR   {:.1} dB  (required \u{2265} {:.1} dB, threshold set from rig data)",
-                stats.pre_impulse_snr_db, PRE_IMPULSE_SNR_MIN_DB,
-            );
-        } else {
-            println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
-        }
-    } else if let IrVerdict::Failed { reason } = &stats.verdict {
-        // Non-finite here means `ir_stats` had nothing to measure a floor
-        // from at all (see the reason already printed in the banner
-        // above) — restate it rather than a generic "silence" that would
-        // misdescribe a zero-peak or guard-band-exhausted capture alike.
-        println!("  pre-imp SNR   {reason}");
-    } else {
-        // Non-finite but `Ok`: a zero floor against a nonzero peak is the
-        // best possible capture, not an unmeasurable one.
-        println!("  pre-imp SNR   \u{221e} dB  (zero measured floor)");
+    for line in pre_impulse_snr_lines(&stats) {
+        println!("{line}");
     }
     println!(
         "  gate          {} window, {} samples ({:.2} ms) → f_low {:.1} Hz",
@@ -1079,7 +1194,7 @@ fn collect_ir(
 fn print_ir_result(
     ir_frame: Option<&serde_json::Value>,
     report_frame: Option<&serde_json::Value>,
-    duration: f64,
+    duration: Option<f64>,
     tail_s: Option<f64>,
 ) {
     let Some(data) = ir_frame.and_then(|f| f.get("data")) else {
@@ -1096,14 +1211,10 @@ fn print_ir_result(
     {
         println!("  harmonics     {n} order(s) extracted");
     }
-    // `tail_s` unset on the CLI side means "daemon default" (0.5s per
-    // ZMQ.md's `plot_ir` request) — report the nominal figure either way,
-    // the report `notes` line below carries the measured decay verdict.
-    let tail = tail_s.unwrap_or(0.5);
-    println!(
-        "  captured      {:.2}s  ({duration:.2}s sweep + {tail:.2}s tail)",
-        duration + tail
-    );
+    // `duration` and `tail_s` are the ack's echo (#501): the nominal
+    // figures the daemon ran; the report `notes` line below carries the
+    // measured decay verdict.
+    println!("{}", captured_line(duration, tail_s));
     let _ = report_frame;
 }
 
@@ -1238,10 +1349,11 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, arrival_source_line, collect_sweep_frames, flight_time_line,
-        guard_outcome, interface_latency_lines, label_prefix, onset_gap_line,
+        arrival_check_lines, arrival_source_line, captured_line, collect_sweep_frames,
+        deconvolution_failed_lines, flight_time_line, guard_outcome, interface_latency_lines,
+        ir_stimulus_lines, label_prefix, onset_gap_line, pre_impulse_snr_lines,
         reference_latency_lines, reference_stored_latency_lines, short_onset_rule, wrap_comma_list,
-        SweepOutcome, CONT_INDENT,
+        IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
@@ -2246,5 +2358,151 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── #501: the `IR sweep` block, `captured`, banner and SNR rows ──────
+
+    /// The ack a current daemon sends for a bare `plot ir`.
+    fn default_ack() -> serde_json::Value {
+        serde_json::json!({
+            "ok": true, "f1_hz": 20.0, "f2_hz": 20000.0, "duration": 4.0,
+            "n_harmonics": 5, "tail_s": 0.5, "window_default_s": 0.4,
+        })
+    }
+
+    /// UX frame "default arguments": values from the ack, every tag
+    /// `default`, decimal points on `level`'s column (index 17).
+    #[test]
+    fn ir_stimulus_lines_print_the_default_frame() {
+        let lines = ir_stimulus_lines(&default_ack(), IrTyped::default());
+        assert_eq!(
+            lines,
+            vec![
+                "  IR sweep",
+                "  band       20 Hz \u{2192} 20000 Hz  (default)",
+                "  length        4.00 s  (default)",
+                "  window        0.40 s  (default)",
+                "  harmonics     5 orders  (default)",
+                "  tail          0.50 s  (default)",
+            ]
+        );
+        let level = "  level       -40.0 dBFS  (typed)";
+        for line in &lines[2..] {
+            if let Some(dot) = line.find('.') {
+                assert_eq!(dot, level.find('.').unwrap(), "{line:?}");
+            }
+        }
+    }
+
+    /// UX worst case: every field typed; a typed window is in samples.
+    #[test]
+    fn ir_stimulus_lines_print_the_typed_frame() {
+        let ack = serde_json::json!({
+            "f1_hz": 200.0, "f2_hz": 8000.0, "duration": 4.0,
+            "n_harmonics": 12, "tail_s": 0.25, "window_len": 16384,
+        });
+        let typed = IrTyped {
+            f1: true,
+            f2: true,
+            duration: true,
+            window: true,
+            n_harmonics: true,
+            tail: true,
+        };
+        assert_eq!(
+            ir_stimulus_lines(&ack, typed)[1..],
+            [
+                "  band       200 Hz \u{2192} 8000 Hz  (typed)",
+                "  length        4.00 s  (typed)",
+                "  window     16384 samples  (typed)",
+                "  harmonics    12 orders  (typed)",
+                "  tail          0.25 s  (typed)",
+            ]
+        );
+    }
+
+    /// An older daemon echoes nothing: every row says so, in `level`'s
+    /// fallback wording, and no CLI-side default is shown in its place.
+    #[test]
+    fn ir_stimulus_lines_fall_back_for_an_older_daemon() {
+        let lines = ir_stimulus_lines(&serde_json::json!({"ok": true}), IrTyped::default());
+        for (line, label) in
+            lines[1..]
+                .iter()
+                .zip(["band", "length", "window", "harmonics", "tail"])
+        {
+            assert_eq!(*line, format!("  {label:<11}(not reported by this daemon)"));
+        }
+    }
+
+    #[test]
+    fn ir_stimulus_lines_tag_a_partly_typed_band_per_edge() {
+        let typed = IrTyped {
+            f1: true,
+            ..IrTyped::default()
+        };
+        assert!(
+            ir_stimulus_lines(&default_ack(), typed)[1].ends_with("(start typed, stop default)")
+        );
+    }
+
+    /// `captured` reads the ack: 4.00 s + 0.50 s under the new defaults,
+    /// never the pre-#501 CLI copy (1.00 s).
+    #[test]
+    fn captured_line_reads_the_echoed_sweep_and_tail() {
+        assert_eq!(
+            captured_line(Some(4.0), Some(0.5)),
+            "  captured      4.50 s  (4.00 s sweep + 0.50 s tail)"
+        );
+        assert_eq!(
+            captured_line(None, Some(0.5)),
+            "  captured      (not reported by this daemon)"
+        );
+    }
+
+    #[test]
+    fn deconvolution_failed_lines_name_the_sweep_and_the_chain() {
+        assert_eq!(
+            deconvolution_failed_lines("pre-impulse SNR below threshold"),
+            vec![
+                "  DECONVOLUTION FAILED \u{2014} pre-impulse SNR below threshold".to_string(),
+                format!("{CONT_INDENT}check: sweep length, band, window (above)"),
+                format!("{CONT_INDENT}check: drive level, input gain, distance, room noise"),
+            ]
+        );
+    }
+
+    /// The threshold and its basis print on a pass as well as a failure;
+    /// a non-finite figure gets neither.
+    #[test]
+    fn pre_impulse_snr_lines_show_the_threshold_and_basis_on_pass_and_fail() {
+        let basis = format!("{CONT_INDENT}fixed threshold, scored for the default sweep only");
+        let mut pass = stats_with(None, ArrivalCheck::Agree);
+        pass.pre_impulse_snr_db = 21.5;
+        assert_eq!(
+            pre_impulse_snr_lines(&pass),
+            vec![
+                "  pre-imp SNR   21.5 dB  (required \u{2265} 18.0 dB)".to_string(),
+                basis.clone(),
+            ]
+        );
+        let mut fail = pass.clone();
+        fail.pre_impulse_snr_db = 12.3;
+        fail.verdict = IrVerdict::Failed {
+            reason: "pre-impulse SNR below threshold".into(),
+        };
+        assert_eq!(
+            pre_impulse_snr_lines(&fail),
+            vec![
+                "  pre-imp SNR   12.3 dB  (required \u{2265} 18.0 dB)".to_string(),
+                basis,
+            ]
+        );
+        let mut silent = pass.clone();
+        silent.pre_impulse_snr_db = f64::INFINITY;
+        assert_eq!(
+            pre_impulse_snr_lines(&silent),
+            vec!["  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string()]
+        );
     }
 }
