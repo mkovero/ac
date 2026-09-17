@@ -61,7 +61,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
     let show = parsed.show_plot;
     match parsed.cmd {
         CommandKind::Devices => devices::run(client),
-        CommandKind::Setup { .. } => setup::run(&parsed.cmd, client),
+        CommandKind::Setup { .. } => setup::run(&parsed.cmd, cfg, client),
         CommandKind::Stop => stop::run(client),
         CommandKind::DmmShow => dmm::run(client),
         CommandKind::ServerEnable => server::enable(client),
@@ -82,7 +82,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
 
         CommandKind::Plot { .. } => plot::run(&parsed.cmd, cfg, client, show),
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
-        CommandKind::PlotIr { .. } => plot::run_ir(&parsed.cmd, cfg, client),
+        CommandKind::PlotIr { .. } => plot::run_ir(&parsed.cmd, client),
 
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
         CommandKind::Transfer { .. } => transfer::run(&parsed.cmd, cfg),

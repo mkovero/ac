@@ -110,7 +110,26 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         None => return json!({"ok": false, "error": "missing 'update' field"}),
     };
 
+    // #472: the report directory is validated before anything else in the
+    // update is applied, so a refusal leaves the whole config as it was —
+    // "setting not changed" is true for every key in the command.
+    let report_dir_update: Option<Option<std::path::PathBuf>> = match update.get("report_dir") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => {
+            let raw = v.as_str().unwrap_or_default();
+            if let Err(reason) = validate_report_dir(raw) {
+                return report_dir_refusal(raw, &reason);
+            }
+            Some(Some(std::path::PathBuf::from(raw)))
+        }
+    };
+
     let mut cfg = state.cfg.lock().unwrap();
+
+    if let Some(dir) = report_dir_update {
+        cfg.report_dir = dir;
+    }
 
     // Explicit channel selection invalidates any prior sticky port override.
     // Without this, a stale `*_port` in config.json silently overrides the
@@ -204,6 +223,19 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
     if let Err(e) = ac_core::config::save(&cfg, None) {
         eprintln!("setup: save failed: {e}");
+        // #472: config is reloaded from disk before the next request, so an
+        // unsaved update would silently revert right after the read-out
+        // showed it. Read-only calls (`update: {}`) keep answering.
+        let has_updates = update.as_object().is_some_and(|m| !m.is_empty());
+        if has_updates {
+            return json!({
+                "ok": false,
+                "error": format!(
+                    "config not saved ({}): {e}",
+                    state.config_path.display()
+                ),
+            });
+        }
     }
     // #459: the fixed emission maximum, at the top level (beside `config`,
     // not inside it — `config` is the config file, and the maximum is a
@@ -212,10 +244,68 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     // emission — `setup` is never refused, retired key or not, so it stays
     // reachable exactly when an operator needs to find out what the
     // maximum is.
-    json!({
+    let mut reply = json!({
         "ok": true,
         "config": cfg_value,
         "max_dbfs": ac_core::shared::emission_level::MAX_EMISSION_DBFS,
+    });
+    // #472: whether the configured report directory can be written, beside
+    // `config` for the same reason as `max_dbfs` — it is not a config
+    // value. Checked on every call, so a directory removed after it was set
+    // shows up in the read-out before a capture, not after one.
+    if let Some(dir) = cfg.report_dir.as_ref() {
+        reply["report_dir_status"] = match probe_dir_writable(dir) {
+            Ok(()) => json!({"writable": true}),
+            Err(e) => json!({"writable": false, "error": e.to_string()}),
+        };
+    }
+    reply
+}
+
+/// Refusal reason for a non-absolute `report_dir`: a relative path or a `~`
+/// means nothing to a daemon that may not share the client's cwd or `$HOME`.
+const REPORT_DIR_NOT_ABSOLUTE: &str = "must be an absolute path on the daemon host";
+
+/// Whether `raw` can be stored as the report directory (#472): absolute,
+/// existing, and writable by this process. Never creates it — a typo must
+/// not become a working archive in the wrong place. The reason is the
+/// `std::io::Error` text as the OS gave it, so it names what was observed
+/// and nothing more.
+fn validate_report_dir(raw: &str) -> Result<(), String> {
+    let path = std::path::Path::new(raw);
+    if raw.is_empty() || !path.is_absolute() {
+        return Err(REPORT_DIR_NOT_ABSOLUTE.to_string());
+    }
+    probe_dir_writable(path).map_err(|e| e.to_string())
+}
+
+/// Write probe shared by setup-time validation and `report_dir_status`:
+/// `create_new` a dot-prefixed file in `dir`, then remove it (a failed
+/// removal is ignored — a leftover probe file is harmless and visible).
+fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::metadata(dir)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let probe = dir.join(format!(".ac-write-probe-{}-{nanos}", std::process::id()));
+    // On a plain file the open fails with the OS's own "Not a directory".
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    if !meta.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+    }
+    Ok(())
+}
+
+fn report_dir_refusal(path: &str, reason: &str) -> Value {
+    json!({
+        "ok": false,
+        "error": format!("report-dir {path}: {reason} \u{2014} setting not changed"),
+        "refused": {"key": "report_dir", "path": path, "reason": reason},
     })
 }
 

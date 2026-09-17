@@ -865,10 +865,43 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
     "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
-    "snapshot_spool_dir":"<path>" | null  // optional — see `snapshot`
+    "snapshot_spool_dir":"<path>" | null, // optional — see `snapshot`
+    "report_dir":        "<absolute path>" | null  // optional — null = do not persist
   }
 }
 ```
+
+`report_dir` is validated **before any other key in the update is applied**:
+it must be an absolute path on the daemon host, name an existing directory,
+and accept a probe file (`<dir>/.ac-write-probe-<pid>-<nanos>`, created with
+`create_new` and removed at once). The directory is never created, and the
+path is stored as given (no canonicalisation). On failure nothing in the
+update is changed or saved:
+
+```json
+{ "ok": false,
+  "error": "report-dir /home/mui/ac-reprots: No such file or directory (os error 2) — setting not changed",
+  "refused": { "key": "report_dir", "path": "/home/mui/ac-reprots",
+               "reason": "No such file or directory (os error 2)" } }
+```
+
+`error` stays one line for generic clients; `refused` carries the parts
+separately. `reason` is either `must be an absolute path on the daemon host`
+(relative, `~`, or empty) or the OS error text as-is (`No such file or
+directory (os error 2)`, `Not a directory (os error 20)`, `Permission denied
+(os error 13)`, …). `ac setup report-dir` resolves `~` and relative paths
+against the client's own `$HOME` and cwd only when the daemon is local
+(`server_host` unset); to a remote daemon the value is sent as typed.
+
+When `update` is non-empty and the config file cannot be saved, the reply is a
+refusal rather than an `ok` whose values would revert on the next request's
+config reload:
+
+```json
+{ "ok": false, "error": "config not saved (/home/mui/.config/ac/config.json): <err>" }
+```
+
+A read-only call (`update: {}`) still answers when the save fails.
 
 `backend` is a requirement, not a preference. `null` selects the platform's
 real default and never falls back to fake. `fake` is the persistent explicit
@@ -894,12 +927,20 @@ vice versa.
 {
   "ok":     true,
   "max_dbfs": 0.0,
-  "config": { /* full config dict, all keys */ }
+  "config": { /* full config dict, all keys */ },
+  "report_dir_status": { "writable": true }   // only when config.report_dir is set
 }
 ```
 
 `max_dbfs` is the fixed build maximum, not a config setting. A retired
 `drive_max_dbfs` key remains inside `config` until the operator removes it.
+
+`report_dir_status` sits beside `config` for the same reason: it is not a
+config value. It is present only when `config.report_dir` is set, and is
+recomputed with the same write probe on every `setup` call, read-only calls
+included — `{"writable": true}` or `{"writable": false, "error": "<os error>"}`
+— so a directory removed or unmounted after it was set shows before a capture
+rather than after one.
 
 ---
 
@@ -1195,7 +1236,10 @@ has no reference configured.
 { "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 9, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
-{ "cmd": "plot_ir" }
+{ "cmd": "plot_ir", "backend": "jack",
+  "report_files": { "dir": "/home/mui/ac-reports",
+                    "json": { "path": "/home/mui/ac-reports/2026-09-17T09-41-12Z-plot_ir.json" },
+                    "csv":  { "error": "No space left on device (os error 28)" } } }
 ```
 
 `notes` carries independent statements, **one per line**: the ISO 18233
@@ -1300,7 +1344,15 @@ supplied. It is an **input** to the causal bound, converted to seconds inside
 When `cfg.report_dir` is configured the daemon also writes the pair
 `<ISO8601>-plot_ir.json` and `<ISO8601>-plot_ir.csv` there (colons
 replaced with `-`), so the result survives the run without the client
-having to save anything.
+having to save anything. The directory is **never created**: one removed
+after `setup` accepted it makes both writes fail with the OS error.
+
+The `done` frame reports what was actually written, in `report_files` (#472):
+`{"dir": null}` when no report directory is configured; otherwise `dir` plus
+one entry each for `json` and `csv`, either `{"path": "<file>"}` or
+`{"error": "<err>"}`. A client prints these rather than building paths from
+its own config, which may not be the daemon's. `plot`, `plot_level` and the
+other `done` frames do not carry the field.
 
 ---
 

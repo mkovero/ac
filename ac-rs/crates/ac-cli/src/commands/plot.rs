@@ -152,7 +152,7 @@ pub fn run_level(
 /// `generate::wait_for_stop` and printed nothing else), actually reads the
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
-pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
+pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s, distance_m) =
         match cmd {
             CommandKind::PlotIr {
@@ -256,9 +256,14 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     }
     println!("  Running IR measurement...\n");
 
-    let (ir_frame, report_frame) = collect_ir(client, "plot_ir");
+    let (ir_frame, report_frame, done_frame) = collect_ir(client, "plot_ir");
     print_ir_result(ir_frame.as_ref(), report_frame.as_ref(), duration, tail_s);
-    print_ir_report(report_frame.as_ref(), cfg);
+    print_ir_report(report_frame.as_ref());
+    if let Some(done) = done_frame.as_ref() {
+        for line in report_files_lines(done) {
+            println!("{line}");
+        }
+    }
     print_ir_notes(report_frame.as_ref());
 }
 
@@ -888,7 +893,7 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
 /// frame, so the printed numbers and the archived ones are the same
 /// numbers by construction. No distance figure — #391 removed the
 /// ms → m conversion this used to also print.
-fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::config::Config) {
+fn print_ir_report(report_frame: Option<&serde_json::Value>) {
     use ac_core::measurement::report::{IrVerdict, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB};
 
     let Some(value) = report_frame.and_then(|f| f.get("report")) else {
@@ -1023,32 +1028,94 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         stats.gate_window_s * 1000.0,
         stats.gate_f_low_hz,
     );
+}
 
-    if let Some(dir) = cfg.report_dir.as_ref() {
-        let stem = report.timestamp_utc.replace(':', "-");
-        println!(
-            "  report        {}",
-            dir.join(format!("{stem}-plot_ir.json")).display()
-        );
-        println!(
-            "  csv           {}",
-            dir.join(format!("{stem}-plot_ir.csv")).display()
-        );
-    } else {
-        eprintln!("  note: report_dir not configured — result not persisted (see `ac setup`)");
+/// The `setup` command that sets the report directory, as the `report`
+/// line prints it (#472): built from the parser's own token, and fed back
+/// through the parser by a test, so it cannot name something `ac setup`
+/// does not accept.
+fn report_dir_remedy() -> String {
+    format!("ac setup {} <dir>", crate::parse::REPORT_DIR_TOKEN)
+}
+
+/// The `report` / `csv` lines (#472 UX), from what the daemon's `done` frame
+/// says it wrote — never from this process's config, which may not be the
+/// daemon's. A `done` frame without `report_files` comes from a daemon that
+/// predates the field, and says so rather than guessing a path.
+fn report_files_lines(done: &serde_json::Value) -> Vec<String> {
+    let Some(files) = done.get("report_files") else {
+        return vec![format!(
+            "{}not reported by this daemon",
+            label_prefix("report")
+        )];
+    };
+    let Some(dir) = files.get("dir").and_then(|v| v.as_str()) else {
+        return vec![format!(
+            "{}not saved \u{2014} no report directory  ({})",
+            label_prefix("report"),
+            report_dir_remedy()
+        )];
+    };
+    let path_of = |key: &str| {
+        files
+            .get(key)
+            .and_then(|f| f.get("path"))
+            .and_then(|v| v.as_str())
+    };
+    let error_of = |key: &str| {
+        files
+            .get(key)
+            .and_then(|f| f.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("reason not reported")
+    };
+    let mut lines = Vec::new();
+    match path_of("json") {
+        Some(p) => lines.push(format!("{}{p}", label_prefix("report"))),
+        None => {
+            // The JSON is the report; when it failed, the CSV's own outcome
+            // is not repeated unless it was written after all.
+            lines.push(format!(
+                "{}not saved \u{2014} write failed in {dir}",
+                label_prefix("report")
+            ));
+            lines.push(format!("{CONT_INDENT}{}", error_of("json")));
+            if let Some(p) = path_of("csv") {
+                lines.push(format!("{}{p}", label_prefix("csv")));
+            }
+            return lines;
+        }
     }
+    match path_of("csv") {
+        Some(p) => lines.push(format!("{}{p}", label_prefix("csv"))),
+        None => lines.push(format!(
+            "{}not saved \u{2014} {}",
+            label_prefix("csv"),
+            error_of("csv")
+        )),
+    }
+    lines
 }
 
 /// Wait for `plot_ir`'s DATA frames: `measurement/impulse_response` and
 /// `measurement/report` ride their own topics (not wrapped in a generic
 /// `data` topic the way `plot`/`plot_level` per-point frames are), so this
 /// mirrors `collect_sweep` but keys off the topic string directly.
+///
+/// The `done` frame is returned too: it carries `report_files` (#472). It is
+/// `None` when the command ended on `error` or a timeout, both already
+/// reported.
 fn collect_ir(
     client: &mut AcClient,
     cmd_name: &str,
-) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+) -> (
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+) {
     let mut ir_frame = None;
     let mut report_frame = None;
+    let mut done_frame = None;
     loop {
         let frame = match client.recv_data(300_000) {
             Some(f) => f,
@@ -1061,7 +1128,10 @@ fn collect_ir(
         match topic.as_str() {
             "measurement/impulse_response" => ir_frame = Some(data),
             "measurement/report" => report_frame = Some(data),
-            "done" => break,
+            "done" => {
+                done_frame = Some(data);
+                break;
+            }
             "error" => {
                 let msg = data
                     .get("message")
@@ -1073,7 +1143,7 @@ fn collect_ir(
             _ => {}
         }
     }
-    (ir_frame, report_frame)
+    (ir_frame, report_frame, done_frame)
 }
 
 fn print_ir_result(
@@ -1240,8 +1310,8 @@ mod tests {
     use super::{
         arrival_check_lines, arrival_source_line, collect_sweep_frames, flight_time_line,
         guard_outcome, interface_latency_lines, label_prefix, onset_gap_line,
-        reference_latency_lines, reference_stored_latency_lines, short_onset_rule, wrap_comma_list,
-        SweepOutcome, CONT_INDENT,
+        reference_latency_lines, reference_stored_latency_lines, report_files_lines,
+        short_onset_rule, wrap_comma_list, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
@@ -1306,6 +1376,112 @@ mod tests {
 
         assert_eq!(outcome, SweepOutcome::Done);
         assert_eq!(results.len(), 2);
+    }
+
+    /// #472 UX: the three `report` states, all on the `report` slot.
+    #[test]
+    fn report_files_lines_render_each_state() {
+        let saved = serde_json::json!({"cmd": "plot_ir", "report_files": {
+            "dir": "/r",
+            "json": {"path": "/r/t-plot_ir.json"},
+            "csv": {"path": "/r/t-plot_ir.csv"},
+        }});
+        assert_eq!(
+            report_files_lines(&saved),
+            vec![
+                "  report        /r/t-plot_ir.json",
+                "  csv           /r/t-plot_ir.csv",
+            ]
+        );
+
+        let unset = serde_json::json!({"report_files": {"dir": null}});
+        assert_eq!(
+            report_files_lines(&unset),
+            vec![
+                "  report        not saved \u{2014} no report directory  (ac setup report-dir <dir>)"
+            ]
+        );
+
+        let failed = serde_json::json!({"report_files": {
+            "dir": "/mnt/rigdata/ac-reports",
+            "json": {"error": "Permission denied (os error 13)"},
+            "csv": {"error": "Permission denied (os error 13)"},
+        }});
+        assert_eq!(
+            report_files_lines(&failed),
+            vec![
+                "  report        not saved \u{2014} write failed in /mnt/rigdata/ac-reports",
+                "                Permission denied (os error 13)",
+            ]
+        );
+
+        let csv_only_failed = serde_json::json!({"report_files": {
+            "dir": "/r",
+            "json": {"path": "/r/t-plot_ir.json"},
+            "csv": {"error": "No space left on device (os error 28)"},
+        }});
+        assert_eq!(
+            report_files_lines(&csv_only_failed),
+            vec![
+                "  report        /r/t-plot_ir.json",
+                "  csv           not saved \u{2014} No space left on device (os error 28)",
+            ]
+        );
+
+        let old_daemon = serde_json::json!({"cmd": "plot_ir"});
+        assert_eq!(
+            report_files_lines(&old_daemon),
+            vec!["  report        not reported by this daemon"]
+        );
+    }
+
+    /// #472: the unset line's remedy must be a command the real parser
+    /// accepts as a report-directory setter. Comparing the token with itself
+    /// could never fail; this renders the line, cuts the command out of it,
+    /// and parses it — so a remedy renamed to `reports-dir`, given an extra
+    /// argument, or pointed at another command goes red.
+    #[test]
+    fn unset_report_line_names_a_setup_command_the_parser_accepts() {
+        let lines = report_files_lines(&serde_json::json!({"report_files": {"dir": null}}));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let remedy = remedy_of(&lines[0]);
+        assert_parses_as_report_dir_setter(&remedy);
+
+        // The check itself must be able to fail: the rejected remedies.
+        for wrong in [
+            "ac setup reports-dir <dir>",
+            "ac setup report-dir <dir> extra",
+            "ac plot ir <dir>",
+            "ac setup <dir>",
+        ] {
+            let outcome = std::panic::catch_unwind(|| assert_parses_as_report_dir_setter(wrong));
+            assert!(outcome.is_err(), "{wrong:?} must not pass the drift check");
+        }
+    }
+
+    fn remedy_of(line: &str) -> String {
+        let start = line.find("(ac ").expect("remedy opens with `(ac `") + 1;
+        let end = start + line[start..].find(')').expect("remedy closes with `)`");
+        line[start..end].to_string()
+    }
+
+    fn assert_parses_as_report_dir_setter(remedy: &str) {
+        let argv: Vec<String> = remedy
+            .replace("<dir>", "/srv/ac-reports")
+            .split_whitespace()
+            .skip(1) // `ac`, the binary name
+            .map(String::from)
+            .collect();
+        match crate::parse::parse(&argv) {
+            Ok(p) => match p.cmd {
+                crate::parse::CommandKind::Setup {
+                    report_dir: Some(Some(ref d)),
+                    ..
+                } => assert_eq!(d, "/srv/ac-reports"),
+                other => panic!("{remedy:?} parses as {other:?}, not a report-dir setter"),
+            },
+            Err(e) => panic!("{remedy:?} does not parse: {e}"),
+        }
     }
 
     fn unbounded() -> CausalBound {
