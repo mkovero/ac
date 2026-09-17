@@ -48,6 +48,8 @@ _caller_limit_file="${AC_LIMIT_FILE:-}"
 source "$(dirname "$0")/common.sh"
 # One limit file per run: a concurrent master.sh must not clear or trip ours.
 export AC_LIMIT_FILE="${_caller_limit_file:-$AC_LOG_DIR/provider-limit.$$}"
+# Our own per-run file goes when the run does; a caller's path is theirs.
+[[ -n $_caller_limit_file ]] || trap 'rm -f "$AC_LIMIT_FILE"' EXIT
 BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
@@ -147,7 +149,7 @@ architect_declared_no_change() {
     --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""') || return 1
   printf '%s\n' "$body" | awk '
     /^\*\*file manifest\*\*/ { m=1; next }
-    m && NF { if (tolower($1) ~ /^`?none/) found=1; exit }
+    m && NF { if (tolower($0) ~ /^[[:space:]`(]*none/) found=1; exit }
     END { exit found ? 0 : 1 }'
 }
 
@@ -258,7 +260,8 @@ qa_loop() {
         || { echo "  #$n: cannot count PR comments — not starting a revise"; return 1; }
       local revise_rc=0 retry_head
       AC_REVISE_MODE="${codex_base:+codex}" "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
-      if (( revise_rc != 0 && revise_rc != 130 && revise_rc != 143 )); then
+      # 75 is a provider limit (run()): retrying would only hit it again.
+      if (( revise_rc != 0 && revise_rc != 75 && revise_rc != 130 && revise_rc != 143 )); then
         retry_head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" || return 1
         if [[ $retry_head == "$pre" ]]; then
           echo "  #$n: revision worker exited before pushing — retrying once in the preserved worktree"

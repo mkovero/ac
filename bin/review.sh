@@ -91,6 +91,7 @@ independent_review() {
       return 3
     fi
     git worktree add --detach "$wt" "$head" >/dev/null
+    git update-ref -d "refs/ac/review/pr-$pr"   # the worktree now holds $head
     link_support "$wt"
     local rc=0
     local task
@@ -144,9 +145,9 @@ $gate_out"
     else
       echo "<codex/qa> PR #$pr: gate refused in $wt" >&2; rc=1
     fi
+    # The worktree is per-pass; so is its target (remove_worktree takes both).
+    # Seeding makes the next one cheap.
     remove_worktree "$wt"
-    # The worktree is per-pass; so is its target. Seeding makes the next one cheap.
-    rm -rf "$(target_for "$wt")"
     ((rc == 0)) || return "$rc"
     echo "<codex/qa> Done. Review posted for PR #$pr."
   done

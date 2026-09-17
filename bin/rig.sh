@@ -141,6 +141,7 @@ git_retry git fetch -q origin "+pull/$pr/head:refs/ac/rig/pr-$pr"
 [[ $(git rev-parse "refs/ac/rig/pr-$pr") == "$head" ]] || { echo "PR #$pr moved while preparing" >&2; exit 1; }
 [[ -e $wt ]] && remove_worktree "$wt"
 git worktree add --detach "$wt" "$head" >/dev/null
+git update-ref -d "refs/ac/rig/pr-$pr"   # the worktree now holds $head
 link_support "$wt"
 
 # Build and ship here, not in the session: both are mechanical, and a rig

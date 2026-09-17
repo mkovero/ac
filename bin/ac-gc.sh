@@ -72,7 +72,7 @@ for wt in "${WTS[@]}"; do
       # no PR yet, which reads exactly like an abandoned one; on 2026-09-17 a
       # --yes run would have removed #433's worktree mid-implementation.
       # Anything touched within the grace period is kept.
-      if [[ -n "$(find "$wt" -maxdepth 3 -newermt "-${GRACE_H} hours" -print -quit 2>/dev/null)" ]]; then
+      if [[ -n "$(find "$wt" -newermt "-${GRACE_H} hours" -print -quit 2>/dev/null)" ]]; then
         echo "  KEEP $(size "$wt")  $wt  [$br] no PR yet, but touched within ${GRACE_H} h (may be in use)"
         continue
       fi

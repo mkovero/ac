@@ -38,6 +38,21 @@ check '[[ $(cat $T/r_quoted) == 0 ]]' "a transcript that only quotes the limit t
 check '[[ $(cat $T/r_claude) == 1 ]]' "claude session limit in the result record is detected"
 check '[[ $(cat $T/r_codex) == 1 ]]'  "codex usage limit error record is detected"
 
+# --- 1b: a finished session whose own summary quotes the phrase (QA, #528) ---
+(
+  cd "$REPO" && source "$BIN/common.sh"
+  export AC_LIMIT_FILE="$T/limit1b"
+  printf '%s\n' '{"type":"result","is_error":false,"result":"Reviewed PR: the detector matches \"You'"'"'ve hit your session limit\" in result records."}' > "$T/quoted_result.jsonl"
+  r=0; provider_limit_check "$T/quoted_result.jsonl" claude jsonl && r=1; echo "$r" > "$T/r_quoted_result"
+  printf '%s\n' 'Summary: run() now detects "You'"'"'ve hit your session limit" and returns 75.' > "$T/quoted.txt"
+  r=0; provider_limit_check "$T/quoted.txt" claude text && r=1; echo "$r" > "$T/r_quoted_text"
+  printf '%s\n' 'working' "ERROR: You've hit your usage limit. try again at Sep 19th" > "$T/codex_fg.txt"
+  AC_LIMIT_FILE="$T/limit1c"; r=0; provider_limit_check "$T/codex_fg.txt" codex text && r=1; echo "$r" > "$T/r_codex_text"
+) 2>/dev/null
+check '[[ $(cat $T/r_quoted_result) == 0 && ! -e $T/limit1b ]]' "a final result that quotes the limit text is not a limit"
+check '[[ $(cat $T/r_quoted_text) == 0 ]]' "plain output that quotes the limit text mid-line is not a limit"
+check '[[ $(cat $T/r_codex_text) == 1 ]]' "codex's 'ERROR: You've hit your usage limit' line is a limit"
+
 # --- 2 ----------------------------------------------------------------------
 cat > "$T/stub/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -53,6 +68,36 @@ chmod +x "$T/stub/claude"
 check '[[ $(cat $T/r_run) == 75 ]]' "run --fg without a terminal returns 75 on a limit"
 check '[[ -s $T/limit2 ]] && grep -q "session limit" $T/limit2' "run --fg records the limit"
 check 'grep -q "working..." $T/run2.out' "run --fg still shows the provider output"
+
+# --- 2b: unattended --fg keeps a non-limit failure status ---------------------
+cat > "$T/stub/claude" <<'EOF'
+#!/usr/bin/env bash
+echo "working..."; exit 3
+EOF
+(
+  cd "$REPO" && source "$BIN/common.sh"
+  export AC_LIMIT_FILE="$T/limit2b" AC_PROVIDER=claude AC_DEVELOPER_PROVIDER=claude
+  rc=0; run developer "task" --fg > /dev/null 2>&1 || rc=$?
+  echo "$rc" > "$T/r_run2b"
+)
+check '[[ $(cat $T/r_run2b) == 3 && ! -e $T/limit2b ]]' "run --fg without a terminal keeps a plain failure status (3), no limit"
+
+# --- 2c: remove_worktree takes the target with it -------------------------------
+(
+  R="$T/repo2c"; git init -q "$R" && cd "$R" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  source "$BIN/common.sh"
+  export AC_TARGETS="$T/targets2c"
+  git worktree add -q --detach "$T/wt2c/gone" HEAD
+  git worktree add -q --detach "$T/wt2c/kept" HEAD
+  mkdir -p "$AC_TARGETS/gone/debug" "$AC_TARGETS/kept/debug"
+  echo dirty > "$T/wt2c/kept/untracked-but-locked"; git worktree lock "$T/wt2c/kept"
+  remove_worktree "$T/wt2c/gone"
+  remove_worktree "$T/wt2c/kept"   # locked: removal fails, target must stay
+  { [[ -d $T/wt2c/gone ]] && echo wt-left || echo wt-gone; [[ -d $AC_TARGETS/gone ]] && echo t-left || echo t-gone
+    [[ -d $T/wt2c/kept ]] && echo kwt-left || echo kwt-gone; [[ -d $AC_TARGETS/kept ]] && echo kt-left || echo kt-gone; } > "$T/r_2c"
+  git worktree unlock "$T/wt2c/kept"
+) 2>/dev/null
+check '[[ $(tr "\n" " " < $T/r_2c) == "wt-gone t-gone kwt-left kt-left " ]]' "remove_worktree removes the target only when the worktree went"
 
 # --- 3, 5: master.sh with stubbed gh and role scripts ------------------------
 mk_master() {  # $1 = dir; copies master/common and stubs the role scripts
@@ -131,6 +176,6 @@ check '[[ $(cat $T/r_g1) == "0 3" ]]' "git_retry retries a DNS failure until it 
 check '[[ $(cat $T/r_g2) == "128 1" ]]' "git_retry returns a real error at once"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
-check '! grep -n "rev-parse FETCH_HEAD" "$BIN"/*.sh | grep -v pipeline_test.sh | grep -q .' "no bin script reads the shared FETCH_HEAD"
+check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
 
 exit $fail

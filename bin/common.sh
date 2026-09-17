@@ -182,13 +182,15 @@ remove_worktree() {
 }
 
 # provider_limit_check <file> <provider> <mode> — did the provider stop on an
-# account limit? mode `jsonl` reads only the provider's own error/result
-# records, `text` only the tail of plain output, so a session that merely
-# quotes these strings (reviewing this function, say) is not a limit.
+# account limit? mode `jsonl` reads only the provider's own result/error
+# records, `text` only the tail of plain output. In both, the phrase must START
+# a line (optionally after "Error:"/"ERROR:"): a provider's limit notice is the
+# whole message, while a session that finished normally and merely quotes the
+# phrase in its summary (reviewing this function, say) has it mid-sentence.
 # On a hit: writes $AC_LIMIT_FILE and returns 0.
 provider_limit_check() {
   local file="$1" provider="$2" mode="$3" text re
-  re="(You've|You have) hit your (session|usage|weekly) limit[^\"]{0,100}"
+  re="^[[:space:]]*((Error|ERROR):[[:space:]]*)?(You've|You have) hit your (session|usage|weekly) limit[^\"]{0,100}"
   [[ -s $file ]] || return 1
   if [[ $mode == jsonl ]]; then
     if [[ $provider == claude ]]; then
