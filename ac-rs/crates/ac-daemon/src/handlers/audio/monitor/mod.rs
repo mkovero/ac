@@ -198,6 +198,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
+    // #466: the recorded session-check verdict, applied once at start. A
+    // refused voltage scale is withheld (SPL and the mic curve stay); a
+    // refusal recorded mid-monitor takes effect at the next start.
+    let recorded = crate::handlers::checks::Recorded::now(state);
+    let channel_cals: Vec<_> = channel_cals
+        .into_iter()
+        .map(|cal| {
+            let check = recorded.voltage_check(cal.as_ref());
+            (crate::handlers::checks::gated(cal, check.as_ref()), check)
+        })
+        .collect();
+
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
         Ok(eng) => StoppingEngine::new(eng),
@@ -354,8 +366,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             .iter()
             .zip(in_ports_worker.iter())
             .zip(channel_cals)
-            .map(|((&channel, in_port), cal)| {
-                ChannelState::new(channel, in_port.clone(), cal, sr, freq_hz, &ring_caps)
+            .map(|((&channel, in_port), (cal, check))| {
+                ChannelState::new(channel, in_port.clone(), cal, check, sr, freq_hz, &ring_caps)
             })
             .collect();
         let single_channel = channel_states.len() == 1;
@@ -736,6 +748,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // `samples` holds `ch.fft_ring` mutably.
                 let mc = MicCorrection::new(ch.mic_curve.as_ref(), &ctx);
                 let dbu_offset = dbu_offset_db(ch.cal.as_ref());
+                let voltage_check = ch.voltage_check.clone();
                 let spl_offset = ch.spl_offset;
                 let ring = &mut ch.fft_ring;
                 ring.extend(new.iter());
@@ -877,6 +890,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             ("n_channels", json!(n_channels)),
                             ("sr", json!(sr)),
                             ("dbu_offset_db", json!(dbu_offset)),
+                            ("voltage_check", json!(voltage_check)),
                             ("spl_offset_db", json!(spl_offset)),
                             ("mic_correction", json!(mc_tag)),
                             ("xruns", json!(xruns_total)),

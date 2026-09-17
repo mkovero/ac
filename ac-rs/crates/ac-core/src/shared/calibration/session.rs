@@ -665,6 +665,9 @@ pub struct SessionCheckRecord {
     pub judged: JudgedIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<ProbeSummary>,
+    /// Seconds between the two τ lifecycles' captures, when τ was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_separation_s: Option<f64>,
     /// Present only on a record with a refused layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted: Option<bool>,
@@ -1409,6 +1412,7 @@ mod tests {
                 latency: None,
             },
             probe: None,
+            latency_separation_s: None,
             persisted: None,
             persist_error: None,
         }

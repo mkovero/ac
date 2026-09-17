@@ -8,7 +8,7 @@
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::Calibration;
+use ac_core::shared::calibration::{Calibration, LayerVerdict};
 
 use crate::handlers::mic;
 
@@ -89,14 +89,20 @@ pub(super) struct TickInputs<'a> {
 ///
 /// Shared by the settling frame and the analysis frame so the two cannot
 /// disagree about a session constant.
+///
+/// #466: `voltage` means the scale is **applied** (the calibrations here are
+/// already gated), and each leg's `voltage_check` carries the session
+/// check's verdict whenever that leg's stored calibration had a scale.
 pub(super) fn cal_tags_value(
     meas_cal: Option<&Calibration>,
     ref_cal: Option<&Calibration>,
+    meas_check: Option<&LayerVerdict>,
+    ref_check: Option<&LayerVerdict>,
     meas_mic_tag: &str,
     mc_enabled: bool,
 ) -> Value {
     let ref_curve_loaded = ref_cal.is_some_and(|c| c.mic_response.is_some());
-    json!({
+    let mut tags = json!({
         "meas": {
             "voltage": if meas_cal.and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
             "spl":     if meas_cal.and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
@@ -107,7 +113,13 @@ pub(super) fn cal_tags_value(
             "spl":     if ref_cal.and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
             "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
         },
-    })
+    });
+    for (leg, check) in [("meas", meas_check), ("ref", ref_check)] {
+        if let Some(check) = check {
+            tags[leg]["voltage_check"] = json!(check);
+        }
+    }
+    tags
 }
 
 /// The frame a pair publishes before its ring holds a whole Welch segment.
@@ -173,7 +185,14 @@ pub(super) fn settling_frame(
         "spl":             Value::Null,
         "spl_weighting":   statics.weighting.tag(),
         "spl_integration": statics.integration_tag.as_str(),
-        "cal_tags":        cal_tags_value(ctx.meas_cal.as_ref(), ctx.ref_cal.as_ref(), mc_tag, mc_enabled),
+        "cal_tags":        cal_tags_value(
+            ctx.meas_cal.as_ref(),
+            ctx.ref_cal.as_ref(),
+            ctx.meas_voltage_check.as_ref(),
+            ctx.ref_voltage_check.as_ref(),
+            mc_tag,
+            mc_enabled,
+        ),
         "drive":           drive_msg.clone(),
         "backend":         statics.backend.as_str(),
     })
@@ -254,6 +273,8 @@ pub(super) fn build_pair_messages(
     let cal_tags = cal_tags_value(
         ctx.meas_cal.as_ref(),
         ctx.ref_cal.as_ref(),
+        ctx.meas_voltage_check.as_ref(),
+        ctx.ref_voltage_check.as_ref(),
         mc_tag,
         mc_enabled,
     );

@@ -145,6 +145,11 @@ pub struct ServerState {
     /// a restart. `active` flips true on worker spawn and false on exit;
     /// `set_monitor_params` uses it to reject changes when no monitor runs.
     pub monitor_params: Arc<Mutex<MonitorParams>>,
+    /// Session-check records of this process and the persisted-refusal
+    /// store's sync state (#466). Verified records live only here; refused
+    /// ones are also written to `session_refusals.json`, which is re-read on
+    /// every access.
+    pub session_checks: Arc<Mutex<crate::handlers::SessionChecks>>,
 }
 
 /// Live-tunable parameters for the FFT spectrum monitor.
@@ -267,6 +272,7 @@ pub fn run(
         loudness_reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mic_correction_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
+        session_checks: Arc::new(Mutex::new(crate::handlers::SessionChecks::default())),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
@@ -580,6 +586,7 @@ fn dispatch(
         "generate_pink" => handlers::generate_pink(state, &cmd),
         "calibrate" => handlers::calibrate(state, &cmd),
         "calibrate_spl" => handlers::calibrate_spl(state, &cmd),
+        "session_check" => handlers::session_check(state, &cmd),
         "calibrate_mic_curve" => handlers::calibrate_mic_curve(state, &cmd),
         "set_mic_correction_enabled" => handlers::set_mic_correction_enabled(state, &cmd),
         "cal_reply" => handlers::cal_reply(state, &cmd),

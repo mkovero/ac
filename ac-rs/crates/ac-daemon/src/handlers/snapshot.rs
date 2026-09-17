@@ -161,6 +161,9 @@ impl SnapshotRingState {
                 weighting: self.weighting_tag.clone(),
                 integration: self.integration_tag.clone(),
                 calibration: cal.clone(),
+                // Filled by the `snapshot` handler from the verdicts the
+                // session applied at start (#466); `cal` is already gated.
+                voltage_check: None,
             })
             .collect();
 
@@ -267,6 +270,10 @@ pub fn snapshot(state: &ServerState, _cmd: &Value) -> Value {
         let ring = ring_handle.lock().unwrap();
         ring.snapshot_meta_and_channels(daemon_version)
     };
+    let mut meta = meta;
+    for ch in meta.per_channel.iter_mut() {
+        ch.voltage_check = crate::handlers::checks::transfer_applied(state, ch.input_channel);
+    }
     let (bytes, sha256, duration_s, channels) = match build_acsnap(&meta, &channels) {
         Ok(v) => v,
         Err(e) => return json!({"ok": false, "error": format!("snapshot: {e}")}),

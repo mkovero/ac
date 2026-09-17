@@ -23,7 +23,12 @@ use ac_core::measurement::sweep::{
     LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
-use ac_core::shared::calibration::{Calibration, DeviceEpoch, ResolvedTau, TauConditions};
+use ac_core::shared::calibration::session::{
+    judge_latency, CheckCtx, CheckSource, LatencyIdentity, StoredTau,
+};
+use ac_core::shared::calibration::{
+    Calibration, DeviceEpoch, LayerVerdict, ResolvedTau, TauConditions,
+};
 use ac_core::shared::emission_level::{
     DEFAULT_LEVEL_DBFS, DEFAULT_RAMP_START_DBFS, DEFAULT_RAMP_STOP_DBFS, MAX_EMISSION_DBFS,
 };
@@ -41,6 +46,7 @@ use crate::handlers::calibrate::{
     analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
     TauLegReading,
 };
+use crate::handlers::checks::{Gate, LevelUnit};
 use crate::handlers::mic;
 
 /// Method tag on a same-capture reference reading (#460).
@@ -251,6 +257,10 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         );
     }
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
     let cfg = state.cfg.lock().unwrap().clone();
     // #459: `plot` puts a stimulus on a physical output, so a level above
     // the fixed maximum is refused here — before ports are resolved or the
@@ -283,6 +293,8 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
+    // #466: the session check runs in the worker, before the sweep emits.
+    let gate = Gate::plan(state, &cfg, "plot", cal.clone(), level_unit, false);
     // Processing-context shared state — same Arc clones the monitor
     // worker uses so #97 + #98 wire the same envelope onto Tier 1.
     //
@@ -303,7 +315,22 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     // here is knowable without operator entry.
     let temperature_c = cfg.temperature_c;
 
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "in_port": in_port_reply,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
+
     let worker = spawn_worker(state, "plot", move |stop| {
+        let Ok(checked) = gate.run(&pub_tx, true) else {
+            return;
+        };
+        let cal = checked.cal;
+        let voltage_check = checked.voltage;
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
@@ -376,6 +403,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     let frame = sweep_point_frame(
                         &r,
                         cal.as_ref(),
+                        voltage_check.as_ref(),
                         n,
                         "plot",
                         level_dbfs,
@@ -457,7 +485,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 window: "hann".into(),
                 n_averages: None,
             },
-            calibration: snapshot_from_cal(cal.as_ref()),
+            calibration: snapshot_from_cal(cal.as_ref(), voltage_check.as_ref()),
             position,
             // A stepped-sine sweep records no arrival, so there is
             // nothing here for a τ to correct (#283).
@@ -522,6 +550,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 &timestamp,
                 report_dir.as_deref(),
                 cal.as_ref(),
+                voltage_check.as_ref(),
                 chain.clone(),
                 temperature_c,
                 backend,
@@ -539,14 +568,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot".to_string(), worker);
     }
-    json!({
-        "ok": true,
-        "out_port": out_port_reply,
-        "in_port": in_port_reply,
-        "level_dbfs": level_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }
 
 pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
@@ -567,6 +589,10 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_level") {
         Ok(v) => v,
+        Err(e) => return e,
+    };
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
         Err(e) => return e,
     };
     let cfg = state.cfg.lock().unwrap().clone();
@@ -592,6 +618,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
+    let gate = Gate::plan(state, &cfg, "plot_level", cal.clone(), level_unit, false);
     // One mic-correction state per measurement (#436) — see `plot`.
     let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
     let band_weighting_shared = state.band_weighting.clone();
@@ -605,7 +632,22 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     // Baseline taken right at engine creation (#428) — see `plot`'s
     // identical comment.
     let xruns_start = eng.xruns();
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "in_port": in_port_reply,
+        "start_dbfs": start_dbfs,
+        "stop_dbfs": stop_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
     let worker = spawn_worker(state, "plot_level", move |stop| {
+        let Ok(checked) = gate.run(&pub_tx, true) else {
+            return;
+        };
+        let cal = checked.cal;
+        let voltage_check = checked.voltage;
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         // #459: both endpoints already passed `emission_range_guard!` above
@@ -663,6 +705,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     let frame = sweep_point_frame(
                         &r,
                         cal.as_ref(),
+                        voltage_check.as_ref(),
                         n,
                         "plot_level",
                         level_dbfs,
@@ -708,15 +751,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_level".to_string(), worker);
     }
-    json!({
-        "ok": true,
-        "out_port": out_port_reply,
-        "in_port": in_port_reply,
-        "start_dbfs": start_dbfs,
-        "stop_dbfs": stop_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }
 
 /// Run the concatenated sweep capture through an IEC 61260-1 Class 1
@@ -738,6 +773,7 @@ fn emit_spectrum_bands(
     timestamp: &str,
     report_dir: Option<&std::path::Path>,
     cal: Option<&Calibration>,
+    voltage_check: Option<&LayerVerdict>,
     chain: ProcessingChain,
     temperature_c: Option<f64>,
     backend: &'static str,
@@ -791,7 +827,7 @@ fn emit_spectrum_bands(
             window: "butterworth-bp".into(),
             n_averages: None,
         },
-        calibration: snapshot_from_cal(cal),
+        calibration: snapshot_from_cal(cal, voltage_check),
         position,
         // Band levels carry no arrival for a τ to correct (#283).
         interface_latency: None,
@@ -968,6 +1004,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         },
     };
 
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
     let cfg = state.cfg.lock().unwrap().clone();
     // #459: `plot_ir` had no ceiling check at all before #360, and #360's
     // clamp let it emit a flat-topped level nobody asked for. Refused here
@@ -1032,6 +1072,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     } else {
         None
     };
+    // #466: voltage is probed before emission; τ is judged from this
+    // capture's own reference leg (#460), after analysis.
+    let gate = Gate::plan(state, &cfg, "plot_ir", cal.clone(), level_unit, true);
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
     let device = cfg.device;
@@ -1049,7 +1092,18 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     };
     let backend = eng.backend_name();
 
+    let gate_pending_reply = {
+        let mut r = json!({});
+        gate.write_reply(&mut r);
+        r
+    };
     let worker = spawn_worker(state, "plot_ir", move |stop| {
+        let Ok(checked) = gate.run(&pub_tx, false) else {
+            return;
+        };
+        let cal_stored = cal;
+        let cal = checked.cal.clone();
+        let voltage_check = checked.voltage.clone();
         // Calibration snapshot. The linear IR itself is never mic-curve
         // corrected — arrival estimation and gating (`extract_irs`,
         // `gated_frequency_response` below) run on the raw, uncorrected
@@ -1087,8 +1141,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // rather than measured — `plot_ir` must not silently re-run a
         // calibration step. Both outcomes are recorded; "no τ" is the
         // provenance that stops a distance being derived downstream (#283).
-        let interface_latency = Some(resolve_tau(
-            cal.as_ref(),
+        let mut interface_latency = Some(resolve_tau(
+            cal_stored.as_ref(),
             &TauConditions {
                 device,
                 backend: eng.backend_name().to_string(),
@@ -1252,6 +1306,70 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             // `noise_tail_start_s`'s doc (#284).
             noise_tail_start_s: Some(noise_tail_start_s(&params)),
         };
+        // #460: τ of the reference pair, read from the reference leg of this
+        // same capture with `calibrate`'s single-reading gates (SNR, window
+        // edge, xrun). It feeds only the onset search's causal bound.
+        let reference_latency = Some(match reference_leg {
+            ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
+            ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {
+                reason: "xrun during capture; check: JACK period size, system load".to_string(),
+            },
+            ReferenceLeg::Captured(reference) => reference_latency_from_leg(
+                &reference,
+                &params,
+                tail_s,
+                ref_out_port.as_deref().unwrap_or_default(),
+                ref_in_port.as_deref().unwrap_or_default(),
+            ),
+        });
+
+        // #466: the reference pair's latency verdict, from this capture —
+        // the same comparison `IrStats::arrival_check` makes (stored, then
+        // same-capture, through `compare_tau_readings`). Published before
+        // any measurement frame. A refused τ on the measurement pair is not
+        // applied: the report records it as unavailable, so no flight time
+        // is derived from it.
+        if gate.pending() {
+            let latency = ref_in_port.as_ref().map(|_| {
+                same_capture_latency(
+                    reference_latency.as_ref(),
+                    reference_stored_latency.as_ref(),
+                    sr,
+                    checked.record.as_ref().map(|r| r.ran_at.clone()),
+                    device,
+                )
+            });
+            let own_key = ac_core::shared::calibration::cal_key(out_ch, in_ch);
+            let stored_pair = cal_stored.clone();
+            let capture_tau = interface_latency.clone();
+            let pair_latency = gate.finish_latency(&pub_tx, &checked, latency, |recorded, rec| {
+                if let Some(r) = rec.filter(|r| r.loopback.key == own_key) {
+                    return r.latency.clone();
+                }
+                let c = stored_pair.as_ref()?;
+                let Some(InterfaceLatency::Measured(m)) = capture_tau.as_ref() else {
+                    return None;
+                };
+                let entry = c
+                    .tau_history
+                    .iter()
+                    .find(|e| e.measured_at == m.measured_at && e.tau_s == m.tau_s)?;
+                Some(recorded.latency(c, Ok(entry)).verdict)
+            });
+            if let Some(LayerVerdict::Refused { via, .. }) = &pair_latency {
+                let source = via
+                    .as_ref()
+                    .map(|k| format!(" via [{k}]"))
+                    .unwrap_or_default();
+                interface_latency = Some(InterfaceLatency::Unavailable {
+                    reason: format!(
+                        "stored \u{3c4} refused by the session check{source}; \
+                         check: `ac calibrate check`, then `ac calibrate` for this pair"
+                    ),
+                });
+            }
+        }
+
         // Gate lengths ride alongside `data` rather than inside it: a
         // consumer that assumes every IR is `window_len` long would read
         // the clamped harmonics wrong, and `MeasurementData` is a
@@ -1341,23 +1459,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             }),
         };
 
-        // #460: τ of the reference pair, read from the reference leg of this
-        // same capture with `calibrate`'s single-reading gates (SNR, window
-        // edge, xrun). It feeds only the onset search's causal bound.
-        let reference_latency = Some(match reference_leg {
-            ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
-            ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {
-                reason: "xrun during capture; check: JACK period size, system load".to_string(),
-            },
-            ReferenceLeg::Captured(reference) => reference_latency_from_leg(
-                &reference,
-                &params,
-                tail_s,
-                ref_out_port.as_deref().unwrap_or_default(),
-                ref_in_port.as_deref().unwrap_or_default(),
-            ),
-        });
-
         let timestamp = ac_core::shared::time::now_utc_iso8601();
         // #460: `position` also carries the operator-entered distance, so it
         // is present when either value is.
@@ -1389,7 +1490,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 window: "farina-inverse".into(),
                 n_averages: None,
             },
-            calibration: snapshot_from_cal(cal.as_ref()),
+            calibration: snapshot_from_cal(cal.as_ref(), voltage_check.as_ref()),
             position,
             interface_latency,
             reference_latency,
@@ -1533,7 +1634,69 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     if let Some(w) = ref_warning {
         reply["warnings"] = json!([w]);
     }
+    for (k, v) in gate_pending_reply.as_object().into_iter().flatten() {
+        reply[k] = v.clone();
+    }
     reply
+}
+
+/// The reference pair's latency verdict from one `plot_ir` capture (#466):
+/// the stored τ against this capture's same-capture reading. The identity
+/// is the stored entry the report resolved.
+fn same_capture_latency(
+    same_capture: Option<&ReferenceLatency>,
+    stored: Option<&InterfaceLatency>,
+    sample_rate: u32,
+    checked_at: Option<String>,
+    device: u32,
+) -> (LayerVerdict, Option<LatencyIdentity>) {
+    let ctx = CheckCtx {
+        key: String::new(),
+        checked_at: checked_at.unwrap_or_else(ac_core::shared::time::now_utc_iso8601),
+        source: CheckSource::SameCapture,
+    };
+    let (stored_tau, identity, period, missing) = match stored {
+        Some(InterfaceLatency::Measured(m)) => (
+            Some(StoredTau {
+                tau_s: m.tau_s,
+                measured_at: m.measured_at.clone(),
+            }),
+            Some(LatencyIdentity {
+                measured_at: m.measured_at.clone(),
+                tau_s: m.tau_s,
+                conditions: TauConditions {
+                    device,
+                    backend: m.backend.clone(),
+                    sample_rate: m.sample_rate_hz,
+                    period_size: m.period_size,
+                    output_port: m.output_port.clone(),
+                    input_port: m.input_port.clone(),
+                },
+            }),
+            m.period_size,
+            String::new(),
+        ),
+        Some(InterfaceLatency::Unavailable { reason }) => (None, None, None, reason.clone()),
+        None => (
+            None,
+            None,
+            None,
+            "no stored latency for the reference pair".to_string(),
+        ),
+    };
+    let measured = match same_capture {
+        Some(ReferenceLatency::Measured(r)) => Ok(r.tau_s),
+        Some(ReferenceLatency::Unavailable { reason }) => Err(reason.clone()),
+        None => Err("no same-capture reference in this capture".to_string()),
+    };
+    let verdict = judge_latency(
+        stored_tau.as_ref().ok_or(missing.as_str()),
+        measured.as_ref().map(|v| *v).map_err(String::as_str),
+        sample_rate,
+        period,
+        &ctx,
+    );
+    (verdict, identity)
 }
 
 #[cfg(test)]

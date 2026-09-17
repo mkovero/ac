@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::Calibration;
+use ac_core::shared::calibration::{Calibration, LayerVerdict};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::handlers::{
@@ -223,6 +223,20 @@ impl SessionPlan {
         // takes the curve alone and is left untouched (additive-only
         // discipline). Both come from the same `unique_cals` load, so they
         // cannot disagree about a channel.
+        //
+        // #466: the recorded session-check verdict is applied here, once, at
+        // session start — a refused voltage scale is withheld from both the
+        // per-pair views and the snapshot ring's copy. A refusal recorded
+        // while the stream runs takes effect at the next session.
+        let recorded = crate::handlers::checks::Recorded::now(state);
+        let check_for = |ch: u32| -> Option<LayerVerdict> {
+            cal_for(ch)
+                .filter(|c| c.vrms_at_0dbfs_in.is_some())
+                .map(|c| recorded.voltage(c).verdict)
+        };
+        let gated_for = |ch: u32| {
+            crate::handlers::checks::gated(cal_for(ch).cloned(), check_for(ch).as_ref())
+        };
         let pair_ctx: Vec<PairCtx> = pairs
             .iter()
             .enumerate()
@@ -232,11 +246,20 @@ impl SessionPlan {
                 ref_ch: r,
                 mi: unique_chans.iter().position(|&c| c == meas).unwrap(),
                 ri: unique_chans.iter().position(|&c| c == r).unwrap(),
-                meas_cal: cal_for(meas).cloned(),
-                ref_cal: cal_for(r).cloned(),
+                meas_cal: gated_for(meas),
+                ref_cal: gated_for(r),
+                meas_voltage_check: check_for(meas),
+                ref_voltage_check: check_for(r),
                 meas_curve: cal_for(meas).and_then(|c| c.mic_response.clone()),
             })
             .collect();
+        let applied: std::collections::BTreeMap<u32, LayerVerdict> = unique_chans
+            .iter()
+            .filter_map(|&ch| check_for(ch).map(|v| (ch, v)))
+            .collect();
+        crate::handlers::checks::set_transfer_applied(state, applied);
+        let unique_cals: Vec<Option<Calibration>> =
+            unique_chans.iter().map(|&ch| gated_for(ch)).collect();
 
         Ok(SessionPlan {
             drive,

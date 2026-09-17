@@ -8,6 +8,8 @@ use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
 
 use crate::server::ServerState;
 
+use crate::handlers::checks::{self, Gate, LevelUnit};
+
 use super::super::{
     busy_guard, cfg_guard, emission_guard, make_engine_for_state, resolve_output,
     resolve_output_by_channel, send_pub, spawn_worker, wire,
@@ -63,6 +65,15 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     // requested level is refused here, before it ever reaches the engine,
     // if it is above the fixed maximum — never clamped down to it.
     let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let pair_cal = match checks::gate_pair_cal(&cfg, level_unit) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let gate = Gate::plan(state, &cfg, "generate", pair_cal, level_unit, false);
 
     let out_ports = match resolve_channels("generate", cmd, &cfg, state) {
         Ok(p) => p,
@@ -77,7 +88,19 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     let backend = eng.backend_name();
     let ports_for_worker = out_ports.clone();
 
+    let mut reply = json!({
+        "ok": true,
+        "out_ports": out_ports,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
+
     let worker = spawn_worker(state, "generate", move |stop| {
+        if gate.run(&pub_tx, true).is_err() {
+            return;
+        }
         if let Err(e) = eng.start(&ports_for_worker, None) {
             send_pub(
                 &pub_tx,
@@ -105,13 +128,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    json!({
-        "ok": true,
-        "out_ports": out_ports,
-        "level_dbfs": level_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
@@ -124,6 +141,15 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let cfg = state.cfg.lock().unwrap().clone();
     // #459: same refusal discipline as `generate` above.
     let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let pair_cal = match checks::gate_pair_cal(&cfg, level_unit) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let gate = Gate::plan(state, &cfg, "generate_pink", pair_cal, level_unit, false);
 
     let out_ports = match resolve_channels("generate_pink", cmd, &cfg, state) {
         Ok(p) => p,
@@ -138,7 +164,19 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let backend = eng.backend_name();
     let ports_for_worker = out_ports.clone();
 
+    let mut reply = json!({
+        "ok": true,
+        "out_ports": out_ports,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
+
     let worker = spawn_worker(state, "generate_pink", move |stop| {
+        if gate.run(&pub_tx, true).is_err() {
+            return;
+        }
         if let Err(e) = eng.start(&ports_for_worker, None) {
             send_pub(
                 &pub_tx,
@@ -166,11 +204,5 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    json!({
-        "ok": true,
-        "out_ports": out_ports,
-        "level_dbfs": level_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }

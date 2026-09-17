@@ -49,8 +49,12 @@ pub use audio::{
     sweep_level,
 };
 pub use calibrate::{
-    cal_reply, calibrate, calibrate_mic_curve, calibrate_spl, set_mic_correction_enabled,
+    cal_reply, calibrate, calibrate_mic_curve, calibrate_spl, session_check,
+    set_mic_correction_enabled, SessionChecks,
 };
+/// #466: the session check's gate and recorded verdicts, for the handlers
+/// that consume a stored calibration layer.
+pub(crate) use calibrate::session_check as checks;
 pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
@@ -635,8 +639,12 @@ pub(super) fn downsample(spec: &[f64], freqs: &[f64], max_pts: usize) -> (Vec<f6
 /// loaded `Calibration`. The snapshot carries provenance only for the
 /// mic-curve — the full curve stays in `cal.json`. `None` when no cal
 /// was loaded.
+///
+/// #466: `cal` is the **gated** calibration (voltage withheld when the
+/// session check refused it), and `voltage_check` is frozen beside it.
 pub(super) fn snapshot_from_cal(
     cal: Option<&Calibration>,
+    voltage_check: Option<&ac_core::shared::calibration::LayerVerdict>,
 ) -> Option<ac_core::measurement::report::CalibrationSnapshot> {
     use ac_core::measurement::report::{CalibrationSnapshot, MicResponseRef};
     cal.map(|c| CalibrationSnapshot {
@@ -652,6 +660,7 @@ pub(super) fn snapshot_from_cal(
             source_path: r.source_path.clone(),
             imported_at: r.imported_at.clone(),
         }),
+        voltage_check: voltage_check.cloned(),
     })
 }
 
@@ -685,9 +694,13 @@ impl Default for Tier1Ctx<'_> {
     }
 }
 
+/// `cal` is the gated calibration; `voltage_check` rides the frame (#466),
+/// and a refused scale leaves every `*_vrms`/`*_dbu`/`gain_db` null.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sweep_point_frame(
     r: &ac_core::shared::types::AnalysisResult,
     cal: Option<&Calibration>,
+    voltage_check: Option<&ac_core::shared::calibration::LayerVerdict>,
     n: usize,
     cmd_name: &str,
     level_dbfs: f64,
@@ -735,6 +748,7 @@ pub(super) fn sweep_point_frame(
         "gain_db":           gain_db,
         "vrms_at_0dbfs_out": cal.and_then(|c| c.vrms_at_0dbfs_out),
         "vrms_at_0dbfs_in":  cal.and_then(|c| c.vrms_at_0dbfs_in),
+        "voltage_check":     voltage_check,
         // Processing-context envelope (#98) — matches the keys the Tier 2
         // monitor frames carry. `null` / `"off"` / `"none"` when inactive
         // so external subscribers always see the keys.
@@ -985,6 +999,7 @@ mod resolve_output_by_channel_tests {
             loudness_reset_request: Arc::new(AtomicBool::new(false)),
             mic_correction_enabled: Arc::new(AtomicBool::new(true)),
             monitor_params: Arc::new(Mutex::new(crate::server::MonitorParams::default())),
+            session_checks: Arc::new(Mutex::new(SessionChecks::default())),
         }
     }
 

@@ -13,6 +13,7 @@ use ac_core::shared::emission_level::{
 
 use crate::audio::AudioEngine;
 use crate::handlers::mic;
+use crate::handlers::checks::{Gate, LevelUnit};
 use crate::server::ServerState;
 
 use super::{
@@ -86,6 +87,14 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
+    // #466: the dBu labels below read the stored scale; the check runs first.
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let gate = Gate::plan(state, &cfg, "test_dut", cal.clone(), level_unit, false);
+    let mut gate_reply = json!({});
+    gate.write_reply(&mut gate_reply);
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
@@ -102,6 +111,10 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     let ref_out_port_r = ref_out_port.clone();
 
     let worker = spawn_worker(state, "test_dut", move |stop| {
+        let Ok(checked) = gate.run(&pub_tx, true) else {
+            return;
+        };
+        let cal = checked.cal;
         let out_ports: Vec<String> = if ref_out_port != out_port {
             vec![out_port.clone(), ref_out_port]
         } else {
@@ -270,6 +283,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         "max_dbfs":     MAX_EMISSION_DBFS,
         "backend":      backend,
     });
+    for (k, v) in gate_reply.as_object().into_iter().flatten() {
+        reply[k] = v.clone();
+    }
     // #225 migration notice — present on every reply, not just the first, so a
     // client that connects later still sees it. Omitted entirely when it does
     // not apply, so `warnings` is never an empty array a reader must interpret.
