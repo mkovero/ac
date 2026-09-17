@@ -7,10 +7,12 @@
 //! [`mic_curve`] the response curve, [`query`] what `get_calibration` /
 //! `list_calibrations` report back. [`routing`] covers the config-reload
 //! rules that `calibrate` happens to be the routing command for.
+//! [`session_check`] is the per-session check of the stored layers (#466).
 
 mod mic_curve;
 mod query;
 mod routing;
+mod session_check;
 mod spl;
 mod tau;
 mod voltage;

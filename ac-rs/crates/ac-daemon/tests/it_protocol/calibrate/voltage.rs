@@ -384,3 +384,79 @@ fn calibrate_ref_dbfs_defaults_and_refuses_above_the_maximum() {
         "a refused calibrate must still name the maximum: {r}"
     );
 }
+
+/// One `calibrate` run on out0/in0 at `ref_dbfs`, each prompt answered with
+/// the given reading (`None` skips it). Returns `cal_done`.
+fn calibrate_with(
+    c: &Client,
+    ref_dbfs: f64,
+    out: Option<f64>,
+    inp: Option<f64>,
+) -> serde_json::Value {
+    let r = c.call(json!({
+        "cmd": "calibrate", "ref_dbfs": ref_dbfs, "output_channel": 0, "input_channel": 0,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let _ = expect_prompt(c, 1);
+    reply_vrms(c, out);
+    let _ = expect_prompt(c, 2);
+    reply_vrms(c, inp);
+    expect_cal_done(c)
+}
+
+/// #466 baseline-write rule: a loop-gain baseline is stored only when a leg
+/// was measured, none kept an old value, and the drive is the default the
+/// session check uses; a kept leg beside a measured one removes it; both
+/// prompts skipped leave the entry as found; `calibrate` never writes a
+/// session-check verdict.
+#[test]
+fn calibrate_writes_the_loop_gain_baseline_only_under_its_rule() {
+    use ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS;
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let cal = d.home.join(".config").join("ac").join("cal.json");
+
+    // Both legs measured at the default drive: stored.
+    let done = calibrate_with(&c, DEFAULT_LEVEL_DBFS, Some(0.03), Some(0.03));
+    assert_eq!(done["loop_gain_state"], json!("measured"), "{done}");
+    assert_eq!(done["loop_gain_drive_dbfs"], json!(DEFAULT_LEVEL_DBFS));
+    assert_eq!(done["loop_gain_freq_hz"], json!(1000.0));
+    let gain = done["loop_gain_db"].as_f64().expect("loop_gain_db");
+    let entry = read_cal_entry(&cal);
+    assert_eq!(
+        entry["loop_gain_baseline"]["loop_gain_db"].as_f64(),
+        Some(gain)
+    );
+    assert!(
+        !d.home.join(".config/ac/session_refusals.json").exists(),
+        "calibrate records no session-check verdict"
+    );
+
+    // Both prompts skipped: left as found, the kept date reported.
+    let done = calibrate_with(&c, DEFAULT_LEVEL_DBFS, None, None);
+    assert_eq!(done["loop_gain_state"], json!("unchanged"), "{done}");
+    assert_eq!(done["loop_gain_db"].as_f64(), Some(gain));
+    assert_eq!(
+        read_cal_entry(&cal)["loop_gain_baseline"],
+        entry["loop_gain_baseline"]
+    );
+
+    // Output measured, input kept: the old baseline no longer describes
+    // the stored pair and is removed.
+    let done = calibrate_with(&c, DEFAULT_LEVEL_DBFS, Some(0.03), None);
+    assert_eq!(done["loop_gain_state"], json!("removed"), "{done}");
+    assert_eq!(
+        done["loop_gain_reason"],
+        json!("Input unchanged, not measured now")
+    );
+    assert!(read_cal_entry(&cal).get("loop_gain_baseline").is_none());
+
+    // A non-default drive records nothing, and says why as an observation.
+    let done = calibrate_with(&c, -30.0, Some(0.03), Some(0.03));
+    assert_eq!(done["loop_gain_state"], json!("not_recorded"), "{done}");
+    assert_eq!(
+        done["loop_gain_reason"],
+        json!("calibrated at -30.0 dBFS; session check drives -40.0 dBFS")
+    );
+    assert!(read_cal_entry(&cal).get("loop_gain_baseline").is_none());
+}
