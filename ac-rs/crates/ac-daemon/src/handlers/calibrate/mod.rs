@@ -38,6 +38,9 @@ pub(crate) use tau::{
     analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
     TauLegReading,
 };
+// #494: `plot_ir`'s reason tests build an edge refusal with its SNR observation.
+#[cfg(test)]
+pub(crate) use tau::EdgeSnr;
 
 /// Channel pair a calibration command addresses: explicit fields win, the
 /// session config supplies the rest. Spelled once because all four

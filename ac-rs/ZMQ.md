@@ -1273,7 +1273,7 @@ FireWire SYT interval on every device enumeration (#461). Tagged union on
   "method": "farina_same_capture_reference_v1",
   "output_port": "system:playback_2", "input_port": "system:capture_2" }
 
-{ "state": "unavailable", "reason": "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain" }
+{ "state": "unavailable", "reason": "peak SNR 9.30 dB, need 24.00 dB; check: reference loopback cable, ref input gain" }
 ```
 
 `pre_impulse_snr_db` is omitted when the pre-impulse region measured true
@@ -1282,7 +1282,11 @@ silence (an infinite SNR, which JSON cannot carry). `pre_impulse_snr_floor_db`
 reading stays re-judgeable once the threshold is no longer a constant; it is
 absent on v7 reports and on a reading that fell back to the fixed 24 dB gate
 because no floor could be established. The `unavailable` reason keeps its exact
-shape — only the `need` figure now varies per run. `reason` names what was
+shape — only the `need` figure now varies per run. #494: SNR figures in it
+carry two decimals, and a reference peak that sits at the window edge *and*
+fails the SNR gate names both: `peak at reference window edge, SNR 21.34 dB,
+need 24.00 dB; check: reference loopback routing, capture tail, reference
+loopback cable, ref input gain`. `reason` names what was
 observed and, after `; check: `, where to look — never a cause. `plot_ir`
 always records the field, so `unavailable` with `no reference configured (ac
 setup reference)` is what no reference looks like; reports written before v7
@@ -1695,9 +1699,9 @@ reading either.
   "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
-  "tau_state":            "measured" | "not_measured_low_snr" | "error"
-                           | "disagree_period_shift" | "disagree_other" | "refused_xrun"
-                           | "disagree_declared_latency",
+  "tau_state":            "measured" | "not_measured_low_snr" | "not_measured_window_edge"
+                           | "error" | "disagree_period_shift" | "disagree_other"
+                           | "refused_xrun" | "disagree_declared_latency",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
@@ -1712,8 +1716,14 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", "disagree_other", or "disagree_declared_latency"
-  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, absent on error
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, and on not_measured_window_edge when the refusing lifecycle had no xrun (#494: that lifecycle's own value); absent on error
   "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
+  "tau_snr_below_threshold": <bool>,       // #494: whether the refused peak also failed the SNR gate, computed by the daemon — present only on not_measured_window_edge, and only together with the SNR pair
+  "tau_refused_reading":    <int>,         // #494: which lifecycle refused, 1 or 2 — present on not_measured_low_snr and not_measured_window_edge
+  "tau_peak_offset_samples": <int>,        // #494: the refused peak's signed offset from the window centre (peak index − half) — present only on not_measured_window_edge
+  "tau_window_first_offset_samples": <int>, // #494: the window's first sample as an offset (−half) — present only on not_measured_window_edge
+  "tau_window_last_offset_samples": <int>, // #494: the window's last sample as an offset (half − 1; the window is asymmetric by one sample) — present only on not_measured_window_edge
+  "tau_edge_margin_samples": <int>,        // #494: the edge margin the peak fell inside — present only on not_measured_window_edge
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
   "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
   "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
@@ -1760,12 +1770,13 @@ still-unity-keyed decision.
 | `tau_state` | meaning |
 |-------------|---------|
 | `measured` | two independent readings agreed to the whole sample and their average was appended to `tau_history` |
-| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR — not distinguishable from noise, so nothing was measured |
-| `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR, and clear of the window's edge margin. Nothing is stored. |
+| `not_measured_window_edge` | a lifecycle's deconvolved peak sat within `tau_edge_margin_samples` of either end of its analysis window (#494), so its position cannot be told apart from an arrival outside the window. Judged before the SNR gate on the same peak: a peak failing both is reported here with `tau_snr_below_threshold: true`, never as `not_measured_low_snr`. That combined case cannot say whether the peak is the skirt of an out-of-window arrival or a noise argmax that landed in the margin, and asserts neither. Carries no `tau_error`. Nothing is stored. |
+| `error` | a lifecycle's own measurement failed for a reason other than a gate refusal (`tau_error` names why, including which reading); since #494 an edge refusal is `not_measured_window_edge`, not `error`. The voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
 | `disagree_declared_latency` | the two lifecycles' `tau_reading{1,2}_declared_frames` differed (#363) — the graph's own account of the path moved between two readings of an unchanged graph, so the readings agreeing proves nothing. Compared as exact integer frames, no tolerance: these are counts the graph asserts, not measurements. Checked *after* `refused_xrun` and *before* the readings are compared. Nothing is stored. **This does not detect the failure #363 documents** — a shift the graph never declares stays invisible, and no reachable rig currently reproduces it; what this state catches is the subset that announces itself. |
-| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. An xrun-crossed lifecycle still runs the edge check, so it can end the run as `not_measured_window_edge` (without the SNR pair) before the second lifecycle runs; that state does not mention the xrun. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
@@ -1779,7 +1790,10 @@ never fire on that backend — any disagreement there is `disagree_other`).
 
 `tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
 every state where at least one lifecycle reached deconvolution
-(`measured`, `not_measured_low_snr`, `disagree_*`), absent on `error`
+(`measured`, `not_measured_low_snr`, `disagree_*`), and on
+`not_measured_window_edge` when the refusing lifecycle had no xrun (#494;
+there they are that lifecycle's own values, not the worse of two, and
+`tau_snr_below_threshold` travels with them), absent on `error`
 (which can fail before a peak was ever located), and **also absent on
 `refused_xrun`** (#369): an xrun-crossed lifecycle's SNR gate never runs
 (see the `refused_xrun` row above), so there is no SNR figure to report —
@@ -1791,7 +1805,10 @@ carried no xrun, would have produced `not_measured_low_snr` instead, and
 a lifecycle that did carry one would have diverted the whole run to
 `refused_xrun` before either `measured` or `disagree_*` could be reached
 — so this is a diagnostic figure alongside the result rather than a
-second gate. `tau_snr_threshold_db` is a derived constant (see
+second gate. On `not_measured_window_edge` the pair *is* a gate result the
+state reports beside the edge observation, which is why the daemon also
+sends the comparison as `tau_snr_below_threshold` rather than leaving a
+client to redo it. `tau_snr_threshold_db` is a derived constant (see
 `ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
 comment for its provenance), not measured on this exact sweep.
 
