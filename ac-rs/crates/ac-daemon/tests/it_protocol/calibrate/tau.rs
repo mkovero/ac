@@ -84,9 +84,11 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
         // Deterministic dither seeded from the loopback delay (see
         // `audio/fake/hooks.rs`'s doc comment); the default 32-sample
         // delay happens to land this noise-only IR's peak within the
-        // edge margin, refusing via `check_peak_within_window` instead
-        // of the SNR gate this test means to exercise — 800 lands well
-        // clear of either edge (empirically probed, not derived).
+        // edge margin, which since #494 reports `not_measured_window_edge`
+        // (the edge check is judged first) instead of the SNR-only state
+        // this test means to exercise — 800 lands well clear of either
+        // edge (empirically probed, not derived; re-checked under the
+        // #494 order).
         ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "800,800"),
         ("AC_FAKE_TAU_GAIN_OVERRIDE", "0.0"),
         ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.01"),
@@ -124,6 +126,12 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
         snr < threshold,
         "refused SNR {snr} should be below the {threshold} dB threshold: {done}"
     );
+    // #494: the first lifecycle refuses, and the run short-circuits there.
+    assert_eq!(done["tau_refused_reading"], json!(1), "frame: {done}");
+    assert!(
+        done.get("tau_peak_offset_samples").is_none(),
+        "a low-SNR refusal carries no peak position: {done}"
+    );
 
     // Refused, not stored — no entry in tau_history at all.
     let after = read_cal_entry(&cal_path);
@@ -134,6 +142,101 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
                 .is_some_and(|a| a.is_empty()),
         "a low-SNR refusal must not append to tau_history: {after}"
     );
+}
+
+/// #494: an arrival past the far edge of the τ window is refused as
+/// `not_measured_window_edge`, with typed numeric fields, not as `error`
+/// prose and not as `not_measured_low_snr`. The fake runs at 48 kHz, so
+/// `half = ceil(0.05 × 48000) = 2400` and the window is offsets −2400 to
+/// +2399 with a `round(0.10 × 2400) = 240`-sample margin. A 2410-sample
+/// delay lands 11 samples past the last one; 2500 lands 101 past, where a
+/// skirt peak rather than a pinned one is expected. Both must name the edge.
+#[test]
+fn calibrate_reports_not_measured_window_edge_for_an_arrival_past_the_window() {
+    for delay in [2410, 2500] {
+        let d = Daemon::spawn_with_env(&[(
+            "AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE",
+            &format!("{delay},{delay}"),
+        )]);
+        let cal_path = d.home.join(".config").join("ac").join("cal.json");
+        let c = Client::new(&d);
+
+        let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                               "output_channel": 0, "input_channel": 0}));
+        assert_eq!(r["ok"], json!(true));
+        for step in 1..=2 {
+            expect_prompt(&c, step);
+            reply_vrms(&c, None);
+        }
+        let done = expect_cal_done(&c);
+
+        assert_eq!(
+            done["tau_state"],
+            json!("not_measured_window_edge"),
+            "delay {delay}: frame: {done}"
+        );
+        assert_eq!(done["tau_s"], json!(null), "delay {delay}: {done}");
+        assert_eq!(
+            done["tau_agreement_count"],
+            json!(0),
+            "delay {delay}: {done}"
+        );
+        assert_eq!(
+            done["tau_refused_reading"],
+            json!(1),
+            "delay {delay}: {done}"
+        );
+        assert_eq!(
+            done["tau_window_first_offset_samples"],
+            json!(-2400),
+            "delay {delay}: {done}"
+        );
+        assert_eq!(
+            done["tau_window_last_offset_samples"],
+            json!(2399),
+            "delay {delay}: {done}"
+        );
+        assert_eq!(
+            done["tau_edge_margin_samples"],
+            json!(240),
+            "delay {delay}: {done}"
+        );
+        let offset = done["tau_peak_offset_samples"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("delay {delay}: peak offset missing: {done}"));
+        assert!(
+            (2399 - 240..=2399).contains(&offset),
+            "delay {delay}: peak offset {offset} is not inside the far edge margin: {done}"
+        );
+        let snr = done["tau_pre_impulse_snr_db"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("delay {delay}: SNR missing without an xrun: {done}"));
+        let threshold = done["tau_snr_threshold_db"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("delay {delay}: threshold missing: {done}"));
+        assert_eq!(
+            done["tau_snr_below_threshold"],
+            json!(snr < threshold),
+            "delay {delay}: the flag must agree with the pair it travels with: {done}"
+        );
+        assert!(
+            done.get("tau_error").is_none(),
+            "delay {delay}: an edge refusal is not an error: {done}"
+        );
+        assert!(
+            done.get("tau_reading1_s").is_none(),
+            "delay {delay}: {done}"
+        );
+
+        let after = read_cal_entry(&cal_path);
+        assert!(
+            after.get("tau_history").is_none()
+                || after["tau_history"]
+                    .as_array()
+                    .is_some_and(|a| a.is_empty()),
+            "delay {delay}: an edge refusal must not append to tau_history: {after}"
+        );
+    }
 }
 
 /// #369: a lifecycle that crosses an xrun refuses the reading end-to-end,
