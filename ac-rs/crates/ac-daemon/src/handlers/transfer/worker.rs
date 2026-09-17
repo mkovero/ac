@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::audio::{make_engine, AudioEngine};
+use crate::audio::make_engine;
 use crate::handlers::snapshot::{SnapshotRingState, SpoolEntry};
 use crate::handlers::{busy_guard, cfg_guard, send_pub, spawn_worker};
 use crate::server::ServerState;
-use crate::workers::{DriveState, RelockRequest};
+use crate::workers::{with_unpoisoned, DriveState, RelockRequest, StoppingEngine};
 
 use super::plan::SessionPlan;
 use super::session::{SessionState, TickEvents};
@@ -41,9 +41,95 @@ pub(super) fn drive_out_ports(drivable: bool, out_port: &str, ref_out_port: &str
     }
 }
 
+type DriveSlot = Arc<Mutex<Option<Arc<DriveState>>>>;
+type RelockSlot = Arc<Mutex<Option<Arc<RelockRequest>>>>;
+type SnapshotRingSlot = Arc<Mutex<Option<Arc<Mutex<SnapshotRingState>>>>>;
+type SnapshotSpool = Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>;
+
+/// The `ServerState` slots one `transfer_stream` session publishes, owned
+/// from the moment they are published until the guard drops (#432).
+///
+/// Built by [`TransferSessionGuard::publish`], which is also what publishes
+/// `drive_state` and `relock_state`, so no line of code sits between a slot
+/// becoming visible and something being responsible for clearing it. Moved
+/// into the worker, it is dropped on every way out of the thread — normal
+/// completion, an early `return` when the engine will not open or start, or
+/// a panic unwinding the worker — and its `Drop` does the teardown that used
+/// to sit only at the bottom of [`run_session`], in the same order.
+///
+/// Holds plain `Arc`s rather than `&ServerState` so a test can build one
+/// without a daemon.
+struct TransferSessionGuard {
+    drive_state_slot: DriveSlot,
+    relock_state_slot: RelockSlot,
+    snapshot_ring_slot: SnapshotRingSlot,
+    snapshot_spool: SnapshotSpool,
+    drive_state: Arc<DriveState>,
+    relock_state: Arc<RelockRequest>,
+}
+
+impl TransferSessionGuard {
+    /// Publish `drive_state` and `relock_state` into their slots and take
+    /// ownership of clearing them, along with the snapshot ring slot and
+    /// spool the worker publishes later.
+    fn publish(
+        drive_state_slot: DriveSlot,
+        relock_state_slot: RelockSlot,
+        snapshot_ring_slot: SnapshotRingSlot,
+        snapshot_spool: SnapshotSpool,
+        drive_state: Arc<DriveState>,
+        relock_state: Arc<RelockRequest>,
+    ) -> TransferSessionGuard {
+        let guard = TransferSessionGuard {
+            drive_state_slot,
+            relock_state_slot,
+            snapshot_ring_slot,
+            snapshot_spool,
+            drive_state,
+            relock_state,
+        };
+        let drive = guard.drive_state.clone();
+        with_unpoisoned(&guard.drive_state_slot, |slot| *slot = Some(drive));
+        let relock = guard.relock_state.clone();
+        with_unpoisoned(&guard.relock_state_slot, |slot| *slot = Some(relock));
+        guard
+    }
+
+    /// Publish this session's snapshot ring; cleared when the guard drops.
+    fn publish_snapshot_ring(&self, ring: Arc<Mutex<SnapshotRingState>>) {
+        with_unpoisoned(&self.snapshot_ring_slot, |slot| *slot = Some(ring));
+    }
+}
+
+/// Empty `slot` only if it still holds `own`, so a finishing session can
+/// never clear state a successor has since published.
+fn clear_if_own<T>(slot: &Mutex<Option<Arc<T>>>, own: &Arc<T>) {
+    with_unpoisoned(slot, |slot| {
+        if slot.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, own)) {
+            *slot = None;
+        }
+    });
+}
+
+impl Drop for TransferSessionGuard {
+    // Runs during unwinding when the worker panicked, so nothing here may
+    // panic: every lock goes through `with_unpoisoned`, and `clear_spool`
+    // accepts a poisoned lock.
+    fn drop(&mut self) {
+        clear_if_own(&self.drive_state_slot, &self.drive_state);
+        clear_if_own(&self.relock_state_slot, &self.relock_state);
+
+        // Snapshot ring/spool lifecycle ends with the session (deliverable
+        // 3's retention policy — module doc, `handlers/snapshot.rs`).
+        with_unpoisoned(&self.snapshot_ring_slot, |slot| *slot = None);
+        crate::handlers::snapshot::clear_spool(&self.snapshot_spool);
+        self.snapshot_spool.clear_poison();
+    }
+}
+
 /// The handles a running session needs that are not data: the PUB socket,
-/// the shared toggles, and the `ServerState` slots this session owns for
-/// its lifetime and clears on the way out.
+/// the shared toggles, and the guard over the `ServerState` slots this
+/// session owns for its lifetime.
 ///
 /// Separate from [`SessionPlan`] because the split is not cosmetic —
 /// `drive_state` and `relock_state` are constructed and published *before*
@@ -53,12 +139,7 @@ pub(super) fn drive_out_ports(drivable: bool, out_port: &str, ref_out_port: &str
 struct SessionIo {
     pub_tx: crossbeam_channel::Sender<Vec<u8>>,
     mic_corr_enabled: Arc<AtomicBool>,
-    snapshot_ring_slot: Arc<Mutex<Option<Arc<Mutex<SnapshotRingState>>>>>,
-    snapshot_spool: Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>,
-    drive_state_slot: Arc<Mutex<Option<Arc<DriveState>>>>,
-    relock_state_slot: Arc<Mutex<Option<Arc<RelockRequest>>>>,
-    drive_state: Arc<DriveState>,
-    relock_state: Arc<RelockRequest>,
+    session: TransferSessionGuard,
 }
 
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
@@ -79,25 +160,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // stimulus client is exactly that caller. Constructing it here closes
     // the race structurally rather than narrowing it. (The snapshot_ring
     // twin is tracked separately.)
-    let drive_state =
-        std::sync::Arc::new(crate::workers::DriveState::new(plan.drive, plan.level_dbfs));
-    *state.drive_state.lock().unwrap() = Some(drive_state.clone());
-
-    // Published before spawn for the same structural reason as
-    // `drive_state` above: closing the window between the CTRL reply and
-    // the worker actually existing, rather than narrowing it.
-    let relock_state = std::sync::Arc::new(crate::workers::RelockRequest::new());
-    *state.relock_state.lock().unwrap() = Some(relock_state.clone());
+    //
+    // `relock_state` is published alongside it for the same structural
+    // reason: closing the window between the CTRL reply and the worker
+    // actually existing, rather than narrowing it.
+    //
+    // The guard that publishes both is the thing that clears them, on
+    // every way the worker can end (#432).
+    let session = TransferSessionGuard::publish(
+        state.drive_state.clone(),
+        state.relock_state.clone(),
+        state.snapshot_ring.clone(),
+        state.snapshot_spool.clone(),
+        Arc::new(DriveState::new(plan.drive, plan.level_dbfs)),
+        Arc::new(RelockRequest::new()),
+    );
 
     let io = SessionIo {
         pub_tx: state.pub_tx.clone(),
         mic_corr_enabled: state.mic_correction_enabled.clone(),
-        snapshot_ring_slot: state.snapshot_ring.clone(),
-        snapshot_spool: state.snapshot_spool.clone(),
-        drive_state_slot: state.drive_state.clone(),
-        relock_state_slot: state.relock_state.clone(),
-        drive_state,
-        relock_state,
+        session,
     };
 
     // Built before the plan is moved into the worker; nothing in it
@@ -119,7 +201,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 /// `None` when the engine will not start; the error has already been
 /// published, because by this point the REP reply is long sent and the PUB
 /// channel is the only way to say so.
-fn open_engine(plan: &SessionPlan, io: &SessionIo) -> Option<Box<dyn AudioEngine>> {
+///
+/// The engine is stopped when the returned handle drops, and on the `None`
+/// paths once it has been built.
+fn open_engine(
+    plan: &SessionPlan,
+    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
+) -> Option<StoppingEngine> {
     // Passive mode (default): open no output ports at all so the daemon
     // doesn't need exclusive access to the playback side — the user is
     // driving the DUT externally. Any drivable session connects its
@@ -128,10 +216,10 @@ fn open_engine(plan: &SessionPlan, io: &SessionIo) -> Option<Box<dyn AudioEngine
     let out_ports: Vec<String> = drive_out_ports(plan.drivable, &plan.out_port, &plan.ref_out_port);
 
     let mut eng = match make_engine(plan.fake, plan.backend_required.as_deref()) {
-        Ok(eng) => eng,
+        Ok(eng) => StoppingEngine::new(eng),
         Err(e) => {
             send_pub(
-                &io.pub_tx,
+                pub_tx,
                 "error",
                 &json!({"cmd":"transfer_stream","message":e.to_string()}),
             );
@@ -141,7 +229,7 @@ fn open_engine(plan: &SessionPlan, io: &SessionIo) -> Option<Box<dyn AudioEngine
     let main_port = plan.unique_ports[0].clone();
     if let Err(e) = eng.start(&out_ports, Some(&main_port)) {
         send_pub(
-            &io.pub_tx,
+            pub_tx,
             "error",
             &json!({"cmd":"transfer_stream","message":format!("{e}")}),
         );
@@ -174,15 +262,14 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
     let SessionIo {
         ref pub_tx,
         ref mic_corr_enabled,
-        ref snapshot_ring_slot,
-        ref snapshot_spool,
-        ref drive_state_slot,
-        ref relock_state_slot,
-        ref drive_state,
-        ref relock_state,
+        session: guard,
     } = io;
+    let drive_state = &guard.drive_state;
+    let relock_state = &guard.relock_state;
 
-    let Some(mut eng) = open_engine(&plan, &io) else {
+    // Every `return` and panic from here on drops `guard` (and, once it
+    // exists, `eng`), which is what clears this session's slots.
+    let Some(mut eng) = open_engine(&plan, pub_tx) else {
         return;
     };
     let sr = eng.sample_rate();
@@ -193,7 +280,7 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
     // capped at `snapshot_ring_s` seconds. Crash-safety: wipe any
     // stale spool from a prior session before publishing this one's
     // ring handle (module doc, `handlers/snapshot.rs`).
-    crate::handlers::snapshot::reset_spool_dir(&plan.snapshot_spool_dir, snapshot_spool);
+    crate::handlers::snapshot::reset_spool_dir(&plan.snapshot_spool_dir, &guard.snapshot_spool);
     let snapshot_cap_samples = (plan.snapshot_ring_s * sr as f64).round() as usize;
     let snapshot_ring = std::sync::Arc::new(std::sync::Mutex::new(
         crate::handlers::snapshot::SnapshotRingState::new(
@@ -206,7 +293,7 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
             plan.unique_cals.clone(),
         ),
     ));
-    *snapshot_ring_slot.lock().unwrap() = Some(snapshot_ring.clone());
+    guard.publish_snapshot_ring(snapshot_ring.clone());
 
     // Analysis window: the last `n_averages` Welch blocks, cut on the
     // **stream's own** `k·step` lattice rather than from the head of a
@@ -480,20 +567,17 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         );
     }
 
-    eng.stop();
-    *drive_state_slot.lock().unwrap() = None;
-    *relock_state_slot.lock().unwrap() = None;
+    // Engine stopped, then this session's slots cleared, then `done` — the
+    // order teardown has always had. Dropped explicitly here rather than at
+    // scope end so `done` still follows the clear.
+    drop(eng);
 
     // Known, bounded: a `set_drive` arriving between this worker's
     // last poll and the slot-clear below returns `{"ok":true}` for a
     // session that will not act on it — a few ms at teardown. Not
     // worth a lock redesign; the dead-man and the client's own
     // teardown both converge on silence regardless.
-    //
-    // Snapshot ring/spool lifecycle ends with the session (deliverable
-    // 3's retention policy — module doc, `handlers/snapshot.rs`).
-    *snapshot_ring_slot.lock().unwrap() = None;
-    crate::handlers::snapshot::clear_spool(snapshot_spool);
+    drop(guard);
 
     send_pub(
         pub_tx,
@@ -534,5 +618,164 @@ mod tests {
     #[test]
     fn passive_session_opens_no_output_ports() {
         assert!(drive_out_ports(false, "system:playback_1", "system:playback_2").is_empty());
+    }
+
+    /// The four slots a `ServerState` would hand a session, all empty.
+    struct Slots {
+        drive: DriveSlot,
+        relock: RelockSlot,
+        ring: SnapshotRingSlot,
+        spool: SnapshotSpool,
+    }
+
+    impl Slots {
+        fn new() -> Slots {
+            Slots {
+                drive: Arc::new(Mutex::new(None)),
+                relock: Arc::new(Mutex::new(None)),
+                ring: Arc::new(Mutex::new(None)),
+                spool: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            }
+        }
+
+        fn publish(&self) -> TransferSessionGuard {
+            TransferSessionGuard::publish(
+                self.drive.clone(),
+                self.relock.clone(),
+                self.ring.clone(),
+                self.spool.clone(),
+                Arc::new(DriveState::new(false, -40.0)),
+                Arc::new(RelockRequest::new()),
+            )
+        }
+
+        fn assert_all_cleared(&self) {
+            assert!(self.drive.lock().unwrap().is_none(), "drive slot left set");
+            assert!(
+                self.relock.lock().unwrap().is_none(),
+                "relock slot left set"
+            );
+            assert!(
+                self.ring.lock().unwrap().is_none(),
+                "snapshot ring left set"
+            );
+            assert!(
+                self.spool.lock().unwrap().is_empty(),
+                "spool left populated"
+            );
+        }
+    }
+
+    /// Publish a ring and a spool entry, as a running worker would.
+    fn fill_worker_slots(guard: &TransferSessionGuard) {
+        guard.publish_snapshot_ring(Arc::new(Mutex::new(SnapshotRingState::new(
+            48_000,
+            vec![0, 1],
+            480,
+            vec![(0, 1)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None],
+        ))));
+        guard.snapshot_spool.lock().unwrap().insert(
+            "snap".to_string(),
+            SpoolEntry {
+                path: std::path::PathBuf::from("/nonexistent/ac-issue-432-snap"),
+                bytes: 0,
+                sha256: String::new(),
+                duration_s: 0.0,
+                channels: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn publish_makes_drive_and_relock_visible_before_any_worker_runs() {
+        let slots = Slots::new();
+        let guard = slots.publish();
+        assert!(slots.drive.lock().unwrap().is_some());
+        assert!(slots.relock.lock().unwrap().is_some());
+        drop(guard);
+        slots.assert_all_cleared();
+    }
+
+    /// #432: a worker that panics must still leave every slot cleared —
+    /// the guard's `Drop` runs during unwinding.
+    #[test]
+    fn guard_in_a_panicking_thread_clears_every_slot() {
+        let slots = Slots::new();
+        let guard = slots.publish();
+        let handle = std::thread::spawn(move || {
+            let guard = guard;
+            fill_worker_slots(&guard);
+            panic!("worker panic under test");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the worker thread must have panicked"
+        );
+        slots.assert_all_cleared();
+    }
+
+    /// #432: a slot poisoned before the guard drops must not turn the drop
+    /// into a panic-in-panic (which would abort the daemon), and must be
+    /// left unpoisoned so a later CTRL handler's `lock().unwrap()` works.
+    #[test]
+    fn guard_drop_tolerates_and_clears_poisoned_slots() {
+        let slots = Slots::new();
+        let guard = slots.publish();
+        fill_worker_slots(&guard);
+
+        let (drive, relock, ring, spool) = (
+            slots.drive.clone(),
+            slots.relock.clone(),
+            slots.ring.clone(),
+            slots.spool.clone(),
+        );
+        let poisoner = std::thread::spawn(move || {
+            let _d = drive.lock().unwrap();
+            let _r = relock.lock().unwrap();
+            let _g = ring.lock().unwrap();
+            let _s = spool.lock().unwrap();
+            panic!("poison every slot");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(slots.drive.is_poisoned() && slots.spool.is_poisoned());
+
+        drop(guard);
+
+        for poisoned in [
+            slots.drive.is_poisoned(),
+            slots.relock.is_poisoned(),
+            slots.ring.is_poisoned(),
+            slots.spool.is_poisoned(),
+        ] {
+            assert!(!poisoned, "guard drop must clear slot poison");
+        }
+        slots.assert_all_cleared();
+    }
+
+    /// #432: a finishing session must not clear drive/relock state a
+    /// successor has since published. Goes red if the `Arc::ptr_eq` check
+    /// in `clear_if_own` is dropped.
+    #[test]
+    fn guard_leaves_a_successors_drive_and_relock_state_alone() {
+        let slots = Slots::new();
+        let guard = slots.publish();
+        let successor_drive = Arc::new(DriveState::new(false, -40.0));
+        let successor_relock = Arc::new(RelockRequest::new());
+        *slots.drive.lock().unwrap() = Some(successor_drive.clone());
+        *slots.relock.lock().unwrap() = Some(successor_relock.clone());
+
+        drop(guard);
+
+        let drive = slots.drive.lock().unwrap();
+        let relock = slots.relock.lock().unwrap();
+        assert!(drive
+            .as_ref()
+            .is_some_and(|d| Arc::ptr_eq(d, &successor_drive)));
+        assert!(relock
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(r, &successor_relock)));
     }
 }

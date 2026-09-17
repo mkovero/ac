@@ -38,10 +38,11 @@ mod stimulus;
 use anyhow::Result;
 use std::time::Duration;
 
+pub(super) use self::hooks::engine_open_hook;
 use self::hooks::{
-    next_capture_block_xruns_delta, next_declared_latency_frames, next_loopback_delay_samples,
-    next_xruns_delta, period_size_override, ref_delay_samples, ref_gain, tau_gain_override,
-    tau_noise_amplitude_override,
+    capture_panic_hook, next_capture_block_xruns_delta, next_declared_latency_frames,
+    next_loopback_delay_samples, next_xruns_delta, period_size_override, ref_delay_samples,
+    ref_gain, start_hook, tau_gain_override, tau_noise_amplitude_override,
 };
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
@@ -179,10 +180,71 @@ impl FakeEngine {
     fn samples_in(&self, duration: f64) -> usize {
         (self.sample_rate as f64 * duration) as usize
     }
+
+    // The `*_impl` bodies below are the fake capture methods proper. The
+    // trait methods wrap them so a caller-visible capture consumes exactly
+    // one `capture_panic_hook` slot even when one method delegates to
+    // another (`capture_multi_contiguous` → `capture_multi` →
+    // `capture_stereo`, `capture_available` → `capture_block`); #432.
+
+    fn block_impl(&mut self, duration: f64) -> Result<Vec<f32>> {
+        let n = self.samples_in(duration);
+        if let Some(out) = self.ring_capture(n, duration, RingDrain::Block) {
+            return Ok(out?.into_iter().next().unwrap_or_default());
+        }
+        // Opt-in xrun injection (#428) — see
+        // `hooks::next_capture_block_xruns_delta`'s doc. Inert (adds 0)
+        // unless `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` is set.
+        self.xruns += next_capture_block_xruns_delta();
+        std::thread::sleep(Duration::from_secs_f64(duration));
+        let port = self.input_port.clone();
+        let gain = tau_gain_override();
+        let mut block = self.synth().block(port.as_deref(), duration, 0);
+        for v in block.iter_mut() {
+            *v *= gain;
+        }
+        Ok(block)
+    }
+
+    fn stereo_impl(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
+        let n = self.samples_in(duration);
+        if let Some(out) = self.ring_capture(n, duration, RingDrain::Stereo) {
+            let mut out = out?.into_iter();
+            let meas = out.next().unwrap_or_default();
+            let refch = out.next().unwrap_or_default();
+            return Ok((meas, refch));
+        }
+        std::thread::sleep(Duration::from_secs_f64(duration));
+        // If no explicit ref_port, reference mirrors the generator (channel 0).
+        let in_port = self.input_port.clone();
+        let ref_port = self.ref_port().map(str::to_string);
+        let meas = self.synth().block(in_port.as_deref(), duration, 0);
+        let refch = self.synth().block(ref_port.as_deref(), duration, 0);
+        Ok((meas, refch))
+    }
+
+    fn multi_impl(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        let n = self.samples_in(duration);
+        if let Some(out) = self.ring_capture(n, duration, RingDrain::Multi) {
+            return out;
+        }
+        let extra: Vec<String> = self.ref_ports.iter().skip(1).cloned().collect();
+        let (meas, refch) = self.stereo_impl(duration)?;
+        let mut out = Vec::with_capacity(2 + extra.len());
+        out.push(meas);
+        out.push(refch);
+        for port in &extra {
+            // `capture_stereo` already slept for `duration`; these are the
+            // same wall-clock tick, so they must not sleep again.
+            out.push(self.synth().block(Some(port.as_str()), duration, 0));
+        }
+        Ok(out)
+    }
 }
 
 impl AudioEngine for FakeEngine {
     fn start(&mut self, output_ports: &[String], input_port: Option<&str>) -> Result<()> {
+        start_hook()?;
         self.output_ports = output_ports.to_vec();
         self.input_port = input_port.map(str::to_string);
         Ok(())
@@ -237,34 +299,21 @@ impl AudioEngine for FakeEngine {
     /// report the off-unity `captured_dbfs`/`loopback` it claimed to
     /// exercise. Unset (`1.0`) multiplies by 1.0, i.e. unchanged.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
-        let n = self.samples_in(duration);
-        if let Some(out) = self.ring_capture(n, duration, RingDrain::Block) {
-            return Ok(out?.into_iter().next().unwrap_or_default());
-        }
-        // Opt-in xrun injection (#428) — see
-        // `hooks::next_capture_block_xruns_delta`'s doc. Inert (adds 0)
-        // unless `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` is set.
-        self.xruns += next_capture_block_xruns_delta();
-        std::thread::sleep(Duration::from_secs_f64(duration));
-        let port = self.input_port.clone();
-        let gain = tau_gain_override();
-        let mut block = self.synth().block(port.as_deref(), duration, 0);
-        for v in block.iter_mut() {
-            *v *= gain;
-        }
-        Ok(block)
+        capture_panic_hook();
+        self.block_impl(duration)
     }
 
     /// Non-clearing drain. In ring mode this is the *contiguous* control arm:
     /// identical to `capture_block` except for the absent `clear()`, which is
     /// precisely the variable H1 says the defect turns on.
     fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
+        capture_panic_hook();
         let sr = self.sample_rate() as f64;
         let duration = max_samples as f64 / sr.max(1.0);
         if let Some(out) = self.ring_capture(max_samples, duration, RingDrain::Available) {
             return Ok(out?.into_iter().next().unwrap_or_default());
         }
-        self.capture_block(duration)
+        self.block_impl(duration)
     }
 
     /// Fake loopback: returns `samples` delayed by a fixed number of
@@ -377,20 +426,8 @@ impl AudioEngine for FakeEngine {
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
-        let n = self.samples_in(duration);
-        if let Some(out) = self.ring_capture(n, duration, RingDrain::Stereo) {
-            let mut out = out?.into_iter();
-            let meas = out.next().unwrap_or_default();
-            let refch = out.next().unwrap_or_default();
-            return Ok((meas, refch));
-        }
-        std::thread::sleep(Duration::from_secs_f64(duration));
-        // If no explicit ref_port, reference mirrors the generator (channel 0).
-        let in_port = self.input_port.clone();
-        let ref_port = self.ref_port().map(str::to_string);
-        let meas = self.synth().block(in_port.as_deref(), duration, 0);
-        let refch = self.synth().block(ref_port.as_deref(), duration, 0);
-        Ok((meas, refch))
+        capture_panic_hook();
+        self.stereo_impl(duration)
     }
 
     /// One buffer per capture channel this session registered: the
@@ -408,30 +445,18 @@ impl AudioEngine for FakeEngine {
     /// buffers, including the `CorrelatedPair` role dispatch, which is why
     /// it is still called rather than replaced by a loop.
     fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
-        let n = self.samples_in(duration);
-        if let Some(out) = self.ring_capture(n, duration, RingDrain::Multi) {
-            return out;
-        }
-        let extra: Vec<String> = self.ref_ports.iter().skip(1).cloned().collect();
-        let (meas, refch) = self.capture_stereo(duration)?;
-        let mut out = Vec::with_capacity(2 + extra.len());
-        out.push(meas);
-        out.push(refch);
-        for port in &extra {
-            // `capture_stereo` already slept for `duration`; these are the
-            // same wall-clock tick, so they must not sleep again.
-            out.push(self.synth().block(Some(port.as_str()), duration, 0));
-        }
-        Ok(out)
+        capture_panic_hook();
+        self.multi_impl(duration)
     }
 
     fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        capture_panic_hook();
         let n = self.samples_in(duration);
         if let Some(out) = self.ring_capture(n, duration, RingDrain::MultiContiguous) {
             return out;
         }
         // No ring to splice: the on-demand generator is already contiguous.
-        self.capture_multi(duration)
+        self.multi_impl(duration)
     }
 
     fn discarded_samples(&self) -> u64 {

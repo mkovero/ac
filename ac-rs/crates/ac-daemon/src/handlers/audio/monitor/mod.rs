@@ -20,6 +20,7 @@ mod mode;
 mod reconnect;
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -27,6 +28,7 @@ use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::server::{MonitorParams, ServerState};
+use crate::workers::{with_unpoisoned, StoppingEngine};
 
 use super::super::{
     busy_guard, cfg_guard, load_calibration_or_refuse, make_engine_for_state, resolve_input,
@@ -51,6 +53,36 @@ use self::mode::Mode;
 struct FakeTone {
     freq_hz: f64,
     level_dbfs: f64,
+}
+
+/// Owns `MonitorParams::active` for one `monitor_spectrum` session (#432).
+///
+/// [`MonitorActiveGuard::activate`] is what sets `active: true`, and the
+/// guard is moved into the worker, so `active` returns to `false` on every
+/// way out of the thread — normal completion, an early `return` (engine
+/// start failure, reconnect give-up, a failed capture), or a panic
+/// unwinding the worker. `Drop` must not panic, so the lock is taken
+/// through `with_unpoisoned`.
+struct MonitorActiveGuard {
+    params: Arc<Mutex<MonitorParams>>,
+}
+
+impl MonitorActiveGuard {
+    fn activate(params: Arc<Mutex<MonitorParams>>, active: MonitorParams) -> MonitorActiveGuard {
+        with_unpoisoned(&params, |mp| {
+            *mp = MonitorParams {
+                active: true,
+                ..active
+            }
+        });
+        MonitorActiveGuard { params }
+    }
+}
+
+impl Drop for MonitorActiveGuard {
+    fn drop(&mut self) {
+        with_unpoisoned(&self.params, |mp| mp.active = false);
+    }
 }
 
 /// Full-scale dBFS → linear peak amplitude (0 dBFS = 1.0). Used only for
@@ -168,10 +200,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
-        Ok(eng) => eng,
+        Ok(eng) => StoppingEngine::new(eng),
         Err(e) => return json!({"ok": false, "error": e}),
     };
-    let fake = selected_backend_is_fake(eng.as_ref());
+    let fake = selected_backend_is_fake(&*eng);
     let backend = eng.backend_name();
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
@@ -186,19 +218,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let loudness_reset_shared = state.loudness_reset_request.clone();
     let band_weighting_shared = state.band_weighting.clone();
 
-    {
-        let mut mp = state.monitor_params.lock().unwrap();
-        *mp = MonitorParams {
+    // Cleared by the guard's drop, whichever way the worker ends (#432).
+    let active_guard = MonitorActiveGuard::activate(
+        state.monitor_params.clone(),
+        MonitorParams {
             interval,
             fft_n,
             lf_fft_n,
             crossover_hz,
             active: true,
-        };
-    }
+        },
+    );
     let monitor_params_shared = state.monitor_params.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
+        // Every `return` and panic below drops both, stopping the engine and
+        // clearing `active`.
+        let active_guard = active_guard;
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
             send_pub(
@@ -455,7 +491,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
                 if mode == Mode::Cwt {
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Cwt,
@@ -599,7 +635,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // bins above it produce earlier, but a partial column
                     // would confuse the waterfall.
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Cqt,
@@ -634,7 +670,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
                 if mode == Mode::Reassigned {
                     let xruns_total = match capture_into_ring(
-                        eng.as_mut(),
+                        &mut *eng,
                         ch,
                         &ctx,
                         RingKind::Reassigned,
@@ -871,11 +907,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
             }
         }
-        eng.stop();
-        {
-            let mut mp = monitor_params_shared.lock().unwrap();
-            mp.active = false;
-        }
+        // Engine stopped, then `active` cleared, then `done` — dropped
+        // explicitly so `done` still follows the clear.
+        drop(eng);
+        drop(active_guard);
         send_pub(
             &pub_tx,
             "done",
@@ -898,4 +933,61 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         "lf_overlap_pct":  LF_OVERLAP * 100.0,
         "backend":         backend,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_params() -> MonitorParams {
+        MonitorParams {
+            active: false,
+            ..MonitorParams::default()
+        }
+    }
+
+    #[test]
+    fn activate_sets_active_and_drop_clears_it() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        assert!(params.lock().unwrap().active);
+        drop(guard);
+        assert!(!params.lock().unwrap().active);
+    }
+
+    /// #432: a monitor worker that panics must still leave `active` false.
+    #[test]
+    fn guard_in_a_panicking_thread_clears_active() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        let handle = std::thread::spawn(move || {
+            let _guard = guard;
+            panic!("monitor worker panic under test");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the worker thread must have panicked"
+        );
+        assert!(!params.lock().unwrap().active);
+    }
+
+    /// #432: a poisoned `monitor_params` must not turn the guard's drop into
+    /// a panic-in-panic, and must be left unpoisoned for `set_monitor_params`.
+    #[test]
+    fn guard_drop_tolerates_and_clears_a_poisoned_lock() {
+        let params = Arc::new(Mutex::new(session_params()));
+        let guard = MonitorActiveGuard::activate(params.clone(), session_params());
+        let poison = params.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _held = poison.lock().unwrap();
+            panic!("poison monitor_params");
+        });
+        assert!(poisoner.join().is_err());
+        assert!(params.is_poisoned());
+
+        drop(guard);
+
+        assert!(!params.is_poisoned(), "guard drop must clear the poison");
+        assert!(!params.lock().unwrap().active);
+    }
 }
