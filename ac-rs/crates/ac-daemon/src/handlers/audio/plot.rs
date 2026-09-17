@@ -96,14 +96,27 @@ fn reference_latency_from_leg(
 
 /// Operator-facing reason for a refused reference reading (#460 UX): the
 /// observation, then `; check:` and the places to look. Never a cause.
+///
+/// #494: an edge refusal whose peak also failed the SNR gate names both
+/// observations and both check lists, window side first. SNR figures carry
+/// two decimals so a refused value just under a derived threshold cannot
+/// print equal to it.
 fn reference_unavailable_reason(e: &anyhow::Error) -> String {
     if let Some(r) = e.downcast_ref::<LowSnrRefusal>() {
         format!(
-            "peak SNR {:.1} dB, need {:.1} dB; check: reference loopback cable, ref input gain",
+            "peak SNR {:.2} dB, need {:.2} dB; check: reference loopback cable, ref input gain",
             r.snr_db, r.threshold_db
         )
-    } else if e.downcast_ref::<EdgeRefusal>().is_some() {
-        "peak at reference window edge; check: reference loopback routing, capture tail".to_string()
+    } else if let Some(r) = e.downcast_ref::<EdgeRefusal>() {
+        match r.snr {
+            Some(snr) if snr.below_threshold => format!(
+                "peak at reference window edge, SNR {:.2} dB, need {:.2} dB; check: reference \
+                 loopback routing, capture tail, reference loopback cable, ref input gain",
+                snr.snr_db, snr.threshold_db
+            ),
+            _ => "peak at reference window edge; check: reference loopback routing, capture tail"
+                .to_string(),
+        }
     } else if let Some(t) = e.downcast_ref::<TailTooShort>() {
         format!(
             "tail {:.2} s, reference window needs {:.2} s; check: lengthen the tail token (e.g. 0.8s)",
@@ -1467,6 +1480,65 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         reply["warnings"] = json!([w]);
     }
     reply
+}
+
+#[cfg(test)]
+mod reference_reason_tests {
+    use super::*;
+    use crate::handlers::calibrate::EdgeSnr;
+
+    fn edge(snr: Option<EdgeSnr>) -> anyhow::Error {
+        EdgeRefusal {
+            peak_idx: 4600,
+            window_len: 4800,
+            margin: 240,
+            snr,
+        }
+        .into()
+    }
+
+    /// #494 UX: the combined reference reason — edge and failed SNR gate on
+    /// the same peak — pinned here because the fake reference may not reach
+    /// it reliably.
+    #[test]
+    fn edge_refusal_below_threshold_names_both_observations() {
+        let e = edge(Some(EdgeSnr {
+            snr_db: 21.34,
+            threshold_db: 24.0,
+            below_threshold: true,
+        }));
+        assert_eq!(
+            reference_unavailable_reason(&e),
+            "peak at reference window edge, SNR 21.34 dB, need 24.00 dB; check: reference \
+             loopback routing, capture tail, reference loopback cable, ref input gain"
+        );
+    }
+
+    #[test]
+    fn edge_refusal_clearing_the_gate_or_after_an_xrun_is_edge_only() {
+        let edge_only = "peak at reference window edge; check: reference loopback routing, \
+                         capture tail";
+        let cleared = edge(Some(EdgeSnr {
+            snr_db: 26.41,
+            threshold_db: 24.0,
+            below_threshold: false,
+        }));
+        assert_eq!(reference_unavailable_reason(&cleared), edge_only);
+        assert_eq!(reference_unavailable_reason(&edge(None)), edge_only);
+    }
+
+    #[test]
+    fn low_snr_refusal_prints_two_decimals() {
+        let e: anyhow::Error = LowSnrRefusal {
+            snr_db: 23.96,
+            threshold_db: 24.0,
+        }
+        .into();
+        assert_eq!(
+            reference_unavailable_reason(&e),
+            "peak SNR 23.96 dB, need 24.00 dB; check: reference loopback cable, ref input gain"
+        );
+    }
 }
 
 #[cfg(test)]

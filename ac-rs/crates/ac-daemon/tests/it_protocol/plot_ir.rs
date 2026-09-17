@@ -951,6 +951,11 @@ fn plot_ir_reports_an_xrun_during_capture_as_unavailable() {
 /// `half + delay`, so refusal needs `half + delay ≥ 4800 - 1 - 240`, i.e.
 /// `delay ≥ 2159`. 2200 clears that by 41 samples and still fits the
 /// capture.
+///
+/// #494: the edge check now runs first and the reason names a failed SNR
+/// gate beside it. This in-window peak clears its derived threshold, so the
+/// exact edge-only string below is what holds; the combined string is
+/// pinned by a unit test beside `reference_unavailable_reason`.
 #[test]
 fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
     let half = (0.05 * FAKE_SR).ceil() as usize;

@@ -290,22 +290,16 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
         // #368: the peak's own SNR fell short of the threshold it was
         // judged against — both are what the daemon actually measured, so
         // print them rather than an inferred wiring conclusion.
-        "not_measured_low_snr" => {
-            match (
-                data.get("tau_pre_impulse_snr_db").and_then(|v| v.as_f64()),
-                data.get("tau_snr_threshold_db").and_then(|v| v.as_f64()),
-            ) {
-                (Some(snr), Some(threshold)) => vec![format!(
-                    "  {:<8}not measured (peak SNR {snr:.2} dB, need {threshold:.2} dB, \
-                     threshold derived)",
-                    "Delay:"
-                )],
-                // Fields absent (older daemon claiming this state without
-                // them): fall through to the raw-state rendering below
-                // rather than assert numbers the daemon never sent.
-                _ => vec![format!("  {:<8}not measured (state: {state})", "Delay:")],
-            }
-        }
+        "not_measured_low_snr" => render_tau_low_snr_leg(data).unwrap_or_else(|| {
+            // Fields absent (older daemon claiming this state without
+            // them): fall through to the raw-state rendering below rather
+            // than assert numbers the daemon never sent.
+            vec![format!("  {:<8}not measured (state: {state})", "Delay:")]
+        }),
+        // #494: the peak sat inside the window's edge margin — and maybe
+        // failed the SNR gate too, which the daemon says, not this client.
+        "not_measured_window_edge" => render_tau_window_edge_leg(data, sample_rate)
+            .unwrap_or_else(|| vec![format!("  {:<8}not measured (state: {state})", "Delay:")]),
         "refused_xrun" => render_tau_xrun_leg(data),
         // Anything unrecognised (older daemon, or a future state this
         // client doesn't know): state the raw wire value, not an inferred
@@ -315,6 +309,127 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
         // than asserting the wiring conclusion #368 removed.
         _ => vec![format!("  {:<8}not measured (state: {state})", "Delay:")],
     }
+}
+
+/// Places to check when a τ peak sat at the window edge (#494 UX): the
+/// round trip the interface adds has to land inside the window.
+const TAU_EDGE_CHECK: &str =
+    "interface buffer size, loopback routing, delay devices in the loopback path";
+/// Places to check when a τ peak's SNR fell below the threshold (#494 UX).
+const TAU_LOW_SNR_CHECK: &str = "loopback cable, output level, input gain";
+/// Evidence lines under a `Delay:` headline start at column 10.
+const TAU_EVIDENCE_INDENT: &str = "          ";
+
+/// `reading N of 2 refused, nothing stored` (#494). A daemon between #368
+/// and #494 sends no reading number; the line then says only what is known.
+fn tau_refused_line(data: &serde_json::Value) -> String {
+    match data.get("tau_refused_reading").and_then(|v| v.as_u64()) {
+        Some(n) => format!("{TAU_EVIDENCE_INDENT}reading {n} of 2 refused, nothing stored"),
+        None => format!("{TAU_EVIDENCE_INDENT}nothing stored"),
+    }
+}
+
+fn tau_snr_pair(data: &serde_json::Value) -> Option<(f64, f64)> {
+    Some((
+        data.get("tau_pre_impulse_snr_db")?.as_f64()?,
+        data.get("tau_snr_threshold_db")?.as_f64()?,
+    ))
+}
+
+/// Two decimals on both figures (#494 UX): a refused 23.96 against 24.00
+/// must not print as `24.0 … threshold 24.0`.
+fn tau_snr_line(snr: f64, threshold: f64) -> String {
+    format!(
+        "{TAU_EVIDENCE_INDENT}{:<10}{snr:.2} dB pre-impulse, threshold {threshold:.2} dB",
+        "peak SNR"
+    )
+}
+
+fn tau_check_lines(places: &str) -> Vec<String> {
+    super::plot::wrap_comma_list(&format!("{TAU_EVIDENCE_INDENT}check: "), places, 80)
+}
+
+/// Render #368's `not_measured_low_snr` in #494's evidence layout, or
+/// `None` when the SNR pair is missing. No peak position: a noise argmax's
+/// position means nothing and would only invite reading it as a τ.
+fn render_tau_low_snr_leg(data: &serde_json::Value) -> Option<Vec<String>> {
+    let (snr, threshold) = tau_snr_pair(data)?;
+    let mut lines = vec![
+        format!("  {:<8}not measured (peak SNR below threshold)", "Delay:"),
+        tau_refused_line(data),
+        tau_snr_line(snr, threshold),
+    ];
+    lines.extend(tau_check_lines(TAU_LOW_SNR_CHECK));
+    Some(lines)
+}
+
+/// A millisecond figure without trailing zeros: `50`, `48.625`.
+fn trimmed_ms(ms: f64) -> String {
+    let s = format!("{ms:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Render #494's `not_measured_window_edge`: where the peak sat against the
+/// window bounds and margin, in the same units, so "at the edge" can be
+/// checked by eye. The headline names every gate the peak failed, as the
+/// daemon's `tau_snr_below_threshold` says — this client never compares the
+/// two figures itself. `None` when the position fields are missing.
+fn render_tau_window_edge_leg(
+    data: &serde_json::Value,
+    sample_rate: Option<u64>,
+) -> Option<Vec<String>> {
+    let peak = data.get("tau_peak_offset_samples")?.as_i64()?;
+    let first = data.get("tau_window_first_offset_samples")?.as_i64()?;
+    let last = data.get("tau_window_last_offset_samples")?.as_i64()?;
+    let margin = data.get("tau_edge_margin_samples")?.as_u64()?;
+    // The SNR pair is absent after an xrun (the gate never ran); the flag
+    // travels with it.
+    let snr = tau_snr_pair(data);
+    let below = snr.is_some()
+        && data
+            .get("tau_snr_below_threshold")
+            .and_then(|v| v.as_bool())
+            == Some(true);
+    let headline = if below {
+        "peak at window edge, peak SNR below threshold"
+    } else {
+        "peak at window edge"
+    };
+    let (peak_ms, half_ms) = match sample_rate {
+        Some(sr) if sr > 0 => (
+            format!("   {:+.4} ms", peak as f64 * 1000.0 / sr as f64),
+            format!(
+                " (\u{b1}{} ms)",
+                trimmed_ms(first.unsigned_abs() as f64 * 1000.0 / sr as f64)
+            ),
+        ),
+        _ => (String::new(), String::new()),
+    };
+    let mut lines = vec![
+        format!("  {:<8}not measured ({headline})", "Delay:"),
+        tau_refused_line(data),
+        format!(
+            "{TAU_EVIDENCE_INDENT}{:<10}{peak:+} samples{peak_ms}",
+            "peak"
+        ),
+        format!(
+            "{TAU_EVIDENCE_INDENT}{:<10}{first} to {last:+} samples{half_ms}, \
+             edge margin {margin} samples",
+            "window"
+        ),
+    ];
+    if let Some((snr, threshold)) = snr {
+        lines.push(tau_snr_line(snr, threshold));
+    }
+    // Window-side places first: the edge observation is the more specific
+    // one. The order is not a claim about the cause.
+    let places = if below {
+        format!("{TAU_EDGE_CHECK}, {TAU_LOW_SNR_CHECK}")
+    } else {
+        TAU_EDGE_CHECK.to_string()
+    };
+    lines.extend(tau_check_lines(&places));
+    Some(lines)
 }
 
 /// Render one of the two #347 disagreement states: a period-shift (the
@@ -1194,6 +1309,124 @@ mod tests {
         assert_eq!(lines, render_tau_xrun_leg(&data));
     }
 
+    /// #494 UX, edge only: the issue's d = 4820, peak pinned at the last
+    /// sample, SNR clears the gate.
+    #[test]
+    fn render_tau_leg_window_edge_only_matches_ux() {
+        let data = serde_json::json!({
+            "tau_state": "not_measured_window_edge",
+            "tau_sample_rate": 96_000,
+            "tau_period_size": 1024,
+            "tau_refused_reading": 1,
+            "tau_peak_offset_samples": 4799,
+            "tau_window_first_offset_samples": -4800,
+            "tau_window_last_offset_samples": 4799,
+            "tau_edge_margin_samples": 480,
+            "tau_pre_impulse_snr_db": 26.41,
+            "tau_snr_threshold_db": 24.0,
+            "tau_snr_below_threshold": false,
+        });
+        assert_eq!(
+            render_tau_leg(&data),
+            vec![
+                "  Delay:  not measured (peak at window edge)",
+                "          reading 1 of 2 refused, nothing stored",
+                "          peak      +4799 samples   +49.9896 ms",
+                "          window    -4800 to +4799 samples (±50 ms), edge margin 480 samples",
+                "          peak SNR  26.41 dB pre-impulse, threshold 24.00 dB",
+                "          check: interface buffer size, loopback routing,",
+                "                 delay devices in the loopback path",
+            ]
+        );
+    }
+
+    /// #494 UX, both observations: the issue's d = 4885 skirt peak. The
+    /// headline follows the daemon's flag, not a comparison made here.
+    #[test]
+    fn render_tau_leg_window_edge_and_low_snr_matches_ux() {
+        let data = serde_json::json!({
+            "tau_state": "not_measured_window_edge",
+            "tau_sample_rate": 96_000,
+            "tau_period_size": 1024,
+            "tau_refused_reading": 1,
+            "tau_peak_offset_samples": 4616,
+            "tau_window_first_offset_samples": -4800,
+            "tau_window_last_offset_samples": 4799,
+            "tau_edge_margin_samples": 480,
+            "tau_pre_impulse_snr_db": 21.34,
+            "tau_snr_threshold_db": 24.0,
+            "tau_snr_below_threshold": true,
+        });
+        assert_eq!(
+            render_tau_leg(&data),
+            vec![
+                "  Delay:  not measured (peak at window edge, peak SNR below threshold)",
+                "          reading 1 of 2 refused, nothing stored",
+                "          peak      +4616 samples   +48.0833 ms",
+                "          window    -4800 to +4799 samples (±50 ms), edge margin 480 samples",
+                "          peak SNR  21.34 dB pre-impulse, threshold 24.00 dB",
+                "          check: interface buffer size, loopback routing,",
+                "                 delay devices in the loopback path,",
+                "                 loopback cable, output level, input gain",
+            ]
+        );
+    }
+
+    /// #494 UX, low SNR only: no peak position, the reading number, and the
+    /// constant threshold — no `threshold derived`, which was false here.
+    #[test]
+    fn render_tau_leg_low_snr_matches_ux() {
+        let data = serde_json::json!({
+            "tau_state": "not_measured_low_snr",
+            "tau_sample_rate": 96_000,
+            "tau_refused_reading": 2,
+            "tau_pre_impulse_snr_db": 17.28,
+            "tau_snr_threshold_db": 24.0,
+        });
+        assert_eq!(
+            render_tau_leg(&data),
+            vec![
+                "  Delay:  not measured (peak SNR below threshold)",
+                "          reading 2 of 2 refused, nothing stored",
+                "          peak SNR  17.28 dB pre-impulse, threshold 24.00 dB",
+                "          check: loopback cable, output level, input gain",
+            ]
+        );
+    }
+
+    /// #494: after an xrun the SNR pair is absent, so no SNR line, and the
+    /// check list is the edge one alone. A daemon between #368 and #494
+    /// sends no reading number; the line says only what is known.
+    #[test]
+    fn render_tau_leg_window_edge_without_snr_or_reading() {
+        let data = serde_json::json!({
+            "tau_state": "not_measured_window_edge",
+            "tau_sample_rate": 48_000,
+            "tau_peak_offset_samples": 2399,
+            "tau_window_first_offset_samples": -2400,
+            "tau_window_last_offset_samples": 2399,
+            "tau_edge_margin_samples": 240,
+        });
+        let lines = render_tau_leg(&data);
+        assert_eq!(lines[0], "  Delay:  not measured (peak at window edge)");
+        assert_eq!(lines[1], "          nothing stored");
+        assert!(lines.iter().all(|l| !l.contains("SNR")), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("input gain")), "{lines:?}");
+    }
+
+    /// #494: the required keys missing falls back to the raw state rather
+    /// than inventing numbers.
+    #[test]
+    fn render_tau_leg_refusals_without_fields_print_the_raw_state() {
+        for state in ["not_measured_window_edge", "not_measured_low_snr"] {
+            let data = serde_json::json!({ "tau_state": state });
+            assert_eq!(
+                render_tau_leg(&data),
+                vec![format!("  Delay:  not measured (state: {state})")]
+            );
+        }
+    }
+
     #[test]
     fn render_tau_history_leg_missing_period_size_shows_na() {
         let entry = serde_json::json!({
@@ -1264,6 +1497,28 @@ mod tests {
             "tau_reading_separation_s": 1.187,
             "tau_reading1_declared_frames": 1268,
             "tau_reading2_declared_frames": 1268,
+        })));
+
+        // #494: the widest window line UX tabulated — five-digit offsets at
+        // 384 kHz — under the combined headline.
+        rendered.extend(render_tau_leg(&serde_json::json!({
+            "tau_state": "not_measured_window_edge",
+            "tau_sample_rate": 384_000,
+            "tau_period_size": 4096,
+            "tau_refused_reading": 2,
+            "tau_peak_offset_samples": -19199,
+            "tau_window_first_offset_samples": -19200,
+            "tau_window_last_offset_samples": 19199,
+            "tau_edge_margin_samples": 1920,
+            "tau_pre_impulse_snr_db": -103.45,
+            "tau_snr_threshold_db": 24.0,
+            "tau_snr_below_threshold": true,
+        })));
+        rendered.extend(render_tau_leg(&serde_json::json!({
+            "tau_state": "not_measured_low_snr",
+            "tau_refused_reading": 2,
+            "tau_pre_impulse_snr_db": -103.45,
+            "tau_snr_threshold_db": 24.0,
         })));
 
         rendered.extend(render_tau_history_leg(&serde_json::json!({

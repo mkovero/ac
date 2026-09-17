@@ -712,12 +712,20 @@ fn reference_latency_lines(
     sample_rate_hz: u32,
 ) -> Vec<String> {
     use ac_core::measurement::report::ReferenceLatency;
+    // #494 UX: display-only wrap past 79 columns, hanging under the first
+    // item. Stored reasons are unchanged; older reports render the same way.
+    const MAX_COLS: usize = 79;
     let unavailable = |reason: &str| match reason.split_once("; check: ") {
-        Some((observation, places)) => vec![
-            format!("  ref latency   unavailable \u{2014} {observation}"),
-            format!("                check: {places}"),
-        ],
-        None => vec![format!("  ref latency   unavailable \u{2014} {reason}")],
+        Some((observation, places)) => {
+            let mut lines = wrap_comma_list(
+                "  ref latency   unavailable \u{2014} ",
+                observation,
+                MAX_COLS,
+            );
+            lines.extend(wrap_comma_list("                check: ", places, MAX_COLS));
+            lines
+        }
+        None => wrap_comma_list("  ref latency   unavailable \u{2014} ", reason, MAX_COLS),
     };
     match reference {
         Some(ReferenceLatency::Measured(m)) => {
@@ -735,6 +743,73 @@ fn reference_latency_lines(
         Some(ReferenceLatency::Unavailable { reason }) => unavailable(reason),
         None => unavailable("not recorded (report predates schema v7)"),
     }
+}
+
+/// `prefix` followed by the `, `-separated list `text`, on one line when it
+/// fits in `max_cols` columns, otherwise wrapped at `, ` boundaries with a
+/// hanging indent under the first item (#494 UX). Every line but the last
+/// keeps its trailing comma.
+///
+/// The wrap uses the fewest lines that fit, and among those the split whose
+/// widest line is narrowest — so related items stay together (`SNR 21.34 dB,
+/// need 24.00 dB`) where a greedy fill would split them. Every rendering UX
+/// specified for #494 is this rule's output. An item wider than the space
+/// left gets a line of its own and overflows; nothing is cut.
+pub(super) fn wrap_comma_list(prefix: &str, text: &str, max_cols: usize) -> Vec<String> {
+    let indent = prefix.chars().count();
+    if indent + text.chars().count() <= max_cols {
+        return vec![format!("{prefix}{text}")];
+    }
+    let items: Vec<&str> = text.split(", ").collect();
+    let n = items.len();
+    let avail = max_cols.saturating_sub(indent);
+    // Width of items[a..b] as one line, with its trailing comma unless it
+    // is the last line.
+    let width = |a: usize, b: usize| -> usize {
+        let joined: usize = items[a..b].iter().map(|s| s.chars().count()).sum();
+        joined + 2 * (b - a - 1) + usize::from(b < n)
+    };
+    // Bit i of a mask set = break after item i. Lists here are a handful of
+    // items; past 16 fall back to one item per line.
+    let mut best: Option<(u32, usize, u32)> = None;
+    if n <= 16 {
+        for mask in 0u32..(1u32 << (n - 1)) {
+            let mut start = 0;
+            let mut widest = 0;
+            for end in 1..=n {
+                if end == n || mask & (1 << (end - 1)) != 0 {
+                    widest = widest.max(width(start, end));
+                    start = end;
+                }
+            }
+            if widest > avail {
+                continue;
+            }
+            let key = (mask.count_ones(), widest, mask);
+            if best.is_none_or(|b| (key.0, key.1) < (b.0, b.1)) {
+                best = Some(key);
+            }
+        }
+    }
+    let breaks_after = |end: usize| match best {
+        Some((_, _, mask)) => mask & (1 << (end - 1)) != 0,
+        None => true,
+    };
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for end in 1..=n {
+        if end == n || breaks_after(end) {
+            let lead = if start == 0 {
+                prefix.to_string()
+            } else {
+                " ".repeat(indent)
+            };
+            let comma = if end < n { "," } else { "" };
+            lines.push(format!("{lead}{}{comma}", items[start..end].join(", ")));
+            start = end;
+        }
+    }
+    lines
 }
 
 /// `latency` line (#359 UX): the τ subtracted from the arrival to produce
@@ -1277,8 +1352,8 @@ mod tests {
         arrival_check_lines, arrival_source_line, captured_line, collect_sweep_frames,
         deconvolution_failed_lines, flight_time_line, guard_outcome, interface_latency_lines,
         ir_stimulus_lines, label_prefix, onset_gap_line, pre_impulse_snr_lines,
-        reference_latency_lines, reference_stored_latency_lines, short_onset_rule, IrTyped,
-        SweepOutcome, CONT_INDENT,
+        reference_latency_lines, reference_stored_latency_lines, short_onset_rule, wrap_comma_list,
+        IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
@@ -1687,6 +1762,74 @@ mod tests {
             vec!["  ref latency   unavailable — no reference configured (ac setup reference)"]
         );
         assert_eq!(reference_latency_lines(None, 96_000).len(), 1);
+
+        // #494: the stored reasons from before the change still render
+        // unwrapped, one-decimal SNR included.
+        let edge = ReferenceLatency::Unavailable {
+            reason:
+                "peak at reference window edge; check: reference loopback routing, capture tail"
+                    .into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&edge), 96_000),
+            vec![
+                "  ref latency   unavailable — peak at reference window edge",
+                "                check: reference loopback routing, capture tail",
+            ]
+        );
+    }
+
+    /// #494 UX: the combined reference reason is wider than 79 columns, so
+    /// both its observation and its `check:` line wrap at `, ` under their
+    /// first item.
+    #[test]
+    fn reference_latency_lines_wrap_the_combined_edge_and_snr_reason() {
+        let both = ReferenceLatency::Unavailable {
+            reason: "peak at reference window edge, SNR 21.34 dB, need 24.00 dB; check: \
+                     reference loopback routing, capture tail, reference loopback cable, \
+                     ref input gain"
+                .into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&both), 96_000),
+            vec![
+                "  ref latency   unavailable — peak at reference window edge,",
+                "                              SNR 21.34 dB, need 24.00 dB",
+                "                check: reference loopback routing, capture tail,",
+                "                       reference loopback cable, ref input gain",
+            ]
+        );
+
+        let low = ReferenceLatency::Unavailable {
+            reason:
+                "peak SNR 17.28 dB, need 24.00 dB; check: reference loopback cable, ref input gain"
+                    .into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&low), 96_000),
+            vec![
+                "  ref latency   unavailable — peak SNR 17.28 dB, need 24.00 dB",
+                "                check: reference loopback cable, ref input gain",
+            ]
+        );
+    }
+
+    /// #494: the wrap rule itself. Fits → untouched; too wide → fewest
+    /// lines, then the narrowest widest line; an item too wide for any line
+    /// gets its own line rather than being cut.
+    #[test]
+    fn wrap_comma_list_prefers_fewest_then_balanced_lines() {
+        assert_eq!(wrap_comma_list("> ", "a, b, c", 20), vec!["> a, b, c"]);
+        // Greedy would give "aaaa, bb," / "cc"; balanced gives the split
+        // whose widest line is narrowest.
+        assert_eq!(
+            wrap_comma_list("> ", "aaaa, bb, cc", 12),
+            vec!["> aaaa,", "  bb, cc"]
+        );
+        assert_eq!(
+            wrap_comma_list("> ", "aaaaaaaaaaaa, b", 8),
+            vec!["> aaaaaaaaaaaa,", "  b"]
+        );
     }
 
     fn measured_tau(tau_s: f64, period_size: Option<u32>) -> InterfaceLatency {
@@ -2075,7 +2218,10 @@ mod tests {
             "no reference configured (ac setup reference)",
             "backend cpal cannot capture a reference",
             "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain",
+            "peak SNR -103.45 dB, need 124.00 dB; check: reference loopback cable, ref input gain",
             "peak at reference window edge; check: reference loopback routing, capture tail",
+            "peak at reference window edge, SNR -103.45 dB, need 124.00 dB; check: reference \
+             loopback routing, capture tail, reference loopback cable, ref input gain",
             "xrun during capture; check: JACK period size, system load",
             "tail 0.08 s, reference window needs 0.10 s; check: lengthen the tail token (e.g. 0.8s)",
         ] {

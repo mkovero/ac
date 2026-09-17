@@ -19,6 +19,9 @@ pub(crate) use measure::{
     analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
     TauLegReading,
 };
+// #494: only tests build an `EdgeRefusal` with its SNR observation by hand.
+#[cfg(test)]
+pub(crate) use measure::EdgeSnr;
 use measure::{measure_tau, tau_snr_threshold_db};
 
 /// Method tag stored on every [`TauEntry`] this handler produces. Bumped
@@ -71,7 +74,17 @@ pub(super) enum TauAttempt {
     /// lifecycle (mirroring `Error`'s own short-circuit shape below).
     LowSnr {
         conditions: Option<TauConditions>,
+        /// #494: which lifecycle refused, 1 or 2.
+        reading: u8,
         pre_impulse_snr_db: f64,
+    },
+    /// A lifecycle's peak sat within the edge margin of its window (#494).
+    /// Short-circuits like [`TauAttempt::LowSnr`]. `refusal` carries the
+    /// refusing lifecycle's own SNR observation, absent after an xrun.
+    WindowEdge {
+        conditions: Option<TauConditions>,
+        reading: u8,
+        refusal: EdgeRefusal,
     },
     Error {
         conditions: Option<TauConditions>,
@@ -157,38 +170,36 @@ pub(super) fn measure_tau_twice(
         })
     };
 
-    // #368: a low-SNR refusal is recovered from the error by type, not by
-    // matching the message — it is a distinct `tau_state`, and a reworded
+    // #368/#494: a gate refusal is recovered from the error by type, not by
+    // matching the message — each is a distinct `tau_state`, and a reworded
     // message must not silently collapse it back into `error`.
-    let (reading1, conditions) = match run_once() {
-        Ok(r) => r,
-        Err(e) => {
-            return match e.downcast_ref::<LowSnrRefusal>() {
-                Some(refusal) => TauAttempt::LowSnr {
-                    conditions: None,
-                    pre_impulse_snr_db: refusal.snr_db,
-                },
-                None => TauAttempt::Error {
-                    conditions: None,
-                    message: format!("\u{3c4} measurement failed (reading 1 of 2): {e}"),
-                },
+    let refused = |e: anyhow::Error, conditions: Option<TauConditions>, reading: u8| {
+        if let Some(refusal) = e.downcast_ref::<EdgeRefusal>() {
+            TauAttempt::WindowEdge {
+                conditions,
+                reading,
+                refusal: *refusal,
+            }
+        } else if let Some(refusal) = e.downcast_ref::<LowSnrRefusal>() {
+            TauAttempt::LowSnr {
+                conditions,
+                reading,
+                pre_impulse_snr_db: refusal.snr_db,
+            }
+        } else {
+            TauAttempt::Error {
+                conditions,
+                message: format!("\u{3c4} measurement failed (reading {reading} of 2): {e}"),
             }
         }
     };
+    let (reading1, conditions) = match run_once() {
+        Ok(r) => r,
+        Err(e) => return refused(e, None, 1),
+    };
     let (reading2, conditions2) = match run_once() {
         Ok(r) => r,
-        Err(e) => {
-            return match e.downcast_ref::<LowSnrRefusal>() {
-                Some(refusal) => TauAttempt::LowSnr {
-                    conditions: Some(conditions),
-                    pre_impulse_snr_db: refusal.snr_db,
-                },
-                None => TauAttempt::Error {
-                    conditions: Some(conditions),
-                    message: format!("\u{3c4} measurement failed (reading 2 of 2): {e}"),
-                },
-            }
-        }
+        Err(e) => return refused(e, Some(conditions), 2),
     };
     let comparison = compare_tau_readings(
         reading1.tau_s,
@@ -234,8 +245,20 @@ pub(super) enum TauOutcome {
     /// lifecycle, which short-circuits before any were captured.
     NotMeasuredLowSnr {
         conditions: Option<TauConditions>,
+        /// #494: which lifecycle refused, 1 or 2.
+        reading: u8,
         pre_impulse_snr_db: f64,
         snr_threshold_db: f64,
+    },
+    /// #494: a lifecycle's peak sat within the edge margin of its window.
+    /// Takes precedence over [`TauOutcome::NotMeasuredLowSnr`] for the same
+    /// peak; `refusal.snr` says whether that peak also failed the SNR gate,
+    /// and is `None` when the lifecycle crossed an xrun. `conditions` as on
+    /// `NotMeasuredLowSnr`.
+    NotMeasuredWindowEdge {
+        conditions: Option<TauConditions>,
+        reading: u8,
+        refusal: EdgeRefusal,
     },
     /// Two independent lifecycles agreed to the whole sample.
     Measured {
@@ -357,6 +380,7 @@ impl TauOutcome {
     pub(super) fn state(&self) -> &'static str {
         match self {
             Self::NotMeasuredLowSnr { .. } => "not_measured_low_snr",
+            Self::NotMeasuredWindowEdge { .. } => "not_measured_window_edge",
             Self::Measured { .. } => "measured",
             Self::RefusedXrun { .. } => "refused_xrun",
             Self::DisagreeDeclaredLatency { .. } => "disagree_declared_latency",
@@ -381,9 +405,9 @@ impl TauOutcome {
             | Self::RefusedXrun { conditions, .. }
             | Self::DisagreeDeclaredLatency { conditions, .. }
             | Self::Disagree { conditions, .. } => Some(conditions),
-            Self::NotMeasuredLowSnr { conditions, .. } | Self::Error { conditions, .. } => {
-                conditions.as_ref()
-            }
+            Self::NotMeasuredLowSnr { conditions, .. }
+            | Self::NotMeasuredWindowEdge { conditions, .. }
+            | Self::Error { conditions, .. } => conditions.as_ref(),
         }
     }
 
@@ -436,7 +460,8 @@ impl TauOutcome {
         // #368: present on every state that reached a deconvolution at
         // least once — `measured`, `not_measured_low_snr`, `disagree_*` —
         // and absent on `error`, which can fail before a peak was ever
-        // located.
+        // located. `not_measured_window_edge` writes its own below, from the
+        // refusing lifecycle, and only when that lifecycle had no xrun.
         if let Self::Measured {
             pre_impulse_snr_db,
             snr_threshold_db,
@@ -462,7 +487,25 @@ impl TauOutcome {
             frame["tau_snr_threshold_db"] = json!(snr_threshold_db);
         }
         match self {
-            Self::NotMeasuredLowSnr { .. } => {}
+            Self::NotMeasuredLowSnr { reading, .. } => {
+                frame["tau_refused_reading"] = json!(reading);
+            }
+            Self::NotMeasuredWindowEdge {
+                reading, refusal, ..
+            } => {
+                frame["tau_refused_reading"] = json!(reading);
+                frame["tau_peak_offset_samples"] = json!(refusal.peak_offset_samples());
+                frame["tau_window_first_offset_samples"] =
+                    json!(refusal.window_first_offset_samples());
+                frame["tau_window_last_offset_samples"] =
+                    json!(refusal.window_last_offset_samples());
+                frame["tau_edge_margin_samples"] = json!(refusal.margin);
+                if let Some(snr) = refusal.snr {
+                    frame["tau_pre_impulse_snr_db"] = json!(snr.snr_db);
+                    frame["tau_snr_threshold_db"] = json!(snr.threshold_db);
+                    frame["tau_snr_below_threshold"] = json!(snr.below_threshold);
+                }
+            }
             Self::Measured {
                 reading1_s,
                 reading2_s,
@@ -557,7 +600,9 @@ impl TauOutcome {
                 Some(*reading2_declared_frames),
                 *separation_s,
             )),
-            Self::NotMeasuredLowSnr { .. } | Self::Error { .. } => None,
+            Self::NotMeasuredLowSnr { .. }
+            | Self::NotMeasuredWindowEdge { .. }
+            | Self::Error { .. } => None,
         };
         if let Some((d1, d2, separation_s)) = evidence {
             frame["tau_reading1_declared_frames"] = match d1 {
@@ -595,11 +640,22 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
         },
         TauAttempt::LowSnr {
             conditions,
+            reading,
             pre_impulse_snr_db,
         } => TauOutcome::NotMeasuredLowSnr {
             conditions,
+            reading,
             pre_impulse_snr_db,
             snr_threshold_db: tau_snr_threshold_db(),
+        },
+        TauAttempt::WindowEdge {
+            conditions,
+            reading,
+            refusal,
+        } => TauOutcome::NotMeasuredWindowEdge {
+            conditions,
+            reading,
+            refusal,
         },
         // #368/#369 precedence: an xrun-crossed lifecycle is refused
         // (`refused_xrun`) even when its own SNR would also have been
@@ -763,6 +819,7 @@ mod tests {
     fn tau_result_low_snr_reports_new_state_and_fields() {
         let outcome = tau_result(|| TauAttempt::LowSnr {
             conditions: Some(dummy_conditions()),
+            reading: 2,
             pre_impulse_snr_db: -3.45,
         });
         assert_eq!(outcome.state(), "not_measured_low_snr");
@@ -781,6 +838,70 @@ mod tests {
         // lifecycle produced one.
         assert!(f.get("tau_error").is_none(), "{f}");
         assert!(f.get("tau_reading1_s").is_none(), "{f}");
+        assert_eq!(f["tau_refused_reading"], json!(2));
+        // The edge keys belong to `not_measured_window_edge` only.
+        assert!(f.get("tau_peak_offset_samples").is_none(), "{f}");
+        assert!(f.get("tau_snr_below_threshold").is_none(), "{f}");
+    }
+
+    fn edge_refusal(snr: Option<EdgeSnr>) -> EdgeRefusal {
+        EdgeRefusal {
+            peak_idx: 9416,
+            window_len: 9600,
+            margin: 480,
+            snr,
+        }
+    }
+
+    /// #494: an edge refusal is its own state with typed numeric fields —
+    /// not `error` prose — and carries the refusing lifecycle's SNR pair
+    /// and the daemon-computed combined flag.
+    #[test]
+    fn tau_result_window_edge_reports_new_state_and_fields() {
+        let outcome = tau_result(|| TauAttempt::WindowEdge {
+            conditions: None,
+            reading: 1,
+            refusal: edge_refusal(Some(EdgeSnr {
+                snr_db: 21.34,
+                threshold_db: 24.0,
+                below_threshold: true,
+            })),
+        });
+        assert_eq!(outcome.state(), "not_measured_window_edge");
+        assert!(outcome.conditions().is_none());
+        assert!(outcome.stored_entry("m").is_none());
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_s"], Value::Null);
+        assert_eq!(f["tau_agreement_count"], json!(0));
+        assert_eq!(f["tau_refused_reading"], json!(1));
+        assert_eq!(f["tau_peak_offset_samples"], json!(4616));
+        assert_eq!(f["tau_window_first_offset_samples"], json!(-4800));
+        assert_eq!(f["tau_window_last_offset_samples"], json!(4799));
+        assert_eq!(f["tau_edge_margin_samples"], json!(480));
+        assert_eq!(f["tau_pre_impulse_snr_db"].as_f64(), Some(21.34));
+        assert_eq!(f["tau_snr_threshold_db"].as_f64(), Some(24.0));
+        assert_eq!(f["tau_snr_below_threshold"], json!(true));
+        assert!(f.get("tau_error").is_none(), "{f}");
+        assert!(f.get("tau_reading1_s").is_none(), "{f}");
+        assert!(f.get("tau_reading_separation_s").is_none(), "{f}");
+    }
+
+    /// #494: after an xrun the refusing lifecycle's SNR was never judged,
+    /// so the SNR pair and the flag are absent together.
+    #[test]
+    fn tau_result_window_edge_after_xrun_omits_the_snr_pair() {
+        let outcome = tau_result(|| TauAttempt::WindowEdge {
+            conditions: Some(dummy_conditions()),
+            reading: 2,
+            refusal: edge_refusal(None),
+        });
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_state"], json!("not_measured_window_edge"));
+        assert_eq!(f["tau_refused_reading"], json!(2));
+        assert_eq!(f["tau_peak_offset_samples"], json!(4616));
+        assert!(f.get("tau_pre_impulse_snr_db").is_none(), "{f}");
+        assert!(f.get("tau_snr_threshold_db").is_none(), "{f}");
+        assert!(f.get("tau_snr_below_threshold").is_none(), "{f}");
     }
 
     /// #347: two independent readings agreeing is what "measured" means
