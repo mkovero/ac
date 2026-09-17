@@ -245,19 +245,95 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
     Ok(cfg)
 }
 
-/// Merge `updates` into the on-disk config and write back.
-/// Returns the merged config.
-pub fn save(updates: &Config, path: Option<&Path>) -> Result<Config> {
+/// Why [`save`] did not persist. In both cases the file on disk is exactly
+/// what it was before the call.
+#[derive(Debug)]
+pub enum SaveError {
+    /// The existing file exists but could not be read or parsed. Nothing was
+    /// written: merging into defaults would replace every setting the file
+    /// holds with the patch alone.
+    Unreadable {
+        path: PathBuf,
+        source: anyhow::Error,
+    },
+    /// Creating the directory, writing or syncing the temporary, or renaming
+    /// it over the target failed. The previous file is untouched.
+    Write {
+        path: PathBuf,
+        source: anyhow::Error,
+    },
+}
+
+impl SaveError {
+    /// The config file the save targeted.
+    pub fn path(&self) -> &Path {
+        match self {
+            SaveError::Unreadable { path, .. } | SaveError::Write { path, .. } => path,
+        }
+    }
+
+    /// The underlying failure, with its full context chain.
+    pub fn cause(&self) -> &anyhow::Error {
+        match self {
+            SaveError::Unreadable { source, .. } | SaveError::Write { source, .. } => source,
+        }
+    }
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaveError::Unreadable { path, .. } => write!(
+                f,
+                "existing config {} is unreadable; not overwritten",
+                path.display()
+            ),
+            SaveError::Write { path, .. } => {
+                write!(f, "config {} not saved", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause().as_ref())
+    }
+}
+
+/// Merge `updates` into the on-disk config and write back atomically
+/// (see [`crate::shared::atomic_write`]). Returns the merged config — what is
+/// now on disk.
+///
+/// A missing file merges into defaults. An existing file that cannot be read
+/// or parsed is refused with [`SaveError::Unreadable`] and left as it was.
+pub fn save(updates: &Config, path: Option<&Path>) -> std::result::Result<Config, SaveError> {
     let path = path
         .map(|p| p.to_path_buf())
         .unwrap_or_else(default_config_path);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating dir {}", dir.display()))?;
-    }
     // Merge: start from existing, apply updates field by field via JSON patch.
-    let existing = load(Some(&path)).unwrap_or_default();
+    let existing = match load(Some(&path)) {
+        Ok(cfg) => cfg,
+        Err(source) => return Err(SaveError::Unreadable { path, source }),
+    };
+    let write_err = |source: anyhow::Error| SaveError::Write {
+        path: path.clone(),
+        source,
+    };
+    let (final_cfg, out) = merge_and_render(&existing, updates).map_err(write_err)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating dir {}", dir.display()))
+            .map_err(write_err)?;
+    }
+    crate::shared::atomic_write::write_atomic(&path, out.as_bytes()).map_err(write_err)?;
+    Ok(final_cfg)
+}
+
+/// Apply `updates` over `existing` key by key and serialise the result.
+fn merge_and_render(existing: &Config, updates: &Config) -> Result<(Config, String)> {
     // Serialize both to Value, merge, then deserialise back.
-    let mut merged = serde_json::to_value(&existing)?;
+    let mut merged = serde_json::to_value(existing)?;
     let patch = serde_json::to_value(updates)?;
     if let (Some(m), Some(p)) = (merged.as_object_mut(), patch.as_object()) {
         for (k, v) in p {
@@ -266,8 +342,7 @@ pub fn save(updates: &Config, path: Option<&Path>) -> Result<Config> {
     }
     let final_cfg: Config = serde_json::from_value(merged)?;
     let out = serde_json::to_string_pretty(&final_cfg)?;
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    Ok(final_cfg)
+    Ok((final_cfg, out))
 }
 
 #[cfg(test)]
@@ -290,5 +365,63 @@ mod tests {
         assert_eq!(cfg.device, 2);
         assert_eq!(cfg.output_channel, 0);
         assert!((cfg.range_stop_hz - 20_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn save_over_corrupt_json_refuses_and_preserves_the_file() {
+        // The failing case: a save that treats a parse failure as defaults
+        // replaces every setting in the file with defaults plus the patch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let corrupt = b"{\"output_channel\": 3, \"input_chan";
+        std::fs::write(&path, corrupt).unwrap();
+
+        let updates = Config {
+            output_channel: 5,
+            ..Config::default()
+        };
+        let err = save(&updates, Some(&path)).expect_err("save must refuse");
+        assert!(
+            matches!(err, SaveError::Unreadable { .. }),
+            "expected Unreadable, got {err:?}"
+        );
+        assert_eq!(err.path(), path);
+        assert!(format!("{:#}", err.cause()).contains("parsing"), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[test]
+    fn save_into_unwritable_storage_is_a_write_error() {
+        // Parent of the config dir is a regular file: fails for root too.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("f");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let path = blocker.join("config.json");
+
+        let err = save(&Config::default(), Some(&path)).expect_err("save must fail");
+        assert!(
+            matches!(err, SaveError::Write { .. }),
+            "expected Write, got {err:?}"
+        );
+        assert_eq!(err.path(), path);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"not a dir");
+    }
+
+    #[test]
+    fn save_merges_into_a_missing_file_and_returns_what_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("config.json");
+        let updates = Config {
+            output_channel: 4,
+            ..Config::default()
+        };
+        let saved = save(&updates, Some(&path)).unwrap();
+        let reread = load(Some(&path)).unwrap();
+        assert_eq!(saved.output_channel, 4);
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&reread).unwrap()
+        );
     }
 }

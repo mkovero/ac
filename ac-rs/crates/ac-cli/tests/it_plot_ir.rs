@@ -585,7 +585,13 @@ fn setup_report_dir_then_plot_ir_prints_the_written_report() {
         "the read-out must show the resolved absolute path:\n{setup}"
     );
     assert!(!setup.contains("cannot write"), "{setup}");
-    assert!(setup.contains("  Saved."), "{setup}");
+    assert!(
+        setup.contains(&format!(
+            "  saved            {}",
+            rig.home.join(".config/ac/config.json").display()
+        )),
+        "{setup}"
+    );
 
     let stdout = rig.run_ac(QUICK_IR);
     let report = report_line(&stdout).unwrap_or_else(|| panic!("no report line:\n{stdout}"));
