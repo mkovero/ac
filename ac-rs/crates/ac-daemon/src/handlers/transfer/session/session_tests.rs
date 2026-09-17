@@ -60,6 +60,8 @@ fn session() -> SessionState {
             meas_cal: None,
             ref_cal: None,
             meas_curve: None,
+            meas_voltage_check: None,
+            ref_voltage_check: None,
         }],
         2,
         0.05,
