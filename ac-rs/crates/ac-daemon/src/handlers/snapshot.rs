@@ -224,9 +224,13 @@ pub fn reset_spool_dir(
 }
 
 /// Delete every spooled file from this session. Called when the
-/// `transfer_stream` worker stops.
+/// `transfer_stream` worker stops — including when it panicked, so a
+/// poisoned lock is accepted rather than unwrapped (a panic here, during
+/// unwinding, would abort the daemon; #432).
 pub fn clear_spool(spool: &Mutex<std::collections::HashMap<String, SpoolEntry>>) {
-    let mut spool = spool.lock().unwrap();
+    let mut spool = spool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for entry in spool.values() {
         let _ = fs::remove_file(&entry.path);
     }
