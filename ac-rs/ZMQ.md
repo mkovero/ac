@@ -121,15 +121,18 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 10`); the
-capture backend is archived at report top level. Example payload:
+configured. Schema is versioned (currently `schema_version: 11`); the
+capture backend is archived at report top level. v11 (#466) adds
+`calibration.voltage_check` — the session check's verdict on the voltage
+scale, frozen at capture (a `LayerVerdict`, see [`session_check`](#session_check));
+when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`. Example payload:
 
 ```json
 {
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 10,
+    "schema_version": 11,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -236,6 +239,10 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "gain_db":          <float> | null,
   "vrms_at_0dbfs_out":<float> | null,
   "vrms_at_0dbfs_in": <float> | null,
+  "voltage_check":    <LayerVerdict> | null, // #466: the session check's verdict on the pair's
+                                     // stored voltage scale; null when none is stored.
+                                     // When "refused", every *_vrms, *_dbu, gain_db and
+                                     // vrms_at_0dbfs_* above is null (values stay in dBFS)
   // Processing-context envelope (#98): same shape Tier 2 monitor
   // frames carry. fundamental / harmonic / spectrum values reflect
   // the active mic-curve correction when `mic_correction == "on"`;
@@ -267,6 +274,10 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "thd_pct":          <float>,        // harmonic residual / total output, percent
   "thdn_pct":         <float>,        // notched residual / total output, percent
   "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
+  "dbu_offset_db":    <float> | null, // dBFS → dBu offset; null when uncalibrated or refused
+  "voltage_check":    <LayerVerdict> | null, // #466: recorded verdict on the channel's stored
+                                      // scale, taken once at monitor start; null when none
+                                      // is stored. "refused" withholds the scale
   "spl_offset_db":    <float> | null, // additive dBFS → dB SPL offset (calibration §)
   "mic_correction":   "on" | "off" | "none",   // mic frequency-response state
   "clipping":         <bool>,
@@ -1082,13 +1093,34 @@ Look up a stored calibration entry.
       "session":     "<pid>@<RFC3339>" | null,  // #461: stored — opaque id of the daemon session that measured it. Never printed. null before #461
       "current_enumeration_check": <EnumerationCheck>  // #461: live, computed at reply time against the entry's backend's epoch now — not a stored field
     }
-  ]   // always present, [] when no τ has ever been measured for this key
+  ],  // always present, [] when no τ has ever been measured for this key
+  "loop_gain_baseline": {                                   // #466: stored — calibrate's loop gain, what a session check compares against
+    "loop_gain_db": <float>,   // fundamental_dbfs − drive_dbfs, both peak-referenced
+    "freq_hz":      <float>,
+    "drive_dbfs":   <float>,
+    "measured_at":  "<RFC3339>",
+    "epoch":        <DeviceEpoch>
+  } | null,
+  "session_check": {                                        // #466: live, computed at reply time (time and pair rules)
+    "voltage":  <LayerVerdict>,   // this entry's voltage scale
+    "latency":  <LayerVerdict>,   // the τ entry tau_for resolves now (else the newest)
+    "recorded": {                 // the record that decided each verdict, or null
+      "voltage": <RecordSummary> | null,
+      "latency": <RecordSummary> | null
+    }
+  },
+  "refusal_record": "ok" | { "unreadable": "<observation>" }  // #466: session_refusals.json as read now
 }
 ```
 
+A reply without `session_check` (an older daemon) renders as `UNVERIFIED —
+daemon did not report a session check`; one without `refusal_record` prints
+no header. `RecordSummary` is `{ "id", "ran_at", "loopback", "persisted"?,
+"persist_error"? }` — see [`session_check`](#session_check).
+
 **Reply — not found**
 ```json
-{ "ok": true, "found": false }
+{ "ok": true, "found": false, "refusal_record": "ok" | { "unreadable": "<observation>" } }
 ```
 
 **Device-enumeration epoch (#461).** A stored τ belongs to the device
@@ -1153,15 +1185,20 @@ Returns all stored calibration entries.
       "vrms_at_0dbfs_in":                  <float> | null,
       "mic_sensitivity_dbfs_at_94db_spl":  <float> | null,
       "mic_response":                      { ... } | null,
-      "tau_history":                       [ { ... } ]   // same shape as get_calibration, including the live current_enumeration_check per entry; always present, [] when unmeasured
+      "tau_history":                       [ { ... } ],  // same shape as get_calibration, including the live current_enumeration_check per entry; always present, [] when unmeasured
+      "loop_gain_baseline":                { ... } | null, // #466, same shape as get_calibration
+      "session_check":                     { ... }         // #466, live, same shape as get_calibration
     }
-  ]
+  ],
+  "refusal_record": "ok" | { "unreadable": "<observation>" }  // #466, once for the whole store
 }
 ```
 
 ---
 
 ### `sweep_level`
+
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
 
 Output-only: ramps amplitude linearly in dB from `start_dbfs` to `stop_dbfs`
 over `duration` seconds at a fixed frequency. No capture.
@@ -1204,6 +1241,8 @@ On port error: `{ "ok": false, "error": "port error: ..." }`.
 
 ### `sweep_frequency`
 
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
+
 Output-only: logarithmic chirp from `start_hz` to `stop_hz` over `duration`
 seconds at fixed level. No capture.
 
@@ -1241,6 +1280,8 @@ never clamped.
 ---
 
 ### `plot_ir`
+
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
 
 Farina exponential log-sweep impulse-response measurement. Generates an
 ESS, plays it out the configured output, synchronously captures
@@ -1390,7 +1431,7 @@ has no reference configured.
   "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 10, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 11, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir", "backend": "jack",
@@ -1526,6 +1567,8 @@ other `done` frames do not carry the field.
 
 ### `plot`
 
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
+
 Blocking point-by-point frequency sweep: plays a tone at each frequency and
 captures + analyses the loopback. Emits one `measurement/frequency_response/point` frame per frequency.
 
@@ -1596,6 +1639,8 @@ count; `completed_points` is how many points had already published a
 ---
 
 ### `plot_level`
+
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
 
 Blocking point-by-point level sweep at a fixed frequency. Plays and captures
 at each level step. Emits one `measurement/frequency_response/point` frame per level.
@@ -1782,6 +1827,8 @@ is active.
 
 ### `generate`
 
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
+
 Plays a continuous sine tone until stopped.
 
 **Request**
@@ -1819,6 +1866,8 @@ On port error: `{ "ok": false, "error": "port error: ..." }`.
 ---
 
 ### `generate_pink`
+
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
 
 Plays continuous pink noise until stopped.
 
@@ -1920,6 +1969,15 @@ a skip: it aborts the whole run before anything is saved, at either
 step, so a cancel after step 1 was answered does not commit that
 reading either.
 
+**Loop-gain baseline (#466).** Step 2's captured block also yields the
+loop gain a session check compares against. It is written only when at least
+one leg is `measured`, no leg is `unchanged`, and `ref_dbfs` is the default
+(−40 dBFS): `measured`. Both prompts skipped leave the entry as found:
+`unchanged`. A leg kept beside a measured or absent one removes the old
+baseline: `removed`. A non-default drive or an unusable block (capture
+error, xrun, tone SNR below `S_min`) stores none: `not_recorded`.
+`calibrate` never writes a session-check verdict.
+
 **DATA — `cal_done`**:
 ```json
 // topic: cal_done
@@ -1956,6 +2014,13 @@ reading either.
   "tau_window_first_offset_samples": <int>, // #494: the window's first sample as an offset (−half) — present only on not_measured_window_edge
   "tau_window_last_offset_samples": <int>, // #494: the window's last sample as an offset (half − 1; the window is asymmetric by one sample) — present only on not_measured_window_edge
   "tau_edge_margin_samples": <int>,        // #494: the edge margin the peak fell inside — present only on not_measured_window_edge
+  "loop_gain_state":      "measured" | "unchanged" | "removed" | "not_recorded", // #466: what this run did with the loop-gain baseline
+  "loop_gain_db":         <float> | null,  // #466: the baseline stored now (the kept one on "unchanged"); null when none
+  "loop_gain_drive_dbfs": <float> | null,  // #466: ditto
+  "loop_gain_freq_hz":    <float> | null,  // #466: ditto
+  "loop_gain_measured_at": "<RFC3339>" | null, // #466: ditto
+  "loop_gain_reason":     "<observation>", // #466: present with "removed" and "not_recorded"
+  "loop_gain_probe":      <ProbeSummary>,  // #466: this run's step-2 block read the way a session check reads it, full precision
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
   "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
   "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
@@ -2067,6 +2132,122 @@ the two readings' comparison would otherwise have said (dispatch checks
 the xrun counts before consulting `compare_tau_readings`'s result), so
 `tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured`,
 `refused_enumeration_changed`, or one of the `disagree_*` states.
+
+---
+
+### `session_check`
+
+Measure the stored calibration layers against the configured reference
+loopback now (#466). CLI: `ac calibrate check` (exit 0 all verified, 1 any
+refused, 2 otherwise). `busy_guard` applies: the check is exclusive with every
+other worker.
+
+**Request**
+```json
+{
+  "cmd":    "session_check",
+  "layers": ["latency", "voltage"]   // optional, default both
+}
+```
+
+**Reply**
+```json
+{
+  "ok":             true,
+  "loopback":       { "key": "out1_in1", "output_port": "<port>", "input_port": "<port>" },
+  "stimulus":       { "level_dbfs": -40.0, "freq_hz": 1000.0 } | null,  // null when voltage is not requested
+  "refusal_record": "ok" | { "unreadable": "<observation>" },
+  "backend":        "<string>"
+}
+```
+Without a reference loopback: `{ "ok": false, "error": "no reference loopback
+configured; check: …", "refusal_record": … }`. The worker publishes a
+`session_check` frame, then `done`.
+
+**DATA — `session_check`** (topic `session_check`; also published by the nine
+emitting commands below, with their own `cmd`):
+```json
+{
+  "cmd":        "session_check",
+  "id":         "<pid>-<seq>",
+  "ran_at":     "<RFC3339, ms>",
+  "epoch":      <DeviceEpoch>,
+  "source":     "probe" | "same_capture" | "explicit",
+  "loopback":   { "key": "out1_in1", "output_port": "<port>", "input_port": "<port>" },
+  "stimulus":   { "level_dbfs": <float>, "freq_hz": <float> } | null,  // null: no probe tone was played
+  "duration_s": <float>,                  // emission length; 0 without a stimulus
+  "reach":      { "voltage": ["<cal key>", ...],
+                  "latency": [ { "key": "<cal key>", "sample_rate": <int>, "period_size": <int> | null } ] },
+  "latency":    <LayerVerdict>,           // present when the layer was checked
+  "voltage":    <LayerVerdict>,           // ditto
+  "judged":     { "voltage": { "measured_at": "<RFC3339>" }, "latency": { "measured_at", "tau_s", "conditions" } },
+  "probe":      <ProbeSummary>,           // present when a probe tone was captured
+  "latency_separation_s": <float>,        // present when τ was measured twice
+  "persisted":  <bool>,                   // present only when a layer is refused
+  "persist_error": { "kind": "unreadable" | "write_failed", "detail": "<root io/serde error, no path>" },
+                                          // present when persisted is false
+  "pair": { "key": "<cal key>", "voltage": <LayerVerdict> | null, "latency": <LayerVerdict> | null }
+                                          // emitting commands only: the command pair's own verdicts
+}
+```
+
+```json
+// LayerVerdict — tagged on "state"
+{ "state": "verified", "measured": <f>, "stored": <f>, "delta": <f>,   // delta = measured − stored
+  "tolerance": <f>, "unit": "samples" | "dB", "stored_at": "<RFC3339>",
+  "checked_at": "<RFC3339>", "source": "probe" | "same_capture" | "explicit" }
+{ "state": "refused", ...same..., "via": "<cal key>"?, "delta_bound": "at_most"? }
+{ "state": "unverified", "cause": "<cause>", "reason": "<observation>[; check: <places>]" }
+
+// ProbeSummary
+{ "loop_gain_db": <f> | null, "total_peak_dbfs": <f> | null, "snr_db": <f> | null,
+  "snr_min_db": <f>, "xruns": <int>, "capture_error": "<text>"? }
+```
+
+`cause` ∈ `no_loopback`, `not_measured`, `no_baseline`,
+`baseline_drive_differs`, `not_stored`, `not_covered`, `not_checked`,
+`refusals_unreadable`. A cause a client does not know reads as unverified and
+its reason prints verbatim — never as verified. Precedence: `not_stored` >
+`refusals_unreadable` > the rest. `via` names the loopback whose refusal
+propagated here. `delta_bound: "at_most"` marks a refusal with no tone found:
+the whole return, noise included, was quieter than the stored loop would make
+the tone alone, so `delta` is an upper bound.
+
+**Rules.**
+- **Voltage probe:** 1000 Hz at −40 dBFS, 150 ms settle, one 0.3 s capture,
+  in its own engine lifecycle. Loop gain = `fundamental_dbfs − drive_dbfs`.
+  Refused on `|Δ| > 0.10 dB` (provisional until the rig record), judged only
+  when the in-lobe tone SNR ≥ `S_min` (≈ 50.8 dB). A capture error or an xrun
+  is `not_measured`, never refused.
+- **Latency:** `session_check` measures τ twice on the loopback and compares
+  it with the τ stored for the same conditions; `plot_ir` uses its own
+  same-capture reference leg. Any whole-sample difference is refused.
+- **Time:** a `verified` record applies only within the same daemon process,
+  the same device-enumeration epoch, and the same stored value. A `refused`
+  record is written to `session_refusals.json` (beside `cal.json`) and stands
+  across daemons until a check on the same loopback passes or a new value is
+  stored.
+- **Pair:** a refusal propagates — voltage to every voltage entry, τ to every
+  τ entry sharing device, backend, rate and period. Verification never
+  propagates: other pairs read `not_covered`.
+- **Unreadable record:** `session_refusals.json` is read on every access and
+  never written over when unreadable. Every stored layer without a verdict
+  from this daemon process reads `refusals_unreadable`; a refusal that cannot
+  be written is held in memory (`persisted: false`) and written at the next
+  access that can.
+
+**On emitting commands** (`sweep_level`, `sweep_frequency`, `plot`,
+`plot_level`, `plot_ir`, `generate`, `generate_pink`, `test_hardware`,
+`test_dut`): the request takes an optional `level_unit: "dbfs" | "dbu" |
+"vrms"` (default `dbfs`). The check runs in the worker before the first
+emission when a loopback is configured and the pair stores a voltage scale or
+the level was typed in dBu/Vrms (`plot_ir` also for its τ). The reply gains
+`session_check: "pending" | "not_run"`, and `session_check_reason` with
+`not_run`. The `session_check` frame precedes every measurement frame
+(`plot_ir`: after analysis, before `measurement/impulse_response`). A refused
+scale is withheld from every figure; with a physical `level_unit` the command
+is refused instead — an `error` frame carrying `voltage_check`, `level_unit`
+and `session_check` (the record), and nothing is emitted.
 
 ---
 
@@ -2642,11 +2823,15 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // labelled-tag rules, #97/#98 vocabulary)
     "meas": {
       "voltage":   "on" | "none",        // vrms_at_0dbfs_in present and applied
+      "voltage_check": <LayerVerdict>,   // #466: present iff the stored calibration has
+                                          // vrms_at_0dbfs_in; decided once at session start.
+                                          // "refused" → voltage "none" (spectra in dBFS)
       "spl":       "on" | "none",        // SPL cal layer present and applied
       "mic_curve": "on" | "off" | "none" // same vocabulary as `mic_correction`
     },
     "ref": {
       "voltage":   "on" | "none",
+      "voltage_check": <LayerVerdict>,   // #466: same rule as meas
       "spl":       "on" | "none",
       "mic_curve": "none"                // always "none" — a ref-channel mic
                                           // curve is refused at request time
@@ -3171,6 +3356,8 @@ contract. `results` order is the order the checks ran.
 
 ### `test_hardware`
 
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
+
 Analog loopback self-tests of the interface itself: noise floor, level
 linearity, THD floor, frequency response, channel match, repeatability.
 With `dmm: true` and a `dmm_host` configured it also runs three
@@ -3239,6 +3426,8 @@ actually ran, not the size of the suite.
 ---
 
 ### `test_dut`
+
+**Session check (#466):** optional `level_unit`; the reply gains `session_check` — see [`session_check`](#session_check).
 
 Qualification suite for a device under test: noise floor, gain, THD vs
 level, frequency response, clipping point. With `compare: true` it runs
@@ -3338,7 +3527,7 @@ Audio commands are classified into four concurrency groups:
 | `OUTPUT`    | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
 | `INPUT`     | `monitor_spectrum` |
 | `TRANSFER`  | `transfer_stream` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `plot_ir`, `calibrate`, `probe`, `test_hardware`, `test_dut` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `plot_ir`, `calibrate`, `session_check`, `probe`, `test_hardware`, `test_dut` |
 
 Rules:
 - Only one `OUTPUT` command at a time.
