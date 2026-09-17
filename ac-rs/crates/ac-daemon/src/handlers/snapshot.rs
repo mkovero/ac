@@ -71,6 +71,10 @@ impl SnapshotRingState {
         unique_cals: Vec<Option<Calibration>>,
     ) -> Self {
         let n = unique_chans.len();
+        // One entry per pair from the start: the worker pushes samples
+        // before it first syncs delays, and a `snapshot` landing between
+        // the two must still write one delay per pair (#435).
+        let delay_samples = vec![None; pairs.len()];
         Self {
             sr,
             unique_chans,
@@ -79,7 +83,7 @@ impl SnapshotRingState {
                 .collect(),
             cap_samples,
             pairs,
-            delay_samples: Vec::new(),
+            delay_samples,
             weighting_tag,
             integration_tag,
             unique_cals,
@@ -124,11 +128,13 @@ impl SnapshotRingState {
         let n_frames = channels.first().map(Vec::len).unwrap_or(0);
         let duration_s = n_frames as f64 / self.sr as f64;
 
-        // Role naming: first occurrence of a channel as a pair's meas
-        // leg is "meas_<pair index>"; a channel that's only ever a ref
-        // leg is "ref". A channel used as meas in one pair and ref in
-        // another (unusual but not forbidden) keeps its meas name — the
-        // meas role is the more specific one to preserve.
+        // Role naming: walking pairs in order, a channel takes the role of
+        // its first occurrence — "meas_<pair index>" if that occurrence is
+        // a meas leg, "ref" if it is a ref leg — and later occurrences do
+        // not rename it. A channel used as meas in one pair and ref in
+        // another (unusual but not forbidden) therefore keeps whichever
+        // role comes first: pairs [[0,1],[1,2]] name channel 1 "ref".
+        // Roles are labels, not unique keys; `input_channel` is the key.
         let mut roles = vec![None; self.unique_chans.len()];
         for (pair_idx, &(meas, refch)) in self.pairs.iter().enumerate() {
             if let Some(pos) = self.unique_chans.iter().position(|&c| c == meas) {
@@ -231,9 +237,13 @@ pub fn reset_spool_dir(
 }
 
 /// Delete every spooled file from this session. Called when the
-/// `transfer_stream` worker stops.
+/// `transfer_stream` worker stops — including when it panicked, so a
+/// poisoned lock is accepted rather than unwrapped (a panic here, during
+/// unwinding, would abort the daemon; #432).
 pub fn clear_spool(spool: &Mutex<std::collections::HashMap<String, SpoolEntry>>) {
-    let mut spool = spool.lock().unwrap();
+    let mut spool = spool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for entry in spool.values() {
         let _ = fs::remove_file(&entry.path);
     }
@@ -431,6 +441,30 @@ mod tests {
         }
         assert_eq!(ring.channels[0].len(), 10, "ring must cap at 10 samples");
         assert_eq!(ring.channels[1].len(), 10);
+    }
+
+    /// #435: the worker pushes samples before it first syncs delays. A
+    /// `snapshot` taken in that gap must still carry one delay per pair,
+    /// or `write_acsnap` refuses the metadata.
+    #[test]
+    fn snapshot_before_first_delay_sync_has_one_delay_per_pair() {
+        let mut ring = SnapshotRingState::new(
+            48_000,
+            vec![0, 1, 2],
+            1_000,
+            vec![(0, 1), (0, 2)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None, None],
+        );
+        ring.push_tick(&[vec![0.1; 64], vec![0.2; 64], vec![0.3; 64]]);
+        let (meta, channels) = ring.snapshot_meta_and_channels("test");
+        assert_eq!(
+            meta.session.delay_samples.len(),
+            meta.session.pairs.len(),
+            "delay_samples must have one entry per pair before the first sync"
+        );
+        build_acsnap(&meta, &channels).expect("first-tick snapshot must write");
     }
 
     /// AC #5 (ring correctness, wraparound): push distinguishable,

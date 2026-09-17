@@ -114,9 +114,12 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
     wait_for_stop(client, "generate_pink");
 }
 
-fn resolve_channels(ch_spec: &Option<String>, client: &mut AcClient) -> Vec<u32> {
-    if let Some(spec) = ch_spec {
-        crate::parse::parse_channels(spec).unwrap_or_else(|_| vec![0])
+/// The channels to report and send. An explicit list was already validated
+/// by the parser, so it is used as given; only an omitted list asks the
+/// daemon for the configured output.
+fn resolve_channels(ch_spec: &Option<Vec<u32>>, client: &mut AcClient) -> Vec<u32> {
+    if let Some(channels) = ch_spec {
+        channels.clone()
     } else {
         let ack = client.send_cmd(&serde_json::json!({"cmd": "setup", "update": {}}), None);
         let ch = ack

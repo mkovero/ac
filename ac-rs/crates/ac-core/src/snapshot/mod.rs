@@ -15,6 +15,7 @@
 //! reader refuse an unknown schema rather than silently misread one).
 
 mod flac;
+mod validate;
 
 use std::io::{Cursor, Read, Write};
 
@@ -178,13 +179,9 @@ pub fn write_acsnap(meta: &SnapshotMeta, channels: &[Vec<f32>]) -> Result<(Vec<u
             FORMAT_VERSION
         ));
     }
-    if channels.len() != meta.channel_map.len() {
-        return Err(anyhow!(
-            "write_acsnap: {} channels but channel_map has {} entries",
-            channels.len(),
-            meta.channel_map.len()
-        ));
-    }
+    validate::validate_metadata(meta).map_err(|e| anyhow!("write_acsnap: {e}"))?;
+    validate::validate_stream_count(meta, channels.len(), "channels")
+        .map_err(|e| anyhow!("write_acsnap: {e}"))?;
 
     let flac_bytes = flac::encode(channels, meta.sr).context("encoding audio.flac")?;
     let meta_json = serde_json::to_vec_pretty(meta).context("serializing meta.json")?;
@@ -234,6 +231,9 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
             FORMAT_VERSION
         ));
     }
+    // Metadata-only rules before the decode; the stream-count rule after.
+    // See `validate` for the rule list.
+    validate::validate_metadata(&meta).map_err(|e| anyhow!("read_acsnap: {e}"))?;
 
     let flac_bytes = {
         let mut entry = archive
@@ -250,13 +250,8 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
             meta.sr
         ));
     }
-    if channels.len() != meta.channel_map.len() {
-        return Err(anyhow!(
-            "read_acsnap: FLAC has {} channels but channel_map has {} entries",
-            channels.len(),
-            meta.channel_map.len()
-        ));
-    }
+    validate::validate_stream_count(&meta, channels.len(), "audio.flac")
+        .map_err(|e| anyhow!("read_acsnap: {e}"))?;
 
     Ok(Snapshot { meta, channels })
 }
@@ -334,7 +329,16 @@ mod tests {
         zip.write_all(&flac_bytes).unwrap();
         let bytes = zip.finish().unwrap().into_inner();
 
-        assert!(read_acsnap(&bytes).is_err());
+        // `tiny_meta(1)` also has a dangling ref input; the version check
+        // runs first, so the refusal must name the version, not that.
+        let err = match read_acsnap(&bytes) {
+            Ok(_) => panic!("read_acsnap accepted format_version 999"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("unsupported format_version 999"),
+            "refused for the wrong reason: {err}"
+        );
     }
 
     #[test]

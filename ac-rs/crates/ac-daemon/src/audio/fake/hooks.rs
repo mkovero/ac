@@ -240,3 +240,85 @@ pub(super) fn next_capture_block_xruns_delta() -> u32 {
         .copied()
         .unwrap_or(0)
 }
+
+/// Parse a comma-separated list of 0-based call indices from `var`. Unset or
+/// unparsable entries contribute nothing.
+fn call_index_list(var: &str) -> Vec<usize> {
+    std::env::var(var)
+        .ok()
+        .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Opt-in, fake-only fault hooks (#432): let an integration test make a
+/// worker fail at engine open, at engine start, or panic mid-capture, so the
+/// state a worker publishes can be shown to be cleared on those exits too.
+/// Without them, the fake backend never fails any of the three and those
+/// exits are unreachable under `--fake-audio`.
+///
+/// Each variable is a comma-separated list of 0-based call indices, counted
+/// per process by its own counter; a listed call faults, every other call
+/// behaves normally. Unset ⇒ nothing faults, byte-identical to before #432.
+/// Every fault message carries its variable's name, so a test can prove the
+/// hook fired rather than passing because the index drifted onto a call
+/// that no longer exists.
+///
+/// `AC_FAKE_ENGINE_OPEN_FAIL_CALLS`: the `"fake"` arm of `make_engine`
+/// returns `Err` on the listed calls.
+pub(in crate::audio) const ENGINE_OPEN_FAIL_VAR: &str = "AC_FAKE_ENGINE_OPEN_FAIL_CALLS";
+/// `AC_FAKE_START_FAIL_CALLS`: `FakeEngine::start` returns `Err` on the
+/// listed calls.
+pub(super) const START_FAIL_VAR: &str = "AC_FAKE_START_FAIL_CALLS";
+/// `AC_FAKE_CAPTURE_PANIC_CALLS`: panic on the listed call, counted once per
+/// caller-visible `capture_*` call across every fake capture method (a
+/// method that delegates to another is still one call).
+pub(super) const CAPTURE_PANIC_VAR: &str = "AC_FAKE_CAPTURE_PANIC_CALLS";
+
+static ENGINE_OPEN_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static START_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CAPTURE_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn engine_open_fail_list() -> &'static [usize] {
+    static LIST: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| call_index_list(ENGINE_OPEN_FAIL_VAR))
+}
+
+fn start_fail_list() -> &'static [usize] {
+    static LIST: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| call_index_list(START_FAIL_VAR))
+}
+
+fn capture_panic_list() -> &'static [usize] {
+    static LIST: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| call_index_list(CAPTURE_PANIC_VAR))
+}
+
+/// Consume one fake engine-open slot; `Err` when this call is listed in
+/// [`ENGINE_OPEN_FAIL_VAR`].
+pub(in crate::audio) fn engine_open_hook() -> anyhow::Result<()> {
+    let call_idx = ENGINE_OPEN_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if engine_open_fail_list().contains(&call_idx) {
+        anyhow::bail!("fake engine open failed on call {call_idx} ({ENGINE_OPEN_FAIL_VAR})");
+    }
+    Ok(())
+}
+
+/// Consume one `FakeEngine::start` slot; `Err` when this call is listed in
+/// [`START_FAIL_VAR`].
+pub(super) fn start_hook() -> anyhow::Result<()> {
+    let call_idx = START_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if start_fail_list().contains(&call_idx) {
+        anyhow::bail!("fake engine start failed on call {call_idx} ({START_FAIL_VAR})");
+    }
+    Ok(())
+}
+
+/// Consume one fake capture slot; panics when this call is listed in
+/// [`CAPTURE_PANIC_VAR`].
+pub(super) fn capture_panic_hook() {
+    let call_idx = CAPTURE_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if capture_panic_list().contains(&call_idx) {
+        panic!("fake capture panicked on call {call_idx} ({CAPTURE_PANIC_VAR})");
+    }
+}

@@ -326,34 +326,57 @@ subscribers that expect a linear spectrum should convert / branch.
 
 ### `visualize/scope` frame
 
-Emitted by `monitor_spectrum` once per channel per tick, **alongside**
-the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
-(not instead of it). Carries raw f32 audio samples — no calibration,
-no mic-curve, just the unmodified per-tick capture truncated to the
-newest 2048 samples. Intended for a client-side goniometer / trajectory
-view (`docs/superseded/unified.md` Phase 0b, resolves §9 OQ7); no current client
-subscribes to it since the ac-ui detach.
+Emitted by `monitor_spectrum` once per channel capture, **alongside**
+the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same
+capture (not instead of it). Carries raw f32 audio samples — no
+calibration, no mic-curve, just the unmodified per-channel capture
+truncated to the newest 2048 samples. Originally intended for a
+client-side goniometer / trajectory view (`docs/superseded/unified.md`
+Phase 0b, §9 OQ7); no current client subscribes to it since the ac-ui
+detach, and the current frames cannot feed a paired L/R view (see
+below).
 
 ```json
 {
-  "type":       "visualize/scope",
-  "cmd":        "monitor_spectrum",
-  "channel":    <int>,            // input channel index
-  "n_channels": <int>,            // total channels being monitored
-  "sr":         <int>,            // sample rate (Hz)
-  "frame_idx":  <int>,            // monotonic per-tick counter (see below)
-  "samples":    [<float>, ...],   // raw f32 in [-1, 1], length ≤ 2048
-  "timestamp":  <int>,            // tick-wide UNIX-epoch nanoseconds
-  "xruns":      <int>
+  "type":         "visualize/scope",
+  "cmd":          "monitor_spectrum",
+  "channel":      <int>,          // input channel index
+  "n_channels":   <int>,          // channels in the monitor request (context only)
+  "sr":           <int>,          // sample rate (Hz)
+  "frame_idx":    <int>,          // unique per emitted scope frame, increasing
+  "capture_mode": "sequential",   // always present; see below
+  "samples":      [<float>, ...], // raw f32 in [-1, 1], length ≤ 2048
+  "timestamp":    <int>,          // UNIX-epoch ns at this channel's capture completion
+  "xruns":        <int>,
+  "backend":      <string>
 }
 ```
 
-**`frame_idx` synchronization.** The counter increments exactly once
-per worker tick, so every channel's frame from the same capture tick
-shares the same `frame_idx`. Subscribers that need a synchronized L/R
-pair (Goniometer / PhaseScope3D) match frames by `frame_idx` rather
-than relying on receive-order or `timestamp` (which is also tick-wide
-but coarser).
+**Sequential capture — frames are not pairable (#434).** A
+multi-channel monitor captures its channels one after another:
+reconnect to the channel's input, flush, capture a block, then move to
+the next channel. Two channels' frames therefore never cover the same
+acquisition interval. The wire says so:
+
+- `frame_idx` increments once per emitted scope frame, across all
+  channels, so no two frames share a value. It orders frames; it is
+  not a pair key.
+- `timestamp` is the wall-clock time this channel's capture completed,
+  not a tick-wide value; consecutive channels' timestamps differ by at
+  least that channel's capture time.
+- `capture_mode` is `"sequential"` on every frame. `n_channels` is the
+  size of the monitor request, not a claim that the channels were
+  captured together.
+
+**Breaking semantic change.** Before #434, `frame_idx` and `timestamp`
+were shared by every channel of a worker tick and this section told
+subscribers to pair L/R frames by equal `frame_idx`. That pairing was
+never valid — the samples were captured sequentially — and equal
+`frame_idx` values no longer occur. A consumer that draws a paired
+trajectory (Goniometer, PhaseScope3D, any Lissajous of two channels)
+must check `capture_mode` and refuse any frame whose mode is not a
+simultaneous capture; no current mode is. A simultaneous
+multi-channel scope needs its own capture path and contract.
 
 **No calibration.** The trajectory consumers are dimensionless —
 displaying a Lissajous figure of `(L, R)` doesn't need voltage or SPL
@@ -880,6 +903,10 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
   }
 }
 ```
+
+The four channel fields follow **Error handling → Wire values**: all four
+are checked before anything is applied, so a malformed one leaves the whole
+config unchanged (`setup rejected — …`, `config  unchanged`).
 
 `snapshot_spool_dir` is confined to the daemon's spool root,
 `~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
@@ -1592,6 +1619,10 @@ across `reconnect_input` can't be preserved).
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused. Any present `fft_n`
+that is not an integer in 0–4294967295 — `null` and strings included — gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
+missing `freq_hz` or `level_dbfs` refuses the whole request.
+
 Both `interval` and `fft_n` are live-reconfigurable — see
 `set_monitor_params` below.
 
@@ -1709,6 +1740,10 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+`channels` absent, `null` or `[]` plays on the configured output; a list
+with any invalid element is refused and nothing is emitted.
+
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
 
@@ -1741,6 +1776,8 @@ Plays continuous pink noise until stopped.
   "channels":   [<int>, ...]   // optional
 }
 ```
+
+`channels` is read exactly as in `generate`. See **Error handling → Wire values** for how a malformed field is refused.
 
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
@@ -2076,6 +2113,8 @@ fields on the same entry stay untouched.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+
 **Request — clear**
 ```json
 {
@@ -2094,7 +2133,11 @@ fields on the same entry stay untouched.
 Validation: `freqs_hz` must be strictly increasing and finite, length
 in `[16, 4096]`; `gain_db` must match length and be finite. Failures
 return `{ "ok": false, "error": "<reason>" }` and leave the prior
-curve (if any) untouched.
+curve (if any) untouched. The arrays are read positionally: any invalid
+element (non-number, or not finite as a 32-bit float) rejects the whole
+upload, naming `freqs_hz[i]` / `gain_db[i]` and the partner value at the
+same index — elements are never dropped. A length mismatch names both
+lengths.
 
 ---
 
@@ -2282,6 +2325,10 @@ in the list once per iteration and emits one `transfer_stream` DATA frame
 per pair (each tagged with its own `meas_channel` / `ref_channel`). The
 legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
 `pairs` must be non-empty and every channel index must be within range.
+See **Error handling → Wire values** for how a malformed field is refused:
+a malformed `pairs[i][j]`, `meas_channel` or `ref_channel` is refused as
+`transfer_stream not started`, and a non-array `pairs` is refused rather than
+falling back to the legacy form.
 `weighting`/`integration` apply to every pair in the session; invalid values
 reply `{"ok": false, "error": "..."}` before the worker spawns.
 
@@ -3251,6 +3298,51 @@ When the guard fires:
 ---
 
 ## Error handling
+
+### Wire values
+
+A value a request supplies is either exactly valid or the **whole request
+is refused** — no default, no worker, no write, no config change (#431).
+Applies to every channel field (`channels`, `output_channel`,
+`input_channel`, `reference_channel`, `reference_output_channel`,
+`pairs[i][j]`, `meas_channel`, `ref_channel`) and to the positional
+`calibrate_mic_curve` arrays.
+
+| wire value | meaning |
+|---|---|
+| field absent | configured default |
+| `channels`: `null` or `[]` | configured default |
+| `reference_channel` / `reference_output_channel`: `null` | clear |
+| integer in 0–4294967295 | that channel |
+| anything else present — string, float, negative, > 4294967295, `null` on a non-nullable scalar, non-array `channels`/`pairs`, any bad array element | refused |
+
+Values are never narrowed: 4294967296 is refused, not read as channel 0.
+`fft_n` (`monitor_spectrum`, `set_monitor_params`) and `bpo`
+(`set_ioct_bpo`) above u32 get their existing domain errors.
+
+Refusal layout — a headline, then 9-space-indented `label  value` lines,
+the first always `received` (the JSON text of the value, cut at 64
+characters with `…`):
+
+```text
+generate not started — channels[0] must be an integer
+         received  "bad"
+         stimulus  silent
+```
+
+`<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
+`must be a finite number`, `must be an array`.
+
+| command | headline | state line |
+|---|---|---|
+| `generate`, `generate_pink` | `<cmd> not started` | `stimulus  silent` |
+| `transfer_stream` | `transfer_stream not started` | `stimulus  silent` |
+| `calibrate` | `calibration not started` | `stimulus  silent` |
+| `calibrate_spl` | `SPL calibration not started` | — |
+| `calibrate_mic_curve` | `mic curve not saved` / `mic curve not cleared` | `data  existing curve unchanged` (plus `paired field  <other>[i] = <value>` when the partner element is valid) |
+| `monitor_spectrum` | `monitor not started` | — |
+| `setup` | `setup rejected` | `config  unchanged` |
+| `get_calibration` | `calibration lookup rejected` | — |
 
 ### Invalid JSON
 ```json
