@@ -268,6 +268,58 @@ fn channel_info_lines(
     lines
 }
 
+pub(crate) fn wait_for_stop(client: &mut AcClient, cmd_name: &str) {
+    crossterm::terminal::enable_raw_mode().ok();
+    let result = wait_loop(client, cmd_name);
+    crossterm::terminal::disable_raw_mode().ok();
+    if let Err(reason) = result {
+        println!("\n  {reason}");
+    }
+}
+
+fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
+    loop {
+        if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                use crossterm::event::KeyCode;
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        crossterm::terminal::disable_raw_mode().ok();
+                        client
+                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
+                        return Err("Stopped.".into());
+                    }
+                    KeyCode::Char('c')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        crossterm::terminal::disable_raw_mode().ok();
+                        client
+                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
+                        return Err("Stopped.".into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((topic, frame)) = client.recv_data(100) {
+            let frame_cmd = frame.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+            if topic == "error" && (frame_cmd.is_empty() || frame_cmd == cmd_name) {
+                let msg = frame
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("error");
+                return Err(format!("error: {msg}"));
+            }
+            if topic == "done" && (frame_cmd.is_empty() || frame_cmd == cmd_name) {
+                return Ok(());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,57 +375,5 @@ mod tests {
             "source": "probe",
         }));
         assert_eq!(channel_info_lines(1, None, -40.0, Some(&c)).len(), 1);
-    }
-}
-
-pub(crate) fn wait_for_stop(client: &mut AcClient, cmd_name: &str) {
-    crossterm::terminal::enable_raw_mode().ok();
-    let result = wait_loop(client, cmd_name);
-    crossterm::terminal::disable_raw_mode().ok();
-    if let Err(reason) = result {
-        println!("\n  {reason}");
-    }
-}
-
-fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
-    loop {
-        if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
-                use crossterm::event::KeyCode;
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => {
-                        crossterm::terminal::disable_raw_mode().ok();
-                        client
-                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
-                        return Err("Stopped.".into());
-                    }
-                    KeyCode::Char('c')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        crossterm::terminal::disable_raw_mode().ok();
-                        client
-                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
-                        return Err("Stopped.".into());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if let Some((topic, frame)) = client.recv_data(100) {
-            let frame_cmd = frame.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-            if topic == "error" && (frame_cmd.is_empty() || frame_cmd == cmd_name) {
-                let msg = frame
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("error");
-                return Err(format!("error: {msg}"));
-            }
-            if topic == "done" && (frame_cmd.is_empty() || frame_cmd == cmd_name) {
-                return Ok(());
-            }
-        }
     }
 }

@@ -2040,6 +2040,6 @@ mod tests {
             .collect();
         let total = total_peak_dbfs(&block);
         assert!((total - (-40.0)).abs() < 0.1, "{total}");
-        assert!((total_peak_dbfs(&vec![0.0; 10]) - (-240.0 + PEAK_TO_RMS_DB)).abs() < 1e-9);
+        assert!((total_peak_dbfs(&[0.0; 10]) - (-240.0 + PEAK_TO_RMS_DB)).abs() < 1e-9);
     }
 }

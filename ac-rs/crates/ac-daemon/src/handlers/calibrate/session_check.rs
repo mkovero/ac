@@ -46,8 +46,7 @@ use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
 
 use super::super::{
-    busy_guard, cfg_guard, make_engine_for_state, resolve_ref_input, resolve_ref_output,
-    selected_backend_is_fake, send_pub, spawn_worker,
+    busy_guard, cfg_guard, resolve_ref_input, resolve_ref_output, send_pub, spawn_worker,
 };
 use super::tau::{measure_tau_twice, tau_result, TauOutcome};
 
@@ -280,12 +279,20 @@ pub(crate) fn configured_loopback(
 pub(crate) const NO_LOOPBACK: &str =
     "no reference loopback configured; check: `ac setup reference`, `ac setup reference-output`";
 
+/// The backend `fake_audio`/`required` selects, resolved without opening an
+/// engine: an open would consume the fake backend's engine-open fault slots
+/// (#432) that a consumer's own open is meant to hit.
+fn selected_backend(fake_audio: bool, required: Option<&str>) -> Result<String, String> {
+    let (required, _, selected) = crate::audio::backend_status(fake_audio, required);
+    selected.ok_or_else(|| {
+        format!("audio backend unavailable \u{2014} required {required}; measurement not started")
+    })
+}
+
 /// The device-enumeration epoch the configured backend is in now.
 fn epoch_now(state: &ServerState) -> DeviceEpoch {
-    match make_engine_for_state(state) {
-        Ok(eng) => current_epoch(eng.backend_name()),
-        Err(e) => DeviceEpoch::NotObservable { reason: e },
-    }
+    let required = state.cfg.lock().unwrap().backend.clone();
+    epoch_for(state.fake_audio, required.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -687,10 +694,9 @@ impl Gate {
         } else {
             None
         };
-        let (fake, required) = match make_engine_for_state(state) {
-            Ok(e) => (selected_backend_is_fake(e.as_ref()), cfg.backend.clone()),
-            Err(_) => (state.fake_audio, cfg.backend.clone()),
-        };
+        let required = cfg.backend.clone();
+        let fake = state.fake_audio
+            || selected_backend(state.fake_audio, required.as_deref()).as_deref() == Ok("fake");
         Gate {
             state: state.clone(),
             cmd,
@@ -749,10 +755,9 @@ impl Gate {
             );
             fill_reach(&mut rec);
             fresh = Some(record(&self.state, rec));
-        } else if self.tau_loopback.is_some() {
+        } else if let Some(loopback) = &self.tau_loopback {
             // `plot_ir` without a voltage layer: a latency-only record,
             // stimulus none, filled in after analysis.
-            let loopback = self.tau_loopback.as_ref().expect("checked");
             let rec = new_record(
                 &self.state,
                 self.cmd,
@@ -851,11 +856,9 @@ impl Gate {
 
 /// The epoch of the backend `fake`/`required` selects.
 fn epoch_for(fake: bool, required: Option<&str>) -> DeviceEpoch {
-    match make_engine(fake, required) {
-        Ok(e) => current_epoch(e.backend_name()),
-        Err(e) => DeviceEpoch::NotObservable {
-            reason: format!("{e:#}"),
-        },
+    match selected_backend(fake, required) {
+        Ok(backend) => current_epoch(&backend),
+        Err(reason) => DeviceEpoch::NotObservable { reason },
     }
 }
 
@@ -946,14 +949,13 @@ pub fn session_check(state: &ServerState, cmd: &Value) -> Value {
         }
         Err(e) => return json!({"ok": false, "error": e, "refusal_record": refusal_record}),
     };
-    let eng = match make_engine_for_state(state) {
-        Ok(e) => e,
+    let required = cfg.backend.clone();
+    let backend = match selected_backend(state.fake_audio, required.as_deref()) {
+        Ok(b) => b,
         Err(e) => return json!({"ok": false, "error": e, "refusal_record": refusal_record}),
     };
-    let fake = selected_backend_is_fake(eng.as_ref());
-    let backend = eng.backend_name();
-    drop(eng);
-    let required = cfg.backend.clone();
+    let fake = state.fake_audio || backend == "fake";
+    let reply_backend = backend.clone();
     let device = cfg.device;
     let pub_tx = state.pub_tx.clone();
     let worker_state = state.clone();
@@ -1073,7 +1075,7 @@ pub fn session_check(state: &ServerState, cmd: &Value) -> Value {
             "freq_hz": PROBE_FREQ_HZ,
         })),
         "refusal_record": refusal_record,
-        "backend": backend,
+        "backend": reply_backend,
     })
 }
 

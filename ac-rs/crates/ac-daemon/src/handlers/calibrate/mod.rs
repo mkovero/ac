@@ -672,7 +672,8 @@ mod loop_gain_tests {
         assert_eq!(b, None);
 
         let mut noisy = clean();
-        noisy.tone.as_mut().unwrap().noise_floor_dbfs = -60.0;
+        // In-lobe SNR ≈ 36 dB, below `S_min`.
+        noisy.tone.as_mut().unwrap().noise_floor_dbfs = -40.0;
         let mut b = None;
         let o = run(
             &mut b,
