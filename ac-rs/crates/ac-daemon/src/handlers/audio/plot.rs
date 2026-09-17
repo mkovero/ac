@@ -17,8 +17,10 @@ use ac_core::measurement::report::{
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
-    gated_frequency_response, gated_response_citation, inverse_sweep, log_sweep,
-    noise_tail_start_s, SweepParams, LINEAR_DECONV_TAIL_NOTE,
+    gated_frequency_response, gated_response_citation, inverse_sweep, ir_default_window_len,
+    log_sweep, noise_tail_start_s, SweepParams, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
+    IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
+    LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, TauConditions};
@@ -880,9 +882,19 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_ir");
     cfg_guard!(state);
-    let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
-    let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
-    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_ir") {
+    // #501: every default comes from `ac_core::measurement::sweep::defaults`,
+    // the single owner; the ack below echoes what was accepted so `ac-cli`
+    // keeps no copy of its own.
+    let f1_hz = cmd
+        .get("f1_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(IR_DEFAULT_F1_HZ);
+    let f2_hz = cmd
+        .get("f2_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(IR_DEFAULT_F2_HZ);
+    let duration = match bounded_duration(cmd, "duration", IR_DEFAULT_DURATION_S, false, "plot_ir")
+    {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -890,26 +902,39 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(DEFAULT_LEVEL_DBFS);
-    let tail_s = match bounded_duration(cmd, "tail_s", 0.5, true, "plot_ir") {
+    let tail_s = match bounded_duration(cmd, "tail_s", IR_DEFAULT_TAIL_S, true, "plot_ir") {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let n_harmonics = match bounded_usize(cmd, "n_harmonics", 5, 1, MAX_IR_HARMONICS, "plot_ir") {
+    let n_harmonics = match bounded_usize(
+        cmd,
+        "n_harmonics",
+        IR_DEFAULT_N_HARMONICS,
+        1,
+        MAX_IR_HARMONICS,
+        "plot_ir",
+    ) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // 4096 is a request, not a promise: `extract_irs` clamps each order's
+    // A typed `window_len` is a sample count, budget-checked here before
+    // port resolution. An omitted one stays `None` until the worker knows
+    // the engine rate, then becomes `IR_DEFAULT_WINDOW_S` in samples
+    // (#501): the default gate means the same time span at every rate.
+    //
+    // Either is a request, not a promise: `extract_irs` clamps each order's
     // gate down to the spacing of its own nearest neighbour, so the linear
-    // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
-    // away at these defaults) while the tighter high orders get 2818 /
-    // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
-    // the `measurement/impulse_response` envelope and, when any order was
+    // IR usually keeps the full request while the tighter high orders are
+    // shortened. Those lengths are not silent — they ride out in the
+    // `measurement/impulse_response` envelope and, when any order was
     // shortened, in the report notes. See issue #278.
-    let window_len =
-        match bounded_usize(cmd, "window_len", 4096, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
-            Ok(v) => v,
+    let window_len = match cmd.get("window_len") {
+        None => None,
+        Some(_) => match bounded_usize(cmd, "window_len", 1, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
+            Ok(v) => Some(v),
             Err(e) => return e,
-        };
+        },
+    };
 
     // #460: operator-entered source-to-receiver distance for the onset
     // search's causal bound. Checked before port resolution, like the other
@@ -1031,6 +1056,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         let sr = eng.sample_rate();
+        let window_len = window_len.unwrap_or_else(|| ir_default_window_len(sr));
 
         // τ (#281) resolved here, while the engine is live: `period_size()`
         // and `backend_name()` are part of the exact-match key, and a τ
@@ -1457,7 +1483,21 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         "level_dbfs": level_dbfs,
         "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
+        // #501: the stimulus as accepted, defaults applied — what `ac-cli`
+        // prints before the result, so it never keeps its own copy.
+        "f1_hz": f1_hz,
+        "f2_hz": f2_hz,
+        "duration": duration,
+        "n_harmonics": n_harmonics,
+        "tail_s": tail_s,
     });
+    // The engine rate is not known yet, so a defaulted window can only be
+    // echoed in seconds; its sample count arrives in the
+    // `measurement/impulse_response` frame's `window_len_requested`.
+    match window_len {
+        Some(n) => reply["window_len"] = json!(n),
+        None => reply["window_default_s"] = json!(IR_DEFAULT_WINDOW_S),
+    }
     // #460: every port the sweep leaves through or is referenced against,
     // named before any result (UX: "Also driven" / "Ref input").
     if let Some(p) = ref_in_port_reply {

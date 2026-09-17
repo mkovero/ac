@@ -267,6 +267,30 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     );
 
     // ── the rest of the printed summary ───────────────────────────────
+    // #501 UX: a pass states the threshold and its basis too — the margin
+    // is the reading — and the stimulus rows carry the typed values.
+    for want in [
+        "  IR sweep\n",
+        "  band       200 Hz \u{2192} 8000 Hz  (typed)",
+        "  length        0.50 s  (typed)",
+        "  window     4096 samples  (typed)",
+        "  harmonics     3 orders  (typed)",
+        "  tail          0.10 s  (typed)",
+        "  captured      0.60 s  (0.50 s sweep + 0.10 s tail)",
+        "(required \u{2265} 18.0 dB)",
+        "                fixed threshold, scored for the default sweep only",
+    ] {
+        assert!(
+            stdout.contains(want),
+            "passing run missing {want:?}:\n{stdout}"
+        );
+    }
+    for gone in ["  IR: ", "-sample window, ", "threshold set from rig data"] {
+        assert!(
+            !stdout.contains(gone),
+            "pre-#501 line {gone:?} must not print:\n{stdout}"
+        );
+    }
     for want in ["peak", "pre-imp SNR", "gate", "f_low"] {
         assert!(
             stdout.contains(want),
@@ -389,6 +413,39 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     );
 }
 
+/// #501 through the real binary: `ac plot ir` with no arguments runs the
+/// daemon's default stimulus, prints it from the ack with `(default)` tags,
+/// and passes on a clean loopback — the first-use case that used to print
+/// `DECONVOLUTION FAILED`. The window row is in seconds before emission and
+/// becomes 19200 samples (0.4 s at the fake's 48 kHz) in the result `gate`.
+#[test]
+fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
+    let rig = Rig::start();
+    let stdout = rig.run_ac(&["plot", "ir"]);
+    for want in [
+        "  band       20 Hz \u{2192} 20000 Hz  (default)",
+        "  length        4.00 s  (default)",
+        "  window        0.40 s  (default)",
+        "  harmonics     5 orders  (default)",
+        "  tail          0.50 s  (default)",
+        "  level       -40.0 dBFS  (default)",
+        "  captured      4.50 s  (4.00 s sweep + 0.50 s tail)",
+        "(required \u{2265} 18.0 dB)",
+        "fixed threshold, scored for the default sweep only",
+        "rectangular window, 19200 samples (400.00 ms)",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
+    }
+    assert!(
+        !stdout.contains("DECONVOLUTION FAILED"),
+        "the default sweep must pass on a clean loopback:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  arrival       "),
+        "a passing default run prints its arrival:\n{stdout}"
+    );
+}
+
 /// #376: a capture whose pre-impulse SNR does not clear the threshold is
 /// reported as a failed deconvolution, not as a result with a number in
 /// it — a short (1024-sample) gate window leaves too few pre-impulse
@@ -406,9 +463,18 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         stdout.contains("DECONVOLUTION FAILED"),
         "expected a failed-deconvolution banner:\n{stdout}"
     );
+    for want in [
+        "check: sweep length, band, window (above)",
+        "check: drive level, input gain, distance, room noise",
+    ] {
+        assert!(
+            stdout.contains(want),
+            "banner must name what to check ({want:?}):\n{stdout}"
+        );
+    }
     assert!(
-        stdout.contains("check: drive level, mic gain, distance, room noise"),
-        "banner must name what to check:\n{stdout}"
+        !stdout.contains("mic gain"),
+        "a cable has no mic; the check list says input gain:\n{stdout}"
     );
     // The exact plausible-looking-wrong-number shape #376 exists to
     // close: neither line may print on a failed verdict.
@@ -427,6 +493,14 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
     assert!(
         stdout.contains("required \u{2265} 18.0 dB"),
         "pre-imp SNR line must state the threshold it failed against:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("fixed threshold, scored for the default sweep only"),
+        "the threshold's basis must print under it:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  window     1024 samples  (typed)"),
+        "the typed window the check list points at must be above it:\n{stdout}"
     );
 
     let dir = rig.report_dir();

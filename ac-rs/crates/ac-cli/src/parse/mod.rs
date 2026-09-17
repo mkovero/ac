@@ -378,14 +378,15 @@ pub enum CommandKind {
     // straight into `PlotIr` below (see `parse/sweep.rs`), not a second
     // command variant to keep in sync.
     /// `ac plot ir` — Farina log-sweep impulse response (#282; moved from
-    /// `ac sweep ir`, which is now a deprecated alias). Gate parameters
-    /// are `Option` — unset means "use the daemon's default", not "send a
-    /// hardcoded override" (the daemon already defaults them; see
-    /// `ZMQ.md`'s `plot_ir` request).
+    /// `ac sweep ir`, which is now a deprecated alias). Every stimulus
+    /// parameter is `Option` — unset means "use the daemon's default", not
+    /// "send a hardcoded override". The defaults live once, in
+    /// `ac_core::measurement::sweep::defaults`, and come back in the ack
+    /// (#501; see `ZMQ.md`'s `plot_ir` request).
     PlotIr {
-        f1: f64,
-        f2: f64,
-        duration: f64,
+        f1: Option<f64>,
+        f2: Option<f64>,
+        duration: Option<f64>,
         level: LevelSpec,
         level_defaulted: bool,
         n_harmonics: Option<u32>,

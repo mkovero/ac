@@ -113,8 +113,8 @@ mod tests {
                 window_len,
                 ..
             } => {
-                assert!((f1 - 20.0).abs() < 1e-9);
-                assert!((f2 - 20000.0).abs() < 1e-9);
+                assert_eq!(f1, Some(20.0));
+                assert_eq!(f2, Some(20000.0));
                 assert_eq!(n_harmonics, Some(5));
                 assert_eq!(window_len, Some(4096));
             }

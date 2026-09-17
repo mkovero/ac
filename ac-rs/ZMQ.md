@@ -1144,15 +1144,25 @@ a configured reference.
   "cmd":          "plot_ir",
   "f1_hz":        <float>,   // default 20
   "f2_hz":        <float>,   // default 20000 (must be < sr/2)
-  "duration":     <float>,   // seconds, default 1.0
+  "duration":     <float>,   // seconds, default 4.0
   "level_dbfs":   <float>,   // default -40
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
-  "window_len":   <int>,     // requested IR gate length in samples, default 4096
+  "window_len":   <int>,     // requested IR gate length in samples;
+                             // default round(0.4 s × engine sample rate)
   "distance_m":   <float>    // optional, metres source to receiver; feeds only the
                              // onset search's causal bound (#460)
 }
 ```
+
+The defaults (except `level_dbfs`) are owned by
+`ac_core::measurement::sweep::defaults` (#501); the daemon applies them and
+the CLI keeps no copy. The sweep length and window changed in #501 (from 1.0 s
+and 4096 samples) because the pre-impulse SNR gate refused a clean loopback at
+the old values. An omitted `window_len` is converted from 0.4 s once the engine
+reports its rate — 19200 samples at 48 kHz, 38400 at 96 kHz — so the default
+gate spans the same time at every rate. A typed `window_len` is still a sample
+count.
 
 Request budgets are enforced before port resolution or worker spawn:
 
@@ -1179,6 +1189,10 @@ also stated in the report `notes`.
 **Reply**
 ```json
 { "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": 0.0,
+  "f1_hz": <float>, "f2_hz": <float>, "duration": <float>,  // accepted, defaults applied
+  "n_harmonics": <int>, "tail_s": <float>,                  // accepted, defaults applied
+  "window_len": <int>,          // only when the request carried window_len
+  "window_default_s": 0.4,      // only when the request did not carry window_len
   "ref_in_port": "<reference-capture-port>",    // only when a reference is configured
   "ref_out_port": "<reference-playback-port>",  // only when a reference is configured
   "warnings": ["<#225 migration warning>"] }    // only when it applies
@@ -1186,6 +1200,15 @@ also stated in the report `notes`.
 
 `level_dbfs` in the reply equals the accepted request, and the report's
 `stimulus.level_dbfs` field is the same value.
+
+The stimulus echo (#501) is additive: `f1_hz`, `f2_hz`, `duration`,
+`n_harmonics` and `tail_s` carry the values the sweep will run with, defaults
+applied. A defaulted window cannot be echoed in samples, because the sample
+rate is unknown until the engine starts; the reply carries
+`window_default_s` instead, and the converted sample count arrives as
+`window_len_requested` on the `measurement/impulse_response` frame. Replies
+from daemons before #501 carry none of these fields; `ac-cli` prints
+`(not reported by this daemon)` for each.
 
 **Reference leg (#460).** `plot_ir` takes a same-capture reference from the
 config keys `transfer_stream` and `test_dut` already use: `reference_channel` /
@@ -1229,8 +1252,10 @@ has no reference configured.
 // window_len_used is indexed by order-1: [0] is the linear IR (order 1),
 // [i] is harmonic order i+1. Each entry is the gate length of the
 // corresponding IR in `data`, which may be below window_len_requested.
+// window_len_requested is the typed window_len, or the 0.4 s default
+// converted at the engine rate (here the defaults at 96 kHz).
 { "cmd": "plot_ir", "data": { "kind": "impulse_response", ... },
-  "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
+  "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
 { "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 9, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }

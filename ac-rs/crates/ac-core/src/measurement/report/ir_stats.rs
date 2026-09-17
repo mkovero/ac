@@ -34,7 +34,40 @@ use crate::shared::calibration::{compare_tau_readings, TauComparison, TauDisagre
 /// refused — low drive is the operator-encouraged *safe* choice under
 /// the rig's emission consent rules, so that blind spot is real and
 /// documented here rather than picked by eye.
+///
+/// **Scored for the default sweep (#501).** The figure a clean loopback
+/// reads is set by the stimulus, not by the capture's noise (#471), so
+/// this value means something only for the stimulus it was checked
+/// against. It was checked against the `plot_ir` defaults in
+/// [`crate::measurement::sweep::IR_DEFAULT_DURATION_S`] and its siblings —
+/// 20 Hz–20 kHz, 4.0 s, a 0.4 s window, 5 harmonics, 0.5 s tail — on a
+/// synthetic chain that mirrors `plot_ir` (`log_sweep` → delay → tail →
+/// `deconvolve_full` → `extract_irs` → `ir_peak` → `pre_impulse_snr_db`):
+/// - a perfect loopback reads 21.1–22.0 dB for τ from 0 to 40 ms, the same
+///   to 0.01 dB at 44.1, 48, 96 and 192 kHz, and unmoved by added noise
+///   at −110 or −70 dBFS;
+/// - a noise-only capture (no signal path) read at most 16.3 dB over
+///   about 200 draws at 48 and 96 kHz (median 10.1 dB, 95th percentile
+///   12.7 dB); none reached this value.
+///
+/// Rig anchor: under the previous defaults (1 s, 4096 samples) pupu's
+/// 96 kHz electrical loopback read 12.8 dB (2026-09-16, #501), against
+/// 13.2 dB from the same synthetic chain at the rig's τ — a perfect cable
+/// could not clear this value there, which is what #501 fixed by changing
+/// the defaults rather than this number. A derived threshold (#471's
+/// floor − 3 dB) was rejected at those defaults because it accepted a
+/// noise-only capture in 15 of 200 draws; the fixed value accepted none.
+///
+/// A typed configuration (another band, length or window) is still judged
+/// against this value, which nobody has derived for it (#474). The
+/// operator is told so by [`PRE_IMPULSE_SNR_BASIS`].
 pub const PRE_IMPULSE_SNR_MIN_DB: f64 = 18.0;
+
+/// What [`PRE_IMPULSE_SNR_MIN_DB`] was scored against, as printed under
+/// the pre-impulse SNR by `ac-cli` and inside `ac-scene`'s fault detail
+/// (#501). True on a default run (the gate was checked for this sweep)
+/// and on a typed one (it was not). Changes with the provenance above.
+pub const PRE_IMPULSE_SNR_BASIS: &str = "fixed threshold, scored for the default sweep only";
 
 impl MeasurementReport {
     /// Derived read-out quantities for the report's first
@@ -1707,5 +1740,343 @@ mod tests {
             Some(stats.arrival_s - 0.001),
             "Unchecked must not withhold a flight time it never disputed"
         );
+    }
+}
+
+/// #501: the coupling between [`PRE_IMPULSE_SNR_MIN_DB`] and `plot_ir`'s
+/// default stimulus (`measurement::sweep::defaults`), recorded next to the
+/// threshold whose provenance it is. Each test runs the chain `plot_ir`
+/// runs — `log_sweep` → integer delay → 0.5 s tail → optional Gaussian
+/// noise → `deconvolve_full` → ÷ amplitude → `extract_irs` (5 orders) →
+/// `ir_peak` → `pre_impulse_snr_db` — at a −40 dBFS drive.
+#[cfg(test)]
+mod default_sweep_tests {
+    use super::{ir_verdict, pre_impulse_region, IrVerdict, PRE_IMPULSE_SNR_MIN_DB};
+    use crate::measurement::sweep::{
+        deconvolve_full, extract_irs, inverse_sweep, ir_default_window_len, ir_peak, log_sweep,
+        pre_impulse_snr_db, pre_impulse_snr_floor_db, DeconvolvedIrs, SweepParams,
+        IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS,
+        IR_DEFAULT_TAIL_S,
+    };
+
+    /// −40 dBFS, the standing drive level the rig reading was taken at.
+    const AMP: f64 = 0.01;
+    /// pupu's measured loopback τ at 96 kHz, in samples.
+    const RIG_TAU_96K: usize = 1711;
+    /// The pre-impulse figure pupu read under the previous defaults (#501).
+    const RIG_OLD_DEFAULTS_DB: f64 = 12.8;
+
+    fn defaults(sample_rate: u32) -> (SweepParams, usize) {
+        (
+            SweepParams {
+                f1_hz: IR_DEFAULT_F1_HZ,
+                f2_hz: IR_DEFAULT_F2_HZ,
+                duration_s: IR_DEFAULT_DURATION_S,
+                sample_rate,
+            },
+            ir_default_window_len(sample_rate),
+        )
+    }
+
+    /// The defaults before #501: 1 s and a 4096-sample window.
+    fn old_defaults(sample_rate: u32) -> (SweepParams, usize) {
+        (
+            SweepParams {
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                sample_rate,
+            },
+            4096,
+        )
+    }
+
+    /// Standard-normal draws from a fixed-seed LCG (Box–Muller), so every
+    /// run of these tests sees the same noise. The seed is the initial state
+    /// as given: the increment is odd, so the generator has full period from
+    /// any state, and forcing the seed odd would map seeds `2k` and `2k + 1`
+    /// onto one capture.
+    fn gaussian(n: usize, sigma: f64, seed: u64) -> Vec<f64> {
+        let mut state = seed;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let (u1, u2) = (uniform(), uniform());
+                sigma * (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+            })
+            .collect()
+    }
+
+    fn analyse(p: &SweepParams, window_len: usize, captured: &[f32]) -> DeconvolvedIrs {
+        let inv = inverse_sweep(p).expect("inverse");
+        let full: Vec<f64> = deconvolve_full(captured, &inv)
+            .iter()
+            .map(|v| v / AMP)
+            .collect();
+        extract_irs(&full, p, IR_DEFAULT_N_HARMONICS, window_len).expect("irs")
+    }
+
+    /// A perfect loopback delayed by `tau` samples, with optional added
+    /// Gaussian noise `(dBFS rms, seed)`. Returns the figure and the IRs.
+    fn loopback(
+        p: &SweepParams,
+        window_len: usize,
+        tau: usize,
+        noise: Option<(f64, u64)>,
+    ) -> (f64, DeconvolvedIrs) {
+        let sweep = log_sweep(p).expect("sweep");
+        let tail = (IR_DEFAULT_TAIL_S * p.sample_rate as f64).round() as usize;
+        let n = sweep.len() + tail;
+        let mut captured = vec![0.0f64; n];
+        for (i, &s) in sweep.iter().enumerate() {
+            if let Some(slot) = captured.get_mut(i + tau) {
+                *slot += AMP * s as f64;
+            }
+        }
+        if let Some((dbfs, seed)) = noise {
+            let sigma = 10f64.powf(dbfs / 20.0);
+            for (c, w) in captured.iter_mut().zip(gaussian(n, sigma, seed)) {
+                *c += w;
+            }
+        }
+        let captured: Vec<f32> = captured.iter().map(|&v| v as f32).collect();
+        let irs = analyse(p, window_len, &captured);
+        let (idx, _) = ir_peak(&irs.linear);
+        (pre_impulse_snr_db(&irs.linear, idx), irs)
+    }
+
+    /// A capture with no signal path: noise only. Returns what `ir_stats`
+    /// would decide from it — peak, pre-region, figure — so the caller can
+    /// apply either verdict rule with `ir_verdict`'s semantics (an empty
+    /// pre-region is a failure, not +inf).
+    struct NoSignal {
+        peak_index: usize,
+        peak_magnitude: f64,
+        snr_db: f64,
+        linear: Vec<f64>,
+    }
+
+    fn no_signal(p: &SweepParams, window_len: usize, seed: u64) -> NoSignal {
+        let n = p.n_samples() + (IR_DEFAULT_TAIL_S * p.sample_rate as f64).round() as usize;
+        let captured: Vec<f32> = gaussian(n, 1e-3, seed).iter().map(|&v| v as f32).collect();
+        let irs = analyse(p, window_len, &captured);
+        let (peak_index, peak_magnitude) = ir_peak(&irs.linear);
+        NoSignal {
+            peak_index,
+            peak_magnitude,
+            snr_db: pre_impulse_snr_db(&irs.linear, peak_index),
+            linear: irs.linear,
+        }
+    }
+
+    impl NoSignal {
+        /// The shipped rule: `ir_verdict` against the fixed threshold.
+        fn fixed_verdict(&self) -> IrVerdict {
+            ir_verdict(
+                self.peak_magnitude,
+                pre_impulse_region(&self.linear, self.peak_index),
+                self.snr_db,
+            )
+        }
+
+        /// The rejected rule (#471 applied here): threshold = the floor at
+        /// this draw's own argmax − 3 dB, falling back to 18 dB when no floor
+        /// exists. Same fail-closed cases as `ir_verdict`.
+        fn derived_accepts(&self, p: &SweepParams, window_len: usize) -> bool {
+            let threshold = pre_impulse_snr_floor_db(p, window_len, self.peak_index)
+                .map(|f| f - 3.0)
+                .unwrap_or(PRE_IMPULSE_SNR_MIN_DB);
+            self.peak_magnitude != 0.0
+                && !pre_impulse_region(&self.linear, self.peak_index).is_empty()
+                && self.snr_db >= threshold
+        }
+    }
+
+    /// Test 1: the defaults clear the gate with margin on a perfect
+    /// loopback over the whole plausible τ range (0–40 ms), and added
+    /// noise does not move the figure. Margin: 2.0 dB = 4 × the ≤ 0.5 dB
+    /// rig-vs-synthetic spread measured in #471 and #501 (multiplier
+    /// assumed). Measured minimum 21.14 dB.
+    #[test]
+    fn default_sweep_clears_the_gate_on_a_perfect_loopback() {
+        let sr = 96_000;
+        let (p, wl) = defaults(sr);
+        let taus = [0, 115, 1709, RIG_TAU_96K, 1967, 3840];
+        for tau in taus {
+            let (snr, _) = loopback(&p, wl, tau, None);
+            assert!(
+                snr >= PRE_IMPULSE_SNR_MIN_DB + 2.0,
+                "τ = {tau} samples: a perfect loopback at the defaults reads {snr:.2} dB, \
+                 under {:.1} dB + 2.0 dB margin",
+                PRE_IMPULSE_SNR_MIN_DB
+            );
+            assert!(
+                (21.0..22.1).contains(&snr),
+                "τ = {tau}: {snr:.2} dB left the measured 21.1–22.0 dB range"
+            );
+        }
+        let (clean, _) = loopback(&p, wl, RIG_TAU_96K, None);
+        for dbfs in [-110.0, -70.0] {
+            let (noisy, _) = loopback(&p, wl, RIG_TAU_96K, Some((dbfs, 0xA5A5)));
+            assert!(
+                (noisy - clean).abs() < 0.1,
+                "noise at {dbfs} dBFS moved the default figure {clean:.2} → {noisy:.2} dB"
+            );
+        }
+    }
+
+    /// Test 2 (criteria 1, 2 and 6): the previous defaults are refused by
+    /// the same 18 dB on the same perfect loopback, the synthetic reproduces
+    /// the rig reading within 1.0 dB, and noise does not move it — the
+    /// figure is the stimulus's, not the capture's. Also pins the
+    /// band-limited run the rig passed at 32.7 dB. If the first assertion
+    /// ever fails, the defaults change was unnecessary.
+    #[test]
+    fn previous_defaults_are_refused_by_the_shipped_threshold() {
+        let sr = 96_000;
+        let (p, wl) = old_defaults(sr);
+        let (clean, _) = loopback(&p, wl, RIG_TAU_96K, None);
+        assert!(
+            clean < PRE_IMPULSE_SNR_MIN_DB,
+            "the previous defaults read {clean:.2} dB, which the {PRE_IMPULSE_SNR_MIN_DB} dB \
+             gate accepts — #501's premise no longer holds"
+        );
+        assert!(
+            (clean - RIG_OLD_DEFAULTS_DB).abs() <= 1.0,
+            "synthetic {clean:.2} dB is not within 1.0 dB of the rig's {RIG_OLD_DEFAULTS_DB} dB"
+        );
+        let (noisy, _) = loopback(&p, wl, RIG_TAU_96K, Some((-70.0, 0x5A5A)));
+        assert!(
+            (noisy - clean).abs() < 0.1,
+            "noise moved the previous-default figure {clean:.2} → {noisy:.2} dB"
+        );
+
+        let typed = SweepParams {
+            f1_hz: 200.0,
+            f2_hz: 8_000.0,
+            duration_s: 4.0,
+            sample_rate: sr,
+        };
+        let (band_limited, _) = loopback(&typed, 16_384, RIG_TAU_96K, None);
+        assert!(
+            (band_limited - 32.7).abs() <= 1.0,
+            "200 Hz–8 kHz / 4 s / 16384 reads {band_limited:.2} dB, not within 1.0 dB of 32.7"
+        );
+    }
+
+    /// Test 3: the default window is set in seconds, so at every supported
+    /// rate the linear gate is unclamped and the figure is the same.
+    #[test]
+    fn default_sweep_is_rate_independent_and_unclamped() {
+        let tau_s = 0.017_8;
+        let mut seen = Vec::new();
+        for sr in [44_100u32, 48_000, 96_000, 192_000] {
+            let (p, wl) = defaults(sr);
+            let tau = (tau_s * sr as f64).round() as usize;
+            let (snr, irs) = loopback(&p, wl, tau, None);
+            assert_eq!(
+                irs.window_len_used[0],
+                (0.4 * sr as f64).round() as usize,
+                "{sr} Hz: the default linear gate was clamped"
+            );
+            assert!(
+                irs.clamp_note().is_none_or(|n| !n.contains("order 1 ")),
+                "{sr} Hz: the linear IR must not appear in a clamp note"
+            );
+            seen.push(snr);
+        }
+        let spread = seen.iter().cloned().fold(f64::MIN, f64::max)
+            - seen.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            spread < 0.2,
+            "figure moved {spread:.2} dB across rates: {seen:?}"
+        );
+    }
+
+    /// Test 4 (criterion 5): with no signal path, the fixed gate refuses
+    /// every draw at the defaults. 48 kHz only — the figure does not depend
+    /// on the rate (test 3). A draw whose peak lands at index 0 has an empty
+    /// pre-region: `ir_verdict` refuses it, and its +inf figure is left out
+    /// of `worst`. Measured over 200 distinct draws: maximum 15.49 dB, 2 with
+    /// an empty pre-region (this 40-draw set: 13.44 dB, 1).
+    #[test]
+    fn default_sweep_refuses_a_capture_with_no_signal_path() {
+        let (p, wl) = defaults(48_000);
+        let mut worst = f64::MIN;
+        let mut figured = 0;
+        for seed in 0..NO_SIGNAL_DEFAULT_DRAWS {
+            let draw = no_signal(&p, wl, NO_SIGNAL_DEFAULT_SEED ^ seed);
+            if !pre_impulse_region(&draw.linear, draw.peak_index).is_empty() {
+                worst = worst.max(draw.snr_db);
+                figured += 1;
+            }
+            assert!(
+                matches!(draw.fixed_verdict(), IrVerdict::Failed { .. }),
+                "seed {seed}: a noise-only capture read {:.2} dB and was accepted",
+                draw.snr_db
+            );
+        }
+        assert!(
+            figured * 2 > NO_SIGNAL_DEFAULT_DRAWS,
+            "only {figured} of {NO_SIGNAL_DEFAULT_DRAWS} draws had a pre-region to judge"
+        );
+        assert!(
+            worst < PRE_IMPULSE_SNR_MIN_DB,
+            "worst noise-only draw {worst:.2} dB"
+        );
+    }
+
+    /// Test 5, against the rejected implementation: at the previous
+    /// defaults, #471's derived rule (floor at the draw's argmax − 3 dB)
+    /// accepts a capture with no signal path. That is why #501 changed the
+    /// defaults instead of deriving the gate. Measured: 26 of 200 distinct
+    /// draws (this 60-draw set: 7).
+    #[test]
+    fn a_derived_threshold_would_accept_no_signal_at_the_previous_defaults() {
+        let (p, wl) = old_defaults(96_000);
+        let accepted = (0..NO_SIGNAL_OLD_DRAWS)
+            .filter(|seed| no_signal(&p, wl, NO_SIGNAL_OLD_SEED ^ seed).derived_accepts(&p, wl))
+            .count();
+        assert!(
+            accepted >= 1,
+            "the derived rule refused all {NO_SIGNAL_OLD_DRAWS} noise-only draws — the \
+             reason it was rejected for #501 no longer shows on this fixture"
+        );
+    }
+
+    const NO_SIGNAL_DEFAULT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+    const NO_SIGNAL_DEFAULT_DRAWS: u64 = 40;
+    const NO_SIGNAL_OLD_SEED: u64 = 0xC2B2_AE3D_27D4_EB4F;
+    const NO_SIGNAL_OLD_DRAWS: u64 = 60;
+
+    /// Tests 4 and 5 count draws; each draw must be a distinct capture, or
+    /// the count overstates the coverage. Before this check, `gaussian`
+    /// forced its seed odd and each loop ran half its draws twice.
+    #[test]
+    fn no_signal_draws_are_distinct_captures() {
+        for (base, draws) in [
+            (NO_SIGNAL_DEFAULT_SEED, NO_SIGNAL_DEFAULT_DRAWS),
+            (NO_SIGNAL_OLD_SEED, NO_SIGNAL_OLD_DRAWS),
+        ] {
+            let heads: std::collections::HashSet<Vec<u64>> = (0..draws)
+                .map(|seed| {
+                    gaussian(8, 1.0, base ^ seed)
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                heads.len() as u64,
+                draws,
+                "seed base {base:#x}: {draws} draws give {} distinct captures",
+                heads.len()
+            );
+        }
     }
 }
