@@ -1792,9 +1792,12 @@ mod default_sweep_tests {
     }
 
     /// Standard-normal draws from a fixed-seed LCG (Box–Muller), so every
-    /// run of these tests sees the same noise.
+    /// run of these tests sees the same noise. The seed is the initial state
+    /// as given: the increment is odd, so the generator has full period from
+    /// any state, and forcing the seed odd would map seeds `2k` and `2k + 1`
+    /// onto one capture.
     fn gaussian(n: usize, sigma: f64, seed: u64) -> Vec<f64> {
-        let mut state = seed | 1;
+        let mut state = seed;
         let mut uniform = || {
             state = state
                 .wrapping_mul(6364136223846793005)
@@ -1997,20 +2000,31 @@ mod default_sweep_tests {
 
     /// Test 4 (criterion 5): with no signal path, the fixed gate refuses
     /// every draw at the defaults. 48 kHz only — the figure does not depend
-    /// on the rate (test 3). Measured maximum over ~200 draws: 16.3 dB.
+    /// on the rate (test 3). A draw whose peak lands at index 0 has an empty
+    /// pre-region: `ir_verdict` refuses it, and its +inf figure is left out
+    /// of `worst`. Measured over 200 distinct draws: maximum 15.49 dB, 2 with
+    /// an empty pre-region (this 40-draw set: 13.44 dB, 1).
     #[test]
     fn default_sweep_refuses_a_capture_with_no_signal_path() {
         let (p, wl) = defaults(48_000);
         let mut worst = f64::MIN;
-        for seed in 0..40u64 {
-            let draw = no_signal(&p, wl, 0x9E37_79B9_7F4A_7C15 ^ seed);
-            worst = worst.max(draw.snr_db);
+        let mut figured = 0;
+        for seed in 0..NO_SIGNAL_DEFAULT_DRAWS {
+            let draw = no_signal(&p, wl, NO_SIGNAL_DEFAULT_SEED ^ seed);
+            if !pre_impulse_region(&draw.linear, draw.peak_index).is_empty() {
+                worst = worst.max(draw.snr_db);
+                figured += 1;
+            }
             assert!(
                 matches!(draw.fixed_verdict(), IrVerdict::Failed { .. }),
                 "seed {seed}: a noise-only capture read {:.2} dB and was accepted",
                 draw.snr_db
             );
         }
+        assert!(
+            figured * 2 > NO_SIGNAL_DEFAULT_DRAWS,
+            "only {figured} of {NO_SIGNAL_DEFAULT_DRAWS} draws had a pre-region to judge"
+        );
         assert!(
             worst < PRE_IMPULSE_SNR_MIN_DB,
             "worst noise-only draw {worst:.2} dB"
@@ -2020,17 +2034,49 @@ mod default_sweep_tests {
     /// Test 5, against the rejected implementation: at the previous
     /// defaults, #471's derived rule (floor at the draw's argmax − 3 dB)
     /// accepts a capture with no signal path. That is why #501 changed the
-    /// defaults instead of deriving the gate. Measured: 15 of 200 draws.
+    /// defaults instead of deriving the gate. Measured: 26 of 200 distinct
+    /// draws (this 60-draw set: 7).
     #[test]
     fn a_derived_threshold_would_accept_no_signal_at_the_previous_defaults() {
         let (p, wl) = old_defaults(96_000);
-        let accepted = (0..60u64)
-            .filter(|seed| no_signal(&p, wl, 0xC2B2_AE3D_27D4_EB4F ^ seed).derived_accepts(&p, wl))
+        let accepted = (0..NO_SIGNAL_OLD_DRAWS)
+            .filter(|seed| no_signal(&p, wl, NO_SIGNAL_OLD_SEED ^ seed).derived_accepts(&p, wl))
             .count();
         assert!(
             accepted >= 1,
-            "the derived rule refused all 60 noise-only draws — the reason it was \
-             rejected for #501 no longer shows on this fixture"
+            "the derived rule refused all {NO_SIGNAL_OLD_DRAWS} noise-only draws — the \
+             reason it was rejected for #501 no longer shows on this fixture"
         );
+    }
+
+    const NO_SIGNAL_DEFAULT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+    const NO_SIGNAL_DEFAULT_DRAWS: u64 = 40;
+    const NO_SIGNAL_OLD_SEED: u64 = 0xC2B2_AE3D_27D4_EB4F;
+    const NO_SIGNAL_OLD_DRAWS: u64 = 60;
+
+    /// Tests 4 and 5 count draws; each draw must be a distinct capture, or
+    /// the count overstates the coverage. Before this check, `gaussian`
+    /// forced its seed odd and each loop ran half its draws twice.
+    #[test]
+    fn no_signal_draws_are_distinct_captures() {
+        for (base, draws) in [
+            (NO_SIGNAL_DEFAULT_SEED, NO_SIGNAL_DEFAULT_DRAWS),
+            (NO_SIGNAL_OLD_SEED, NO_SIGNAL_OLD_DRAWS),
+        ] {
+            let heads: std::collections::HashSet<Vec<u64>> = (0..draws)
+                .map(|seed| {
+                    gaussian(8, 1.0, base ^ seed)
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                heads.len() as u64,
+                draws,
+                "seed base {base:#x}: {draws} draws give {} distinct captures",
+                heads.len()
+            );
+        }
     }
 }
