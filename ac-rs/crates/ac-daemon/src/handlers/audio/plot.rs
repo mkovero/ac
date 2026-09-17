@@ -285,7 +285,14 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let cal = cal_guard!(out_ch, in_ch);
     // Processing-context shared state — same Arc clones the monitor
     // worker uses so #97 + #98 wire the same envelope onto Tier 1.
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    //
+    // Mic-correction enablement is snapshotted once, here, at command
+    // acceptance (#436): every point and the report's processing chain
+    // use this one value. A `set_mic_correction_enabled` toggle accepted
+    // after this reply applies to later measurements (and live monitor
+    // frames), never to this sweep — so one report cannot mix corrected
+    // and uncorrected points while claiming a single state.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
@@ -341,7 +348,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     // result in place — spectrum bins, fundamental, harmonics,
                     // THD recomputed. linear_rms / noise_floor untouched (see
                     // `mic::apply_mic_curve_to_analysis` doc).
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
                     if mc_enabled {
                         if let Some(curve) = &mic_curve_opt {
                             mic::apply_mic_curve_to_analysis(curve, &mut r);
@@ -420,8 +426,9 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         // re-loaded report tells the reader what was active during this
         // capture (#105). `mic_correction_applied` reads true exactly
         // when the per-point loop above ran `apply_mic_curve_to_analysis`
-        // — the same predicate as the wire frame's `mic_correction` tag.
-        let mc_applied = mic_curve_opt.is_some() && mic_corr_enabled.load(Ordering::Relaxed);
+        // — the same predicate, over the same `mc_enabled` snapshot
+        // (#436), as every point frame's `mic_correction` tag.
+        let mc_applied = mic_curve_opt.is_some() && mc_enabled;
         let chain = ProcessingChain {
             weighting: band_weighting_shared.lock().unwrap().clone(),
             smoothing_bpo: None,
@@ -585,7 +592,8 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    // One mic-correction state per measurement (#436) — see `plot`.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
@@ -637,7 +645,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
 
             match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
                 Ok(mut r) => {
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
                     if mc_enabled {
                         if let Some(curve) = &mic_curve_opt {
                             mic::apply_mic_curve_to_analysis(curve, &mut r);
@@ -1021,7 +1028,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let device = cfg.device;
     let tau_out_port = out_port.clone();
     let tau_in_port = in_port.clone();
-    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    // One mic-correction state per measurement (#436) — see `plot`. Read
+    // at acceptance, not after capture, so a toggle during the capture
+    // cannot reach this report.
+    let mc_enabled = state.mic_correction_enabled.load(Ordering::Relaxed);
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
@@ -1268,7 +1278,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // above (and the arrival/gate it was extracted with) is never
         // touched: by this point gating is already done, so there is no
         // time axis left for a FIR's group delay to disturb.
-        let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
         if mc_enabled {
             if let Some(curve) = &mic_curve_opt {
                 mic::apply_mic_curve_to_gated_response(curve, &mut gated_raw);
