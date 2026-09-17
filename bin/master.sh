@@ -143,11 +143,11 @@ triage_evidence() {
   echo "${c:-0}"
 }
 
-# The newest architect comment's **file manifest** field says `none`.
+# The newest architect **file manifest** field says `none` (ARCH_MANIFEST_JQ).
 architect_declared_no_change() {
   local body
   body=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
-    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""') || return 1
+    --jq "$ARCH_MANIFEST_JQ") || return 1
   printf '%s\n' "$body" | awk '
     /^\*\*file manifest\*\*/ { m=1; next }
     m && NF { if (tolower($0) ~ /^[[:space:]`(]*none/) found=1; exit }

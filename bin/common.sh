@@ -386,11 +386,16 @@ newest_record() {
 
 # The architect's file manifest for an issue: repo-relative paths, one per line.
 # Empty output means no manifest — the caller decides whether that is fatal.
+# The newest architect comment that carries a **file manifest** field. Not
+# simply the newest architect comment: a design revised in place is followed
+# by a short label note with no manifest (#466, 2026-09-17), and reading that
+# note stopped master.sh with "still no file manifest" beside a full one.
+ARCH_MANIFEST_JQ='[.comments[] | select((.body | test("<!-- agent: architect -->")) and (.body | test("(^|\n)\\*\\*file manifest\\*\\*")))] | last | .body // ""'
+
 manifest_of() {
   local body out
   body=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
-    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""') \
-    || return 1
+    --jq "$ARCH_MANIFEST_JQ") || return 1
 
   # Newer comments may use an explicit files fence. Prefer it because its end
   # marker is unambiguous.

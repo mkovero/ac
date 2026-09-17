@@ -12,6 +12,7 @@
 #   8. rig verdicts, including decline-site, parse whole.
 #   7. nothing reads FETCH_HEAD, which concurrent fetches in the shared
 #      checkout overwrite.
+#  10. the architect manifest survives a newer architect note without one.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -205,6 +206,33 @@ prompt_quotes() {  # bare double quotes between the prompt's first and last line
   sed -n '/run rig "Pipeline mode/,/ "\$@" || true$/p' "$1" | sed '1d;$d' | grep -c '"' || true
 }
 check '[[ $(prompt_quotes "$BIN/rig.sh") == 0 ]]' "rig.sh prompt body contains no bare double quote"
+
+# --- 10: manifest from the newest architect comment that has one ---------------
+# #466, 2026-09-17: the design comment was revised in place, then a label note
+# followed. Reading the newest architect comment found no manifest and stopped.
+mkdir -p "$T/stub10"
+cat > "$T/stub10/gh" <<'EOF'
+#!/usr/bin/env bash
+while (($#)); do [[ $1 == --jq ]] && { jq -r "$2" < "$GH_COMMENTS"; exit; }; shift; done
+EOF
+chmod +x "$T/stub10/gh"
+jq -n '{comments: [
+  {body: "<!-- agent: architect -->\n### design decision\n**file manifest**\n```files\nac-rs/old.rs\n```\n"},
+  {body: "<!-- agent: architect -->\n### design decision\n**file manifest**\n```files\nac-rs/a.rs\nac-rs/b.rs\n```\n"},
+  {body: "<!-- agent: ux -->\n**file manifest**\n```files\nac-rs/ux.rs\n```\n"},
+  {body: "<!-- agent: architect -->\n**Labels:** added `needs-ux`. The file manifest above stands.\n"}
+]}' > "$T/comments10"
+(
+  cd "$REPO" && source "$BIN/common.sh"
+  export PATH="$T/stub10:$PATH" GH_COMMENTS="$T/comments10"
+  manifest_of 10 | tr '\n' ' ' > "$T/r_10"
+  # The rejected selection: the newest architect comment of any kind.
+  jq -r '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""' \
+    < "$T/comments10" | grep -c '^ac-rs/' > "$T/r_10_old"
+) 2>/dev/null
+check '[[ $(cat $T/r_10) == "ac-rs/a.rs ac-rs/b.rs " ]]' "manifest_of reads the newest architect manifest past a later label note"
+check '[[ $(cat $T/r_10_old) == 0 ]]' "the newest-architect-comment selection finds no manifest on the same thread"
+check 'sed -n "/^architect_declared_no_change()/,/^}/p" "$BIN/master.sh" | grep -q ARCH_MANIFEST_JQ' "architect_declared_no_change uses the same selection"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
