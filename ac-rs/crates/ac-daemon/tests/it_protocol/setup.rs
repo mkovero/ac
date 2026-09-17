@@ -479,54 +479,112 @@ fn setup_report_dir_survives_a_daemon_restart() {
     assert_eq!(r["report_dir_status"]["writable"], json!(true), "{r}");
 }
 
-/// #472 — an update whose config save fails is refused, since the daemon
-/// reloads config from disk before the next request and the value would
-/// silently revert. A read-only call still answers.
+/// #430 (was #472) — an update whose config save fails is refused on the
+/// wire, and neither memory nor disk moves: the next read still reports the
+/// last-good value and the file bytes are unchanged.
 #[test]
 fn setup_refuses_an_update_it_could_not_save() {
     use std::os::unix::fs::PermissionsExt;
 
-    let d = Daemon::spawn();
+    let d = Daemon::spawn_with_config(Some(json!({"output_channel": 3})));
     let c = Client::new(&d);
-    // Save something first so config.json exists, then make both the file
-    // and its directory read-only.
-    let r = c.call(json!({"cmd": "setup", "update": {"output_channel": 1}}));
-    assert_eq!(r["ok"], json!(true), "{r}");
     let cfg_dir = d.home.join(".config").join("ac");
     let cfg_file = cfg_dir.join("config.json");
+    let before = std::fs::read(&cfg_file).expect("seeded config.json");
     let set_mode = |p: &std::path::Path, mode: u32| {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap()
     };
-    set_mode(&cfg_file, 0o400);
-    set_mode(&cfg_dir, 0o500);
+    set_mode(&cfg_dir, 0o555);
 
     // A process that ignores permissions (root) cannot exercise this path;
-    // say so rather than pass without checking anything.
-    let probe_writable = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&cfg_file)
-        .is_ok();
-
-    let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 2}}));
-    let read = c.call(json!({"cmd": "setup", "update": {}}));
-
-    set_mode(&cfg_dir, 0o700);
-    set_mode(&cfg_file, 0o600);
-
+    // say so rather than pass without checking anything. The root-proof
+    // counterpart is `ac_core::config` `save_into_unwritable_storage_*`.
+    let probe = cfg_dir.join(".probe");
+    let probe_writable = std::fs::File::create(&probe).is_ok();
     if probe_writable {
+        let _ = std::fs::remove_file(&probe);
+        set_mode(&cfg_dir, 0o755);
         eprintln!("skipped: permissions are not enforced for this user");
         return;
     }
+
+    let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 5}}));
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    let after = std::fs::read(&cfg_file).expect("config.json after refusal");
+    set_mode(&cfg_dir, 0o755);
+
     assert_eq!(refused["ok"], json!(false), "{refused}");
+    assert!(refused.get("config").is_none(), "no config echo: {refused}");
     let err = refused["error"].as_str().unwrap_or_default();
     assert!(
-        err.starts_with("config not saved (") && err.contains("config.json"),
+        err.starts_with("setup not saved \u{2014} configuration unchanged"),
         "{err:?}"
     );
+    assert!(
+        err.contains(&format!("file   {}", cfg_file.display())),
+        "{err:?}"
+    );
+    assert!(err.contains("cause  "), "{err:?}");
     assert_eq!(
         read["ok"],
         json!(true),
         "read-only setup must still answer: {read}"
     );
-    assert_eq!(read["config"]["output_channel"], json!(1), "{read}");
+    assert_eq!(read["config"]["output_channel"], json!(3), "{read}");
+    assert_eq!(after, before, "config.json must be byte-identical");
+}
+
+/// #430 — a corrupt config.json is never replaced by defaults plus the
+/// patch: the update is refused, and neither it nor a following read-only
+/// `setup {}` (what `ac generate` sends) touches the file.
+#[test]
+fn setup_refuses_to_overwrite_a_corrupt_config() {
+    const CORRUPT: &[u8] = b"{\"output_channel\": 3, \"input_chan";
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let cfg_dir = d.home.join(".config").join("ac");
+    let cfg_file = cfg_dir.join("config.json");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(&cfg_file, CORRUPT).unwrap();
+
+    let refused = c.call(json!({"cmd": "setup", "update": {"output_channel": 5}}));
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    let err = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        err.starts_with("setup not saved \u{2014} existing configuration is unreadable"),
+        "{err:?}"
+    );
+    assert!(
+        err.contains(&format!("file   {}", cfg_file.display())),
+        "{err:?}"
+    );
+    assert!(err.contains("data   existing file preserved"), "{err:?}");
+    assert_eq!(std::fs::read(&cfg_file).unwrap(), CORRUPT);
+
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    assert!(read.get("saved").is_none(), "{read}");
+    assert_eq!(
+        std::fs::read(&cfg_file).unwrap(),
+        CORRUPT,
+        "a read-only setup must not rewrite the file"
+    );
+}
+
+/// #430 — a persisted update names the file it was written to, and its
+/// `config` is what is now on disk. A read-only call carries no `saved`.
+#[test]
+fn setup_success_reports_the_saved_path_and_the_disk_state() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let cfg_file = d.home.join(".config").join("ac").join("config.json");
+
+    let r = c.call(json!({"cmd": "setup", "update": {"output_channel": 2}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["saved"], json!(cfg_file.display().to_string()), "{r}");
+    assert_eq!(r["config"], config_on_disk(&d.home), "{r}");
+    assert_eq!(r["config"]["output_channel"], json!(2), "{r}");
+
+    let read = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(read["ok"], json!(true), "{read}");
+    assert!(read.get("saved").is_none(), "{read}");
 }

@@ -225,8 +225,6 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         };
     }
 
-    let has_updates = !update.is_empty();
-
     let reply = client.send_cmd(&serde_json::json!({"cmd": "setup", "update": update}), None);
     if let Some(lines) = reply.as_ref().and_then(refusal_lines) {
         for line in lines {
@@ -339,8 +337,10 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         None => println!("  Server idle:   (no timeout)"),
     }
 
-    if has_updates {
-        println!("  Saved.");
+    // #430: the daemon names the file only after the update is on disk; a
+    // failed save never reaches here (`check_ack` prints it and exits).
+    if let Some(path) = ack.get("saved").and_then(|v| v.as_str()) {
+        println!("  saved            {path}");
     }
 
     if let Some(gp) = gpio_port {
