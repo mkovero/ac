@@ -124,7 +124,10 @@ pub use provenance::{
 ///   — the session check's verdict on the voltage layer, frozen at capture
 ///   (#466). A refused verdict comes with both `vrms_at_0dbfs_*` absent, so
 ///   the report's values are in dBFS. Absent on v1-v10 reports, which
-///   readers show as "not recorded", never as verified.
+///   readers show as "not recorded", never as verified. `MeasuredLatency`
+///   gains optional `session_check` / `session_check_loopback`, set on
+///   `interface_latency` by every v11 `plot_ir` run that resolves a τ; a
+///   refused verdict withholds `IrStats::flight_time_s`.
 pub const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

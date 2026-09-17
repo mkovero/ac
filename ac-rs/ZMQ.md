@@ -1484,7 +1484,9 @@ conversion this used to also unlock). It is a tagged union on `state`:
 { "state": "measured", "tau_s": 0.0011931, "measured_at": "<RFC3339>",
   "method": "farina_short_ess", "backend": "jack", "sample_rate_hz": 48000,
   "period_size": 1024, "output_port": "...", "input_port": "...",
-  "enumeration": { "state": "same" } }   // #461, schema v10 — an EnumerationCheck (see get_calibration)
+  "enumeration": { "state": "same" },   // #461, schema v10 — an EnumerationCheck (see get_calibration)
+  "session_check": { "state": "refused", "via": "out1_in1", ... },   // #466, schema v11 — a LayerVerdict
+  "session_check_loopback": "out1_in1" }   // #466, schema v11 — absent when no reference was configured
 
 // no exact match — never a nearest-neighbour or interpolated value
 { "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
@@ -1503,6 +1505,23 @@ every surface that prints the flight time says the latency is unverified. An
 absent field (a report before v10) reads as `not_recorded`, never as `same`.
 A `same` is not proof τ is unchanged: a FireWire bus reset that keeps its
 device node is invisible to the check.
+
+`session_check` (schema v11, #466) is the session check's verdict on this
+stored τ, frozen at capture — a `LayerVerdict` as in the `session_check`
+topic. `plot_ir` sets it on every run that resolves a measured τ, whether or
+not a reference loopback is configured, so a refusal persisted by an earlier
+check still stands without one: `refused` (direct, or with `via` naming the
+loopback whose refusal propagated), or `unverified` with its cause
+(`no_loopback`, `not_covered`, `not_checked`, `refusals_unreadable`). When
+the measurement pair is the reference loopback, a verified or refused
+same-capture reading replaces a recorded verdict; a non-decisive one does not
+replace a standing refusal. A **refused** τ stays `measured` with its value,
+but `IrStats::flight_time_s` is withheld and the value must not be subtracted
+from the arrival. `session_check_loopback` is the cal key of the reference
+loopback configured when the verdict was made, absent when none was. Both
+fields are only ever set on `interface_latency`, never on
+`reference_stored_latency`. On a v11 `plot_ir` report a `measured` τ always
+carries `session_check`; an absent field is a report from before v11.
 
 `reference_latency` (schema v7, #460) is τ of the **reference loopback pair**,
 read from the reference leg captured in this same run under `calibrate`'s

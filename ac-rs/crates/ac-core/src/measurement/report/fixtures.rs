@@ -271,6 +271,8 @@ pub(super) fn measured_tau_with_check(
         output_port: "out1".into(),
         input_port: "in1".into(),
         enumeration,
+        session_check: None,
+        session_check_loopback: None,
     })
 }
 
@@ -303,6 +305,8 @@ pub(super) fn stored_reference_tau(tau_s: f64, period_size: Option<u32>) -> Inte
         output_port: "ref_out".into(),
         input_port: "ref_in".into(),
         enumeration: Some(crate::shared::calibration::EnumerationCheck::Same),
+        session_check: None,
+        session_check_loopback: None,
     })
 }
 

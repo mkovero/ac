@@ -9,7 +9,7 @@ use crate::measurement::sweep::{
     WindowLimit,
 };
 use crate::shared::calibration::{
-    compare_tau_readings, EnumerationCheck, TauComparison, TauDisagreement,
+    compare_tau_readings, EnumerationCheck, LayerVerdict, TauComparison, TauDisagreement,
 };
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
@@ -167,7 +167,18 @@ impl MeasurementReport {
         // this issue exists to stop. Under `Unchecked` the flight time is
         // still produced — the check simply could not run — never withheld
         // for a reason it does not have.
+        //
+        // #466: a stored τ the session check refused is never subtracted,
+        // whatever `arrival_check` says — the value stays in the report,
+        // the flight time derived from it does not.
         let flight_time_s = match (&self.interface_latency, &arrival_check) {
+            (Some(InterfaceLatency::Measured(m)), _)
+                if m.session_check
+                    .as_ref()
+                    .is_some_and(LayerVerdict::is_refused) =>
+            {
+                None
+            }
             (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Agree)
             | (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Unchecked { .. }) => {
                 Some(arrival_s - m.tau_s)
@@ -178,6 +189,11 @@ impl MeasurementReport {
         // the flight time it qualifies. Read as frozen; never recomputed.
         let interface_latency_enumeration = match &self.interface_latency {
             Some(InterfaceLatency::Measured(m)) => m.enumeration.clone(),
+            _ => None,
+        };
+        // #466: the session check's verdict on that same stored τ, frozen.
+        let interface_latency_check = match &self.interface_latency {
+            Some(InterfaceLatency::Measured(m)) => m.session_check.clone(),
             _ => None,
         };
 
@@ -196,6 +212,7 @@ impl MeasurementReport {
             arrival_check,
             flight_time_s,
             interface_latency_enumeration,
+            interface_latency_check,
             pre_impulse_snr_db,
             gate_window_s,
             gate_f_low_hz,
@@ -529,7 +546,9 @@ pub struct IrStats {
     /// `interface_latency` is measured, and `None` whenever no τ was
     /// resolved for this capture pair at all. Still `Some` under
     /// `ArrivalCheck::Unchecked` — the check did not run, which is not a
-    /// reason to withhold a value it never disputed.
+    /// reason to withhold a value it never disputed. `None` whenever
+    /// [`Self::interface_latency_check`] is refused (#466), whatever
+    /// `arrival_check` says.
     pub flight_time_s: Option<f64>,
     /// How the capture pair's stored τ — the one [`Self::flight_time_s`]
     /// subtracts — related to this capture's device-enumeration epoch
@@ -539,6 +558,12 @@ pub struct IrStats {
     /// [`Self::interface_latency_unverified`] says whether it must be
     /// qualified.
     pub interface_latency_enumeration: Option<EnumerationCheck>,
+    /// The session check's verdict on the capture pair's stored τ (#466),
+    /// copied from `interface_latency.session_check`. Read as frozen, never
+    /// recomputed. `None` when that is not a measured τ, or when the report
+    /// predates schema v11. A refused verdict withholds
+    /// [`Self::flight_time_s`].
+    pub interface_latency_check: Option<LayerVerdict>,
     /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
     /// no pre-impulse energy was measurable at all (silent floor).
     pub pre_impulse_snr_db: f64,
@@ -1771,6 +1796,107 @@ mod tests {
             Some(stats.arrival_s - 0.001),
             "Unchecked must not withhold a flight time it never disputed"
         );
+    }
+
+    // ─── #466: interface_latency.session_check ───────────────────────────
+
+    fn with_session_check(tau_s: f64, verdict: Option<LayerVerdict>) -> InterfaceLatency {
+        match measured_tau(tau_s) {
+            InterfaceLatency::Measured(m) => InterfaceLatency::Measured(MeasuredLatency {
+                session_check: verdict,
+                ..m
+            }),
+            other => other,
+        }
+    }
+
+    fn refused_tau(via: Option<&str>) -> LayerVerdict {
+        use crate::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
+        LayerVerdict::Refused {
+            evidence: Evidence {
+                measured: 1743.0,
+                stored: 1711.0,
+                delta: 32.0,
+                tolerance: 0.0,
+                unit: VerdictUnit::Samples,
+                stored_at: "2026-08-15T00:00:00Z".into(),
+                checked_at: "2026-09-16T14:02:11Z".into(),
+                source: CheckSource::Explicit,
+            },
+            via: via.map(str::to_string),
+            delta_bound: None,
+        }
+    }
+
+    /// R6-3 (i): a refused τ with no reference check withholds the flight
+    /// time. The rejected implementation — the #359 rule without the
+    /// verdict — is computed on the same report and gives a value, so the
+    /// test sees the difference.
+    #[test]
+    fn a_refused_session_check_withholds_the_flight_time_under_unchecked() {
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(with_session_check(0.001, Some(refused_tau(None))));
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(
+            stats.arrival_check,
+            ArrivalCheck::Unchecked { .. }
+        ));
+        assert_eq!(stats.flight_time_s, None);
+        assert_eq!(stats.interface_latency_check, Some(refused_tau(None)));
+        assert!(!stats.interface_latency_unverified());
+
+        let rejected = match (&r.interface_latency, &stats.arrival_check) {
+            (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Unchecked { .. }) => {
+                Some(stats.arrival_s - m.tau_s)
+            }
+            _ => None,
+        };
+        assert!(rejected.is_some(), "the rule without the verdict applies τ");
+    }
+
+    /// R6-3 (ii): an unverified verdict is not a refusal; the flight time is
+    /// produced as before.
+    #[test]
+    fn an_unverified_session_check_keeps_the_flight_time() {
+        use crate::shared::calibration::session::UnverifiedCause;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
+        let verdict = LayerVerdict::unverified(
+            UnverifiedCause::NoLoopback,
+            "no reference loopback configured",
+        );
+        r.interface_latency = Some(with_session_check(0.001, Some(verdict.clone())));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, Some(stats.arrival_s - 0.001));
+        assert_eq!(stats.interface_latency_check, Some(verdict));
+    }
+
+    /// R6-3 (iii): a propagated refusal withholds the flight time even when
+    /// the reference check agrees.
+    #[test]
+    fn a_refusal_via_the_loopback_withholds_the_flight_time_under_agree() {
+        let sr = 48_000u32;
+        let stored_tau_s = 0.0119;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.interface_latency = Some(with_session_check(
+            0.001,
+            Some(refused_tau(Some("out1_in1"))),
+        ));
+        r.reference_latency = Some(measured_reference(stored_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(1024)));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.arrival_check, ArrivalCheck::Agree);
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// R6-3 (iv): a report from before v11 carries no verdict and reads as
+    /// it did.
+    #[test]
+    fn a_report_without_a_session_check_keeps_the_flight_time() {
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(with_session_check(0.001, None));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, Some(stats.arrival_s - 0.001));
+        assert_eq!(stats.interface_latency_check, None);
     }
 
     // ─── #461: interface_latency_enumeration ─────────────────────────────

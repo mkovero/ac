@@ -1147,6 +1147,42 @@ fn voltage_show_lines(c: &serde_json::Value, headers: &ShowHeaders) -> Vec<Strin
     lines
 }
 
+/// `REFUSED — via [k], whose τ moved ±N samples` (#466 UX), without its
+/// indent: `calibrate show` and `plot ir`'s stored-latency lines print the
+/// same text.
+pub(super) fn latency_refused_via(via: &str, delta_samples: f64) -> String {
+    format!("REFUSED \u{2014} via [{via}], whose \u{3c4} moved {delta_samples:+.0} samples")
+}
+
+/// `refusal predates the reboot|re-enumeration; stands until a check
+/// passes` (#466 UX R2-e), without its indent, when the refusal was made
+/// (`checked_at`) before the crossed enumeration boundary of the value it
+/// refused. The one predicate `calibrate show` and `plot ir` share.
+pub(super) fn refusal_predates_line(
+    enumeration: Option<&ac_core::shared::calibration::EnumerationCheck>,
+    checked_at: Option<&str>,
+) -> Option<String> {
+    let Some(ac_core::shared::calibration::EnumerationCheck::Crossed { boundary, since }) =
+        enumeration
+    else {
+        return None;
+    };
+    let (Some(since), Some(checked)) = (since.as_deref(), checked_at) else {
+        return None;
+    };
+    if checked >= since {
+        return None;
+    }
+    let noun = if boundary.starts_with(ac_core::shared::calibration::BOUNDARY_HOST_REBOOTED) {
+        "reboot"
+    } else {
+        "re-enumeration"
+    };
+    Some(format!(
+        "refusal predates the {noun}; stands until a check passes"
+    ))
+}
+
 /// One layer's recorded verdict in `show` (#466 UX): the state line, then
 /// the check it came from with its age. `verdict` is `None` for a daemon
 /// that sent no `session_check`, `Some(None)` for one that sent no verdict
@@ -1212,10 +1248,9 @@ fn show_verdict_lines(
                     "{i}REFUSED \u{2014} via [{via}], whose loop gain moved {le}{:+.2} dB",
                     e.delta
                 ),
-                (Some(via), ShowLayer::Latency) => format!(
-                    "{i}REFUSED \u{2014} via [{via}], whose \u{3c4} moved {:+.0} samples",
-                    e.delta
-                ),
+                (Some(via), ShowLayer::Latency) => {
+                    format!("{i}{}", latency_refused_via(via, e.delta))
+                }
                 (None, ShowLayer::Voltage) if delta_bound.is_some() => format!(
                     "{i}REFUSED \u{2014} loop gain \u{394} \u{2264} {:+.2} dB, no tone returned",
                     e.delta
@@ -1230,27 +1265,8 @@ fn show_verdict_lines(
                 ),
             });
             lines.extend(check_line);
-            if let Some(ac_core::shared::calibration::EnumerationCheck::Crossed {
-                boundary,
-                since,
-            }) = enumeration
-            {
-                let predates = match (since.as_deref(), ran_at) {
-                    (Some(since), Some(ran)) => ran < since,
-                    _ => false,
-                };
-                if predates {
-                    let noun = if boundary
-                        .starts_with(ac_core::shared::calibration::BOUNDARY_HOST_REBOOTED)
-                    {
-                        "reboot"
-                    } else {
-                        "re-enumeration"
-                    };
-                    lines.push(format!(
-                        "{i}refusal predates the {noun}; stands until a check passes"
-                    ));
-                }
+            if let Some(line) = refusal_predates_line(enumeration, ran_at) {
+                lines.push(format!("{i}{line}"));
             }
             if recorded
                 .and_then(|r| r.get("persisted"))

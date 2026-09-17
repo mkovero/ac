@@ -5,6 +5,7 @@ use super::{
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
+use ac_core::shared::calibration::LayerVerdict;
 
 pub fn run(
     cmd: &CommandKind,
@@ -883,6 +884,39 @@ fn enumeration_lines(
     }
 }
 
+/// [`enumeration_lines`] under a stored τ a session check measured (#466
+/// UX): the event is named plainly, without `UNVERIFIED` and without the
+/// re-calibrate `check:` — the verdict below answered it and carries its
+/// own `check:` line.
+fn answered_enumeration_lines(
+    check: Option<&ac_core::shared::calibration::EnumerationCheck>,
+) -> Vec<String> {
+    use ac_core::shared::calibration::EnumerationCheck;
+    match check {
+        Some(EnumerationCheck::Same) => enumeration_lines(check, false),
+        Some(EnumerationCheck::Crossed { boundary, since }) => {
+            let (head, nodes) = split_boundary(boundary);
+            let mut lines = vec![format!(
+                "{CONT_INDENT}{head}{}",
+                since_clause(since.as_deref())
+            )];
+            if let Some(list) = nodes {
+                lines.extend(nodes_lines(list, CONT_INDENT));
+            }
+            lines
+        }
+        Some(EnumerationCheck::NotObservable { reason }) => {
+            let mut lines = vec![format!("{CONT_INDENT}device enumeration not observable")];
+            let (observation, _) = ac_core::shared::calibration::session::split_check(reason);
+            lines.extend(indented_wrapped(observation, CONT_INDENT));
+            lines
+        }
+        Some(EnumerationCheck::NotRecorded) | None => {
+            vec![format!("{CONT_INDENT}entry predates enumeration tracking")]
+        }
+    }
+}
+
 /// The `ref latency` read-out (#460 UX), always printed: the same-capture
 /// reference τ in `calibrate`'s `Delay:` format, or its unavailable reason
 /// with any `; check: ` part on its own `check:` line.
@@ -1004,17 +1038,36 @@ fn interface_latency_lines(
     match latency {
         Some(InterfaceLatency::Measured(m)) => {
             let samples = m.tau_s * sample_rate_hz as f64;
+            let refused = m
+                .session_check
+                .as_ref()
+                .is_some_and(LayerVerdict::is_refused);
             let mut lines = vec![
                 format!(
-                    "{}{} ms  ({} samples, stored)",
+                    "{}{} ms  ({} samples, {})",
                     label_prefix("latency"),
                     format_ms_aligned(m.tau_s * 1000.0),
                     format_samples(samples),
+                    if refused {
+                        "stored, not applied"
+                    } else {
+                        "stored"
+                    },
                 ),
                 measured_line(&m.measured_at, report_timestamp_utc),
             ];
             // #461: τ is per channel pair, so `ref Δ` never clears this one.
-            lines.extend(enumeration_lines(m.enumeration.as_ref(), false));
+            // #466: a measured verdict answered the event, so it is named
+            // plainly under one.
+            if m.session_check
+                .as_ref()
+                .is_some_and(LayerVerdict::is_decisive)
+            {
+                lines.extend(answered_enumeration_lines(m.enumeration.as_ref()));
+            } else {
+                lines.extend(enumeration_lines(m.enumeration.as_ref(), false));
+            }
+            lines.extend(session_check_latency_lines(m));
             lines
         }
         Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("latency", reason),
@@ -1025,6 +1078,65 @@ fn interface_latency_lines(
                 "not recorded"
             };
             vec![format!("{}{text}", label_prefix("latency"))]
+        }
+    }
+}
+
+/// The session check's verdict on the capture pair's stored τ, under its
+/// `latency` lines (#466 UX, architect R6-5). Frozen report data only. A
+/// report with no verdict (before v11) and a verified one print nothing
+/// here: the session check block above carries a verified verdict.
+fn session_check_latency_lines(m: &ac_core::measurement::report::MeasuredLatency) -> Vec<String> {
+    use ac_core::shared::calibration::session::{split_check, UnverifiedCause};
+    let Some(verdict) = m.session_check.as_ref() else {
+        return Vec::new();
+    };
+    match verdict {
+        LayerVerdict::Verified(_) => Vec::new(),
+        LayerVerdict::Refused { evidence, via, .. } => {
+            let mut lines = vec![match via {
+                Some(via) => format!(
+                    "{CONT_INDENT}{}",
+                    super::calibrate::latency_refused_via(via, evidence.delta)
+                ),
+                None => format!(
+                    "{CONT_INDENT}REFUSED \u{2014} {:.0} samples read {} (\u{394} {:+.0})",
+                    evidence.measured, evidence.checked_at, evidence.delta
+                ),
+            }];
+            lines.extend(
+                super::calibrate::refusal_predates_line(
+                    m.enumeration.as_ref(),
+                    Some(&evidence.checked_at),
+                )
+                .map(|line| format!("{CONT_INDENT}{line}")),
+            );
+            if via.is_some() {
+                lines.push(format!(
+                    "{CONT_INDENT}check: `ac calibrate check`; if still refused,"
+                ));
+                lines.push(format!("{CONT_INDENT}re-run `ac calibrate` for this pair"));
+            } else {
+                lines.push(format!("{CONT_INDENT}{RECALIBRATE_CHECK}"));
+            }
+            lines
+        }
+        LayerVerdict::Unverified {
+            cause: UnverifiedCause::NotCovered,
+            ..
+        } => vec![match m.session_check_loopback.as_deref() {
+            Some(key) => {
+                format!("{CONT_INDENT}session check does not cover this pair (loopback [{key}])")
+            }
+            None => format!("{CONT_INDENT}session check does not cover this pair"),
+        }],
+        LayerVerdict::Unverified { reason, .. } => {
+            let (observation, places) = split_check(reason);
+            let mut lines = indented_wrapped(&format!("{UNVERIFIED}{observation}"), CONT_INDENT);
+            if let Some(places) = places {
+                lines.extend(indented_wrapped(&format!("check: {places}"), CONT_INDENT));
+            }
+            lines
         }
     }
 }
@@ -1196,6 +1308,19 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
             "{}withheld \u{2014} ref \u{394} is not zero (below)",
             label_prefix("flight time")
         )],
+        // #466: the stored τ is in the report but the session check refused
+        // it. After the #359 arms: their line is the more specific one.
+        (None, _)
+            if stats
+                .interface_latency_check
+                .as_ref()
+                .is_some_and(LayerVerdict::is_refused) =>
+        {
+            vec![format!(
+                "{}not shown \u{2014} stored latency refused (below)",
+                label_prefix("flight time")
+            )]
+        }
         (None, _) => vec![format!(
             "{}not shown \u{2014} no stored latency for this pair (below)",
             label_prefix("flight time")
@@ -1619,7 +1744,7 @@ mod tests {
         MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
-    use ac_core::shared::calibration::{EnumerationCheck, TauDisagreement};
+    use ac_core::shared::calibration::{EnumerationCheck, LayerVerdict, TauDisagreement};
     use std::collections::VecDeque;
 
     fn point(freq_hz: f64) -> serde_json::Value {
@@ -2208,6 +2333,8 @@ mod tests {
             output_port: "system:playback_0".into(),
             input_port: "system:capture_0".into(),
             enumeration: Some(EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         })
     }
 
@@ -2562,12 +2689,218 @@ mod tests {
             arrival_check,
             flight_time_s,
             interface_latency_enumeration: Some(EnumerationCheck::Same),
+            interface_latency_check: None,
             pre_impulse_snr_db: 40.0,
             gate_window_s: 0.01,
             gate_f_low_hz: 100.0,
             gate_window_kind: "tukey".into(),
             verdict: IrVerdict::Ok,
         }
+    }
+
+    // ─── #466: the session check's verdict on the stored τ ──────────────
+
+    fn tau_evidence(checked_at: &str) -> ac_core::shared::calibration::session::Evidence {
+        use ac_core::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
+        Evidence {
+            measured: 1743.0,
+            stored: 1711.0,
+            delta: 32.0,
+            tolerance: 0.0,
+            unit: VerdictUnit::Samples,
+            stored_at: "2026-09-15T23:43:04Z".into(),
+            checked_at: checked_at.into(),
+            source: CheckSource::Explicit,
+        }
+    }
+
+    fn checked_tau(
+        enumeration: EnumerationCheck,
+        verdict: Option<LayerVerdict>,
+        loopback: Option<&str>,
+    ) -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s: 1711.0 / 96_000.0,
+            measured_at: "2026-09-15T23:43:04Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "jack".into(),
+            sample_rate_hz: 96_000,
+            period_size: Some(256),
+            output_port: "system:playback_2".into(),
+            input_port: "system:capture_2".into(),
+            enumeration: Some(enumeration),
+            session_check: verdict,
+            session_check_loopback: loopback.map(str::to_string),
+        })
+    }
+
+    /// UX rev 4, "refused, and the refusal predates a boundary": the whole
+    /// block, line for line.
+    #[test]
+    fn a_refused_stored_tau_that_predates_a_reboot_renders_ux_block() {
+        let tau = checked_tau(
+            EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: Some("2026-09-16T15:10:03Z".into()),
+            },
+            Some(LayerVerdict::Refused {
+                evidence: tau_evidence("2026-09-16T14:02:11Z"),
+                via: None,
+                delta_bound: None,
+            }),
+            Some("out1_in1"),
+        );
+        let c = CONT_INDENT;
+        assert_eq!(
+            interface_latency_lines(Some(&tau), 11, 96_000, "2026-09-16T15:19:04Z"),
+            vec![
+                "  latency       17.8229 ms  (1711 samples, stored, not applied)".to_string(),
+                format!("{c}measured 2026-09-15T23:43:04Z, 15.6 h before capture"),
+                format!("{c}host rebooted at 2026-09-16T15:10:03Z"),
+                format!("{c}REFUSED \u{2014} 1743 samples read 2026-09-16T14:02:11Z (\u{394} +32)"),
+                format!("{c}refusal predates the reboot; stands until a check passes"),
+                format!("{c}check: re-run `ac calibrate` with loopback patched"),
+            ]
+        );
+    }
+
+    /// UX rev 4, "acoustic pair, propagated refusal". A refusal made after
+    /// the boundary prints no `predates` line.
+    #[test]
+    fn a_propagated_refusal_renders_the_via_block() {
+        let tau = checked_tau(
+            EnumerationCheck::Same,
+            Some(LayerVerdict::Refused {
+                evidence: tau_evidence("2026-09-16T14:02:11Z"),
+                via: Some("out1_in1".into()),
+                delta_bound: None,
+            }),
+            Some("out1_in1"),
+        );
+        let lines = interface_latency_lines(Some(&tau), 11, 96_000, "2026-09-16T13:54:44Z");
+        let c = CONT_INDENT;
+        assert_eq!(
+            lines[0],
+            "  latency       17.8229 ms  (1711 samples, stored, not applied)"
+        );
+        assert_eq!(
+            lines[2..].to_vec(),
+            vec![
+                format!("{c}same device enumeration as this capture"),
+                format!("{c}REFUSED \u{2014} via [out1_in1], whose \u{3c4} moved +32 samples"),
+                format!("{c}check: `ac calibrate check`; if still refused,"),
+                format!("{c}re-run `ac calibrate` for this pair"),
+            ]
+        );
+
+        let after = checked_tau(
+            EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: Some("2026-09-16T13:41:52Z".into()),
+            },
+            Some(LayerVerdict::Refused {
+                evidence: tau_evidence("2026-09-16T14:02:11Z"),
+                via: None,
+                delta_bound: None,
+            }),
+            None,
+        );
+        let lines = interface_latency_lines(Some(&after), 11, 96_000, "2026-09-16T15:19:04Z");
+        assert!(!lines.iter().any(|l| l.contains("predates")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("UNVERIFIED")),
+            "a measured verdict answered the boundary: {lines:?}"
+        );
+    }
+
+    /// `not_covered` names the loopback in lowercase; any other unverified
+    /// cause keeps the `(stored)` head and adds its verdict line.
+    #[test]
+    fn unverified_verdicts_keep_the_stored_head_and_add_their_line() {
+        use ac_core::shared::calibration::session::UnverifiedCause;
+        let c = CONT_INDENT;
+        let not_covered = checked_tau(
+            EnumerationCheck::Same,
+            Some(LayerVerdict::unverified(
+                UnverifiedCause::NotCovered,
+                "check covers [out1_in1], not [out0_in0]",
+            )),
+            Some("out1_in1"),
+        );
+        let lines = interface_latency_lines(Some(&not_covered), 11, 96_000, "2026-09-16T13:54:44Z");
+        assert!(lines[0].ends_with("(1711 samples, stored)"), "{lines:?}");
+        assert_eq!(
+            lines.last().unwrap(),
+            &format!("{c}session check does not cover this pair (loopback [out1_in1])")
+        );
+
+        let unreadable = checked_tau(
+            EnumerationCheck::Same,
+            Some(LayerVerdict::unverified(
+                UnverifiedCause::RefusalsUnreadable,
+                "session_refusals.json unreadable: expected value at line 1 column 1; \
+                 check: its permissions and contents, beside cal.json",
+            )),
+            None,
+        );
+        let lines = interface_latency_lines(Some(&unreadable), 11, 96_000, "2026-09-16T13:54:44Z");
+        assert!(lines[0].ends_with("(1711 samples, stored)"), "{lines:?}");
+        assert!(
+            lines.contains(&format!(
+                "{c}check: its permissions and contents, beside cal.json"
+            )),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with(&format!(
+                "{c}UNVERIFIED \u{2014} session_refusals.json unreadable"
+            ))),
+            "{lines:?}"
+        );
+
+        // A report from before v11: no verdict line at all.
+        let old = checked_tau(EnumerationCheck::Same, None, None);
+        assert_eq!(
+            interface_latency_lines(Some(&old), 10, 96_000, "2026-09-16T13:54:44Z").len(),
+            3
+        );
+    }
+
+    /// R6-5: the refused flight-time line sits after the #359 arms, so a
+    /// reference disagreement keeps its own, more specific line.
+    #[test]
+    fn flight_time_line_names_a_refused_stored_latency() {
+        let refused = LayerVerdict::Refused {
+            evidence: tau_evidence("2026-09-16T14:02:11Z"),
+            via: Some("out1_in1".into()),
+            delta_bound: None,
+        };
+        let mut stats = stats_with(
+            None,
+            ArrivalCheck::Unchecked {
+                reason: String::new(),
+            },
+        );
+        stats.interface_latency_check = Some(refused.clone());
+        assert_eq!(
+            flight_time_line(&stats),
+            vec![format!(
+                "{}not shown \u{2014} stored latency refused (below)",
+                label_prefix("flight time")
+            )]
+        );
+
+        let shift = TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 1024.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        let mut stats = stats_with(None, ArrivalCheck::PeriodShift(shift));
+        stats.interface_latency_check = Some(refused);
+        assert!(flight_time_line(&stats)[0].contains("period shift"));
     }
 
     #[test]

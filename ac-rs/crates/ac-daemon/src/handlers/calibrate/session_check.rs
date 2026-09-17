@@ -347,6 +347,12 @@ impl Recorded {
         &self.view
     }
 
+    /// Cal key of the reference loopback configured when this was read;
+    /// `None` when none was.
+    pub(crate) fn loopback_key(&self) -> Option<&str> {
+        self.loopback_key.as_deref()
+    }
+
     fn eval(&self, target: Target<'_>) -> Effective {
         session::effective(
             target,

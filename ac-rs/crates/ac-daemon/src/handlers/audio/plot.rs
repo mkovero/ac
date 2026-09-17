@@ -907,6 +907,8 @@ fn resolve_tau(
             output_port: e.conditions.output_port.clone(),
             input_port: e.conditions.input_port.clone(),
             enumeration: Some(check),
+            session_check: None,
+            session_check_loopback: None,
         }),
         Err(refusal) => InterfaceLatency::Unavailable {
             reason: refusal.message(),
@@ -1326,11 +1328,15 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // #466: the reference pair's latency verdict, from this capture —
         // the same comparison `IrStats::arrival_check` makes (stored, then
         // same-capture, through `compare_tau_readings`). Published before
-        // any measurement frame. A refused τ on the measurement pair is not
-        // applied: the report records it as unavailable, so no flight time
-        // is derived from it.
-        if gate.pending() {
-            let latency = ref_in_port.as_ref().map(|_| {
+        // any measurement frame when the gate is pending.
+        //
+        // The measurement pair's own verdict is frozen into
+        // `interface_latency.session_check` on every run, pending or not
+        // (R6-2): a persisted refusal stands with no reference configured.
+        // The τ value stays in the report; `IrStats` withholds the flight
+        // time a refused verdict would feed.
+        let latency = if gate.pending() {
+            ref_in_port.as_ref().map(|_| {
                 same_capture_latency(
                     reference_latency.as_ref(),
                     reference_stored_latency.as_ref(),
@@ -1338,36 +1344,38 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                     checked.record.as_ref().map(|r| r.ran_at.clone()),
                     device,
                 )
-            });
+            })
+        } else {
+            None
+        };
+        if let Some(InterfaceLatency::Measured(m)) = interface_latency.as_mut() {
             let own_key = ac_core::shared::calibration::cal_key(out_ch, in_ch);
-            let stored_pair = cal_stored.clone();
-            let capture_tau = interface_latency.clone();
+            let stored_pair = cal_stored.as_ref();
+            let mut loopback_key = None;
+            let judged = (m.measured_at.clone(), m.tau_s);
             let pair_latency = gate.finish_latency(&pub_tx, &checked, latency, |recorded, rec| {
-                if let Some(r) = rec.filter(|r| r.loopback.key == own_key) {
-                    return r.latency.clone();
-                }
-                let c = stored_pair.as_ref()?;
-                let Some(InterfaceLatency::Measured(m)) = capture_tau.as_ref() else {
-                    return None;
-                };
+                loopback_key = recorded.loopback_key().map(str::to_string);
+                let c = stored_pair?;
                 let entry = c
                     .tau_history
                     .iter()
-                    .find(|e| e.measured_at == m.measured_at && e.tau_s == m.tau_s)?;
-                Some(recorded.latency(c, Ok(entry)).verdict)
+                    .find(|e| e.measured_at == judged.0 && e.tau_s == judged.1)?;
+                let standing = recorded.latency(c, Ok(entry)).verdict;
+                let same_capture = rec
+                    .filter(|r| r.loopback.key == own_key)
+                    .and_then(|r| r.latency.clone());
+                Some(own_pair_latency(same_capture, standing))
             });
-            if let Some(LayerVerdict::Refused { via, .. }) = &pair_latency {
-                let source = via
-                    .as_ref()
-                    .map(|k| format!(" via [{k}]"))
-                    .unwrap_or_default();
-                interface_latency = Some(InterfaceLatency::Unavailable {
-                    reason: format!(
-                        "stored \u{3c4} refused by the session check{source}; \
-                         check: `ac calibrate check`, then `ac calibrate` for this pair"
-                    ),
-                });
-            }
+            m.session_check = pair_latency;
+            m.session_check_loopback = loopback_key;
+        } else {
+            // No stored τ in the report: nothing to freeze. The frame still
+            // carries the same-capture verdict when this is the loopback.
+            let own_key = ac_core::shared::calibration::cal_key(out_ch, in_ch);
+            gate.finish_latency(&pub_tx, &checked, latency, |_, rec| {
+                rec.filter(|r| r.loopback.key == own_key)
+                    .and_then(|r| r.latency.clone())
+            });
         }
 
         // Gate lengths ride alongside `data` rather than inside it: a
@@ -1640,6 +1648,18 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     reply
 }
 
+/// The measurement pair's τ verdict when that pair is the reference
+/// loopback (#466 R6-2): a decisive same-capture verdict is used as it is;
+/// otherwise a standing refusal is kept; otherwise the same-capture
+/// `unverified` verdict. The rule `Gate::run` applies to voltage — a refusal
+/// is cleared only by a check that passes.
+fn own_pair_latency(same_capture: Option<LayerVerdict>, standing: LayerVerdict) -> LayerVerdict {
+    match same_capture {
+        Some(v) if v.is_decisive() || !standing.is_refused() => v,
+        _ => standing,
+    }
+}
+
 /// The reference pair's latency verdict from one `plot_ir` capture (#466):
 /// the stored τ against this capture's same-capture reading. The identity
 /// is the stored entry the report resolved.
@@ -1697,6 +1717,127 @@ fn same_capture_latency(
         &ctx,
     );
     (verdict, identity)
+}
+
+#[cfg(test)]
+mod session_check_tests {
+    use super::*;
+    use ac_core::shared::calibration::session::{Evidence, UnverifiedCause, VerdictUnit};
+
+    fn evidence(delta: f64) -> Evidence {
+        Evidence {
+            measured: 1711.0 + delta,
+            stored: 1711.0,
+            delta,
+            tolerance: 0.0,
+            unit: VerdictUnit::Samples,
+            stored_at: "2026-09-15T23:43:04Z".into(),
+            checked_at: "2026-09-16T14:02:11Z".into(),
+            source: CheckSource::SameCapture,
+        }
+    }
+
+    fn refused() -> LayerVerdict {
+        LayerVerdict::Refused {
+            evidence: evidence(32.0),
+            via: None,
+            delta_bound: None,
+        }
+    }
+
+    fn not_measured() -> LayerVerdict {
+        LayerVerdict::unverified(UnverifiedCause::NotMeasured, "reference SNR below gate")
+    }
+
+    /// R6-2 / QA 2: on the loopback pair, a non-decisive same-capture
+    /// reading does not replace a standing refusal. The rejected rule —
+    /// the same-capture verdict unconditionally — is computed beside it.
+    #[test]
+    fn a_standing_refusal_survives_a_non_decisive_same_capture_reading() {
+        let same_capture = Some(not_measured());
+        let kept = own_pair_latency(same_capture.clone(), refused());
+        assert!(kept.is_refused(), "{kept:?}");
+        let rejected = same_capture.clone().unwrap_or_else(refused);
+        assert!(!rejected.is_refused());
+
+        // A decisive reading replaces it: a pass clears the refusal.
+        let verified = LayerVerdict::Verified(evidence(0.0));
+        assert_eq!(
+            own_pair_latency(Some(verified.clone()), refused()),
+            verified
+        );
+        // Nothing standing: the unverified reading is what this capture says.
+        let standing = LayerVerdict::unverified(UnverifiedCause::NotChecked, "no check has run");
+        assert_eq!(
+            own_pair_latency(same_capture, standing.clone()),
+            not_measured()
+        );
+        // No same-capture reading at all: the standing verdict.
+        assert_eq!(own_pair_latency(None, standing.clone()), standing);
+    }
+
+    fn stored_tau() -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s: 1711.0 / 96_000.0,
+            measured_at: "2026-09-15T23:43:04Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "jack".into(),
+            sample_rate_hz: 96_000,
+            period_size: Some(256),
+            output_port: "system:playback_2".into(),
+            input_port: "system:capture_2".into(),
+            enumeration: None,
+            session_check: None,
+            session_check_loopback: None,
+        })
+    }
+
+    /// QA on PR #534: `same_capture_latency`'s branches with no usable
+    /// input. An unavailable stored τ is `not_stored` with its reason
+    /// verbatim; a missing same-capture reading is `not_measured`.
+    #[test]
+    fn same_capture_latency_names_what_was_missing() {
+        let reason = "no stored latency at 96000 Hz, period 256";
+        let (v, identity) = same_capture_latency(
+            None,
+            Some(&InterfaceLatency::Unavailable {
+                reason: reason.to_string(),
+            }),
+            96_000,
+            None,
+            0,
+        );
+        assert_eq!(v.cause(), Some(UnverifiedCause::NotStored));
+        assert!(
+            matches!(&v, LayerVerdict::Unverified { reason: r, .. } if r == reason),
+            "{v:?}"
+        );
+        assert!(identity.is_none());
+
+        let (v, identity) = same_capture_latency(None, None, 96_000, None, 0);
+        assert_eq!(v.cause(), Some(UnverifiedCause::NotStored));
+        assert!(identity.is_none());
+
+        let (v, identity) = same_capture_latency(None, Some(&stored_tau()), 96_000, None, 0);
+        assert_eq!(v.cause(), Some(UnverifiedCause::NotMeasured));
+        assert!(
+            matches!(&v, LayerVerdict::Unverified { reason, .. }
+                if reason == "no same-capture reference in this capture"),
+            "{v:?}"
+        );
+        assert!(identity.is_some());
+
+        let (v, _) = same_capture_latency(
+            Some(&ReferenceLatency::Unavailable {
+                reason: "xrun during capture".into(),
+            }),
+            Some(&stored_tau()),
+            96_000,
+            None,
+            0,
+        );
+        assert_eq!(v.cause(), Some(UnverifiedCause::NotMeasured));
+    }
 }
 
 #[cfg(test)]

@@ -366,6 +366,115 @@ fn a_delay_shift_refuses_latency_and_leaves_voltage_verified() {
     assert_eq!(cause(&shifted["pair"]["voltage"]), "not_covered");
 }
 
+/// `calibrate` on an arbitrary pair, τ measured.
+fn calibrate_pair(c: &Client, o: u32, i: u32) -> Value {
+    let r = c.call(json!({"cmd": "calibrate", "output_channel": o, "input_channel": i}));
+    assert_eq!(r["ok"], json!(true), "calibrate ack: {r}");
+    let _ = expect_prompt(c, 1);
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 0.034641}));
+    let _ = expect_prompt(c, 2);
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 0.034995}));
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(15))
+        .expect("cal_done");
+    assert_eq!(done["tau_state"], json!("measured"), "{done}");
+    done
+}
+
+/// The next frame on `topic`, whatever its `cmd`.
+fn frame_on_topic(c: &Client, topic: &str, timeout: Duration) -> Option<Value> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(left.max(1)) {
+            Some((t, v)) if t == topic => return Some(v),
+            Some(_) => continue,
+            None => return None,
+        }
+    }
+    None
+}
+
+/// One `plot_ir` run's archived report, as JSON and decoded.
+fn plot_ir_report(d: &Daemon) -> (Value, ac_core::measurement::report::MeasurementReport) {
+    let c = Client::new(d);
+    let ack = c.call(json!({
+        "cmd": "plot_ir", "f1_hz": 200.0, "f2_hz": 8000.0, "duration": 0.5,
+        "level_dbfs": -40.0, "tail_s": 0.1, "window_len": 4096, "n_harmonics": 3,
+    }));
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    let frame = frame_on_topic(&c, "measurement/report", Duration::from_secs(30))
+        .unwrap_or_else(|| panic!("no measurement/report\n{}", d.log_tail()));
+    let json = frame["report"].clone();
+    let report = serde_json::from_value(json.clone()).expect("decode MeasurementReport");
+    (json, report)
+}
+
+/// Triage AC8(b) for delay, and R3-1 / R6-2 / R6-7: a persisted τ refusal
+/// that reaches the measurement pair is frozen into `plot_ir`'s report and
+/// withholds the flight time, even with no reference configured. The bypass
+/// leg (no refusal on disk) shows the same stored τ consumed, so the test
+/// can fail.
+#[test]
+fn a_persisted_latency_refusal_withholds_the_pair_tau_in_plot_ir() {
+    let d1 = Daemon::spawn_with_config(Some(split_config()));
+    let c1 = Client::new(&d1);
+    calibrate_pair(&c1, 0, 0);
+    calibrate_loopback(&c1);
+
+    // Session 2: τ shifted; the check refuses and reaches out0_in0.
+    let d2 = Daemon::spawn_with(
+        Some(split_config()),
+        &[("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "48,48")],
+    );
+    share_state(&d1, &d2);
+    let check = run_check(&Client::new(&d2));
+    assert_eq!(state(&check["latency"]), "refused", "{check}");
+    assert!(
+        check["reach"]["latency"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["key"] == json!("out0_in0")),
+        "{check}"
+    );
+
+    // Rejected behaviour: no refusal on disk, no reference → τ applied.
+    let bypass = Daemon::spawn_with_config(Some(json!({})));
+    share_state(&d1, &bypass);
+    let (r, report) = plot_ir_report(&bypass);
+    let latency = &r["interface_latency"];
+    assert_eq!(latency["state"], json!("measured"), "{r}");
+    assert_eq!(state(&latency["session_check"]), "unverified", "{latency}");
+    assert_eq!(cause(&latency["session_check"]), "no_loopback", "{latency}");
+    let stats = report.ir_stats().expect("ir stats");
+    assert!(stats.flight_time_s.is_some(), "stale τ consumed: {latency}");
+    drop(bypass);
+
+    // The refusal on disk, reference removed → the stored τ is kept in the
+    // report but not applied.
+    let d3 = Daemon::spawn_with_config(Some(json!({})));
+    share_state(&d2, &d3);
+    let (r, report) = plot_ir_report(&d3);
+    let latency = &r["interface_latency"];
+    assert_eq!(latency["state"], json!("measured"), "{r}");
+    assert!(latency["tau_s"].is_f64(), "{latency}");
+    assert_eq!(state(&latency["session_check"]), "refused", "{latency}");
+    assert_eq!(
+        latency["session_check"]["via"],
+        json!(LOOPBACK),
+        "{latency}"
+    );
+    assert!(latency.get("session_check_loopback").is_none(), "{latency}");
+    let stats = report.ir_stats().expect("ir stats");
+    assert_eq!(
+        stats.flight_time_s, None,
+        "a refused τ was applied: {latency}"
+    );
+}
+
 /// Leg 7: a silent return is refused as a bound, and the refusal reaches
 /// every other stored voltage entry.
 #[test]
