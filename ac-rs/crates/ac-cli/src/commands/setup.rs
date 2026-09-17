@@ -50,7 +50,11 @@ fn print_leg(
 fn resolve_local_report_dir(raw: &str, home: Option<&str>, cwd: &Path) -> String {
     let expanded: PathBuf = match (raw, home) {
         ("~", Some(h)) => PathBuf::from(h),
-        (r, Some(h)) if r.starts_with("~/") => Path::new(h).join(&r[2..]),
+        (r, Some(h)) if r.starts_with("~/") => {
+            // `~//x` must stay under `home`: joining an absolute `/x`
+            // would replace the base.
+            Path::new(h).join(r[2..].trim_start_matches('/'))
+        }
         (r, _) if r.is_empty() || r.starts_with('~') => return raw.to_string(),
         (r, _) => cwd.join(r),
     };
@@ -391,6 +395,11 @@ mod tests {
         assert_eq!(
             resolve_local_report_dir("../Reports", home, cwd),
             "/work/rig/../Reports"
+        );
+        // Extra slashes after `~` stay under home, not at the root.
+        assert_eq!(
+            resolve_local_report_dir("~//data", home, cwd),
+            "/home/mui/data"
         );
     }
 
