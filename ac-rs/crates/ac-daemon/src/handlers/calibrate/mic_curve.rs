@@ -40,7 +40,7 @@ fn parse_curve(cmd: &Value) -> Result<(Vec<f32>, Vec<f32>), String> {
             let len =
                 |a: Option<&Vec<Value>>| a.map_or("missing".to_string(), |a| a.len().to_string());
             return Err(format!(
-                "calibrate_mic_curve set: missing/mismatched freqs_hz/gain_db                  (freqs_hz: {}, gain_db: {})",
+                "calibrate_mic_curve set: missing/mismatched freqs_hz/gain_db (freqs_hz: {}, gain_db: {})",
                 len(f),
                 len(g)
             ));

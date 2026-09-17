@@ -112,7 +112,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         .get("interval")
         .and_then(Value::as_f64)
         .unwrap_or(defaults.interval);
-    // A present `fft_n` outside u32 is refused with the domain message
+    // A present `fft_n` that is not a u32 (`null` and strings included) is
+    // refused with the domain message
     // below rather than wrapped into it (#431: 4294967552 used to become 256).
     let fft_n = match wire::opt_u32(cmd, "fft_n") {
         Ok(v) => v.unwrap_or(defaults.fft_n),

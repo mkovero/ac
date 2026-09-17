@@ -1534,8 +1534,8 @@ across `reconnect_input` can't be preserved).
 }
 ```
 
-See **Error handling → Wire values** for how a malformed field is refused. A present `fft_n` outside
-u32 gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
+See **Error handling → Wire values** for how a malformed field is refused. Any present `fft_n`
+that is not an integer in 0–4294967295 — `null` and strings included — gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
 missing `freq_hz` or `level_dbfs` refuses the whole request.
 
 Both `interval` and `fft_n` are live-reconfigurable — see

@@ -252,7 +252,15 @@ fn mic_curve_mismatched_lengths_name_both() {
         "cmd": "calibrate_mic_curve", "op": "set", "input_channel": 1,
         "freqs_hz": freqs, "gain_db": gains,
     }));
-    assert_refused(&r, "mismatched", &["freqs_hz: 32", "gain_db: 31"]);
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(
+        r["error"],
+        json!(
+            "calibrate_mic_curve set: missing/mismatched freqs_hz/gain_db \
+             (freqs_hz: 32, gain_db: 31)"
+        ),
+        "{r}"
+    );
 }
 
 /// 4294967297 narrowed to channel 1 and keyed the curve under `in1`.
@@ -348,4 +356,49 @@ fn ioct_bpo_above_u32_is_refused() {
     let r = c.call(json!({"cmd": "set_ioct_bpo", "bpo": 3}));
     assert_eq!(r["ok"], json!(true), "{r}");
     assert_eq!(r["bpo"], json!(3));
+}
+
+/// Before the bounded echo, a long string `bpo` was copied into the reply
+/// in full.
+#[test]
+fn ioct_bpo_refusal_does_not_echo_unbounded_input() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_ioct_bpo", "bpo": "x".repeat(100_000)}));
+    assert_refused(&r, "long string bpo", &["invalid bpo \"xxx", "\u{2026}"]);
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(
+        err.chars().count() < 256,
+        "echo must be truncated, got {} chars",
+        err.chars().count()
+    );
+}
+
+/// `calibrate` and `calibrate_spl` are the remaining `channels_from` call
+/// sites; 4294967296 used to wrap to channel 0 and start `calibrate`.
+#[test]
+fn calibrate_and_spl_refuse_malformed_channels_before_starting() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "calibrate", "output_channel": 4294967296u64}));
+    assert_refused(
+        &r,
+        "calibrate",
+        &[
+            "calibration not started",
+            "output_channel is outside",
+            "stimulus  silent",
+        ],
+    );
+    assert_idle(&c, "calibrate");
+    let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": "x", "capture_s": 0.05}));
+    assert_refused(
+        &r,
+        "calibrate_spl",
+        &[
+            "SPL calibration not started",
+            "input_channel must be an integer",
+        ],
+    );
+    assert_idle(&c, "calibrate_spl");
 }

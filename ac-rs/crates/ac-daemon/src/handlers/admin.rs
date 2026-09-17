@@ -457,13 +457,17 @@ pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
         None => return json!({"ok": false, "error": "missing 'bpo' field"}),
     };
     // #431: checked, never narrowed — 4294967299 used to wrap to 3.
+    // The echo comes from `WireError::received`, which is length-bounded;
+    // the raw value would copy an arbitrarily long string into the reply.
+    let refuse = |shown: String| {
+        json!({"ok": false,
+        "error": format!("invalid bpo {shown}: expected 0, 1, 3, 6, 12, or 24")})
+    };
     let new = match wire::u32_value(raw, "bpo") {
         Ok(0) => None,
         Ok(b @ (1 | 3 | 6 | 12 | 24)) => Some(b),
-        _ => {
-            return json!({"ok": false,
-            "error": format!("invalid bpo {raw}: expected 0, 1, 3, 6, 12, or 24")})
-        }
+        Ok(b) => return refuse(b.to_string()),
+        Err(e) => return refuse(e.received),
     };
     let bpo = new.unwrap_or(0);
     *state.ioct_bpo.lock().unwrap() = new;
