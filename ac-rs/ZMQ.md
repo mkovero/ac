@@ -53,6 +53,11 @@ published. The error string names the store and cause and confirms that the
 existing file was preserved; transfer refusals also state that the failure
 applies to all requested pairs.
 
+`setup` applies the same rule to `config.json`: an update is acknowledged
+only after it is on disk, the file is replaced atomically, and an existing
+file that cannot be read or parsed is refused and left as it was (see
+[`setup`](#setup)).
+
 ---
 
 ## DATA frame envelope
@@ -897,15 +902,41 @@ directory (os error 2)`, `Not a directory (os error 20)`, `Permission denied
 against the client's own `$HOME` and cwd only when the daemon is local
 (`server_host` unset); to a remote daemon the value is sent as typed.
 
-When `update` is non-empty and the config file cannot be saved, the reply is a
-refusal rather than an `ok` whose values would revert on the next request's
-config reload:
+**Read vs write.** An empty `update` object (`{}`), or an `update` that is
+not an object, is a read: it
+writes nothing, so it cannot fail on storage and cannot rewrite a config file
+the daemon found unreadable. `ac generate` and the GPIO handler send this form.
+A non-empty `update` is a write. (A request with no `update` key at all is
+refused with `missing 'update' field`.)
+
+A write is applied to a copy of the in-memory config, saved, and only then
+made current. The save merges into the file on disk, writes a sibling
+`config.json.tmp.<pid>`, `fsync`s it and renames it over `config.json`
+(best-effort `fsync` of the directory afterwards), so a reader never sees a
+partial file. If the existing `config.json` cannot be read or parsed, the save
+refuses before writing anything — it never falls back to defaults plus the
+update.
+
+When the save fails, the reply is a refusal with no `config` echo; the
+in-memory config and the file both stay at their last-good state. `error` is a
+multi-line block whose continuation lines are indented to sit under
+`  error: `. The write side (directory creation, temp write/sync, rename):
 
 ```json
-{ "ok": false, "error": "config not saved (/home/mui/.config/ac/config.json): <err>" }
+{ "ok": false,
+  "error": "setup not saved — configuration unchanged\n         file   /home/mui/.config/ac/config.json\n         cause  <cause chain>" }
 ```
 
-A read-only call (`update: {}`) still answers when the save fails.
+An existing file that cannot be read or parsed:
+
+```json
+{ "ok": false,
+  "error": "setup not saved — existing configuration is unreadable\n         file   /home/mui/.config/ac/config.json\n         cause  <cause chain>\n         data   existing file preserved" }
+```
+
+`cause` is the full error chain (e.g. `writing …/config.json.tmp.123:
+Permission denied (os error 13)`, `parsing …/config.json: EOF while parsing
+…`). An invalid `backend` value is still rejected before any save.
 
 `backend` is a requirement, not a preference. `null` selects the platform's
 real default and never falls back to fake. `fake` is the persistent explicit
@@ -932,9 +963,13 @@ vice versa.
   "ok":     true,
   "max_dbfs": 0.0,
   "config": { /* full config dict, all keys */ },
+  "saved":  "/home/mui/.config/ac/config.json",  // only after a successful write
   "report_dir_status": { "writable": true }   // only when config.report_dir is set
 }
 ```
+
+After a write, `config` is the merged config as now stored on disk and `saved`
+is the path it was written to. A read never carries `saved`.
 
 `max_dbfs` is the fixed build maximum, not a config setting. A retired
 `drive_max_dbfs` key remains inside `config` until the operator removes it.

@@ -144,7 +144,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
-    // #431: every channel field is parsed before the lock is taken, so a
+    // #431: every channel field is parsed before the config is copied, so a
     // malformed one refuses the update with nothing applied — not even a
     // valid sibling channel in the same request.
     let channels = match parse_setup_channels(update) {
@@ -155,7 +155,11 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
-    let mut cfg = state.cfg.lock().unwrap();
+    // Every change is made on a copy and committed to `state.cfg` only after
+    // it is on disk (#430), so a failed save leaves memory and disk agreeing
+    // on the last-good config. The lock is not held across the save:
+    // `dispatch()` is the only writer of `state.cfg` and runs on one thread.
+    let mut cfg = state.cfg.lock().unwrap().clone();
 
     if let Some(dir) = report_dir_update {
         cfg.report_dir = dir;
@@ -240,23 +244,22 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
-    let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
-    if let Err(e) = ac_core::config::save(&cfg, None) {
-        eprintln!("setup: save failed: {e}");
-        // #472: config is reloaded from disk before the next request, so an
-        // unsaved update would silently revert right after the read-out
-        // showed it. Read-only calls (`update: {}`) keep answering.
-        let has_updates = update.as_object().is_some_and(|m| !m.is_empty());
-        if has_updates {
-            return json!({
-                "ok": false,
-                "error": format!(
-                    "config not saved ({}): {e}",
-                    state.config_path.display()
-                ),
-            });
+    // `update: {}` is a read (`ac generate`, the GPIO handler): it never
+    // writes, so it cannot fail on storage and cannot overwrite a config file
+    // the per-request reload found unreadable.
+    let has_updates = update.as_object().is_some_and(|m| !m.is_empty());
+    let mut saved_path = None;
+    if has_updates {
+        match ac_core::config::save(&cfg, Some(&state.config_path)) {
+            Ok(final_cfg) => {
+                *state.cfg.lock().unwrap() = final_cfg.clone();
+                cfg = final_cfg;
+                saved_path = Some(state.config_path.display().to_string());
+            }
+            Err(e) => return json!({"ok": false, "error": setup_not_saved(&e)}),
         }
     }
+    let cfg_value = serde_json::to_value(&cfg).unwrap_or_default();
     // #459: the fixed emission maximum, at the top level (beside `config`,
     // not inside it — `config` is the config file, and the maximum is a
     // build constant; putting it there would make it look settable). This
@@ -269,6 +272,9 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         "config": cfg_value,
         "max_dbfs": ac_core::shared::emission_level::MAX_EMISSION_DBFS,
     });
+    if let Some(path) = saved_path {
+        reply["saved"] = json!(path);
+    }
     // #472: whether the configured report directory can be written, beside
     // `config` for the same reason as `max_dbfs` — it is not a config
     // value. Checked on every call, so a directory removed after it was set
@@ -280,6 +286,30 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         };
     }
     reply
+}
+
+/// Operator-facing refusal for a `setup` update that was not persisted
+/// (#430). Laid out like the `calibration unreadable` refusal: continuation
+/// lines are indented to sit under the text after `  error: `.
+fn setup_not_saved(e: &ac_core::config::SaveError) -> String {
+    use ac_core::config::SaveError;
+    match e {
+        SaveError::Write { .. } => format!(
+            "setup not saved \u{2014} configuration unchanged\n\
+             \x20        file   {}\n\
+             \x20        cause  {:#}",
+            e.path().display(),
+            e.cause()
+        ),
+        SaveError::Unreadable { .. } => format!(
+            "setup not saved \u{2014} existing configuration is unreadable\n\
+             \x20        file   {}\n\
+             \x20        cause  {:#}\n\
+             \x20        data   existing file preserved",
+            e.path().display(),
+            e.cause()
+        ),
+    }
 }
 
 /// Refusal reason for a non-absolute `report_dir`: a relative path or a `~`
