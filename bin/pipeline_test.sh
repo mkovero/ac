@@ -9,6 +9,8 @@
 #   4. triage_evidence counts a spec, not a scope-backfill one-liner.
 #   5. master.sh stops after one design preflight on a `none` manifest.
 #   6. git_retry retries a network failure and not a real error.
+#   7. nothing reads FETCH_HEAD, which concurrent fetches in the shared
+#      checkout overwrite.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -127,5 +129,8 @@ chmod +x "$T/stub/netgit"
 )
 check '[[ $(cat $T/r_g1) == "0 3" ]]' "git_retry retries a DNS failure until it clears"
 check '[[ $(cat $T/r_g2) == "128 1" ]]' "git_retry returns a real error at once"
+
+# --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
+check '! grep -n "rev-parse FETCH_HEAD" "$BIN"/*.sh | grep -v pipeline_test.sh | grep -q .' "no bin script reads the shared FETCH_HEAD"
 
 exit $fail

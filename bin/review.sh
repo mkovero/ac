@@ -81,8 +81,11 @@ independent_review() {
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
     require_space "$wt"; mkdir -p "$WT_BASE"
-    git_retry git fetch -q origin "pull/$pr/head"
-    [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
+    # A private ref, not FETCH_HEAD: FETCH_HEAD belongs to the whole shared
+    # checkout, and any concurrent fetch rewrites it (2026-09-17: PR #522
+    # "changed while preparing review" while its head had not moved).
+    git_retry git fetch -q origin "+pull/$pr/head:refs/ac/review/pr-$pr"
+    [[ $(git rev-parse "refs/ac/review/pr-$pr") == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
     if [[ -n $recheck_base ]] && ! git merge-base --is-ancestor "$recheck_base" "$head" 2>/dev/null; then
       echo "<codex/qa> PR #$pr: $head does not descend from $recheck_base — full Claude QA needed." >&2
       return 3

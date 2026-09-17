@@ -136,8 +136,9 @@ cleanup() {
 trap cleanup EXIT
 
 require_space "$wt" || exit 1
-git_retry git fetch -q origin "pull/$pr/head"
-[[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr moved while preparing" >&2; exit 1; }
+# A private ref: FETCH_HEAD is shared by every process using this checkout.
+git_retry git fetch -q origin "+pull/$pr/head:refs/ac/rig/pr-$pr"
+[[ $(git rev-parse "refs/ac/rig/pr-$pr") == "$head" ]] || { echo "PR #$pr moved while preparing" >&2; exit 1; }
 [[ -e $wt ]] && remove_worktree "$wt"
 git worktree add --detach "$wt" "$head" >/dev/null
 link_support "$wt"
