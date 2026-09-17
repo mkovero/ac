@@ -15,13 +15,21 @@
 //! * **A write is all-or-nothing.** Writes go through
 //!   [`crate::shared::atomic_write::write_atomic`], so a crash or a full
 //!   disk leaves the previous file intact rather than a truncated one.
+//!
+//! `session_refusals.json` (#466) sits beside `cal.json` under the same two
+//! guarantees. This module only reads and writes it; which records it holds
+//! is decided in [`super::session`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::session::SessionRefusals;
 use super::{Calibration, CalibrationEntry};
+
+/// File name of the persisted session-check refusals, beside `cal.json`.
+pub const SESSION_REFUSALS_FILE: &str = "session_refusals.json";
 
 /// Default calibration file path: `~/.config/ac/cal.json`.
 pub fn default_cal_path() -> PathBuf {
@@ -35,6 +43,64 @@ pub fn default_cal_path() -> PathBuf {
 /// The one place the `out{N}_in{M}` key format is spelled out.
 pub fn cal_key(output_channel: u32, input_channel: u32) -> String {
     format!("out{output_channel}_in{input_channel}")
+}
+
+/// Default refusal record path: `session_refusals.json` beside
+/// [`default_cal_path`].
+pub fn default_session_refusals_path() -> PathBuf {
+    default_cal_path().with_file_name(SESSION_REFUSALS_FILE)
+}
+
+/// `session_refusals.json` exists and cannot be read or parsed.
+#[derive(Debug)]
+pub struct RefusalsReadError {
+    /// The root io or serde error, with no path.
+    pub observation: String,
+}
+
+impl std::fmt::Display for RefusalsReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{SESSION_REFUSALS_FILE} unreadable: {}", self.observation)
+    }
+}
+
+impl std::error::Error for RefusalsReadError {}
+
+/// Read the persisted refusals. A missing file holds none; a file that
+/// exists but cannot be read or parsed is an **error**, never "none" — it
+/// may hold a refusal.
+pub fn read_session_refusals(path: &Path) -> Result<SessionRefusals, RefusalsReadError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SessionRefusals::default())
+        }
+        Err(e) => {
+            return Err(RefusalsReadError {
+                observation: e.to_string(),
+            })
+        }
+    };
+    serde_json::from_str(&raw).map_err(|e| RefusalsReadError {
+        observation: e.to_string(),
+    })
+}
+
+/// Write the persisted refusals atomically. Re-reads the file first and
+/// refuses to write over one it cannot read, as [`Calibration::save`] does
+/// for `cal.json`: the unreadable file may hold another process's refusal.
+pub fn write_session_refusals(path: &Path, refusals: &SessionRefusals) -> Result<()> {
+    read_session_refusals(path).with_context(|| {
+        format!(
+            "refusing to write over unreadable {} — existing file preserved",
+            path.display()
+        )
+    })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let out = serde_json::to_string_pretty(refusals)?;
+    crate::shared::atomic_write::write_atomic(path, out.as_bytes())
 }
 
 fn resolve_path(path: Option<&Path>) -> PathBuf {
@@ -393,6 +459,90 @@ mod tests {
                 .unwrap()
                 .vrms_at_0dbfs_in,
             Some(0.5)
+        );
+    }
+
+    // ─── #466: loop-gain baseline and session refusals ──────────────────
+
+    #[test]
+    fn an_entry_without_a_baseline_still_loads_and_round_trips_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+        std::fs::write(
+            &path,
+            r#"{"out1_in1":{"output_channel":1,"input_channel":1,
+                "vrms_at_0dbfs_out":3.46,"vrms_at_0dbfs_in":3.5}}"#,
+        )
+        .unwrap();
+        let mut cal = Calibration::load(1, 1, Some(&path)).unwrap().unwrap();
+        assert_eq!(cal.loop_gain_baseline, None);
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("loop_gain_baseline"));
+
+        let baseline = super::super::LoopGainBaseline {
+            loop_gain_db: -0.6,
+            freq_hz: 1000.0,
+            drive_dbfs: -40.0,
+            measured_at: "2026-09-15T23:43:04Z".to_string(),
+            epoch: super::super::epoch::fixtures::observed("boot-a", &[]),
+        };
+        cal.loop_gain_baseline = Some(baseline.clone());
+        cal.save(Some(&path)).unwrap();
+        let back = Calibration::load(1, 1, Some(&path)).unwrap().unwrap();
+        assert_eq!(back.loop_gain_baseline, Some(baseline));
+        assert_eq!(back.vrms_at_0dbfs_in, Some(3.5));
+    }
+
+    #[test]
+    fn session_refusals_path_sits_beside_cal_json() {
+        assert_eq!(
+            default_session_refusals_path().parent(),
+            default_cal_path().parent()
+        );
+        assert!(default_session_refusals_path().ends_with(SESSION_REFUSALS_FILE));
+    }
+
+    #[test]
+    fn a_missing_refusal_record_holds_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = read_session_refusals(&dir.path().join(SESSION_REFUSALS_FILE)).unwrap();
+        assert_eq!(got, SessionRefusals::default());
+    }
+
+    #[test]
+    fn an_unreadable_refusal_record_is_an_error_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_REFUSALS_FILE);
+        std::fs::write(&path, "not json").unwrap();
+        let err = read_session_refusals(&path).expect_err("must not read as empty");
+        assert!(
+            err.observation.starts_with("expected"),
+            "{}",
+            err.observation
+        );
+        assert!(!err.observation.contains('/'), "no path in the observation");
+    }
+
+    #[test]
+    fn a_write_over_an_unreadable_refusal_record_leaves_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_REFUSALS_FILE);
+        let corrupt = b"{\"voltage\": {tru";
+        std::fs::write(&path, corrupt).unwrap();
+        write_session_refusals(&path, &SessionRefusals::default())
+            .expect_err("write must refuse");
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[test]
+    fn refusal_record_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(SESSION_REFUSALS_FILE);
+        write_session_refusals(&path, &SessionRefusals::default()).unwrap();
+        assert_eq!(
+            read_session_refusals(&path).unwrap(),
+            SessionRefusals::default()
         );
     }
 

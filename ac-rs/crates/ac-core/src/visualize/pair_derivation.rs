@@ -168,6 +168,7 @@ mod tests {
             mic_sensitivity_dbfs_at_94db_spl: Some(-20.0),
             mic_response: None,
             tau_history: Vec::new(),
+            loop_gain_baseline: None,
         };
         let offset = cal.spl_offset_db().unwrap();
         let d = derive_pair(&sig, &sig, SR, 0, Some(&cal), None, WeightingCurve::Z);
@@ -200,6 +201,7 @@ mod tests {
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
             tau_history: Vec::new(),
+            loop_gain_baseline: None,
         };
         let d_v = derive_pair(&sig, &sig, SR, 0, Some(&cal_v), None, WeightingCurve::Z);
 
