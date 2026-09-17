@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::shared::calibration::EnumerationCheck;
+
 /// The measurement technique. `kind` is a discriminant so new methods
 /// (Farina sweep, pink-noise, etc.) extend the enum without breaking
 /// existing readers. Describes only the *stimulus shape* — what was
@@ -109,6 +111,12 @@ pub struct MeasuredLatency {
     pub period_size: Option<u32>,
     pub output_port: String,
     pub input_port: String,
+    /// How the stored τ's device-enumeration epoch related to the one this
+    /// capture ran in (#461, schema v10). Frozen at capture and never
+    /// recomputed. `None` on a report written before v10, which a reader
+    /// treats as [`EnumerationCheck::NotRecorded`] — never as `Same`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enumeration: Option<EnumerationCheck>,
 }
 
 /// Round-trip latency of the **reference** loopback pair, measured from a
@@ -306,6 +314,34 @@ mod tests {
         r.interface_latency = Some(measured_tau(0.0011931));
         let back: MeasurementReport = serde_json::from_str(&r.to_json().unwrap()).unwrap();
         assert_eq!(back.interface_latency, r.interface_latency);
+    }
+
+    /// #461: the frozen enumeration check survives the archive, and a v9
+    /// latency object (no `enumeration` key) still decodes, as `None`.
+    #[test]
+    fn interface_latency_enumeration_round_trips_and_v9_decodes_without_it() {
+        use crate::shared::calibration::EnumerationCheck;
+        let mut r = ir_report_with_peak(1_024, 512, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(measured_tau_with_check(
+            0.0011931,
+            Some(EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: Some("2026-09-16T13:41:52Z".into()),
+            }),
+        ));
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"enumeration\""), "{json}");
+        let back: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.interface_latency, r.interface_latency);
+
+        let v9 = r#"{"state": "measured", "tau_s": 0.001, "measured_at": "2026-08-15T00:00:00Z",
+            "method": "farina_short_ess", "backend": "jack", "sample_rate_hz": 48000,
+            "period_size": 1024, "output_port": "a", "input_port": "b"}"#;
+        let decoded: InterfaceLatency = serde_json::from_str(v9).unwrap();
+        match decoded {
+            InterfaceLatency::Measured(m) => assert_eq!(m.enumeration, None),
+            other => panic!("expected measured, got {other:?}"),
+        }
     }
 
     #[test]

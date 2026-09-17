@@ -709,6 +709,142 @@ fn age_before_capture(measured_at: &str, report_timestamp_utc: &str) -> Option<S
     })
 }
 
+/// `UNVERIFIED — `, the prefix of every flagged enumeration verdict (#461
+/// UX). Plain text so it reads without colour.
+pub(super) const UNVERIFIED: &str = "UNVERIFIED \u{2014} ";
+
+/// The action that clears a crossed or not-recorded enumeration flag
+/// (#461 UX). Printed only where re-running does clear it.
+const RECALIBRATE_CHECK: &str = "check: re-run `ac calibrate` with loopback patched";
+
+/// Width of the `nodes: ` label; continuation lines are indented by it so
+/// the node paths line up (#461 UX).
+const NODES_LABEL: &str = "nodes: ";
+
+/// Split a daemon-written `EnumerationCheck::Crossed::boundary` into its
+/// head and, for a device re-enumeration, the node list (#461 UX) — the same
+/// split `ref latency` makes on `"; check: "`.
+pub(super) fn split_boundary(boundary: &str) -> (&str, Option<&str>) {
+    match boundary.split_once(ac_core::shared::calibration::BOUNDARY_NODES_SEPARATOR) {
+        Some((head, nodes)) => (head, Some(nodes)),
+        None => (boundary, None),
+    }
+}
+
+/// ` at <since>`, or ` after measurement` when a node only disappeared and
+/// the observation carries no time (#461 UX).
+pub(super) fn since_clause(since: Option<&str>) -> String {
+    match since {
+        Some(t) => format!(" at {t}"),
+        None => " after measurement".to_string(),
+    }
+}
+
+/// `nodes: <list>` wrapped at `80 − indent`, continuation lines indented
+/// under the list (#461 UX). Wraps between entries, never inside one, so a
+/// node path always stays on the line with its `new` / `re-created` /
+/// `gone`.
+pub(super) fn nodes_lines(list: &str, indent: &str) -> Vec<String> {
+    let pad = " ".repeat(NODES_LABEL.len());
+    let width = 80 - indent.len() - NODES_LABEL.len();
+    let entries: Vec<&str> = list.split(", ").collect();
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let item = if i + 1 < entries.len() {
+            format!("{entry},")
+        } else {
+            entry.to_string()
+        };
+        let candidate = if current.is_empty() {
+            item.chars().count()
+        } else {
+            current.chars().count() + 1 + item.chars().count()
+        };
+        if candidate > width && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&item);
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let label = if i == 0 { NODES_LABEL } else { pad.as_str() };
+            format!("{indent}{label}{line}")
+        })
+        .collect()
+}
+
+/// `text` word-wrapped at `80 − indent`, every line at `indent`.
+pub(super) fn indented_wrapped(text: &str, indent: &str) -> Vec<String> {
+    word_wrap(text, 80 - indent.len())
+        .into_iter()
+        .map(|line| format!("{indent}{line}"))
+        .collect()
+}
+
+/// The verdict on a stored τ's device enumeration, under its `measured`
+/// line (#461 UX): verdict → `nodes:` → `check:`. Frozen report data only;
+/// nothing is recomputed. `None` is a report or daemon older than the check,
+/// which reads as not recorded — never as the same enumeration.
+///
+/// `ref_delta_agrees` is set for `ref stored` when this same capture's
+/// `ref Δ` agreed: a crossed boundary then points at that evidence instead
+/// of reading UNVERIFIED over `0 samples`, and needs no `check:`. The two
+/// cannot-tell states stay UNVERIFIED regardless — no boundary was named
+/// for the Δ to answer.
+fn enumeration_lines(
+    check: Option<&ac_core::shared::calibration::EnumerationCheck>,
+    ref_delta_agrees: bool,
+) -> Vec<String> {
+    use ac_core::shared::calibration::EnumerationCheck;
+    match check {
+        Some(EnumerationCheck::Same) => vec![format!(
+            "{CONT_INDENT}same device enumeration as this capture"
+        )],
+        Some(EnumerationCheck::Crossed { boundary, since }) => {
+            let (head, nodes) = split_boundary(boundary);
+            let at = since_clause(since.as_deref());
+            let mut lines = vec![if ref_delta_agrees {
+                format!("{CONT_INDENT}{head}{at} \u{2014} see ref \u{394}")
+            } else {
+                format!("{CONT_INDENT}{UNVERIFIED}{head}{at}")
+            }];
+            if let Some(list) = nodes {
+                lines.extend(nodes_lines(list, CONT_INDENT));
+            }
+            if !ref_delta_agrees {
+                lines.push(format!("{CONT_INDENT}{RECALIBRATE_CHECK}"));
+            }
+            lines
+        }
+        Some(EnumerationCheck::NotObservable { reason }) => {
+            let mut lines = vec![format!(
+                "{CONT_INDENT}{UNVERIFIED}device enumeration not observable"
+            )];
+            let (observation, places) = match reason.split_once("; check: ") {
+                Some((o, p)) => (o, Some(p)),
+                None => (reason.as_str(), None),
+            };
+            lines.extend(indented_wrapped(observation, CONT_INDENT));
+            if let Some(places) = places {
+                lines.extend(indented_wrapped(&format!("check: {places}"), CONT_INDENT));
+            }
+            lines
+        }
+        Some(EnumerationCheck::NotRecorded) | None => vec![
+            format!("{CONT_INDENT}{UNVERIFIED}entry predates enumeration tracking"),
+            format!("{CONT_INDENT}{RECALIBRATE_CHECK}"),
+        ],
+    }
+}
+
 /// The `ref latency` read-out (#460 UX), always printed: the same-capture
 /// reference τ in `calibrate`'s `Delay:` format, or its unavailable reason
 /// with any `; check: ` part on its own `check:` line.
@@ -830,7 +966,7 @@ fn interface_latency_lines(
     match latency {
         Some(InterfaceLatency::Measured(m)) => {
             let samples = m.tau_s * sample_rate_hz as f64;
-            vec![
+            let mut lines = vec![
                 format!(
                     "{}{} ms  ({} samples, stored)",
                     label_prefix("latency"),
@@ -838,7 +974,10 @@ fn interface_latency_lines(
                     format_samples(samples),
                 ),
                 measured_line(&m.measured_at, report_timestamp_utc),
-            ]
+            ];
+            // #461: τ is per channel pair, so `ref Δ` never clears this one.
+            lines.extend(enumeration_lines(m.enumeration.as_ref(), false));
+            lines
         }
         Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("latency", reason),
         None => {
@@ -854,18 +993,20 @@ fn interface_latency_lines(
 
 /// `ref stored` line (#359 UX): the τ `calibrate` has on file for the
 /// *reference* pair — the second input to `ref \u{394}`, shown next to the
-/// first (`ref latency`).
+/// first (`ref latency`). `ref_delta_agrees` is whether this capture's
+/// `ref Δ` agreed (#461 UX): see [`enumeration_lines`].
 fn reference_stored_latency_lines(
     stored: Option<&ac_core::measurement::report::InterfaceLatency>,
     schema_version: u32,
     sample_rate_hz: u32,
     report_timestamp_utc: &str,
+    ref_delta_agrees: bool,
 ) -> Vec<String> {
     use ac_core::measurement::report::InterfaceLatency;
     match stored {
         Some(InterfaceLatency::Measured(m)) => {
             let samples = m.tau_s * sample_rate_hz as f64;
-            vec![
+            let mut lines = vec![
                 format!(
                     "{}{} ms  ({} samples, stored)",
                     label_prefix("ref stored"),
@@ -873,7 +1014,9 @@ fn reference_stored_latency_lines(
                     format_samples(samples),
                 ),
                 measured_line(&m.measured_at, report_timestamp_utc),
-            ]
+            ];
+            lines.extend(enumeration_lines(m.enumeration.as_ref(), ref_delta_agrees));
+            lines
         }
         Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("ref stored", reason),
         None => {
@@ -979,29 +1122,33 @@ fn arrival_check_lines(
 /// same-capture corroboration never ran) gets a second, 16-space-indented
 /// continuation line naming that (codex-qa on PR #477): otherwise an
 /// unverified flight time prints identically to a checked one.
+///
+/// #461: a flight time over a stored τ whose device enumeration is anything
+/// but `same` gets `latency UNVERIFIED — see latency (below)` directly under
+/// the value, above the reference-check line — a reader who stops at
+/// `flight time` would otherwise miss a caveat two blocks down.
 fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::ArrivalCheck;
     match (stats.flight_time_s, &stats.arrival_check) {
-        (Some(ft), ArrivalCheck::Unchecked { .. }) => {
+        (Some(ft), check) => {
             let samples = ft * stats.sample_rate_hz as f64;
-            vec![
-                format!(
-                    "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
-                    label_prefix("flight time"),
-                    format_samples_signed(samples),
-                    ft * 1000.0,
-                ),
-                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
-            ]
-        }
-        (Some(ft), _) => {
-            let samples = ft * stats.sample_rate_hz as f64;
-            vec![format!(
+            let mut lines = vec![format!(
                 "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
                 label_prefix("flight time"),
                 format_samples_signed(samples),
                 ft * 1000.0,
-            )]
+            )];
+            if stats.interface_latency_unverified() {
+                lines.push(format!(
+                    "{CONT_INDENT}latency UNVERIFIED \u{2014} see latency (below)"
+                ));
+            }
+            if matches!(check, ArrivalCheck::Unchecked { .. }) {
+                lines.push(format!(
+                    "{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"
+                ));
+            }
+            lines
         }
         (None, ArrivalCheck::PeriodShift(_)) => vec![format!(
             "{}withheld \u{2014} ref \u{394} is a period shift (below)",
@@ -1123,6 +1270,10 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>) {
         report.schema_version,
         stats.sample_rate_hz,
         &report.timestamp_utc,
+        matches!(
+            stats.arrival_check,
+            ac_core::measurement::report::ArrivalCheck::Agree
+        ),
     ) {
         println!("{line}");
     }
@@ -1420,17 +1571,17 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 mod tests {
     use super::{
         arrival_check_lines, arrival_source_line, captured_line, collect_sweep_frames,
-        deconvolution_failed_lines, flight_time_line, guard_outcome, interface_latency_lines,
-        ir_stimulus_lines, label_prefix, onset_gap_line, pre_impulse_snr_lines,
-        reference_latency_lines, reference_stored_latency_lines, report_files_lines,
-        short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
+        deconvolution_failed_lines, enumeration_lines, flight_time_line, guard_outcome,
+        interface_latency_lines, ir_stimulus_lines, label_prefix, onset_gap_line,
+        pre_impulse_snr_lines, reference_latency_lines, reference_stored_latency_lines,
+        report_files_lines, short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
         MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
-    use ac_core::shared::calibration::TauDisagreement;
+    use ac_core::shared::calibration::{EnumerationCheck, TauDisagreement};
     use std::collections::VecDeque;
 
     fn point(freq_hz: f64) -> serde_json::Value {
@@ -2018,6 +2169,7 @@ mod tests {
             period_size,
             output_port: "system:playback_0".into(),
             input_port: "system:capture_0".into(),
+            enumeration: Some(EnumerationCheck::Same),
         })
     }
 
@@ -2027,8 +2179,8 @@ mod tests {
     #[test]
     fn interface_latency_lines_print_the_measured_tau_or_the_reason() {
         let measured = measured_tau(1711.4 / 96_000.0, Some(1024));
-        let lines = interface_latency_lines(Some(&measured), 9, 96_000, "2026-09-16T11:30:40Z");
-        assert_eq!(lines.len(), 2);
+        let lines = interface_latency_lines(Some(&measured), 10, 96_000, "2026-09-16T11:30:40Z");
+        assert_eq!(lines.len(), 3);
         assert!(
             lines[0].starts_with(&label_prefix("latency")),
             "{:?}",
@@ -2043,6 +2195,10 @@ mod tests {
         assert_eq!(
             lines[1],
             format!("{CONT_INDENT}measured 2026-09-15T09:10:40Z, 26.3 h before capture")
+        );
+        assert_eq!(
+            lines[2],
+            format!("{CONT_INDENT}same device enumeration as this capture")
         );
 
         let refused = InterfaceLatency::Unavailable {
@@ -2070,14 +2226,172 @@ mod tests {
         );
     }
 
+    fn host_rebooted() -> EnumerationCheck {
+        EnumerationCheck::Crossed {
+            boundary: "host rebooted".into(),
+            since: Some("2026-09-16T13:41:52Z".into()),
+        }
+    }
+
+    fn re_enumerated(since: Option<&str>, nodes: &str) -> EnumerationCheck {
+        EnumerationCheck::Crossed {
+            boundary: format!("audio device re-enumerated; nodes: {nodes}"),
+            since: since.map(str::to_string),
+        }
+    }
+
+    fn with_check(check: Option<EnumerationCheck>) -> InterfaceLatency {
+        match measured_tau(1711.0 / 96_000.0, Some(256)) {
+            InterfaceLatency::Measured(m) => InterfaceLatency::Measured(MeasuredLatency {
+                enumeration: check,
+                ..m
+            }),
+            other => other,
+        }
+    }
+
+    /// #461 UX: every enumeration state under `latency`, in the order
+    /// measured → verdict → nodes → check, with the exact wording.
+    #[test]
+    fn interface_latency_lines_render_every_enumeration_state() {
+        let ts = "2026-09-16T13:52:10Z";
+        let tail = |check: Option<EnumerationCheck>| {
+            interface_latency_lines(Some(&with_check(check)), 10, 96_000, ts)[2..].to_vec()
+        };
+        let c = CONT_INDENT;
+        assert_eq!(
+            tail(Some(host_rebooted())),
+            vec![
+                format!("{c}UNVERIFIED \u{2014} host rebooted at 2026-09-16T13:41:52Z"),
+                format!("{c}check: re-run `ac calibrate` with loopback patched"),
+            ]
+        );
+        assert_eq!(
+            tail(Some(re_enumerated(
+                Some("2026-09-16T00:08:31Z"),
+                "/dev/fw1 new, /dev/snd/controlC1 re-created, /dev/fw2 gone"
+            ))),
+            vec![
+                format!(
+                    "{c}UNVERIFIED \u{2014} audio device re-enumerated at 2026-09-16T00:08:31Z"
+                ),
+                format!("{c}nodes: /dev/fw1 new, /dev/snd/controlC1 re-created,"),
+                format!("{c}       /dev/fw2 gone"),
+                format!("{c}check: re-run `ac calibrate` with loopback patched"),
+            ]
+        );
+        assert_eq!(
+            tail(Some(re_enumerated(None, "/dev/fw2 gone"))),
+            vec![
+                format!("{c}UNVERIFIED \u{2014} audio device re-enumerated after measurement"),
+                format!("{c}nodes: /dev/fw2 gone"),
+                format!("{c}check: re-run `ac calibrate` with loopback patched"),
+            ]
+        );
+        let not_recorded = vec![
+            format!("{c}UNVERIFIED \u{2014} entry predates enumeration tracking"),
+            format!("{c}check: re-run `ac calibrate` with loopback patched"),
+        ];
+        assert_eq!(tail(Some(EnumerationCheck::NotRecorded)), not_recorded);
+        assert_eq!(tail(None), not_recorded, "absent must never read as same");
+        assert_eq!(
+            tail(Some(EnumerationCheck::NotObservable {
+                reason: "cpal backend has no enumeration probe".into()
+            })),
+            vec![
+                format!("{c}UNVERIFIED \u{2014} device enumeration not observable"),
+                format!("{c}cpal backend has no enumeration probe"),
+            ]
+        );
+        assert_eq!(
+            tail(Some(EnumerationCheck::NotObservable {
+                reason: "jack backend: no /dev/snd/controlC* or /dev/fw* nodes; \
+                         check: /dev and /proc readable by the daemon user"
+                    .into()
+            })),
+            vec![
+                format!("{c}UNVERIFIED \u{2014} device enumeration not observable"),
+                format!("{c}jack backend: no /dev/snd/controlC* or /dev/fw* nodes"),
+                format!("{c}check: /dev and /proc readable by the daemon user"),
+            ]
+        );
+    }
+
+    /// #461 UX: `ref stored` crossed with an agreeing `ref Δ` points at that
+    /// evidence and drops `check:`; the cannot-tell states stay UNVERIFIED
+    /// even then, and `latency` is never cleared by `ref Δ`.
+    #[test]
+    fn reference_stored_crossed_with_an_agreeing_delta_points_at_the_delta() {
+        let ts = "2026-09-16T13:52:10Z";
+        let c = CONT_INDENT;
+        let stored = with_check(Some(host_rebooted()));
+        assert_eq!(
+            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, true)[2..].to_vec(),
+            vec![format!(
+                "{c}host rebooted at 2026-09-16T13:41:52Z \u{2014} see ref \u{394}"
+            )]
+        );
+        let stored = with_check(Some(re_enumerated(
+            Some("2026-09-16T00:08:31Z"),
+            "/dev/fw1 new",
+        )));
+        assert_eq!(
+            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, true)[2..].to_vec(),
+            vec![
+                format!(
+                    "{c}audio device re-enumerated at 2026-09-16T00:08:31Z \u{2014} see ref \u{394}"
+                ),
+                format!("{c}nodes: /dev/fw1 new"),
+            ]
+        );
+        assert_eq!(
+            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, false)[2],
+            format!("{c}UNVERIFIED \u{2014} audio device re-enumerated at 2026-09-16T00:08:31Z")
+        );
+        let unrecorded = with_check(Some(EnumerationCheck::NotRecorded));
+        assert!(
+            reference_stored_latency_lines(Some(&unrecorded), 10, 96_000, ts, true)[2]
+                .contains("UNVERIFIED"),
+            "no boundary was named for the Δ to answer"
+        );
+        assert_eq!(
+            enumeration_lines(Some(&EnumerationCheck::Same), true),
+            enumeration_lines(Some(&EnumerationCheck::Same), false)
+        );
+    }
+
+    /// #461 UX: the words the mechanism would suggest never reach operator
+    /// text, and nothing opaque (boot id, session) is printed.
+    #[test]
+    fn enumeration_lines_never_name_a_mechanism() {
+        for check in [
+            Some(host_rebooted()),
+            Some(re_enumerated(None, "/dev/fw2 gone")),
+            Some(EnumerationCheck::NotRecorded),
+            Some(EnumerationCheck::Same),
+            None,
+        ] {
+            for line in enumeration_lines(check.as_ref(), false) {
+                for word in ["mechanism", "SYT", "phase", "boot id", "session"] {
+                    assert!(!line.contains(word), "{line:?} names {word}");
+                }
+            }
+        }
+    }
+
     /// #359: the `ref stored` line mirrors `latency`, but for the
     /// reference pair, and its own schema-version threshold (v9, not v5).
     #[test]
     fn reference_stored_latency_lines_print_the_measured_tau_or_the_reason() {
         let measured = measured_tau(57.0 / 96_000.0, Some(64));
-        let lines =
-            reference_stored_latency_lines(Some(&measured), 9, 96_000, "2026-09-16T11:30:40Z");
-        assert_eq!(lines.len(), 2);
+        let lines = reference_stored_latency_lines(
+            Some(&measured),
+            10,
+            96_000,
+            "2026-09-16T11:30:40Z",
+            false,
+        );
+        assert_eq!(lines.len(), 3);
         assert!(
             lines[0].starts_with(&label_prefix("ref stored")),
             "{:?}",
@@ -2085,14 +2399,14 @@ mod tests {
         );
 
         assert_eq!(
-            reference_stored_latency_lines(None, 8, 96_000, "2026-09-16T11:30:40Z"),
+            reference_stored_latency_lines(None, 8, 96_000, "2026-09-16T11:30:40Z", false),
             vec![format!(
                 "{}not recorded (report predates schema v9)",
                 label_prefix("ref stored")
             )]
         );
         assert_eq!(
-            reference_stored_latency_lines(None, 9, 96_000, "2026-09-16T11:30:40Z"),
+            reference_stored_latency_lines(None, 9, 96_000, "2026-09-16T11:30:40Z", false),
             vec![format!(
                 "{}not looked up \u{2014} no reference configured",
                 label_prefix("ref stored")
@@ -2209,6 +2523,7 @@ mod tests {
             arrival_s: 88.0 / 96_000.0,
             arrival_check,
             flight_time_s,
+            interface_latency_enumeration: Some(EnumerationCheck::Same),
             pre_impulse_snr_db: 40.0,
             gate_window_s: 0.01,
             gate_f_low_hz: 100.0,
@@ -2279,6 +2594,59 @@ mod tests {
                 label_prefix("flight time")
             )]
         );
+    }
+
+    /// #461 UX: a flight time over a non-`same` stored τ carries
+    /// `latency UNVERIFIED — see latency (below)` directly under the value,
+    /// above the reference-check line. A v9 report (no check) is flagged.
+    #[test]
+    fn flight_time_line_flags_an_unverified_latency_above_the_reference_line() {
+        let c = CONT_INDENT;
+        let value = format!(
+            "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
+            label_prefix("flight time")
+        );
+        let flagged = format!("{c}latency UNVERIFIED \u{2014} see latency (below)");
+        for check in [
+            None,
+            Some(EnumerationCheck::NotRecorded),
+            Some(EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: None,
+            }),
+        ] {
+            let mut stats = stats_with(
+                Some(88.0 / 96_000.0),
+                ArrivalCheck::Unchecked {
+                    reason: String::new(),
+                },
+            );
+            stats.interface_latency_enumeration = check.clone();
+            assert_eq!(
+                flight_time_line(&stats),
+                vec![
+                    value.clone(),
+                    flagged.clone(),
+                    format!("{c}reference check not run \u{2014} see ref \u{394}"),
+                ],
+                "{check:?}"
+            );
+            stats.arrival_check = ArrivalCheck::Agree;
+            assert_eq!(
+                flight_time_line(&stats),
+                vec![value.clone(), flagged.clone()],
+                "{check:?}"
+            );
+        }
+        // Withheld: nothing to qualify.
+        let mut withheld = stats_with(
+            None,
+            ArrivalCheck::Unchecked {
+                reason: String::new(),
+            },
+        );
+        withheld.interface_latency_enumeration = None;
+        assert_eq!(flight_time_line(&withheld).len(), 1);
     }
 
     /// codex-qa on PR #477: a `Some` flight time alongside
@@ -2437,15 +2805,53 @@ mod tests {
                 line.chars().count()
             );
         }
-        for line in
-            reference_stored_latency_lines(Some(&long_refusal), 9, 96_000, "2026-09-16T11:30:40Z")
-        {
+        for line in reference_stored_latency_lines(
+            Some(&long_refusal),
+            9,
+            96_000,
+            "2026-09-16T11:30:40Z",
+            false,
+        ) {
             assert!(
                 line.chars().count() <= 80,
                 "line {:?} runs to {} columns",
                 line,
                 line.chars().count()
             );
+        }
+
+        // #461: every enumeration verdict, at the widest node list and
+        // reason the UX pass measured.
+        for check in [
+            Some(EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: Some("2026-09-16T13:41:52Z".into()),
+            }),
+            Some(EnumerationCheck::Crossed {
+                boundary: "audio device re-enumerated; nodes: /dev/fw1 new, \
+                           /dev/snd/controlC1 re-created, /dev/snd/controlC12 re-created, \
+                           /dev/fw2 gone, /dev/fw10 gone"
+                    .into(),
+                since: Some("2026-09-16T00:08:31Z".into()),
+            }),
+            Some(EnumerationCheck::NotObservable {
+                reason: "jack backend: /proc/sys/kernel/random/boot_id unreadable; \
+                         check: /dev and /proc readable by the daemon user"
+                    .into(),
+            }),
+            Some(EnumerationCheck::NotRecorded),
+            None,
+        ] {
+            for agrees in [false, true] {
+                for line in enumeration_lines(check.as_ref(), agrees) {
+                    assert!(
+                        line.chars().count() <= 80,
+                        "line {:?} runs to {} columns",
+                        line,
+                        line.chars().count()
+                    );
+                }
+            }
         }
 
         // #359: the `ref Δ` block at the widest figures the UX pass

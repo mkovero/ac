@@ -10,10 +10,13 @@
 //!
 //! History is append-only and looked up by exact condition match
 //! ([`Calibration::tau_for`]) — never averaged, interpolated, or degraded
-//! to "closest".
+//! to "closest". Among several exact matches the lookup prefers one from the
+//! current device-enumeration epoch, then the newest (#461); the epoch is
+//! compared and reported, never used to refuse (see [`super::epoch`]).
 
 use serde::{Deserialize, Serialize};
 
+use super::epoch::{DeviceEpoch, EnumerationCheck};
 use super::Calibration;
 
 /// Conditions τ (interface round-trip latency) was measured under. τ is a
@@ -39,8 +42,8 @@ pub struct TauConditions {
 /// One τ measurement: the conditions it was taken under, the value, when,
 /// and how. Stored in [`Calibration::tau_history`] as an append-only list —
 /// entries are never overwritten or removed, so a stale value never
-/// silently replaces a good one; [`Calibration::tau_for`] picks among them
-/// by exact condition match.
+/// silently replaces a good one; [`Calibration::tau_for`] filters them by
+/// exact condition match and picks among the matches by epoch, then age.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TauEntry {
     pub conditions: TauConditions,
@@ -83,6 +86,25 @@ pub struct TauEntry {
     /// this field existed.
     #[serde(default)]
     pub reading_separation_s: Option<f64>,
+    /// The device-enumeration epoch this entry was measured in (#461).
+    /// `None` on an entry written before this field existed, which a lookup
+    /// reports as [`EnumerationCheck::NotRecorded`] — never as current.
+    #[serde(default)]
+    pub enumeration: Option<DeviceEpoch>,
+    /// Opaque identifier of the daemon session that measured this entry,
+    /// `"<pid>@<daemon started_at>"` (#461). JSON only; never printed.
+    /// `None` on entries written before this field existed.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+/// A τ entry that matched the requested conditions exactly, and how its
+/// device-enumeration epoch relates to the current one (#461). A non-`Same`
+/// check flags the value; it never refuses it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTau<'a> {
+    pub entry: &'a TauEntry,
+    pub check: EnumerationCheck,
 }
 
 /// Why an exact-match τ lookup missed. Names the delta to the nearest
@@ -305,8 +327,34 @@ impl Calibration {
     /// Exact-match τ lookup. Refuses rather than interpolating or falling
     /// back to "closest" — a stale τ is a silent-wrongness bug (issue
     /// #281), so a miss must say so and name the delta, not degrade.
-    pub fn tau_for(&self, cond: &TauConditions) -> Result<&TauEntry, Box<TauRefusal>> {
-        if let Some(hit) = self.tau_history.iter().find(|e| &e.conditions == cond) {
+    ///
+    /// Among several exact matches (#461): the newest entry whose epoch is
+    /// [`EnumerationCheck::Same`] as `current` wins; failing that, the newest
+    /// entry, carrying its non-`Same` check. "Newest" is `measured_at`, ties
+    /// broken by append order. The epoch never causes a refusal.
+    pub fn tau_for(
+        &self,
+        cond: &TauConditions,
+        current: &DeviceEpoch,
+    ) -> Result<ResolvedTau<'_>, Box<TauRefusal>> {
+        let matches: Vec<ResolvedTau<'_>> = self
+            .tau_history
+            .iter()
+            .filter(|e| &e.conditions == cond)
+            .map(|entry| ResolvedTau {
+                entry,
+                check: EnumerationCheck::of(entry.enumeration.as_ref(), current),
+            })
+            .collect();
+        // `max_by` keeps the last of equal elements, so append order breaks
+        // a `measured_at` tie in favour of the later entry.
+        fn newest(candidates: Vec<ResolvedTau<'_>>) -> Option<ResolvedTau<'_>> {
+            candidates
+                .into_iter()
+                .max_by(|a, b| a.entry.measured_at.cmp(&b.entry.measured_at))
+        }
+        let (same, other): (Vec<_>, Vec<_>) = matches.into_iter().partition(|r| r.check.is_same());
+        if let Some(hit) = newest(same).or_else(|| newest(other)) {
             return Ok(hit);
         }
         let mut nearest: Option<&TauEntry> = None;
@@ -360,14 +408,22 @@ pub(super) mod fixtures {
             agreement_count: 2,
             declared_latency_frames: None,
             reading_separation_s: None,
+            enumeration: None,
+            session: None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::epoch::fixtures::observed;
     use super::fixtures::{dummy_conditions, dummy_tau_entry};
     use super::*;
+
+    /// An epoch for tests that do not care which one it is.
+    fn any_epoch() -> DeviceEpoch {
+        observed("boot-a", &[("/dev/fw1", "2026-09-15T08:00:05Z")])
+    }
 
     #[test]
     fn tau_for_exact_match_hits() {
@@ -375,8 +431,10 @@ mod tests {
         let cond = dummy_conditions();
         cal.tau_history
             .push(dummy_tau_entry(cond.clone(), 0.0011931));
-        let hit = cal.tau_for(&cond).expect("exact match should hit");
-        assert!((hit.tau_s - 0.0011931).abs() < 1e-12);
+        let hit = cal
+            .tau_for(&cond, &any_epoch())
+            .expect("exact match should hit");
+        assert!((hit.entry.tau_s - 0.0011931).abs() < 1e-12);
     }
 
     #[test]
@@ -394,7 +452,7 @@ mod tests {
         requested.period_size = Some(256);
 
         let refusal = cal
-            .tau_for(&requested)
+            .tau_for(&requested, &any_epoch())
             .expect_err("period-size mismatch must refuse, not degrade");
         assert_eq!(refusal.differing_fields, vec!["period_size"]);
         assert_eq!(refusal.nearest.as_ref().unwrap().tau_s, 0.0011931);
@@ -416,10 +474,113 @@ mod tests {
     #[test]
     fn tau_for_refuses_with_no_nearest_when_history_is_empty() {
         let cal = Calibration::new(0, 0);
-        let refusal = cal.tau_for(&dummy_conditions()).unwrap_err();
+        let refusal = cal.tau_for(&dummy_conditions(), &any_epoch()).unwrap_err();
         assert!(refusal.nearest.is_none());
         assert!(refusal.differing_fields.is_empty());
         assert!(refusal.message().contains("no \u{3c4} history"));
+    }
+
+    /// #461 AC6, written against the rejected behaviour. Two entries under
+    /// identical conditions: the older measured in epoch E1 (1711 samples),
+    /// the newer in E2 (1743 samples) — pupu's test A values.
+    ///
+    /// The lookup this replaced was `tau_history.iter().find(..)`: it takes
+    /// the first-appended match, E1, whatever epoch is current. That is why
+    /// re-running `ac calibrate` after a reboot changed nothing `plot ir`
+    /// subtracted. The rejected pick is computed here and shown to be E1.
+    #[test]
+    fn tau_for_prefers_the_current_epoch_and_flags_a_crossed_one() {
+        let sr = 96_000.0;
+        let e1 = observed("boot-1", &[("/dev/fw2", "2026-09-15T08:00:05Z")]);
+        let e2 = observed("boot-2", &[("/dev/fw1", "2026-09-15T13:41:50Z")]);
+        let e3 = observed("boot-3", &[("/dev/fw1", "2026-09-16T00:08:31Z")]);
+        let cond = dummy_conditions();
+
+        let mut cal = Calibration::new(0, 0);
+        let mut older = dummy_tau_entry(cond.clone(), 1711.0 / sr);
+        older.measured_at = "2026-09-15T09:00:00Z".to_string();
+        older.enumeration = Some(e1.clone());
+        let mut newer = dummy_tau_entry(cond.clone(), 1743.0 / sr);
+        newer.measured_at = "2026-09-15T14:00:00Z".to_string();
+        newer.enumeration = Some(e2.clone());
+        cal.tau_history.push(older);
+        cal.tau_history.push(newer);
+
+        let rejected = cal
+            .tau_history
+            .iter()
+            .find(|e| e.conditions == cond)
+            .unwrap();
+        assert_eq!(rejected.enumeration.as_ref(), Some(&e1));
+
+        let now_e2 = cal.tau_for(&cond, &e2).unwrap();
+        assert_eq!(now_e2.check, EnumerationCheck::Same);
+        assert_eq!(now_e2.entry.enumeration.as_ref(), Some(&e2));
+        assert_ne!(now_e2.entry, rejected, "first-match would have used E1");
+
+        // Current epoch E3: nothing matches it, so the newest entry resolves
+        // and carries the crossed boundary — never `Same`.
+        let now_e3 = cal.tau_for(&cond, &e3).unwrap();
+        assert_eq!(now_e3.entry.enumeration.as_ref(), Some(&e2));
+        assert!(
+            matches!(now_e3.check, EnumerationCheck::Crossed { .. }),
+            "a stored τ from another epoch must not resolve silently: {:?}",
+            now_e3.check
+        );
+
+        // Current epoch E1: the older, same-epoch entry wins over the newer.
+        let now_e1 = cal.tau_for(&cond, &e1).unwrap();
+        assert_eq!(now_e1.check, EnumerationCheck::Same);
+        assert_eq!(now_e1.entry.enumeration.as_ref(), Some(&e1));
+    }
+
+    /// #461 AC7: within one epoch a τ resolves as before, with no flag; two
+    /// same-epoch entries resolve to the newer, and an equal `measured_at`
+    /// goes to the later-appended one.
+    #[test]
+    fn tau_for_within_one_epoch_is_same_and_picks_the_newest() {
+        let epoch = any_epoch();
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        for tau_s in [0.001, 0.002, 0.003] {
+            let mut e = dummy_tau_entry(cond.clone(), tau_s);
+            e.enumeration = Some(epoch.clone());
+            cal.tau_history.push(e);
+        }
+        cal.tau_history[0].measured_at = "2026-09-16T10:00:00Z".to_string();
+        let hit = cal.tau_for(&cond, &epoch).unwrap();
+        assert_eq!(hit.check, EnumerationCheck::Same);
+        assert_eq!(hit.entry.tau_s, 0.001, "newest measured_at wins");
+
+        cal.tau_history[0].measured_at = "2026-01-01T00:00:00Z".to_string();
+        let hit = cal.tau_for(&cond, &epoch).unwrap();
+        assert_eq!(hit.entry.tau_s, 0.003, "a tie goes to the later append");
+    }
+
+    /// #461 (d): an entry stored before tracking has no epoch and must never
+    /// read as current.
+    #[test]
+    fn tau_for_an_entry_without_an_epoch_is_not_recorded() {
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        cal.tau_history.push(dummy_tau_entry(cond.clone(), 0.001));
+        let hit = cal.tau_for(&cond, &any_epoch()).unwrap();
+        assert_eq!(hit.check, EnumerationCheck::NotRecorded);
+    }
+
+    /// A `cal.json` entry written before #461 has neither new key and still
+    /// loads.
+    #[test]
+    fn a_pre_461_entry_deserializes_with_no_epoch_or_session() {
+        let raw = r#"{
+            "conditions": {"device": 0, "backend": "jack", "sample_rate": 96000,
+                           "period_size": 256, "output_port": "a", "input_port": "b"},
+            "tau_s": 0.0178229, "measured_at": "2026-09-15T23:43:04Z",
+            "method": "farina_short_ess_v2", "agreement_count": 2
+        }"#;
+        let e: TauEntry = serde_json::from_str(raw).unwrap();
+        assert_eq!(e.enumeration, None);
+        assert_eq!(e.session, None);
     }
 
     #[test]
@@ -596,7 +757,9 @@ mod tests {
             .push(dummy_tau_entry(dummy_conditions(), 0.001));
         let mut wanted = dummy_conditions();
         wanted.period_size = Some(64);
-        let refusal = cal.tau_for(&wanted).expect_err("period size differs");
+        let refusal = cal
+            .tau_for(&wanted, &any_epoch())
+            .expect_err("period size differs");
         let msg = refusal.message();
         assert!(
             msg.contains("period_size (requested 64, stored 1024)"),

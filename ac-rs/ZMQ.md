@@ -121,7 +121,7 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 9`); the
+configured. Schema is versioned (currently `schema_version: 10`); the
 capture backend is archived at report top level. Example payload:
 
 ```json
@@ -129,7 +129,7 @@ capture backend is archived at report top level. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 9,
+    "schema_version": 10,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -1077,7 +1077,10 @@ Look up a stored calibration entry.
       "method":      "<string>",
       "agreement_count": <int>,  // #347: readings that agreed, from separate client lifecycles — agreement over the interval in `reading_separation_s`, not corroboration; see #363. Always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a two-lifecycle one
       "declared_latency_frames": <int> | null,  // #363: what the graph declared this path to be while the entry was measured. Not a τ and never subtracted from one — it carries jackd's unvalidated -I/-O. null on entries written before #363 *and* on backends that declare nothing; on disk those are indistinguishable
-      "reading_separation_s": <float> | null    // #363: wall-clock seconds between the two lifecycles' captures — the number that says what the agreement is worth, since the failure it guards persists over seconds. null on entries written before #363
+      "reading_separation_s": <float> | null,   // #363: wall-clock seconds between the two lifecycles' captures — the number that says what the agreement is worth, since the failure it guards persists over seconds. null on entries written before #363
+      "enumeration": <DeviceEpoch> | null,      // #461: stored — the device-enumeration epoch the entry was measured in (shape below). null on entries written before #461, which never read as current
+      "session":     "<pid>@<RFC3339>" | null,  // #461: stored — opaque id of the daemon session that measured it. Never printed. null before #461
+      "current_enumeration_check": <EnumerationCheck>  // #461: live, computed at reply time against the entry's backend's epoch now — not a stored field
     }
   ]   // always present, [] when no τ has ever been measured for this key
 }
@@ -1087,6 +1090,46 @@ Look up a stored calibration entry.
 ```json
 { "ok": true, "found": false }
 ```
+
+**Device-enumeration epoch (#461).** A stored τ belongs to the device
+enumeration it was measured in, not only to its `conditions`: on the FF400
+rig τ read 1711, 1727 and 1743 samples across reboots and interface power
+cycles with every condition field matching. The epoch is a **flag, not part
+of the exact-match key** — a crossed boundary marks a stored τ unverified and
+never refuses it.
+
+```json
+// DeviceEpoch — tagged on "kind"
+{ "kind": "observed",
+  "host_boot_id":   "<string>",      // /proc/sys/kernel/random/boot_id
+  "host_booted_at": "<RFC3339>",     // btime from /proc/stat
+  "devices": [ { "node": "/dev/fw1", "created_at": "<RFC3339, sub-second>" } ] }  // every /dev/snd/controlC* and /dev/fw* node, mtime as creation time
+{ "kind": "not_observable", "reason": "<observation>[; check: <places>]" }
+
+// EnumerationCheck — tagged on "state"
+{ "state": "same" }
+{ "state": "crossed", "boundary": "<text>", "since": "<RFC3339, whole seconds>" | null }
+{ "state": "not_observable", "reason": "<text>" }
+{ "state": "not_recorded" }
+```
+
+`boundary` is daemon-written and printed verbatim: `host rebooted` when the
+boot id differs, or `audio device re-enumerated; nodes: <list>` when the boot
+is the same but the node set differs. `<list>` is comma-separated `<path>
+new`, `<path> re-created` (same path, different creation time), `<path>
+gone`, in that order; clients split on `"; nodes: "`. `since` is the boot time
+or the newest node creation; `null` when a node only disappeared. A stored
+`enumeration: null` compares as `not_recorded`; either side unobservable
+compares as `not_observable` (the current side's reason when both are).
+Only the `jack` backend (Linux) and `fake` have a probe; any other backend is
+`not_observable`. The fingerprint does not map a JACK port to a card, so an
+unrelated audio device changing also crosses — flagging a τ that did not move
+is the accepted direction. It cannot see a FireWire bus reset that keeps its
+node. The `fake` backend's node time is `AC_FAKE_DEVICE_EPOCH` (test hook).
+
+When several entries match the requested conditions exactly, the newest
+(`measured_at`, then append order) whose epoch is `same` as now resolves;
+failing that, the newest, carrying its non-`same` check.
 
 ---
 
@@ -1110,7 +1153,7 @@ Returns all stored calibration entries.
       "vrms_at_0dbfs_in":                  <float> | null,
       "mic_sensitivity_dbfs_at_94db_spl":  <float> | null,
       "mic_response":                      { ... } | null,
-      "tau_history":                       [ { ... } ]   // same shape as get_calibration, always present, [] when unmeasured
+      "tau_history":                       [ { ... } ]   // same shape as get_calibration, including the live current_enumeration_check per entry; always present, [] when unmeasured
     }
   ]
 }
@@ -1347,7 +1390,7 @@ has no reference configured.
   "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 9, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 10, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir", "backend": "jack",
@@ -1399,7 +1442,8 @@ conversion this used to also unlock). It is a tagged union on `state`:
 // rate, period size, port pair) by a prior `calibrate` run
 { "state": "measured", "tau_s": 0.0011931, "measured_at": "<RFC3339>",
   "method": "farina_short_ess", "backend": "jack", "sample_rate_hz": 48000,
-  "period_size": 1024, "output_port": "...", "input_port": "..." }
+  "period_size": 1024, "output_port": "...", "input_port": "...",
+  "enumeration": { "state": "same" } }   // #461, schema v10 — an EnumerationCheck (see get_calibration)
 
 // no exact match — never a nearest-neighbour or interpolated value
 { "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
@@ -1408,6 +1452,16 @@ conversion this used to also unlock). It is a tagged union on `state`:
 A reader must not subtract τ from the arrival when `state` is
 `unavailable`: the arrival still contains the uncorrected interface
 latency, which at 48 kHz is routinely tens of samples of phantom path.
+
+`enumeration` (schema v10, #461) is how the stored τ's device-enumeration
+epoch related to this capture's, sampled once after the engine started and
+used for both `interface_latency` and `reference_stored_latency`. It is
+frozen at capture and never recomputed. Anything but `same` flags the value —
+it is still `measured`, and `IrStats::flight_time_s` is still produced, but
+every surface that prints the flight time says the latency is unverified. An
+absent field (a report before v10) reads as `not_recorded`, never as `same`.
+A `same` is not proof τ is unchanged: a FireWire bus reset that keeps its
+device node is invisible to the check.
 
 `reference_latency` (schema v7, #460) is τ of the **reference loopback pair**,
 read from the reference leg captured in this same run under `calibrate`'s
@@ -1877,12 +1931,14 @@ reading either.
   "in_state":             "measured" | "unchanged" | "absent",
   "tau_state":            "measured" | "not_measured_low_snr" | "not_measured_window_edge"
                            | "error" | "disagree_period_shift" | "disagree_other"
-                           | "refused_xrun" | "disagree_declared_latency",
+                           | "refused_xrun" | "disagree_declared_latency"
+                           | "refused_enumeration_changed",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
   "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2. Agreement over `tau_reading_separation_s`, not corroboration — see #363 and the state table below
-  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
+  "tau_enumeration":      <DeviceEpoch>,   // #461: the device-enumeration epoch the stored entry belongs to (shape under get_calibration) — present only when tau_state == "measured"
+  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun / refused_enumeration_changed)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
   "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
   "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
@@ -1892,7 +1948,7 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", "disagree_other", or "disagree_declared_latency"
-  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, and on not_measured_window_edge when the refusing lifecycle had no xrun (#494: that lifecycle's own value); absent on error
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_* / refused_enumeration_changed, and on not_measured_window_edge when the refusing lifecycle had no xrun (#494: that lifecycle's own value); absent on error and refused_xrun
   "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
   "tau_snr_below_threshold": <bool>,       // #494: whether the refused peak also failed the SNR gate, computed by the daemon — present only on not_measured_window_edge, and only together with the SNR pair
   "tau_refused_reading":    <int>,         // #494: which lifecycle refused, 1 or 2 — present on not_measured_low_snr and not_measured_window_edge
@@ -1952,6 +2008,7 @@ still-unity-keyed decision.
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
 | `disagree_declared_latency` | the two lifecycles' `tau_reading{1,2}_declared_frames` differed (#363) — the graph's own account of the path moved between two readings of an unchanged graph, so the readings agreeing proves nothing. Compared as exact integer frames, no tolerance: these are counts the graph asserts, not measurements. Checked *after* `refused_xrun` and *before* the readings are compared. Nothing is stored. **This does not detect the failure #363 documents** — a shift the graph never declares stays invisible, and no reachable rig currently reproduces it; what this state catches is the subset that announces itself. |
+| `refused_enumeration_changed` | the device-enumeration epoch (#461, see `get_calibration`) sampled before reading 1's capture differed from the one sampled after reading 2's — a device boundary fell inside the run, so the two readings need not describe one epoch and their agreement proves nothing. Checked directly *after* `refused_xrun` and *before* `disagree_declared_latency` and the comparison. Carries the readings, xrun counts, declared frames, separation and the SNR pair; no `tau_error`. Nothing is stored. The two samples are compared as `get_calibration`'s check compares them — boot id, then the device-node map; the reported boot time alone never separates them. A daemon that survived the run cannot have seen a host reboot, so between two observed samples this only ever reflects a device-node change; it also fires when the probe was observable for one sample and not the other. |
 | `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. An xrun-crossed lifecycle still runs the edge check, so it can end the run as `not_measured_window_edge` (without the SNR pair) before the second lifecycle runs; that state does not mention the xrun. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
@@ -1966,7 +2023,8 @@ never fire on that backend — any disagreement there is `disagree_other`).
 
 `tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
 every state where at least one lifecycle reached deconvolution
-(`measured`, `not_measured_low_snr`, `disagree_*`), and on
+(`measured`, `not_measured_low_snr`, `disagree_*`,
+`refused_enumeration_changed`), and on
 `not_measured_window_edge` when the refusing lifecycle had no xrun (#494;
 there they are that lifecycle's own values, not the worse of two, and
 `tau_snr_below_threshold` travels with them), absent on `error`
@@ -2001,14 +2059,14 @@ rounding/period-multiple logic itself.
 scoped to the `measure_tau` call specifically (sweep synthesis + the
 `play_and_capture` I/O + deconvolve), not the whole `start`..`stop` span.
 Present exactly when the matching `tau_reading{1,2}_s` is, always as a
-concrete integer including 0, on `measured` / `disagree_*` / `refused_xrun`
-alike — an old daemon has none of these fields, and a client must not read
+concrete integer including 0, on `measured` / `disagree_*` / `refused_xrun` /
+`refused_enumeration_changed` alike — an old daemon has none of these fields, and a client must not read
 their absence on an old frame as "zero", only as "unknown". A nonzero
 value on either reading always yields `refused_xrun` regardless of what
 the two readings' comparison would otherwise have said (dispatch checks
 the xrun counts before consulting `compare_tau_readings`'s result), so
-`tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured` or
-one of the `disagree_*` states.
+`tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured`,
+`refused_enumeration_changed`, or one of the `disagree_*` states.
 
 ---
 

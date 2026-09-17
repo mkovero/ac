@@ -2,6 +2,9 @@
 
 pub mod fake;
 
+/// Device-enumeration epoch probe, keyed by backend name (#461).
+pub mod epoch;
+
 pub(crate) mod drain_telemetry;
 
 pub(crate) mod rings;

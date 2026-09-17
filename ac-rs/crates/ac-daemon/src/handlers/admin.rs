@@ -3,7 +3,9 @@
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::Calibration;
+use std::collections::HashMap;
+
+use ac_core::shared::calibration::{Calibration, DeviceEpoch, EnumerationCheck, TauEntry};
 
 use crate::server::ServerState;
 
@@ -393,6 +395,28 @@ fn spool_dir_refusal(r: &ac_core::config::SpoolRejection) -> Value {
     })
 }
 
+/// `tau_history` as sent on the wire (#461): each stored entry verbatim,
+/// plus `current_enumeration_check` — how the entry's epoch relates to the
+/// one its backend is in *now*, computed at reply time. Named `current_*` so
+/// it cannot be mistaken for a stored field. The epoch is sampled once per
+/// backend per reply, never cached across replies.
+fn tau_history_with_live_check(history: &[TauEntry]) -> Vec<Value> {
+    let mut epochs: HashMap<&str, DeviceEpoch> = HashMap::new();
+    history
+        .iter()
+        .map(|entry| {
+            let backend = entry.conditions.backend.as_str();
+            let current = epochs
+                .entry(backend)
+                .or_insert_with(|| crate::audio::epoch::current_epoch(backend));
+            let check = EnumerationCheck::of(entry.enumeration.as_ref(), current);
+            let mut v = json!(entry);
+            v["current_enumeration_check"] = json!(check);
+            v
+        })
+        .collect()
+}
+
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
     let (cfg_out, cfg_in) = {
         let cfg = state.cfg.lock().unwrap();
@@ -422,7 +446,7 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
             "ref_dbfs":                          cal.ref_dbfs,
             "mic_sensitivity_dbfs_at_94db_spl":  cal.mic_sensitivity_dbfs_at_94db_spl,
             "mic_response":                      cal.mic_response,
-            "tau_history":                       cal.tau_history,
+            "tau_history":                       tau_history_with_live_check(&cal.tau_history),
         }),
     }
 }
@@ -440,7 +464,7 @@ pub fn list_calibrations(_state: &ServerState) -> Value {
                         "vrms_at_0dbfs_in":                  c.vrms_at_0dbfs_in,
                         "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
                         "mic_response":                      c.mic_response,
-                        "tau_history":                       c.tau_history,
+                        "tau_history":                       tau_history_with_live_check(&c.tau_history),
                     })
                 })
                 .collect();

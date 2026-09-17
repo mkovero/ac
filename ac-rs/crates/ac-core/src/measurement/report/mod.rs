@@ -112,7 +112,15 @@ pub use provenance::{
 ///   documents for `calibrate` — `plot_ir` had no equivalent corroboration
 ///   at all. Absent on v1-v8 reports and whenever no reference is
 ///   configured, which reads as [`ArrivalCheck::Unchecked`].
-pub const SCHEMA_VERSION: u32 = 9;
+/// - v10: `MeasuredLatency` gains optional `enumeration: EnumerationCheck`,
+///   in both `interface_latency` and `reference_stored_latency` — how the
+///   stored τ's device-enumeration epoch related to this capture's, frozen
+///   at capture (#461). A stored τ re-picks by whole SYT-interval steps
+///   across a reboot or interface power cycle with every `TauConditions`
+///   field matching, so a crossed boundary flags the value; it never
+///   refuses it. Absent on v1-v9 reports, which readers treat as
+///   `not_recorded`, never as `same`.
+pub const SCHEMA_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -239,7 +247,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 9"));
+        assert!(json.contains("\"schema_version\": 10"));
     }
 
     #[test]
@@ -263,7 +271,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 9"));
+            assert!(json.contains("\"schema_version\": 10"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

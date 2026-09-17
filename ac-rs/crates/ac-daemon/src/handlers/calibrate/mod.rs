@@ -194,6 +194,8 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let cal_reply_tx = state.cal_reply_tx.clone();
+    // #461: which daemon session measured a stored τ. Opaque, JSON only.
+    let session = format!("{}@{}", std::process::id(), state.started_at);
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
         // Open both directions: output for the reference tone, input so
@@ -349,7 +351,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         if out_state == "measured" || in_state == "measured" {
             cal.ref_dbfs = ref_dbfs;
         }
-        if let Some(entry) = tau_outcome.stored_entry(TAU_METHOD) {
+        if let Some(entry) = tau_outcome.stored_entry(TAU_METHOD, &session) {
             cal.tau_history.push(entry);
         }
         let save_err = cal.save(None).err().map(|e| e.to_string());

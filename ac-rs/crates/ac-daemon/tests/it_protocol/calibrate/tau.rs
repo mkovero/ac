@@ -63,6 +63,12 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
     // rule), and does not take the refused_xrun path.
     assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
     assert_eq!(done["tau_reading2_xruns"], json!(0), "frame: {done}");
+    // #461: a measured τ names the device-enumeration epoch it belongs to.
+    assert_eq!(
+        done["tau_enumeration"]["kind"],
+        json!("observed"),
+        "frame: {done}"
+    );
 }
 
 /// #368: the pre-attempt `is_loopback` level gate is gone — τ is refused
@@ -659,5 +665,21 @@ fn calibrate_cheap_refresh_still_measures_tau() {
         history[0]["agreement_count"],
         json!(2),
         "stored entry must record its corroboration count: {after}"
+    );
+    // #461: the entry records the epoch and session it was measured in, and
+    // the epoch is the one `cal_done` reported.
+    assert_eq!(
+        history[0]["enumeration"], done["tau_enumeration"],
+        "stored epoch must match the reported one: {after} / {done}"
+    );
+    assert_eq!(
+        history[0]["enumeration"]["kind"],
+        json!("observed"),
+        "{after}"
+    );
+    let session = history[0]["session"].as_str().expect("session stamped");
+    assert!(
+        session.contains('@'),
+        "session is <pid>@<started_at>: {session}"
     );
 }

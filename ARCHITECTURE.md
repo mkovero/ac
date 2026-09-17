@@ -146,3 +146,14 @@ M / S / I LKFS readouts surface as K-weighted dB SPL (`Mk` / `Sk` /
 `Ik` with `dB SPL` unit) while the R128 PASS / WARN / FAIL badge
 stays anchored on the raw integrated LKFS (the `-23 LKFS` target is
 independent of the absolute reference).
+
+Interface latency (τ, `calibration/tau.rs`) is stored separately in
+`tau_history` and resolved by exact `TauConditions` match. Its validity
+is also scoped to a **device epoch** (`calibration/epoch.rs`): host boot
+id plus the creation times of the `/dev/snd/controlC*` and `/dev/fw*`
+nodes, stamped on each entry by `ac calibrate`. The epoch is not part
+of the exact-match key and never causes a refusal: resolution prefers
+the newest same-epoch entry, and a stored τ from another epoch (or with
+no recorded epoch, or on a backend that cannot observe one) resolves
+with an `EnumerationCheck` that every τ-consuming output prints as
+UNVERIFIED. Turning that flag into a verification or refusal is #466.

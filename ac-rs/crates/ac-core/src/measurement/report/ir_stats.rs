@@ -8,7 +8,9 @@ use crate::measurement::sweep::{
     ir_peak, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick,
     WindowLimit,
 };
-use crate::shared::calibration::{compare_tau_readings, TauComparison, TauDisagreement};
+use crate::shared::calibration::{
+    compare_tau_readings, EnumerationCheck, TauComparison, TauDisagreement,
+};
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
 /// reported as failed rather than as a result (#376). Below this floor
@@ -172,6 +174,12 @@ impl MeasurementReport {
             }
             _ => None,
         };
+        // #461: the capture pair's stored-τ enumeration check, carried beside
+        // the flight time it qualifies. Read as frozen; never recomputed.
+        let interface_latency_enumeration = match &self.interface_latency {
+            Some(InterfaceLatency::Measured(m)) => m.enumeration.clone(),
+            _ => None,
+        };
 
         Some(IrStats {
             sample_rate_hz: *sample_rate_hz,
@@ -187,6 +195,7 @@ impl MeasurementReport {
             arrival_s,
             arrival_check,
             flight_time_s,
+            interface_latency_enumeration,
             pre_impulse_snr_db,
             gate_window_s,
             gate_f_low_hz,
@@ -522,6 +531,14 @@ pub struct IrStats {
     /// `ArrivalCheck::Unchecked` — the check did not run, which is not a
     /// reason to withhold a value it never disputed.
     pub flight_time_s: Option<f64>,
+    /// How the capture pair's stored τ — the one [`Self::flight_time_s`]
+    /// subtracts — related to this capture's device-enumeration epoch
+    /// (#461), copied from `interface_latency`. `None` when that is not a
+    /// measured τ, or when the report predates schema v10. A flag, not a
+    /// gate: the flight time is produced either way, and
+    /// [`Self::interface_latency_unverified`] says whether it must be
+    /// qualified.
+    pub interface_latency_enumeration: Option<EnumerationCheck>,
     /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
     /// no pre-impulse energy was measurable at all (silent floor).
     pub pre_impulse_snr_db: f64,
@@ -543,6 +560,20 @@ pub struct IrStats {
     /// the same verdict rather than each re-deriving their own rule from
     /// [`Self::pre_impulse_snr_db`].
     pub verdict: IrVerdict,
+}
+
+impl IrStats {
+    /// Whether [`Self::flight_time_s`] rests on a stored τ that was not
+    /// shown to belong to this capture's device enumeration (#461): any
+    /// check other than `Same`, including a missing one. `false` when no
+    /// flight time was produced — there is nothing to qualify.
+    pub fn interface_latency_unverified(&self) -> bool {
+        self.flight_time_s.is_some()
+            && !matches!(
+                self.interface_latency_enumeration,
+                Some(EnumerationCheck::Same)
+            )
+    }
 }
 
 /// Verdict on whether an [`IrStats`] peak is a trustworthy deconvolution
@@ -1740,6 +1771,56 @@ mod tests {
             Some(stats.arrival_s - 0.001),
             "Unchecked must not withhold a flight time it never disputed"
         );
+    }
+
+    // ─── #461: interface_latency_enumeration ─────────────────────────────
+
+    /// A crossed epoch flags the flight time and never withholds it — the
+    /// architect's "flag, not refuse" ruling. Every non-`Same` state flags,
+    /// including a v9 report that carries no check at all.
+    #[test]
+    fn a_non_same_enumeration_flags_the_flight_time_without_withholding_it() {
+        use crate::shared::calibration::EnumerationCheck;
+        let sr = 48_000u32;
+        let cases = [
+            (Some(EnumerationCheck::Same), false),
+            (
+                Some(EnumerationCheck::Crossed {
+                    boundary: "host rebooted".into(),
+                    since: None,
+                }),
+                true,
+            ),
+            (
+                Some(EnumerationCheck::NotObservable {
+                    reason: "cpal backend has no enumeration probe".into(),
+                }),
+                true,
+            ),
+            (Some(EnumerationCheck::NotRecorded), true),
+            (None, true),
+        ];
+        for (check, flagged) in cases {
+            let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+            r.interface_latency = Some(measured_tau_with_check(0.001, check.clone()));
+            let stats = r.ir_stats().unwrap();
+            assert_eq!(stats.interface_latency_enumeration, check);
+            assert_eq!(
+                stats.flight_time_s,
+                Some(stats.arrival_s - 0.001),
+                "{check:?} must not withhold the flight time"
+            );
+            assert_eq!(stats.interface_latency_unverified(), flagged, "{check:?}");
+        }
+    }
+
+    /// Nothing to qualify when no flight time exists.
+    #[test]
+    fn no_flight_time_is_never_flagged() {
+        let r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, None);
+        assert!(!stats.interface_latency_unverified());
     }
 }
 

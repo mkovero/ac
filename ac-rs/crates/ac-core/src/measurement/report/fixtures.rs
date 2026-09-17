@@ -216,7 +216,21 @@ pub(super) fn ir_report_with_custom_ir(
     r
 }
 
+/// A stored τ for the capture pair, resolved in the same enumeration epoch
+/// as the capture (#461) — the ordinary, unflagged case.
 pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
+    measured_tau_with_check(
+        tau_s,
+        Some(crate::shared::calibration::EnumerationCheck::Same),
+    )
+}
+
+/// [`measured_tau`] with an explicit frozen enumeration check; `None` is the
+/// v9 shape.
+pub(super) fn measured_tau_with_check(
+    tau_s: f64,
+    enumeration: Option<crate::shared::calibration::EnumerationCheck>,
+) -> InterfaceLatency {
     InterfaceLatency::Measured(MeasuredLatency {
         tau_s,
         measured_at: "2026-08-15T00:00:00Z".into(),
@@ -226,6 +240,7 @@ pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
         period_size: Some(1024),
         output_port: "out1".into(),
         input_port: "in1".into(),
+        enumeration,
     })
 }
 
@@ -257,6 +272,7 @@ pub(super) fn stored_reference_tau(tau_s: f64, period_size: Option<u32>) -> Inte
         period_size,
         output_port: "ref_out".into(),
         input_port: "ref_in".into(),
+        enumeration: Some(crate::shared::calibration::EnumerationCheck::Same),
     })
 }
 

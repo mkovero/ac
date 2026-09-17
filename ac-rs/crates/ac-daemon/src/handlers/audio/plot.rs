@@ -23,7 +23,7 @@ use ac_core::measurement::sweep::{
     LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
-use ac_core::shared::calibration::{Calibration, TauConditions};
+use ac_core::shared::calibration::{Calibration, DeviceEpoch, ResolvedTau, TauConditions};
 use ac_core::shared::emission_level::{
     DEFAULT_LEVEL_DBFS, DEFAULT_RAMP_START_DBFS, DEFAULT_RAMP_STOP_DBFS, MAX_EMISSION_DBFS,
 };
@@ -842,7 +842,15 @@ fn emit_spectrum_bands(
 /// gets recorded, so a reader can see why no distance was derived (#281,
 /// #283). A capture with no calibration at all is the same case as a
 /// calibration with no matching τ, and says so.
-fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLatency {
+///
+/// `epoch` is this capture's device-enumeration epoch (#461). The check
+/// against the resolved entry's epoch is frozen into the result as a flag;
+/// it never turns a match into a refusal.
+fn resolve_tau(
+    cal: Option<&Calibration>,
+    cond: &TauConditions,
+    epoch: &DeviceEpoch,
+) -> InterfaceLatency {
     let Some(cal) = cal else {
         return InterfaceLatency::Unavailable {
             reason: format!(
@@ -852,8 +860,8 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
             ),
         };
     };
-    match cal.tau_for(cond) {
-        Ok(e) => InterfaceLatency::Measured(MeasuredLatency {
+    match cal.tau_for(cond, epoch) {
+        Ok(ResolvedTau { entry: e, check }) => InterfaceLatency::Measured(MeasuredLatency {
             tau_s: e.tau_s,
             measured_at: e.measured_at.clone(),
             method: e.method.clone(),
@@ -862,6 +870,7 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
             period_size: e.conditions.period_size,
             output_port: e.conditions.output_port.clone(),
             input_port: e.conditions.input_port.clone(),
+            enumeration: Some(check),
         }),
         Err(refusal) => InterfaceLatency::Unavailable {
             reason: refusal.message(),
@@ -1067,6 +1076,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         }
         let sr = eng.sample_rate();
         let window_len = window_len.unwrap_or_else(|| ir_default_window_len(sr));
+        // #461: the device-enumeration epoch this capture runs in, sampled
+        // once, after `start`, and used for both τ lookups below so the
+        // capture pair and the reference pair are judged against one epoch.
+        let epoch = crate::audio::epoch::current_epoch(eng.backend_name());
 
         // τ (#281) resolved here, while the engine is live: `period_size()`
         // and `backend_name()` are part of the exact-match key, and a τ
@@ -1084,6 +1097,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 output_port: tau_out_port,
                 input_port: tau_in_port,
             },
+            &epoch,
         ));
 
         // #359: τ `calibrate` has on file for the *reference* pair, looked
@@ -1105,6 +1119,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                     output_port: ref_out_port.clone().unwrap_or_else(|| out_port.clone()),
                     input_port: ref_in.to_string(),
                 },
+                &epoch,
             )
         });
 
