@@ -234,9 +234,8 @@ impl SessionPlan {
                 .filter(|c| c.vrms_at_0dbfs_in.is_some())
                 .map(|c| recorded.voltage(c).verdict)
         };
-        let gated_for = |ch: u32| {
-            crate::handlers::checks::gated(cal_for(ch).cloned(), check_for(ch).as_ref())
-        };
+        let gated_for =
+            |ch: u32| crate::handlers::checks::gated(cal_for(ch).cloned(), check_for(ch).as_ref());
         let pair_ctx: Vec<PairCtx> = pairs
             .iter()
             .enumerate()

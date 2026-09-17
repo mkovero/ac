@@ -171,6 +171,22 @@ mod tests {
     }
 
     #[test]
+    fn test_calibrate_check() {
+        for line in ["calibrate check", "cal check", "c CHECK"] {
+            let p = parse(&args(line)).unwrap();
+            assert!(
+                matches!(p.cmd, CommandKind::CalibrateCheck),
+                "{line}: {:?}",
+                p.cmd
+            );
+        }
+        // No abbreviation expands to `check`, and `check` expands to
+        // nothing else, so it cannot collide with `calibrate`'s own tokens.
+        assert_eq!(expand("check"), "check");
+        assert!(parse(&args("calibrate check output 1")).is_err());
+    }
+
+    #[test]
     fn test_calibrate_with_channels() {
         let p = parse(&args("calibrate output 3 input 1")).unwrap();
         match p.cmd {

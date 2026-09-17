@@ -60,7 +60,11 @@ pub struct RefusalsReadError {
 
 impl std::fmt::Display for RefusalsReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{SESSION_REFUSALS_FILE} unreadable: {}", self.observation)
+        write!(
+            f,
+            "{SESSION_REFUSALS_FILE} unreadable: {}",
+            self.observation
+        )
     }
 }
 
@@ -72,9 +76,7 @@ impl std::error::Error for RefusalsReadError {}
 pub fn read_session_refusals(path: &Path) -> Result<SessionRefusals, RefusalsReadError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SessionRefusals::default())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SessionRefusals::default()),
         Err(e) => {
             return Err(RefusalsReadError {
                 observation: e.to_string(),
@@ -530,8 +532,7 @@ mod tests {
         let path = dir.path().join(SESSION_REFUSALS_FILE);
         let corrupt = b"{\"voltage\": {tru";
         std::fs::write(&path, corrupt).unwrap();
-        write_session_refusals(&path, &SessionRefusals::default())
-            .expect_err("write must refuse");
+        write_session_refusals(&path, &SessionRefusals::default()).expect_err("write must refuse");
         assert_eq!(std::fs::read(&path).unwrap(), corrupt);
     }
 

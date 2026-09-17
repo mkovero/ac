@@ -30,10 +30,10 @@ use serde_json::{json, Value};
 use ac_core::config::Config;
 use ac_core::shared::calibration::session::{
     self, judge_latency, judge_voltage, merge_refusals, no_stored_latency_reason, propagate,
-    voltage_precheck, CheckCtx, CheckScope, CheckSource, Effective, JudgedIdentity, LatencyIdentity,
-    LayerVerdict, LoopbackRef, PersistError, PersistErrorKind, ProbeReading, ProbeStimulus,
-    RecordSet, SessionCheckRecord, SessionRefusals, StoredEntry, StoredTau, Target, ToneReading,
-    UnverifiedCause, VoltageIdentity, PROBE_CAPTURE_S, PROBE_FREQ_HZ, PROBE_SETTLE_S,
+    voltage_precheck, CheckCtx, CheckScope, CheckSource, Effective, JudgedIdentity,
+    LatencyIdentity, LayerVerdict, LoopbackRef, PersistError, PersistErrorKind, ProbeReading,
+    ProbeStimulus, RecordSet, SessionCheckRecord, SessionRefusals, StoredEntry, StoredTau, Target,
+    ToneReading, UnverifiedCause, VoltageIdentity, PROBE_CAPTURE_S, PROBE_FREQ_HZ, PROBE_SETTLE_S,
 };
 use ac_core::shared::calibration::{
     cal_key, default_session_refusals_path, read_session_refusals, write_session_refusals,
@@ -378,7 +378,10 @@ impl Recorded {
 }
 
 /// `cal` with its voltage scale withheld when `verdict` refuses it.
-pub(crate) fn gated(cal: Option<Calibration>, verdict: Option<&LayerVerdict>) -> Option<Calibration> {
+pub(crate) fn gated(
+    cal: Option<Calibration>,
+    verdict: Option<&LayerVerdict>,
+) -> Option<Calibration> {
     match (cal, verdict) {
         (Some(c), Some(v)) if v.is_refused() => Some(c.without_voltage()),
         (cal, _) => cal,
@@ -535,14 +538,17 @@ fn check_voltage(
     let cal = Calibration::load(loopback.out_ch, loopback.in_ch, None)
         .ok()
         .flatten();
-    let baseline: Option<LoopGainBaseline> = cal.as_ref().and_then(|c| c.loop_gain_baseline.clone());
+    let baseline: Option<LoopGainBaseline> =
+        cal.as_ref().and_then(|c| c.loop_gain_baseline.clone());
     let ctx = CheckCtx {
         key: loopback.key(),
         checked_at: rec.ran_at.clone(),
         source,
     };
     let verdict = match cal.as_ref().filter(|c| c.has_voltage()) {
-        None => LayerVerdict::unverified(UnverifiedCause::NotStored, "no voltage calibration stored"),
+        None => {
+            LayerVerdict::unverified(UnverifiedCause::NotStored, "no voltage calibration stored")
+        }
         Some(_) => match voltage_precheck(baseline.as_ref(), PROBE_DRIVE_DBFS, &ctx.key) {
             Some(v) => v,
             None => {
@@ -611,7 +617,10 @@ impl LevelUnit {
 /// does not otherwise load one (`generate`, `sweep_*`). An unreadable store
 /// refuses only when the level was typed in a physical unit — the one case
 /// where the scale decides what is emitted.
-pub(crate) fn gate_pair_cal(cfg: &Config, level_unit: LevelUnit) -> Result<Option<Calibration>, Value> {
+pub(crate) fn gate_pair_cal(
+    cfg: &Config,
+    level_unit: LevelUnit,
+) -> Result<Option<Calibration>, Value> {
     match super::super::load_calibration_or_refuse(
         cfg.output_channel,
         cfg.input_channel,
@@ -660,12 +669,17 @@ impl Gate {
         uses_tau: bool,
     ) -> Gate {
         let loopback = configured_loopback(cfg, state);
-        let needs_voltage = pair_cal.as_ref().is_some_and(Calibration::has_voltage)
-            || level_unit.physical();
-        let probe = match (&loopback, needs_voltage) {
+        let needs_voltage =
+            pair_cal.as_ref().is_some_and(Calibration::has_voltage) || level_unit.physical();
+        // A missing loopback is the reason whenever a layer is consumed:
+        // `plot_ir`'s latency verdict needs it even with no voltage in use.
+        let probe = match (&loopback, needs_voltage || uses_tau) {
             (_, false) => Err("no stored voltage scale in use".to_string()),
             (Ok(None), true) => Err(NO_LOOPBACK.to_string()),
             (Err(e), true) => Err(e.clone()),
+            (Ok(Some(_)), true) if !needs_voltage => {
+                Err("no stored voltage scale in use".to_string())
+            }
             (Ok(Some(l)), true) => Ok(l.clone()),
         };
         let tau_loopback = if uses_tau {
@@ -955,7 +969,13 @@ pub fn session_check(state: &ServerState, cmd: &Value) -> Value {
             epoch_for(fake, required.as_deref()),
         );
         if want_voltage {
-            check_voltage(&mut rec, fake, required.as_deref(), &lb, CheckSource::Explicit);
+            check_voltage(
+                &mut rec,
+                fake,
+                required.as_deref(),
+                &lb,
+                CheckSource::Explicit,
+            );
         }
         if want_latency && !stop.load(Ordering::Relaxed) {
             let amp = ac_core::shared::generator::dbfs_to_amplitude(PROBE_DRIVE_DBFS);
@@ -1100,7 +1120,10 @@ mod tests {
 
     #[test]
     fn level_unit_parses_and_refuses_unknown_units() {
-        assert_eq!(LevelUnit::from_request(&json!({})).unwrap(), LevelUnit::Dbfs);
+        assert_eq!(
+            LevelUnit::from_request(&json!({})).unwrap(),
+            LevelUnit::Dbfs
+        );
         assert_eq!(
             LevelUnit::from_request(&json!({"level_unit": "dbu"})).unwrap(),
             LevelUnit::Dbu

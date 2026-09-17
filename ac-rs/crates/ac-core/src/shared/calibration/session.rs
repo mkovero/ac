@@ -349,7 +349,10 @@ impl ProbeReading {
     pub fn summary(&self, drive_dbfs: f64) -> ProbeSummary {
         ProbeSummary {
             loop_gain_db: self.loop_gain_db(drive_dbfs),
-            total_peak_dbfs: self.total_peak_dbfs.is_finite().then_some(self.total_peak_dbfs),
+            total_peak_dbfs: self
+                .total_peak_dbfs
+                .is_finite()
+                .then_some(self.total_peak_dbfs),
             snr_db: self.snr_db(),
             snr_min_db: PROBE_SNR_MIN_DB,
             xruns: self.xruns_delta,
@@ -382,7 +385,9 @@ pub struct CheckCtx {
 fn no_baseline(key: &str) -> LayerVerdict {
     LayerVerdict::unverified(
         UnverifiedCause::NoBaseline,
-        format!("[{key}] has no loop-gain baseline; check: re-run `ac calibrate`, both legs measured"),
+        format!(
+            "[{key}] has no loop-gain baseline; check: re-run `ac calibrate`, both legs measured"
+        ),
     )
 }
 
@@ -895,8 +900,7 @@ impl Target<'_> {
     fn not_stored(&self) -> Option<LayerVerdict> {
         match self {
             Target::Voltage {
-                has_voltage: false,
-                ..
+                has_voltage: false, ..
             } => Some(LayerVerdict::unverified(
                 UnverifiedCause::NotStored,
                 "no voltage calibration stored",
@@ -905,7 +909,10 @@ impl Target<'_> {
             Target::Latency {
                 stored: Err(reason),
                 ..
-            } => Some(LayerVerdict::unverified(UnverifiedCause::NotStored, *reason)),
+            } => Some(LayerVerdict::unverified(
+                UnverifiedCause::NotStored,
+                *reason,
+            )),
             Target::Latency { .. } => None,
         }
     }
@@ -919,8 +926,7 @@ impl Target<'_> {
             },
             (
                 Target::Latency {
-                    stored: Ok((s, c)),
-                    ..
+                    stored: Ok((s, c)), ..
                 },
                 j,
             ) => j.latency.as_ref().is_some_and(|l| {
@@ -994,7 +1000,9 @@ fn latest<'a>(items: impl Iterator<Item = Candidate<'a>>) -> Option<Candidate<'a
 /// The noun a crossed epoch names, for `not_checked`.
 fn boundary_noun(check: &EnumerationCheck) -> &'static str {
     match check {
-        EnumerationCheck::Crossed { boundary, .. } if boundary.starts_with(BOUNDARY_HOST_REBOOTED) => {
+        EnumerationCheck::Crossed { boundary, .. }
+            if boundary.starts_with(BOUNDARY_HOST_REBOOTED) =>
+        {
             "reboot"
         }
         EnumerationCheck::Crossed { .. } => "re-enumeration",
@@ -1159,7 +1167,10 @@ pub fn effective(target: Target<'_>, set: RecordSet<'_>, scope: CheckScope<'_>) 
         ));
     }
     if let Some(reason) = stale {
-        return plain(LayerVerdict::unverified(UnverifiedCause::NotChecked, reason));
+        return plain(LayerVerdict::unverified(
+            UnverifiedCause::NotChecked,
+            reason,
+        ));
     }
     // A check from this process that ran on this value but did not measure.
     let attempted = set
@@ -1255,8 +1266,7 @@ mod tests {
         let n = 28_800;
         let fundamental = DRIVE + gain;
         // Invert `in_lobe_snr_db` for the requested SNR.
-        let noise =
-            fundamental - PEAK_TO_RMS_DB - snr_db + 10.0 * ((n as f64 / 2.0) / 1.5).log10();
+        let noise = fundamental - PEAK_TO_RMS_DB - snr_db + 10.0 * ((n as f64 / 2.0) / 1.5).log10();
         ProbeReading {
             capture: Ok(()),
             xruns_delta: 0,
@@ -1338,7 +1348,11 @@ mod tests {
 
     #[test]
     fn sign_e_a_delta_within_tolerance_is_verified() {
-        for d in [0.0, LOOP_GAIN_TOLERANCE_DB - 1e-9, -LOOP_GAIN_TOLERANCE_DB + 1e-9] {
+        for d in [
+            0.0,
+            LOOP_GAIN_TOLERANCE_DB - 1e-9,
+            -LOOP_GAIN_TOLERANCE_DB + 1e-9,
+        ] {
             let probe = tone_probe(BASE_GAIN + d, 90.0);
             let v = judge_voltage(Some(&baseline()), &probe, DRIVE, &ctx("out1_in1"));
             assert!(v.is_verified(), "Δ {d}: {v:?}");
@@ -1372,14 +1386,32 @@ mod tests {
             tau_s: 1711.0 / 96_000.0,
             measured_at: "2026-09-15T23:43:04Z".to_string(),
         };
-        let v = judge_latency(Ok(&stored), Ok(1711.0 / 96_000.0), 96_000, Some(256), &ctx("k"));
+        let v = judge_latency(
+            Ok(&stored),
+            Ok(1711.0 / 96_000.0),
+            96_000,
+            Some(256),
+            &ctx("k"),
+        );
         assert!(v.is_verified());
-        let v = judge_latency(Ok(&stored), Ok(1712.0 / 96_000.0), 96_000, Some(256), &ctx("k"));
+        let v = judge_latency(
+            Ok(&stored),
+            Ok(1712.0 / 96_000.0),
+            96_000,
+            Some(256),
+            &ctx("k"),
+        );
         assert!(v.is_refused());
         assert_eq!(v.evidence().unwrap().delta, 1.0);
         let v = judge_latency(Err("none"), Ok(0.0), 96_000, Some(256), &ctx("k"));
         assert_eq!(v.cause(), Some(UnverifiedCause::NotStored));
-        let v = judge_latency(Ok(&stored), Err("2 lifetimes disagree"), 96_000, None, &ctx("k"));
+        let v = judge_latency(
+            Ok(&stored),
+            Err("2 lifetimes disagree"),
+            96_000,
+            None,
+            &ctx("k"),
+        );
         assert_eq!(v.cause(), Some(UnverifiedCause::NotMeasured));
     }
 
@@ -1874,7 +1906,10 @@ mod tests {
     #[test]
     fn unverified_heads_are_chosen_by_cause() {
         use UnverifiedCause::*;
-        assert_eq!(unverified_head(NotMeasured, "xrun during probe"), "check did not measure");
+        assert_eq!(
+            unverified_head(NotMeasured, "xrun during probe"),
+            "check did not measure"
+        );
         assert_eq!(
             unverified_head(RefusalsUnreadable, &refusals_unreadable_reason("bad")),
             "session_refusals.json unreadable"
@@ -1883,7 +1918,10 @@ mod tests {
             unverified_head(NoBaseline, "[out1_in1] has no loop-gain baseline; check: x"),
             "[out1_in1] has no loop-gain baseline"
         );
-        assert_eq!(whole_seconds("2026-09-16T14:02:11.345Z"), "2026-09-16T14:02:11Z");
+        assert_eq!(
+            whole_seconds("2026-09-16T14:02:11.345Z"),
+            "2026-09-16T14:02:11Z"
+        );
         assert_eq!(whole_seconds("garbage"), "garbage");
     }
 
@@ -1929,7 +1967,10 @@ mod tests {
         assert_eq!(back, r);
         let mut ok = record("out1_in1", "2026-09-16T14:02:11.000Z", verified_v());
         ok.set_persisted(Ok(()));
-        assert!(serde_json::to_value(&ok).unwrap().get("persisted").is_none());
+        assert!(serde_json::to_value(&ok)
+            .unwrap()
+            .get("persisted")
+            .is_none());
     }
 
     // ─── constants ──────────────────────────────────────────────────────
@@ -1985,7 +2026,10 @@ mod tests {
         // Tone power over the noise power inside a 1.5-bin lobe of n/2 bins.
         let analytic = 10.0 * ((amp * amp / 2.0) / (sigma2 * 1.5 / (n as f64 / 2.0))).log10();
         let got = in_lobe_snr_db(r.fundamental_dbfs, r.noise_floor_dbfs, n);
-        assert!((got - analytic).abs() < 0.3, "got {got}, analytic {analytic}");
+        assert!(
+            (got - analytic).abs() < 0.3,
+            "got {got}, analytic {analytic}"
+        );
     }
 
     #[test]

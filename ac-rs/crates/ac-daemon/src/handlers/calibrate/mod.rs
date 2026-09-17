@@ -23,8 +23,7 @@ use ac_core::shared::calibration::LoopGainBaseline;
 
 use super::{
     busy_guard, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms, resolve_input,
-    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, wire,
-    CalReply,
+    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, wire, CalReply,
 };
 
 mod mic_curve;
@@ -200,7 +199,11 @@ fn apply_loop_gain(
         return LoopGainOutcome::Unchanged;
     }
     let had = baseline.take().is_some();
-    let removed_note = if had { "; earlier baseline removed" } else { "" };
+    let removed_note = if had {
+        "; earlier baseline removed"
+    } else {
+        ""
+    };
     for (name, state) in [("Output", out_state), ("Input", in_state)] {
         if state == "unchanged" {
             return LoopGainOutcome::Removed {
@@ -662,7 +665,10 @@ mod loop_gain_tests {
             -30.0,
         );
         assert_eq!(o.state(), "not_recorded");
-        assert!(o.reason().unwrap().starts_with("calibrated at -30.0 dBFS; session check drives -40.0 dBFS"));
+        assert!(o
+            .reason()
+            .unwrap()
+            .starts_with("calibrated at -30.0 dBFS; session check drives -40.0 dBFS"));
         assert_eq!(b, None);
 
         let mut noisy = clean();

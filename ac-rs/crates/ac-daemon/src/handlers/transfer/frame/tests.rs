@@ -72,8 +72,10 @@ fn cal_tags_carry_the_voltage_verdict_under_the_presence_rule() {
         via: None,
         delta_bound: None,
     };
-    let unverified =
-        LayerVerdict::unverified(UnverifiedCause::NoLoopback, "no reference loopback configured");
+    let unverified = LayerVerdict::unverified(
+        UnverifiedCause::NoLoopback,
+        "no reference loopback configured",
+    );
 
     // (i) refused: the scale is withheld and the verdict says why.
     let gated = stored.without_voltage();

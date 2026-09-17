@@ -1,4 +1,7 @@
-use super::{check_ack, get_cal, level_to_dbfs, print_level, print_level_range};
+use super::{
+    await_session_check, check_ack, consumes_voltage, get_cal, level_to_dbfs, level_unit,
+    print_consumer_check, print_level, print_level_range, voltage_scale, Scale,
+};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -21,20 +24,19 @@ pub fn run(
         _ => unreachable!(),
     };
 
-    let cal = get_cal(client);
-    let have_cal = cal.is_some();
-    if have_cal {
+    let mut cal = get_cal(client);
+    if cal.is_some() {
         println!("  Loaded calibration from server.");
     } else {
         println!("  No calibration found \u{2014} levels in dBFS only.");
     }
     let level_db = level_to_dbfs(level, cal.as_ref());
+    let consumes = consumes_voltage(cal.as_ref(), Some(level));
 
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
     println!("\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
-    io::print_freq_header(have_cal);
 
     let mut cmd_json = serde_json::json!({
         "cmd": "plot",
@@ -42,11 +44,20 @@ pub fn run(
         "stop_hz": stop_hz,
         "level_dbfs": level_db,
         "ppd": ppd,
+        "level_unit": level_unit(level),
     });
     if let Some(b) = bpo {
         cmd_json["bpo"] = serde_json::json!(b);
     }
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot");
+    // #466: the level block and the table wait for the session check; a
+    // refused scale leaves the table in dBFS.
+    let wait = await_session_check(client, "plot", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, Some(level), consumes).is_err() {
+        std::process::exit(1);
+    }
+    let have_cal = matches!(voltage_scale(cal.as_ref()), Some(Scale::Usable(..)));
+    io::print_freq_header(have_cal);
     print_level(
         ack.get("level_dbfs").and_then(|v| v.as_f64()),
         level_defaulted,
@@ -93,18 +104,22 @@ pub fn run_level(
         _ => unreachable!(),
     };
 
-    let cal = get_cal(client);
-    let have_cal = cal.is_some();
-    if have_cal {
+    let mut cal = get_cal(client);
+    if cal.is_some() {
         println!("  Loaded calibration from server.");
     } else {
         println!("  No calibration found \u{2014} levels in dBFS only.");
     }
     let start_db = level_to_dbfs(start, cal.as_ref());
     let stop_db = level_to_dbfs(stop, cal.as_ref());
+    let typed = if level_unit(start) != "dbfs" {
+        start
+    } else {
+        stop
+    };
+    let consumes = consumes_voltage(cal.as_ref(), Some(typed));
 
     println!("\n  Plot level: {freq:.0} Hz  |  {steps} steps");
-    io::print_freq_header(have_cal);
 
     let ack = check_ack(
         client.send_cmd(
@@ -114,11 +129,18 @@ pub fn run_level(
                 "start_dbfs": start_db,
                 "stop_dbfs": stop_db,
                 "steps": steps,
+                "level_unit": level_unit(typed),
             }),
             None,
         ),
         "plot_level",
     );
+    let wait = await_session_check(client, "plot_level", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, Some(typed), consumes).is_err() {
+        std::process::exit(1);
+    }
+    let have_cal = matches!(voltage_scale(cal.as_ref()), Some(Scale::Usable(..)));
+    io::print_freq_header(have_cal);
     print_level_range(
         ack.get("start_dbfs").and_then(|v| v.as_f64()),
         ack.get("stop_dbfs").and_then(|v| v.as_f64()),
@@ -179,7 +201,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             _ => unreachable!(),
         };
 
-    let cal = get_cal(client);
+    let mut cal = get_cal(client);
     let have_cal = cal.is_some();
     if have_cal {
         println!("  Loaded calibration from server.");
@@ -187,12 +209,20 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         println!("  No calibration found \u{2014} levels in dBFS only.");
     }
     let level_db = level_to_dbfs(level, cal.as_ref());
+    // #466: `plot ir` consumes a stored τ as well as a voltage scale.
+    let stored_tau = cal
+        .as_ref()
+        .and_then(|c| c.get("tau_history"))
+        .and_then(|h| h.as_array())
+        .is_some_and(|h| !h.is_empty());
+    let consumes = stored_tau || consumes_voltage(cal.as_ref(), Some(level));
 
     // Only typed fields go on the wire: the daemon applies `ac-core`'s
     // defaults to the rest and echoes what it accepted (#501).
     let mut cmd_json = serde_json::json!({
         "cmd": "plot_ir",
         "level_dbfs": level_db,
+        "level_unit": level_unit(level),
     });
     if let Some(v) = f1 {
         cmd_json["f1_hz"] = serde_json::json!(v);
@@ -238,13 +268,6 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         Some(d) => println!("  distance   {d} m"),
         None => println!("  distance   not given"),
     }
-    print_level(
-        ack.get("level_dbfs").and_then(|v| v.as_f64()),
-        level_defaulted,
-        ack.get("max_dbfs").and_then(|v| v.as_f64()),
-        cal.as_ref(),
-        true,
-    );
     let out_port = ack.get("out_port").and_then(|v| v.as_str());
     if let Some(p) = out_port {
         println!("  output     {p}");
@@ -261,7 +284,22 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     if let Some(p) = ack.get("ref_in_port").and_then(|v| v.as_str()) {
         println!("  ref in     {p}");
     }
-    println!("  Running IR measurement...\n");
+    println!("  Running IR measurement...");
+
+    // #466: `plot ir` reports its session check after analysis, before the
+    // result; the level block waits for it.
+    let wait = await_session_check(client, "plot_ir", &ack, 300_000);
+    if print_consumer_check(wait, &mut cal, Some(level), consumes).is_err() {
+        std::process::exit(1);
+    }
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
+    println!();
 
     let (ir_frame, report_frame, done_frame) = collect_ir(client, "plot_ir");
     print_ir_result(

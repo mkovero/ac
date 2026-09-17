@@ -367,7 +367,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             .zip(in_ports_worker.iter())
             .zip(channel_cals)
             .map(|((&channel, in_port), (cal, check))| {
-                ChannelState::new(channel, in_port.clone(), cal, check, sr, freq_hz, &ring_caps)
+                ChannelState::new(
+                    channel,
+                    in_port.clone(),
+                    cal,
+                    check,
+                    sr,
+                    freq_hz,
+                    &ring_caps,
+                )
             })
             .collect();
         let single_channel = channel_states.len() == 1;

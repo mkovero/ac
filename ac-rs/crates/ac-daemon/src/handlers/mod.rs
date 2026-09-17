@@ -48,13 +48,13 @@ pub use audio::{
     generate, generate_pink, monitor_spectrum, plot, plot_ir, plot_level, sweep_frequency,
     sweep_level,
 };
+/// #466: the session check's gate and recorded verdicts, for the handlers
+/// that consume a stored calibration layer.
+pub(crate) use calibrate::session_check as checks;
 pub use calibrate::{
     cal_reply, calibrate, calibrate_mic_curve, calibrate_spl, session_check,
     set_mic_correction_enabled, SessionChecks,
 };
-/// #466: the session check's gate and recorded verdicts, for the handlers
-/// that consume a stored calibration layer.
-pub(crate) use calibrate::session_check as checks;
 pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;

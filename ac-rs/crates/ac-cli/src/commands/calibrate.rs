@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 
 use super::{check_ack, get_cal, level_to_dbfs, print_level};
+use ac_core::shared::calibration::session::whole_seconds;
+use ac_core::shared::calibration::LayerVerdict;
+
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
 
@@ -101,6 +104,9 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             }
             print_cal_leg("Output", &data, "vrms_at_0dbfs_out", "out_state");
             print_cal_leg("Input", &data, "vrms_at_0dbfs_in", "in_state");
+            for line in loop_gain_lines(&data) {
+                println!("{line}");
+            }
             print_tau_leg(&data);
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 println!("  Note: {err}");
@@ -752,6 +758,13 @@ pub fn run_show(client: &mut AcClient) {
     }
 
     println!("\n  Stored calibrations  ({})\n", cal_path.display());
+    let headers = show_headers(&ack);
+    for line in &headers.lines {
+        println!("{line}");
+    }
+    if !headers.lines.is_empty() {
+        println!();
+    }
     for c in &cals {
         let key = c.get("key").and_then(|v| v.as_str()).unwrap_or("?");
         println!("  [{key}]");
@@ -775,7 +788,12 @@ pub fn run_show(client: &mut AcClient) {
             }
             None => println!("    Input:  not calibrated"),
         }
-        print_tau_history_leg(c);
+        for line in voltage_show_lines(c, &headers) {
+            println!("{line}");
+        }
+        for line in render_tau_history_leg_with(c, Some(&headers)) {
+            println!("{line}");
+        }
         println!();
     }
 }
@@ -791,16 +809,23 @@ pub fn run_show(client: &mut AcClient) {
 /// live session to imply them from context), and names any older entries
 /// rather than hiding them. Split from the pure [`render_tau_history_leg`]
 /// so the line content is testable without capturing stdout.
-fn print_tau_history_leg(c: &serde_json::Value) {
-    for line in render_tau_history_leg(c) {
-        println!("{line}");
-    }
+///
+/// The #499 rendering, without the #466 verdict lines; the tests of the
+/// stored-entry lines read it.
+#[cfg(test)]
+fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
+    render_tau_history_leg_with(c, None)
 }
 
-/// Pure line-rendering core of [`print_tau_history_leg`]. Returns each
-/// output line (indentation included) so the mapping from JSON to text is
-/// unit-testable.
-fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
+/// Pure line-rendering core of the `Delay:` leg. Returns each output line
+/// (indentation included) so the mapping from JSON to text is unit-testable.
+/// With `session`, the #466 latency verdict follows the live enumeration
+/// verdict, and a crossed boundary a measurement answered loses its
+/// `UNVERIFIED`.
+fn render_tau_history_leg_with(
+    c: &serde_json::Value,
+    session: Option<&ShowHeaders>,
+) -> Vec<String> {
     let history = c
         .get("tau_history")
         .and_then(|v| v.as_array())
@@ -852,10 +877,41 @@ fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
         "            ",
         false,
     ));
-    lines.extend(current_enumeration_lines(
-        entry.get("current_enumeration_check"),
-        "            ",
-    ));
+    let verdict = session.map(|_| {
+        c.get("session_check")
+            .filter(|b| b.is_object())
+            .map(|b| super::verdict_from(b.get("latency")))
+    });
+    let answered = matches!(&verdict, Some(Some(Some(v))) if v.is_decisive());
+    let enumeration =
+        current_enumeration_lines(entry.get("current_enumeration_check"), SHOW_INDENT);
+    if answered {
+        lines.extend(enumeration.into_iter().map(|l| {
+            l.replacen(
+                &format!("{SHOW_INDENT}{}", super::plot::UNVERIFIED),
+                SHOW_INDENT,
+                1,
+            )
+        }));
+    } else {
+        lines.extend(enumeration);
+    }
+    if let (Some(headers), Some(verdict)) = (session, verdict) {
+        let crossed = entry.get("current_enumeration_check").and_then(|v| {
+            serde_json::from_value::<ac_core::shared::calibration::EnumerationCheck>(v.clone()).ok()
+        });
+        let recorded = c
+            .get("session_check")
+            .and_then(|b| b.get("recorded"))
+            .and_then(|r| r.get("latency"));
+        lines.extend(show_verdict_lines(
+            verdict,
+            recorded,
+            ShowLayer::Latency,
+            headers,
+            crossed.as_ref(),
+        ));
+    }
     lines.push(format!(
         "            {}",
         lifetimes_clause(
@@ -909,6 +965,437 @@ fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
     }
 
     lines
+}
+
+/// Indent of `show`'s continuation lines.
+const SHOW_INDENT: &str = "            ";
+
+/// `cal_done`'s loop-gain line (#466 UX), under `Input:`. An older daemon
+/// sends no `loop_gain_state` and prints nothing.
+fn loop_gain_lines(data: &serde_json::Value) -> Vec<String> {
+    const IND: &str = "          ";
+    let Some(state) = data.get("loop_gain_state").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let db = data.get("loop_gain_db").and_then(|v| v.as_f64());
+    let reason = data
+        .get("loop_gain_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match (state, db) {
+        ("measured", Some(db)) => vec![format!(
+            "{IND}loop gain {db:+.2} dB   (measured, {:.0} Hz, {:.1} dBFS drive)",
+            data.get("loop_gain_freq_hz")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN),
+            data.get("loop_gain_drive_dbfs")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN),
+        )],
+        ("unchanged", Some(db)) => {
+            let at = data
+                .get("loop_gain_measured_at")
+                .and_then(|v| v.as_str())
+                .map(whole_seconds)
+                .unwrap_or_else(|| "date not reported".to_string());
+            vec![format!("{IND}loop gain {db:+.2} dB   (unchanged, {at})")]
+        }
+        ("unchanged", None) => vec![format!("{IND}loop gain none stored   (unchanged)")],
+        ("removed", _) => vec![
+            format!("{IND}loop gain removed \u{2014} {reason}"),
+            format!("{IND}check: re-run `ac calibrate` with both legs measured"),
+        ],
+        ("not_recorded", _) => {
+            let mut lines = vec![format!("{IND}loop gain not recorded")];
+            lines.extend(super::plot::indented_wrapped(reason, IND));
+            lines
+        }
+        (other, _) => vec![format!("{IND}loop gain {other}")],
+    }
+}
+
+/// The headers `show` prints once, above the first entry, and what the
+/// per-layer lines need to know about them.
+#[derive(Debug, Default)]
+struct ShowHeaders {
+    lines: Vec<String>,
+    /// The unreadable-record header printed: layers point up to it.
+    unreadable: bool,
+}
+
+/// Every record summary the entries carry.
+fn recorded_summaries(ack: &serde_json::Value) -> Vec<serde_json::Value> {
+    ack.get("calibrations")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("session_check").and_then(|b| b.get("recorded")))
+        .flat_map(|r| [r.get("voltage"), r.get("latency")])
+        .flatten()
+        .filter(|r| r.is_object())
+        .cloned()
+        .collect()
+}
+
+/// `show`'s headers (#466 UX): an unreadable refusal record, or refusals
+/// this daemon holds because a write failed.
+fn show_headers(ack: &serde_json::Value) -> ShowHeaders {
+    let records = recorded_summaries(ack);
+    let unsaved =
+        |r: &&serde_json::Value| r.get("persisted").and_then(|v| v.as_bool()) == Some(false);
+    let mut headers = ShowHeaders::default();
+    if let Some(observation) = ack
+        .get("refusal_record")
+        .and_then(|r| r.get("unreadable"))
+        .and_then(|v| v.as_str())
+    {
+        headers.unreadable = true;
+        headers.lines = unreadable_header(observation, records.iter().any(|r| unsaved(&r)));
+        return headers;
+    }
+    let newest_failed = records
+        .iter()
+        .filter(unsaved)
+        .filter(|r| {
+            r.get("persist_error")
+                .and_then(|e| e.get("kind"))
+                .and_then(|v| v.as_str())
+                == Some("write_failed")
+        })
+        .max_by(|a, b| {
+            let t = |r: &serde_json::Value| {
+                r.get("ran_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            t(a).cmp(&t(b))
+        });
+    if let Some(r) = newest_failed {
+        let detail = r
+            .get("persist_error")
+            .and_then(|e| e.get("detail"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        headers.lines =
+            vec!["  NOT SAVED \u{2014} writing session_refusals.json failed".to_string()];
+        headers
+            .lines
+            .extend(super::plot::indented_wrapped(detail, "    "));
+        headers.lines.extend([
+            "    refusals from this daemon are held in memory; a daemon exit".to_string(),
+            "    before a write succeeds drops them".to_string(),
+            "    check: free space and write permission beside cal.json".to_string(),
+        ]);
+    }
+    headers
+}
+
+/// The unreadable-record header, shared by `show` and `check`.
+fn unreadable_header(observation: &str, holds_refusals: bool) -> Vec<String> {
+    let mut lines = vec!["  UNVERIFIED \u{2014} session_refusals.json unreadable".to_string()];
+    lines.extend(super::plot::indented_wrapped(observation, "    "));
+    lines.push("    refusals recorded there cannot be shown".to_string());
+    if holds_refusals {
+        lines.push(
+            "    refusals from this daemon are held in memory until it is repaired".to_string(),
+        );
+    }
+    lines.push("    check: its permissions and contents, beside cal.json".to_string());
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShowLayer {
+    Voltage,
+    Latency,
+}
+
+/// `show`'s stored loop gain and voltage verdict (#466 UX), under `Input:`.
+/// Only for an entry with a stored voltage scale.
+fn voltage_show_lines(c: &serde_json::Value, headers: &ShowHeaders) -> Vec<String> {
+    let has_voltage = c.get("vrms_at_0dbfs_out").is_some_and(|v| v.is_number())
+        || c.get("vrms_at_0dbfs_in").is_some_and(|v| v.is_number());
+    if !has_voltage {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if let Some(b) = c.get("loop_gain_baseline").filter(|b| b.is_object()) {
+        lines.push(format!(
+            "{SHOW_INDENT}loop gain {:+.2} dB at {:.0} Hz, {}",
+            b.get("loop_gain_db")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN),
+            b.get("freq_hz")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN),
+            whole_seconds(b.get("measured_at").and_then(|v| v.as_str()).unwrap_or("?")),
+        ));
+    }
+    let block = c.get("session_check").filter(|b| b.is_object());
+    let verdict = block.map(|b| super::verdict_from(b.get("voltage")));
+    let recorded = block
+        .and_then(|b| b.get("recorded"))
+        .and_then(|r| r.get("voltage"));
+    lines.extend(show_verdict_lines(
+        verdict,
+        recorded,
+        ShowLayer::Voltage,
+        headers,
+        None,
+    ));
+    lines
+}
+
+/// One layer's recorded verdict in `show` (#466 UX): the state line, then
+/// the check it came from with its age. `verdict` is `None` for a daemon
+/// that sent no `session_check`, `Some(None)` for one that sent no verdict
+/// for this layer.
+fn show_verdict_lines(
+    verdict: Option<Option<LayerVerdict>>,
+    recorded: Option<&serde_json::Value>,
+    layer: ShowLayer,
+    headers: &ShowHeaders,
+    enumeration: Option<&ac_core::shared::calibration::EnumerationCheck>,
+) -> Vec<String> {
+    use ac_core::shared::calibration::session::{split_check, UnverifiedCause};
+    let i = SHOW_INDENT;
+    let Some(Some(verdict)) = verdict else {
+        return vec![format!(
+            "{i}UNVERIFIED \u{2014} daemon did not report a session check"
+        )];
+    };
+    let recorded = recorded.filter(|r| r.is_object());
+    let ran_at = recorded
+        .and_then(|r| r.get("ran_at"))
+        .and_then(|v| v.as_str());
+    let check_line = ran_at.map(|t| {
+        format!(
+            "{i}check {}, {}",
+            whole_seconds(t),
+            ac_core::shared::time::age_from_iso8601(t)
+        )
+    });
+    let mut lines = Vec::new();
+    match &verdict {
+        LayerVerdict::Verified(e) => {
+            lines.push(match layer {
+                ShowLayer::Voltage => format!(
+                    "{i}verified this session \u{2014} loop gain \u{394} {:+.2} dB",
+                    e.delta
+                ),
+                ShowLayer::Latency => format!(
+                    "{i}verified this session \u{2014} {:.0} samples {}, {:.0} stored",
+                    e.measured,
+                    if e.source == ac_core::shared::calibration::session::CheckSource::SameCapture {
+                        "this capture"
+                    } else {
+                        "measured"
+                    },
+                    e.stored
+                ),
+            });
+            lines.extend(check_line);
+        }
+        LayerVerdict::Refused {
+            evidence: e,
+            via,
+            delta_bound,
+        } => {
+            let le = if delta_bound.is_some() {
+                "\u{2264} "
+            } else {
+                ""
+            };
+            lines.push(match (via, layer) {
+                (Some(via), ShowLayer::Voltage) => format!(
+                    "{i}REFUSED \u{2014} via [{via}], whose loop gain moved {le}{:+.2} dB",
+                    e.delta
+                ),
+                (Some(via), ShowLayer::Latency) => format!(
+                    "{i}REFUSED \u{2014} via [{via}], whose \u{3c4} moved {:+.0} samples",
+                    e.delta
+                ),
+                (None, ShowLayer::Voltage) if delta_bound.is_some() => format!(
+                    "{i}REFUSED \u{2014} loop gain \u{394} \u{2264} {:+.2} dB, no tone returned",
+                    e.delta
+                ),
+                (None, ShowLayer::Voltage) => format!(
+                    "{i}REFUSED \u{2014} loop gain \u{394} {:+.2} dB, tolerance \u{b1}{:.2} dB",
+                    e.delta, e.tolerance
+                ),
+                (None, ShowLayer::Latency) => format!(
+                    "{i}REFUSED \u{2014} {:.0} samples measured, {:.0} stored (\u{394} {:+.0})",
+                    e.measured, e.stored, e.delta
+                ),
+            });
+            lines.extend(check_line);
+            if let Some(ac_core::shared::calibration::EnumerationCheck::Crossed {
+                boundary,
+                since,
+            }) = enumeration
+            {
+                let predates = match (since.as_deref(), ran_at) {
+                    (Some(since), Some(ran)) => ran < since,
+                    _ => false,
+                };
+                if predates {
+                    let noun = if boundary
+                        .starts_with(ac_core::shared::calibration::BOUNDARY_HOST_REBOOTED)
+                    {
+                        "reboot"
+                    } else {
+                        "re-enumeration"
+                    };
+                    lines.push(format!(
+                        "{i}refusal predates the {noun}; stands until a check passes"
+                    ));
+                }
+            }
+            if recorded
+                .and_then(|r| r.get("persisted"))
+                .and_then(|v| v.as_bool())
+                == Some(false)
+            {
+                let has_error = recorded
+                    .and_then(|r| r.get("persist_error"))
+                    .is_some_and(|e| e.is_object());
+                lines.push(if has_error {
+                    format!("{i}NOT SAVED \u{2014} refusal held in daemon memory (above)")
+                } else {
+                    format!(
+                        "{i}NOT SAVED \u{2014} refusal held in daemon memory \u{2014} not written"
+                    )
+                });
+            }
+        }
+        LayerVerdict::Unverified { cause, reason } => {
+            let (observation, _) = split_check(reason);
+            match cause {
+                UnverifiedCause::NotStored => {}
+                UnverifiedCause::NotChecked => lines.push(format!(
+                    "{i}not checked this session \u{2014} {observation}"
+                )),
+                UnverifiedCause::NotCovered => lines.push(format!(
+                    "{i}not checked this session \u{2014} not the loopback pair"
+                )),
+                UnverifiedCause::NotMeasured => {
+                    lines.push(format!(
+                        "{i}not checked this session \u{2014} check did not measure"
+                    ));
+                    lines.extend(super::plot::indented_wrapped(observation, i));
+                    lines.extend(check_line);
+                }
+                UnverifiedCause::NoBaseline => {
+                    lines.push(format!("{i}not checked \u{2014} no loop-gain baseline"))
+                }
+                UnverifiedCause::BaselineDriveDiffers => {
+                    let head = observation
+                        .split(", check at")
+                        .next()
+                        .unwrap_or(observation);
+                    lines.push(format!("{i}not checked \u{2014} {head}"));
+                }
+                UnverifiedCause::NoLoopback => lines.push(format!(
+                    "{i}not checked \u{2014} no reference loopback configured"
+                )),
+                UnverifiedCause::RefusalsUnreadable if headers.unreadable => lines.push(format!(
+                    "{i}UNVERIFIED \u{2014} refusal record unreadable (above)"
+                )),
+                UnverifiedCause::RefusalsUnreadable | UnverifiedCause::Unknown => {
+                    lines.extend(super::plot::indented_wrapped(
+                        &format!("UNVERIFIED \u{2014} {observation}"),
+                        i,
+                    ));
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// `ac calibrate check` (#466): run the session check on the reference
+/// loopback and exit 0 (all verified), 1 (any refused) or 2 (otherwise).
+pub fn run_check(client: &mut AcClient) {
+    std::process::exit(check_exit_code(client));
+}
+
+fn check_exit_code(client: &mut AcClient) -> i32 {
+    let Some(ack) = client.send_cmd(&serde_json::json!({"cmd": "session_check"}), None) else {
+        eprintln!("  error: no response from server (session_check)");
+        return 2;
+    };
+    println!();
+    if let Some(observation) = ack
+        .get("refusal_record")
+        .and_then(|r| r.get("unreadable"))
+        .and_then(|v| v.as_str())
+    {
+        for line in unreadable_header(observation, false) {
+            println!("{line}");
+        }
+        println!();
+    }
+    if ack.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let err = ack
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        if err.starts_with("busy") || ack.get("refusal_record").is_none() {
+            eprintln!("  error: {err}");
+        } else {
+            for line in super::not_run_lines(err) {
+                println!("{line}");
+            }
+        }
+        println!();
+        return 2;
+    }
+    loop {
+        let Some((topic, frame)) = client.recv_data(60_000) else {
+            eprintln!("  error: timeout waiting for the session check");
+            return 2;
+        };
+        let cmd = frame.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+        if cmd != "session_check" {
+            continue;
+        }
+        match topic.as_str() {
+            "session_check" => {
+                for line in super::session_block_lines(&frame, super::BlockKind::Explicit) {
+                    println!("{line}");
+                }
+                println!();
+                return check_status(&frame);
+            }
+            "error" => {
+                let msg = frame
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("error");
+                eprintln!("  error: {msg}");
+                return 2;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The exit status a `session_check` frame decides: 1 on any refusal, 0
+/// when every layer is verified, 2 otherwise (a script must not read
+/// "could not tell" as a pass).
+fn check_status(frame: &serde_json::Value) -> i32 {
+    let verdicts: Vec<LayerVerdict> = ["latency", "voltage"]
+        .iter()
+        .filter_map(|k| super::verdict_from(frame.get(*k)))
+        .collect();
+    if verdicts.iter().any(LayerVerdict::is_refused) {
+        1
+    } else if !verdicts.is_empty() && verdicts.iter().all(LayerVerdict::is_verified) {
+        0
+    } else {
+        2
+    }
 }
 
 /// `ac calibrate spl [input N] [output N]` — pistonphone-reference SPL.
@@ -1848,5 +2335,239 @@ mod tests {
                 line.chars().count()
             );
         }
+    }
+
+    // ─── #466 session check in `show`, `cal_done` and `check` ──────────
+
+    fn refused_voltage() -> serde_json::Value {
+        serde_json::json!({
+            "state": "refused", "measured": 2.42, "stored": -0.6, "delta": 3.02,
+            "tolerance": 0.1, "unit": "dB", "stored_at": "2026-09-15T23:43:04Z",
+            "checked_at": "2026-09-16T14:02:11Z", "source": "probe",
+        })
+    }
+
+    fn show_entry(voltage: serde_json::Value, recorded: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "key": "out1_in1",
+            "vrms_at_0dbfs_out": 3.4641,
+            "vrms_at_0dbfs_in": 3.4995,
+            "loop_gain_baseline": {"loop_gain_db": -0.6, "freq_hz": 1000.0,
+                "drive_dbfs": -40.0, "measured_at": "2026-09-15T23:43:04.500Z"},
+            "session_check": {
+                "voltage": voltage,
+                "latency": {"state": "unverified", "cause": "not_stored",
+                    "reason": "no stored latency for this pair"},
+                "recorded": {"voltage": recorded, "latency": null},
+            },
+        })
+    }
+
+    /// UX (d): the unreadable header wraps the widest observation at 80.
+    #[test]
+    fn show_unreadable_header_and_layer_line() {
+        let ack = serde_json::json!({
+            "ok": true,
+            "refusal_record": {"unreadable":
+                "invalid type: string \"x\", expected struct SessionCheckRecord at line 3 column 17"},
+            "calibrations": [],
+        });
+        let headers = show_headers(&ack);
+        assert!(headers.unreadable);
+        assert_eq!(
+            headers.lines,
+            vec![
+                "  UNVERIFIED \u{2014} session_refusals.json unreadable",
+                "    invalid type: string \"x\", expected struct SessionCheckRecord at line 3",
+                "    column 17",
+                "    refusals recorded there cannot be shown",
+                "    check: its permissions and contents, beside cal.json",
+            ]
+        );
+        let entry = show_entry(
+            serde_json::json!({"state": "unverified", "cause": "refusals_unreadable",
+                "reason": "session_refusals.json unreadable: expected value at line 1 column 1; check: its permissions and contents, beside cal.json"}),
+            serde_json::Value::Null,
+        );
+        let lines = voltage_show_lines(&entry, &headers);
+        assert_eq!(
+            lines,
+            vec![
+                "            loop gain -0.60 dB at 1000 Hz, 2026-09-15T23:43:04Z",
+                "            UNVERIFIED \u{2014} refusal record unreadable (above)",
+            ]
+        );
+        // Without the header (a mixed-version pair) the full reason prints.
+        let bare = voltage_show_lines(&entry, &ShowHeaders::default());
+        assert!(bare[1]
+            .starts_with("            UNVERIFIED \u{2014} session_refusals.json unreadable:"));
+        for line in headers.lines.iter().chain(&lines).chain(&bare) {
+            assert!(line.chars().count() <= 80, "{line:?}");
+        }
+    }
+
+    /// UX R4-5 in render form: a held refusal prints the header and the
+    /// per-layer line; once written (`persisted: true`) neither prints.
+    #[test]
+    fn show_not_saved_header_follows_persisted() {
+        let held = serde_json::json!({"id": "1-1", "ran_at": "2026-09-16T14:02:11.000Z",
+            "loopback": "out1_in1", "persisted": false,
+            "persist_error": {"kind": "write_failed", "detail": "No space left on device (os error 28)"}});
+        let entry = show_entry(refused_voltage(), held);
+        let ack = serde_json::json!({"ok": true, "refusal_record": "ok", "calibrations": [entry.clone()]});
+        let headers = show_headers(&ack);
+        assert_eq!(
+            headers.lines[0],
+            "  NOT SAVED \u{2014} writing session_refusals.json failed"
+        );
+        assert_eq!(
+            headers.lines[1],
+            "    No space left on device (os error 28)"
+        );
+        let lines = voltage_show_lines(&entry, &headers);
+        assert_eq!(
+            lines[1],
+            "            REFUSED \u{2014} loop gain \u{394} +3.02 dB, tolerance \u{b1}0.10 dB"
+        );
+        assert!(lines[2].starts_with("            check 2026-09-16T14:02:11Z, "));
+        assert_eq!(
+            lines[3],
+            "            NOT SAVED \u{2014} refusal held in daemon memory (above)"
+        );
+
+        let written = serde_json::json!({"id": "1-1", "ran_at": "2026-09-16T14:02:11.000Z",
+            "loopback": "out1_in1", "persisted": true});
+        let entry = show_entry(refused_voltage(), written);
+        let ack = serde_json::json!({"ok": true, "refusal_record": "ok", "calibrations": [entry.clone()]});
+        let headers = show_headers(&ack);
+        assert!(headers.lines.is_empty());
+        assert!(!voltage_show_lines(&entry, &headers)
+            .iter()
+            .any(|l| l.contains("NOT SAVED")));
+    }
+
+    /// A verified τ answers a crossed boundary: the boundary line loses its
+    /// `UNVERIFIED`; the verdict and its check follow.
+    #[test]
+    fn show_latency_verdict_answers_the_boundary() {
+        let mut c: serde_json::Value = serde_json::json!({
+            "key": "out1_in1",
+            "tau_history": [{
+                "conditions": {"device": 0, "backend": "jack", "sample_rate": 96000,
+                    "period_size": 256, "output_port": "a", "input_port": "b"},
+                "tau_s": 0.017_822_9, "measured_at": "2026-09-15T23:43:04Z",
+                "agreement_count": 2, "reading_separation_s": 0.435,
+                "current_enumeration_check": {"state": "crossed",
+                    "boundary": "host rebooted", "since": "2026-09-16T13:41:52Z"}
+            }],
+            "session_check": {
+                "latency": {"state": "verified", "measured": 1711.0, "stored": 1711.0,
+                    "delta": 0.0, "tolerance": 0.5, "unit": "samples",
+                    "stored_at": "x", "checked_at": "x", "source": "explicit"},
+                "recorded": {"latency": {"id": "1-2", "ran_at": "2026-09-16T14:02:11Z",
+                    "loopback": "out1_in1"}}
+            }
+        });
+        let headers = ShowHeaders::default();
+        let lines = render_tau_history_leg_with(&c, Some(&headers));
+        assert_eq!(
+            lines[3],
+            "            host rebooted at 2026-09-16T13:41:52Z"
+        );
+        assert_eq!(
+            lines[4],
+            "            verified this session \u{2014} 1711 samples measured, 1711 stored"
+        );
+        assert!(lines[5].starts_with("            check 2026-09-16T14:02:11Z, "));
+
+        c["session_check"]["latency"] = serde_json::json!({"state": "unverified",
+            "cause": "not_checked", "reason": "last check predates the reboot"});
+        let lines = render_tau_history_leg_with(&c, Some(&headers));
+        assert_eq!(
+            lines[3],
+            "            UNVERIFIED \u{2014} host rebooted at 2026-09-16T13:41:52Z"
+        );
+        assert_eq!(
+            lines[4],
+            "            not checked this session \u{2014} last check predates the reboot"
+        );
+
+        c.as_object_mut().unwrap().remove("session_check");
+        let lines = render_tau_history_leg_with(&c, Some(&headers));
+        assert_eq!(
+            lines[4],
+            "            UNVERIFIED \u{2014} daemon did not report a session check"
+        );
+    }
+
+    #[test]
+    fn cal_done_loop_gain_lines_match_ux() {
+        let lines = |v: serde_json::Value| loop_gain_lines(&v);
+        assert_eq!(
+            lines(
+                serde_json::json!({"loop_gain_state": "measured", "loop_gain_db": -0.6,
+                "loop_gain_freq_hz": 1000.0, "loop_gain_drive_dbfs": -40.0})
+            ),
+            vec!["          loop gain -0.60 dB   (measured, 1000 Hz, -40.0 dBFS drive)"]
+        );
+        assert_eq!(
+            lines(
+                serde_json::json!({"loop_gain_state": "unchanged", "loop_gain_db": -0.6,
+                "loop_gain_measured_at": "2026-09-15T23:43:04.123Z"})
+            ),
+            vec!["          loop gain -0.60 dB   (unchanged, 2026-09-15T23:43:04Z)"]
+        );
+        assert_eq!(
+            lines(serde_json::json!({"loop_gain_state": "unchanged", "loop_gain_db": null})),
+            vec!["          loop gain none stored   (unchanged)"]
+        );
+        assert_eq!(
+            lines(serde_json::json!({"loop_gain_state": "removed",
+                "loop_gain_reason": "Input unchanged, not measured now"})),
+            vec![
+                "          loop gain removed \u{2014} Input unchanged, not measured now",
+                "          check: re-run `ac calibrate` with both legs measured",
+            ]
+        );
+        assert_eq!(
+            lines(serde_json::json!({"loop_gain_state": "not_recorded",
+                "loop_gain_reason": "calibrated at -30.0 dBFS; session check drives -40.0 dBFS"})),
+            vec![
+                "          loop gain not recorded",
+                "          calibrated at -30.0 dBFS; session check drives -40.0 dBFS",
+            ]
+        );
+        assert!(
+            lines(serde_json::json!({})).is_empty(),
+            "an older daemon prints nothing"
+        );
+    }
+
+    #[test]
+    fn check_exit_status_never_reads_unknown_as_pass() {
+        let v = |state: &str| {
+            serde_json::json!({"state": state, "measured": 0.0, "stored": 0.0,
+            "delta": 0.0, "tolerance": 0.1, "unit": "dB", "stored_at": "x",
+            "checked_at": "x", "source": "explicit"})
+        };
+        let unv =
+            serde_json::json!({"state": "unverified", "cause": "not_measured", "reason": "x"});
+        assert_eq!(
+            check_status(&serde_json::json!({"voltage": v("verified"), "latency": v("verified")})),
+            0
+        );
+        assert_eq!(
+            check_status(&serde_json::json!({"voltage": v("refused"), "latency": v("verified")})),
+            1
+        );
+        assert_eq!(
+            check_status(&serde_json::json!({"voltage": unv, "latency": v("verified")})),
+            2
+        );
+        assert_eq!(
+            check_status(&serde_json::json!({"voltage": {"state": "future"}})),
+            2
+        );
+        assert_eq!(check_status(&serde_json::json!({})), 2);
     }
 }

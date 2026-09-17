@@ -475,6 +475,9 @@ pub enum CommandKind {
         input_channel: Option<u32>,
     },
     CalibrateShow,
+    /// `ac calibrate check` — run the session check on the reference
+    /// loopback now (#466). Exit status follows the verdicts.
+    CalibrateCheck,
     CalibrateSpl {
         output_channel: Option<u32>,
         input_channel: Option<u32>,
@@ -546,6 +549,24 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
     if verb == "calibrate" && args.first().map(|a| expand(a)) == Some("show") {
         return Ok(ParsedCommand {
             cmd: CommandKind::CalibrateShow,
+            show_plot: false,
+        });
+    }
+
+    // "ac calibrate check"
+    if verb == "calibrate"
+        && args
+            .first()
+            .is_some_and(|a| a.eq_ignore_ascii_case("check"))
+    {
+        if args.len() > 1 {
+            return Err(format!(
+                "calibrate check takes no arguments, got {:?}",
+                &args[1..]
+            ));
+        }
+        return Ok(ParsedCommand {
+            cmd: CommandKind::CalibrateCheck,
             show_plot: false,
         });
     }

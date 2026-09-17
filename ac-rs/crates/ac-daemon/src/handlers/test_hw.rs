@@ -12,8 +12,8 @@ use ac_core::shared::emission_level::{
 };
 
 use crate::audio::AudioEngine;
-use crate::handlers::mic;
 use crate::handlers::checks::{Gate, LevelUnit};
+use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
@@ -97,7 +97,14 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         Ok(u) => u,
         Err(e) => return e,
     };
-    let gate = Gate::plan(state, &cfg, "test_hardware", cal_ctx.clone(), level_unit, false);
+    let gate = Gate::plan(
+        state,
+        &cfg,
+        "test_hardware",
+        cal_ctx.clone(),
+        level_unit,
+        false,
+    );
     let mut gate_reply = json!({});
     gate.write_reply(&mut gate_reply);
     let mic_corr_enabled = state.mic_correction_enabled.clone();

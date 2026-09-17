@@ -275,7 +275,9 @@ mod tests {
     use super::super::Body;
     use super::*;
     use crate::measurement::report::MicResponseRef;
-    use crate::shared::calibration::session::{CheckSource, Evidence, UnverifiedCause, VerdictUnit};
+    use crate::shared::calibration::session::{
+        CheckSource, Evidence, UnverifiedCause, VerdictUnit,
+    };
 
     fn find<'a>(rows: &'a [Row], label: &str) -> Option<&'a Row> {
         rows.iter().find(|r| r.label == label)
