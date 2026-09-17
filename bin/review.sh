@@ -81,13 +81,17 @@ independent_review() {
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
     require_space "$wt"; mkdir -p "$WT_BASE"
-    git fetch -q origin "pull/$pr/head"
-    [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
+    # A private ref, not FETCH_HEAD: FETCH_HEAD belongs to the whole shared
+    # checkout, and any concurrent fetch rewrites it (2026-09-17: PR #522
+    # "changed while preparing review" while its head had not moved).
+    git_retry git fetch -q origin "+pull/$pr/head:refs/ac/review/pr-$pr"
+    [[ $(git rev-parse "refs/ac/review/pr-$pr") == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
     if [[ -n $recheck_base ]] && ! git merge-base --is-ancestor "$recheck_base" "$head" 2>/dev/null; then
       echo "<codex/qa> PR #$pr: $head does not descend from $recheck_base — full Claude QA needed." >&2
       return 3
     fi
     git worktree add --detach "$wt" "$head" >/dev/null
+    git update-ref -d "refs/ac/review/pr-$pr"   # the worktree now holds $head
     link_support "$wt"
     local rc=0
     local task
@@ -141,9 +145,9 @@ $gate_out"
     else
       echo "<codex/qa> PR #$pr: gate refused in $wt" >&2; rc=1
     fi
-    git worktree remove --force "$wt" || true
-    # The worktree is per-pass; so is its target. Seeding makes the next one cheap.
-    rm -rf "$(target_for "$wt")"
+    # The worktree is per-pass; so is its target (remove_worktree takes both).
+    # Seeding makes the next one cheap.
+    remove_worktree "$wt"
     ((rc == 0)) || return "$rc"
     echo "<codex/qa> Done. Review posted for PR #$pr."
   done
@@ -246,7 +250,7 @@ branch="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRe
 wt="$WT_BASE/pr-$n"
 require_space "$wt" || exit 1
 
-git fetch -q origin "$branch"
+git_retry git fetch -q origin "$branch"
 if [[ -d $wt ]]; then
   git -C "$wt" reset -q --hard "origin/$branch"
 else

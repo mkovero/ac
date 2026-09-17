@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ac-gc.sh [--yes] [--debug]
 #
+#   AC_GC_GRACE_HOURS=6  keep no-PR worktrees touched this recently
+#
 # Reclaim disk from worktrees, target dirs and transcripts. Dry run unless
 # --yes. Never touches a worktree with uncommitted or unpushed work.
 
@@ -13,6 +15,7 @@ source "$(dirname "$0")/common.sh" || exit 1
 set +e
 
 KEEP_DAYS="${AC_KEEP_DAYS:-30}"
+GRACE_H="${AC_GC_GRACE_HOURS:-6}"   # a no-PR worktree touched this recently may be in use
 GO=""; DEBUG=""
 for a in "$@"; do
   case "$a" in
@@ -61,12 +64,20 @@ for wt in "${WTS[@]}"; do
   case "$state" in
     MERGED|CLOSED)
       echo "  GONE $(size "$wt")  $wt  [$br] PR $state"
-      act "git worktree remove --force '$wt'" ;;
+      act "remove_worktree '$wt'" ;;
     OPEN)
       echo "  KEEP $(size "$wt")  $wt  [$br] PR open" ;;
     *)
+      # A pipeline step that has just created its worktree has no commits and
+      # no PR yet, which reads exactly like an abandoned one; on 2026-09-17 a
+      # --yes run would have removed #433's worktree mid-implementation.
+      # Anything touched within the grace period is kept.
+      if [[ -n "$(find "$wt" -newermt "-${GRACE_H} hours" -print -quit 2>/dev/null)" ]]; then
+        echo "  KEEP $(size "$wt")  $wt  [$br] no PR yet, but touched within ${GRACE_H} h (may be in use)"
+        continue
+      fi
       echo "  STALE $(size "$wt")  $wt  [$br] no PR, nothing local"
-      act "git worktree remove --force '$wt'" ;;
+      act "remove_worktree '$wt'" ;;
   esac
 done
 act "git worktree prune"
