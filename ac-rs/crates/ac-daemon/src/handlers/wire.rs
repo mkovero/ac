@@ -9,7 +9,8 @@
 //! | wire value | reader result |
 //! |---|---|
 //! | field absent | `None` — caller applies its default |
-//! | array field `null` | `None` — caller applies its default |
+//! | `channels`-style array `null` ([`opt_array`]) | `None` — caller applies its default |
+//! | `pairs`-style array `null` ([`opt_non_null_array`]) | [`WireError`] |
 //! | nullable scalar `null` | `Some(None)` — caller clears |
 //! | integer in 0–4294967295 | the value |
 //! | anything else | [`WireError`] — caller refuses the whole request |
@@ -157,6 +158,21 @@ pub(crate) fn opt_array<'a>(
     }
 }
 
+/// Optional array field with no `null` default. Absent → `None`; `null` or
+/// any other non-array → refused. For fields such as `pairs`, where only
+/// absence selects a fallback — the `null`-means-default rule belongs to
+/// `channels` alone.
+pub(crate) fn opt_non_null_array<'a>(
+    obj: &'a Value,
+    field: &str,
+) -> Result<Option<&'a Vec<Value>>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(a)),
+        Some(v) => Err(WireError::new(field, Problem::NotArray, v)),
+    }
+}
+
 /// Optional `u32` array. Absent or `null` → `None`; `[]` → `Some(vec![])`
 /// (the caller decides what empty means); any bad element refuses the whole
 /// array, naming `field[i]`.
@@ -232,6 +248,22 @@ mod tests {
         );
         let e = opt_u32_array(&field(json!(3)), "x").unwrap_err();
         assert_eq!(e.problem, Problem::NotArray);
+    }
+
+    #[test]
+    fn non_null_array_refuses_null() {
+        assert_eq!(opt_non_null_array(&json!({}), "x"), Ok(None));
+        let arr = json!({ "x": [1] });
+        assert_eq!(opt_non_null_array(&arr, "x"), Ok(Some(&vec![json!(1)])));
+        let e = opt_non_null_array(&field(Value::Null), "x").unwrap_err();
+        assert_eq!(
+            (e.problem, e.received.as_str()),
+            (Problem::NotArray, "null")
+        );
+        let e = opt_non_null_array(&field(json!(5)), "x").unwrap_err();
+        assert_eq!(e.problem, Problem::NotArray);
+        // The `channels` reader keeps `null` as its default.
+        assert_eq!(opt_array(&field(Value::Null), "x"), Ok(None));
     }
 
     #[test]

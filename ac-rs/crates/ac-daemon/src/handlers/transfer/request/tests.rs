@@ -72,6 +72,21 @@ fn parse_pairs_refuses_non_array_pairs() {
     assert!(err.contains("pairs must be an array"), "{err}");
 }
 
+/// `pairs: null` is not an absent `pairs`: it must not fall through to the
+/// valid legacy fields.
+#[test]
+fn parse_pairs_refuses_null_pairs_despite_legacy_fields() {
+    let err = parse_transfer_pairs(&json!({ "pairs": null, "meas_channel": 0, "ref_channel": 3 }))
+        .unwrap_err();
+    assert!(err.contains("pairs must be an array"), "{err}");
+    assert!(err.contains("received  null"), "{err}");
+    assert!(err.contains("stimulus  silent"), "{err}");
+    assert_eq!(
+        parse_transfer_pairs(&json!({ "meas_channel": 0, "ref_channel": 3 })).unwrap(),
+        vec![(0, 3)]
+    );
+}
+
 /// #431: the legacy single-pair form wrapped the same way.
 #[test]
 fn parse_pairs_legacy_refuses_u32_overflow() {

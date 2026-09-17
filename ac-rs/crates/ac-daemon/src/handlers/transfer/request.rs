@@ -19,8 +19,11 @@ fn channel_refusal(e: &wire::WireError) -> String {
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
 /// `transfer_stream` into a canonical pair list. Returns an Err message
 /// suitable for `{"ok": false, "error": ...}` on malformed input.
+///
+/// Only an absent `pairs` selects the legacy form; `pairs: null` is a
+/// non-array and refuses, like any other.
 pub(super) fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
-    if let Some(arr) = wire::opt_array(cmd, "pairs").map_err(|e| channel_refusal(&e))? {
+    if let Some(arr) = wire::opt_non_null_array(cmd, "pairs").map_err(|e| channel_refusal(&e))? {
         if arr.is_empty() {
             return Err("pairs is empty".into());
         }

@@ -374,6 +374,36 @@ fn ioct_bpo_refusal_does_not_echo_unbounded_input() {
     );
 }
 
+/// `pairs: null` with valid legacy fields used to start a worker on the
+/// legacy pair; only an absent `pairs` selects that form.
+#[test]
+fn transfer_stream_refuses_null_pairs_before_starting() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "pairs": null,
+        "meas_channel": 0, "ref_channel": 3, "drive": false,
+    }));
+    assert_refused(
+        &r,
+        "transfer_stream pairs:null",
+        &[
+            "transfer_stream not started",
+            "pairs must be an array",
+            "received  null",
+            "stimulus  silent",
+        ],
+    );
+    assert_idle(&c, "transfer_stream pairs:null");
+
+    // Control: the same legacy fields with `pairs` absent do start.
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 3, "drive": false,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+}
+
 /// `calibrate` and `calibrate_spl` are the remaining `channels_from` call
 /// sites; 4294967296 used to wrap to channel 0 and start `calibrate`.
 #[test]
