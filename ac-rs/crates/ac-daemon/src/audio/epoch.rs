@@ -105,8 +105,15 @@ fn probe_linux(proc_root: &Path, dev_root: &Path) -> DeviceEpoch {
     };
 
     let mut nodes = Vec::new();
-    nodes.extend(numbered_nodes(&dev_root.join("snd"), "controlC"));
-    nodes.extend(numbered_nodes(dev_root, "fw"));
+    for (dir, prefix) in [
+        (dev_root.join("snd"), "controlC"),
+        (dev_root.to_path_buf(), "fw"),
+    ] {
+        match numbered_nodes(&dir, prefix) {
+            Ok(found) => nodes.extend(found),
+            Err(observation) => return not_observable(observation),
+        }
+    }
     if nodes.is_empty() {
         return not_observable(format!(
             "no {}/snd/controlC* or {}/fw* nodes",
@@ -136,23 +143,27 @@ fn probe_linux(proc_root: &Path, dev_root: &Path) -> DeviceEpoch {
     }
 }
 
-/// Entries of `dir` named `<prefix><digits>`. An unreadable directory
-/// contributes nothing; the caller refuses an empty total.
+/// Entries of `dir` named `<prefix><digits>`. A directory that cannot be
+/// listed, or an entry that cannot be read, is an error naming `dir`: a
+/// fingerprint missing one source would compare `same` across a boundary
+/// confined to that source.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn numbered_nodes(dir: &Path, prefix: &str) -> Vec<std::path::PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .and_then(|n| n.strip_prefix(prefix))
-                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
-        })
-        .map(|e| e.path())
-        .collect()
+fn numbered_nodes(dir: &Path, prefix: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let unreadable = || format!("{} unreadable", dir.display());
+    let entries = std::fs::read_dir(dir).map_err(|_| unreadable())?;
+    let mut nodes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| unreadable())?;
+        let numbered = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.strip_prefix(prefix))
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+        if numbered {
+            nodes.push(entry.path());
+        }
+    }
+    Ok(nodes)
 }
 
 #[cfg(test)]
@@ -288,6 +299,53 @@ mod tests {
                     reason.ends_with("; check: /dev and /proc readable by the daemon user"),
                     "{reason}"
                 );
+            }
+            other => panic!("expected not_observable, got {other:?}"),
+        }
+    }
+
+    /// One node source unreadable while the other holds a stable node is
+    /// `NotObservable`, not a partial epoch. A partial epoch would read
+    /// `same` across a boundary confined to the hidden source: the driver
+    /// reload that re-created `controlC1` and left `fw1` untouched.
+    #[test]
+    fn one_unreadable_node_source_is_not_observable() {
+        let dir = ScratchDir::new("partial");
+        let (proc_root, dev_root) = fake_host(dir.path(), "boot-a", &["snd/controlC1", "fw1"]);
+        let whole = probe_linux(&proc_root, &dev_root);
+        assert!(matches!(whole, DeviceEpoch::Observed { .. }), "{whole:?}");
+
+        // `/dev/snd` replaced by a regular file: `read_dir` fails for any
+        // user, root included, so the test does not depend on permissions.
+        let snd = dev_root.join("snd");
+        std::fs::remove_dir_all(&snd).unwrap();
+        std::fs::write(&snd, b"").unwrap();
+        match probe_linux(&proc_root, &dev_root) {
+            DeviceEpoch::NotObservable { reason } => {
+                assert!(
+                    reason.starts_with(&format!("jack backend: {} unreadable", snd.display())),
+                    "{reason}"
+                );
+                assert!(reason.ends_with(JACK_PROBE_CHECK), "{reason}");
+            }
+            other => panic!("expected not_observable, got {other:?}"),
+        }
+
+        // The case the old probe got wrong: the other source is still
+        // readable and non-empty, so dropping the unreadable one would have
+        // left a non-empty, `fw1`-only observed epoch.
+        let fw_only = numbered_nodes(&dev_root, "fw").unwrap();
+        assert_eq!(fw_only, vec![dev_root.join("fw1")]);
+        assert!(numbered_nodes(&snd, "controlC").is_err());
+
+        // Missing, not just unreadable, is refused the same way.
+        std::fs::remove_file(&snd).unwrap();
+        match probe_linux(&proc_root, &dev_root) {
+            DeviceEpoch::NotObservable { reason } => {
+                assert!(
+                    reason.contains(&format!("{} unreadable", snd.display())),
+                    "{reason}"
+                )
             }
             other => panic!("expected not_observable, got {other:?}"),
         }
