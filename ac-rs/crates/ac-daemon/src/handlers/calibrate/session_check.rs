@@ -21,7 +21,7 @@
 //! written over: a refusal that cannot be written is held in this process
 //! and merged in at the next access that reads the file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -63,6 +63,10 @@ pub(crate) const PROBE_DRIVE_DBFS: f64 = DEFAULT_LEVEL_DBFS;
 pub struct SessionChecks {
     process: Vec<SessionCheckRecord>,
     seq: u64,
+    /// Ids of records without a refusal whose verified layers are already
+    /// applied to the file. They are merged once, never again (R3-3): a
+    /// later refusal another daemon wrote must not be cleared by an old pass.
+    applied: BTreeSet<String>,
     /// Voltage verdict per capture channel, as the current transfer session
     /// applied it at start. Read by the `snapshot` handler.
     transfer_applied: BTreeMap<u32, LayerVerdict>,
@@ -80,10 +84,14 @@ impl SessionChecks {
 
     fn push(&mut self, record: SessionCheckRecord) {
         self.process.retain(|r| r.id != record.id);
+        self.applied.remove(&record.id);
         self.process.push(record);
         if self.process.len() > MAX_PROCESS_RECORDS {
             let excess = self.process.len() - MAX_PROCESS_RECORDS;
             self.process.drain(..excess);
+            let process = &self.process;
+            self.applied
+                .retain(|id| process.iter().any(|r| &r.id == id));
         }
     }
 
@@ -103,8 +111,20 @@ impl SessionChecks {
         for r in self.process.iter_mut() {
             if r.has_refusal() {
                 r.set_persisted(Ok(()));
+            } else {
+                self.applied.insert(r.id.clone());
             }
         }
+    }
+
+    /// The records a sync still has to merge: refusals not yet on disk and
+    /// passes not yet applied.
+    fn unsynced(&self) -> Vec<SessionCheckRecord> {
+        self.process
+            .iter()
+            .filter(|r| r.persisted != Some(true) && !self.applied.contains(&r.id))
+            .cloned()
+            .collect()
     }
 
     /// Read the refusal record, merge this process's records into it, and
@@ -122,7 +142,7 @@ impl SessionChecks {
                 return Err(e.observation);
             }
         };
-        let merged = merge_refusals(&file, &self.process);
+        let merged = merge_refusals(&file, &self.unsynced());
         if merged == file {
             self.mark_persisted();
             return Ok(file);
@@ -1118,6 +1138,71 @@ mod tests {
         assert!((tone.fundamental_dbfs - (-40.0)).abs() < 0.05, "{tone:?}");
         assert!((r.total_peak_dbfs - (-40.0)).abs() < 0.05);
         assert!(r.snr_db().unwrap() > session::PROBE_SNR_MIN_DB);
+    }
+
+    fn check_record(id: &str, voltage: LayerVerdict) -> SessionCheckRecord {
+        SessionCheckRecord {
+            id: id.to_string(),
+            ran_at: "2026-09-16T14:02:11.000Z".to_string(),
+            epoch: current_epoch("fake"),
+            source: CheckSource::Explicit,
+            cmd: "session_check".to_string(),
+            loopback: LoopbackRef {
+                key: "out1_in1".to_string(),
+                output_port: "system:playback_2".to_string(),
+                input_port: "system:capture_2".to_string(),
+            },
+            stimulus: None,
+            duration_s: 0.0,
+            reach: Default::default(),
+            latency: None,
+            voltage: Some(voltage),
+            judged: JudgedIdentity::default(),
+            probe: None,
+            latency_separation_s: None,
+            persisted: None,
+            persist_error: None,
+        }
+    }
+
+    fn evidence() -> session::Evidence {
+        session::Evidence {
+            measured: -0.6,
+            stored: -0.6,
+            delta: 0.0,
+            tolerance: 0.1,
+            unit: session::VerdictUnit::Db,
+            stored_at: "2026-09-15T23:43:04Z".to_string(),
+            checked_at: "2026-09-16T14:02:11.000Z".to_string(),
+            source: CheckSource::Explicit,
+        }
+    }
+
+    /// QA 3 on PR #534 (R6-6): after a successful sync, neither a pass nor
+    /// a written refusal is merged again. Before it, both are — the
+    /// rejected behaviour merged every process record on every sync.
+    #[test]
+    fn a_synced_record_is_not_merged_again() {
+        let mut checks = SessionChecks::default();
+        let mut refused = check_record(
+            "1-1",
+            LayerVerdict::Refused {
+                evidence: evidence(),
+                via: None,
+                delta_bound: None,
+            },
+        );
+        refused.persisted = Some(false);
+        checks.push(refused);
+        checks.push(check_record("1-2", LayerVerdict::Verified(evidence())));
+        assert_eq!(checks.unsynced().len(), 2);
+
+        checks.mark_persisted();
+        assert!(checks.unsynced().is_empty());
+
+        // Re-pushing a record (a gate adding a layer) makes it unsynced.
+        checks.push(check_record("1-2", LayerVerdict::Verified(evidence())));
+        assert_eq!(checks.unsynced().len(), 1);
     }
 
     #[test]

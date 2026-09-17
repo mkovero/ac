@@ -813,9 +813,17 @@ impl SessionRefusals {
 /// older one. A process record wins a tie — it is the newer knowledge. The
 /// result is what the file should hold; compare it with the input to decide
 /// whether to write.
+///
+/// Only records not yet synced are merged (R3-3): a refusal already on disk
+/// (`persisted == Some(true)`) is skipped, so a later pass another daemon
+/// wrote is not undone by re-applying it. The caller passes a verified record
+/// once and drops it from later merges.
 pub fn merge_refusals(file: &SessionRefusals, process: &[SessionCheckRecord]) -> SessionRefusals {
     let mut out = file.clone();
-    let mut ordered: Vec<&SessionCheckRecord> = process.iter().collect();
+    let mut ordered: Vec<&SessionCheckRecord> = process
+        .iter()
+        .filter(|r| r.persisted != Some(true))
+        .collect();
     ordered.sort_by(|a, b| a.ran_at.cmp(&b.ran_at));
     for record in ordered {
         for layer in [Layer::Voltage, Layer::Latency] {
@@ -1901,6 +1909,27 @@ mod tests {
         let stale_pass = record("out1_in1", "2026-09-16T09:00:00.000Z", verified_v());
         let again = merge_refusals(&merged, &[stale_pass]);
         assert!(again.voltage.contains_key("out1_in1"));
+    }
+
+    /// QA 3 on PR #534 (R6-6): a refusal this process already wrote is not
+    /// merged again, so a pass another daemon wrote since stays in force.
+    /// The same record not yet synced does reach the file — the rejected
+    /// behaviour, computed here so the test can tell the two apart.
+    #[test]
+    fn merge_skips_a_refusal_already_persisted() {
+        let mut synced = record("out1_in1", "2026-09-16T14:02:11.000Z", refused_v());
+        synced.persisted = Some(true);
+        let cleared = SessionRefusals::default();
+        assert_eq!(
+            merge_refusals(&cleared, std::slice::from_ref(&synced)),
+            cleared
+        );
+
+        let mut held = synced.clone();
+        held.persisted = Some(false);
+        assert!(merge_refusals(&cleared, &[held])
+            .voltage
+            .contains_key("out1_in1"));
     }
 
     #[test]
