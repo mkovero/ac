@@ -34,6 +34,8 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 AC_HOME="${AC_HOME:-$(dirname "$ROOT")/ac-wt}"
 WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
+# Where run() records a provider account limit. master.sh sets a per-run path.
+export AC_LIMIT_FILE="${AC_LIMIT_FILE:-$AC_LOG_DIR/provider-limit}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$AC_HOME/session}"
 
 # One target dir per worktree: $AC_TARGET/wt/<name> for $AC_HOME/wt/<name>.
@@ -144,6 +146,67 @@ gh_retry() {
   done
 }
 
+# git through a retry, for the network half of git (fetch, pull, push). Only a
+# network failure is retried; an auth or ref error returns at once. On
+# 2026-09-17 a DNS outage made one plain `git fetch` lose a Codex recheck and
+# stopped a queue.
+git_retry() {
+  local tries="${AC_GIT_RETRIES:-5}" i=1 rc err
+  err="$(mktemp)"
+  while :; do
+    rc=0
+    command "$@" 2>"$err" || rc=$?
+    if (( rc == 0 )); then cat "$err" >&2; rm -f "$err"; return 0; fi
+    if ! grep -qEi 'could not resolve host|network is unreachable|connection (timed out|refused|reset)|operation timed out|temporary failure in name resolution|early EOF|the remote end hung up unexpectedly' "$err"; then
+      cat "$err" >&2; rm -f "$err"; return "$rc"
+    fi
+    if (( i >= tries )); then
+      echo "git failed after $tries attempts:" >&2; cat "$err" >&2
+      rm -f "$err"; return "$rc"
+    fi
+    echo "  git network error — retry $i/$tries in $(( 15 * i ))s" >&2
+    sleep $(( 15 * i ))
+    (( ++i ))
+  done
+}
+
+# remove_worktree <wt> — the worktree and its per-worktree target dir. Since
+# #484 each worktree has its own (~25 GB apparent) target; removing only the
+# worktree left them behind, and on 2026-09-17 they took the disk from 77 GB
+# to 5 GB free overnight.
+remove_worktree() {
+  local wt="$1" t
+  t="$(target_for "$wt")"
+  git worktree remove --force "$wt" >/dev/null 2>&1 || true
+  [[ -d $wt ]] || rm -rf "$t"
+}
+
+# provider_limit_check <file> <provider> <mode> — did the provider stop on an
+# account limit? mode `jsonl` reads only the provider's own error/result
+# records, `text` only the tail of plain output, so a session that merely
+# quotes these strings (reviewing this function, say) is not a limit.
+# On a hit: writes $AC_LIMIT_FILE and returns 0.
+provider_limit_check() {
+  local file="$1" provider="$2" mode="$3" text re
+  re="(You've|You have) hit your (session|usage|weekly) limit[^\"]{0,100}"
+  [[ -s $file ]] || return 1
+  if [[ $mode == jsonl ]]; then
+    if [[ $provider == claude ]]; then
+      text="$(jq -r 'select(.type=="result") | .result // empty' "$file" 2>/dev/null | tail -5)"
+    else
+      text="$(jq -r 'select(.type=="error") | .message // empty' "$file" 2>/dev/null | tail -5)"
+    fi
+  else
+    text="$(tail -20 "$file")"
+  fi
+  text="$(grep -oE "$re" <<<"$text" | tail -1)" || true
+  [[ -n $text ]] || return 1
+  mkdir -p "$(dirname "$AC_LIMIT_FILE")"
+  printf '%s %s: %s\n' "$(date -u +%FT%TZ)" "$provider" "$text" > "$AC_LIMIT_FILE"
+  echo "PROVIDER LIMIT ($provider): $text" >&2
+  return 0
+}
+
 # Fail fast and clearly when the API is down, rather than midway through a loop.
 gh_up() {
   gh_retry gh api rate_limit --jq '.rate.remaining' >/dev/null 2>&1 && return 0
@@ -217,7 +280,7 @@ ensure_worktree() {
   if [[ -n $existing && -d $existing ]]; then
     printf '%s\n' "$existing"; return 0
   fi
-  git fetch -q origin "$branch" 2>/dev/null || true
+  git_retry git fetch -q origin "$branch" 2>/dev/null || true
   if git show-ref -q "refs/heads/$branch"; then
     git worktree add "$want" "$branch" >/dev/null 2>&1 || return 1
   else
@@ -500,13 +563,14 @@ $prompt"
     #
     # --permission-mode still differs in effect, not in value: interactively
     # it prompts where -p auto-approves, which is the point of --fg.
+    local -a fgcmd=()
     if [[ $provider == claude ]]; then
-      claude --system-prompt-file "$(spec "$role")" \
-        --model "$model" \
-        --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
-        ${deny:+--disallowedTools "$deny"} \
-        --permission-mode "$mode" \
-        "${extra[@]}" "$task_prompt"
+      fgcmd=(claude --system-prompt-file "$(spec "$role")"
+        --model "$model"
+        --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}"
+        ${deny:+--disallowedTools "$deny"}
+        --permission-mode "$mode"
+        "${extra[@]}" "$task_prompt")
     else
       # Read-only roles still run tests and gh label/comment operations. Codex
       # therefore needs a writable sandbox; the binding role spec forbids
@@ -514,11 +578,24 @@ $prompt"
       local sandbox=workspace-write
       local -a model_arg=()
       [[ -n $model ]] && model_arg=(-m "$model")
-      env "${codex_env[@]}" codex -C "$PWD" -s "$sandbox" -a on-request \
-        "${codex_write_dirs[@]}" \
-        "${model_arg[@]}" "${extra[@]}" "$task_prompt"
+      fgcmd=(env "${codex_env[@]}" codex -C "$PWD" -s "$sandbox" -a on-request
+        "${codex_write_dirs[@]}"
+        "${model_arg[@]}" "${extra[@]}" "$task_prompt")
     fi
-    return
+    # On a terminal, run it as before. Unattended (systemd units run --fg with
+    # no TTY), keep a copy of the output so an account limit is detectable:
+    # on 2026-09-17 a session limit made every step fail at once and a queue
+    # burned through 13 issues in two minutes.
+    if [[ -t 1 ]]; then
+      "${fgcmd[@]}"
+      return
+    fi
+    local fgout fgst=0
+    fgout="$(mktemp)"
+    "${fgcmd[@]}" 2>&1 | tee "$fgout" || fgst=$?
+    provider_limit_check "$fgout" "$provider" text && fgst=75
+    rm -f "$fgout"
+    return "$fgst"
   fi
 
   export CARGO_TARGET_DIR="$target"
@@ -621,5 +698,6 @@ $prompt"
   [[ -s $raw ]] || echo "warning: empty transcript — check $provider exited cleanly" >&2
   echo "session: $out" >&2
   echo "raw:     $raw" >&2
+  provider_limit_check "$raw" "$provider" jsonl && status=75
   return "$status"
 }

@@ -21,7 +21,7 @@ done
 # refresh the base before deciding whether an existing empty branch can be
 # reused; an ff-only merge against a stale origin/main merely preserves the
 # stale base while appearing to synchronize it.
-git fetch -q origin main
+git_retry git fetch -q origin main
 
 # A developer session that stopped (a design handback) leaves $wt checked out on
 # its own issue-$n-<slug> branch (developer.md step 2), so issue-$n is no longer

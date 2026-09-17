@@ -81,7 +81,7 @@ independent_review() {
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
     require_space "$wt"; mkdir -p "$WT_BASE"
-    git fetch -q origin "pull/$pr/head"
+    git_retry git fetch -q origin "pull/$pr/head"
     [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
     if [[ -n $recheck_base ]] && ! git merge-base --is-ancestor "$recheck_base" "$head" 2>/dev/null; then
       echo "<codex/qa> PR #$pr: $head does not descend from $recheck_base — full Claude QA needed." >&2
@@ -141,7 +141,7 @@ $gate_out"
     else
       echo "<codex/qa> PR #$pr: gate refused in $wt" >&2; rc=1
     fi
-    git worktree remove --force "$wt" || true
+    remove_worktree "$wt"
     # The worktree is per-pass; so is its target. Seeding makes the next one cheap.
     rm -rf "$(target_for "$wt")"
     ((rc == 0)) || return "$rc"
@@ -246,7 +246,7 @@ branch="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRe
 wt="$WT_BASE/pr-$n"
 require_space "$wt" || exit 1
 
-git fetch -q origin "$branch"
+git_retry git fetch -q origin "$branch"
 if [[ -d $wt ]]; then
   git -C "$wt" reset -q --hard "origin/$branch"
 else

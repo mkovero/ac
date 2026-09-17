@@ -44,7 +44,10 @@
 # Verify label names first — a wrong one makes this do nothing while looking
 # like it worked:  gh label list -R mkovero/ac
 
+_caller_limit_file="${AC_LIMIT_FILE:-}"
 source "$(dirname "$0")/common.sh"
+# One limit file per run: a concurrent master.sh must not clear or trip ours.
+export AC_LIMIT_FILE="${_caller_limit_file:-$AC_LOG_DIR/provider-limit.$$}"
 BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
@@ -126,11 +129,36 @@ routed() {
 # qa_evidence(): a run that crashed or hit its turn limit leaves an issue
 # looking exactly like one triage never touched, and an API failure must not
 # read as "no spec". Echoes a count or fails; never 0-on-error.
+# Only a comment carrying triage's `### spec` heading counts. Triage also posts
+# agent-tagged one-liners (scope-label backfills on other issues); on
+# 2026-09-17 those made #472 and #494 look triaged, and drive() stopped them at
+# "spec present but no routing label".
 triage_evidence() {
   local c
   c=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
-      --jq '[.comments[] | select(.body | test("agent: *triage"; "i"))] | length') || return 1
+      --jq '[.comments[] | select((.body | test("agent: *triage"; "i")) and (.body | test("(^|\n)### spec")))] | length') || return 1
   echo "${c:-0}"
+}
+
+# The newest architect comment's **file manifest** field says `none`.
+architect_declared_no_change() {
+  local body
+  body=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
+    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""') || return 1
+  printf '%s\n' "$body" | awk '
+    /^\*\*file manifest\*\*/ { m=1; next }
+    m && NF { if (tolower($1) ~ /^`?none/) found=1; exit }
+    END { exit found ? 0 : 1 }'
+}
+
+# Stop the whole run on a provider account limit: every later step would fail
+# the same way (2026-09-17, 00:37Z: 13 issues "aborted" in two minutes).
+limit_stop() {
+  [[ -s $AC_LIMIT_FILE ]] || return 0
+  echo
+  echo "  provider limit — stopping this run: $(cat "$AC_LIMIT_FILE")"
+  echo "  nothing after this issue was attempted. rerun once the limit resets."
+  exit 75
 }
 
 # qa_loop <issue> <pr> [force]
@@ -446,7 +474,7 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
 
 drive() {
   local n="$1" step=0 ls pr tc st force="" continue_arg="" mf=""
-  local ran_design=0 ran_ux=0 ran_triage=0
+  local ran_design=0 ran_ux=0 ran_triage=0 preflight_ran=0
   local design_passes=0 ux_passes=0
   qa_round=0
 
@@ -578,6 +606,18 @@ drive() {
     mf="$(manifest_of "$n")" \
       || { echo "  #$n: cannot read architect manifest — stopping"; return 1; }
     if [[ -z $mf ]]; then
+      # One preflight. An architect can finish with an empty manifest on
+      # purpose (#400: "none", verification only); re-running design on that
+      # looped until the step limit.
+      if (( preflight_ran )); then
+        echo "  #$n: still no file manifest after a design pass — yours"
+        if architect_declared_no_change "$n"; then
+          echo "     the architect's manifest is 'none': no code change is planned."
+          echo "     close the issue, or re-route it if code is still wanted."
+        fi
+        STATE=needs-human; return 0
+      fi
+      preflight_ran=1
       echo "  #$n: no architect manifest — running design preflight"
       "$BIN/design.sh" "$n" $fg || { echo "  #$n: design preflight failed"; return 1; }
       continue
@@ -709,7 +749,7 @@ drive_epic() {
 
     echo "-- #$c (child of #$e)"
     STATE=""
-    drive "$c" || { echo "  #$c: aborted — stopping epic"; return 1; }
+    drive "$c" || { limit_stop; echo "  #$c: aborted — stopping epic"; return 1; }
 
     case "$STATE" in
       awaiting-merge)
@@ -753,14 +793,17 @@ drive_epic() {
 }
 
 gh_up || exit 1
+rm -f "$AC_LIMIT_FILE"
 
 for id in "${ids[@]}"; do
   echo "== issue #$id"
   if is_epic "$id"; then
     drive_epic "$id" || true
+    limit_stop
   else
     STATE=""
     drive "$id" || echo "  #$id: aborted"
+    limit_stop
     # is_epic() ran before triage did. An issue triage has just broken into
     # sub-issues is an epic now, and drive() returns STATE=epic saying so.
     [[ $STATE == epic ]] && drive_epic "$id" || true

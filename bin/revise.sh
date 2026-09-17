@@ -19,7 +19,7 @@ wt="$(ensure_worktree "$branch" "$WT_BASE/$branch")" \
   || { echo "cannot get a worktree for $branch" >&2; exit 1; }
 cd "$wt"
 sparse_trim "$wt"
-git fetch -q origin "$branch"
+git_retry git fetch -q origin "$branch"
 # A cut-off Codex run may have pushed the PR commit while its sandbox was
 # unable to advance this linked worktree's Git metadata. If the local tip is a
 # strict ancestor of the remote PR tip, advance only HEAD/index and preserve
