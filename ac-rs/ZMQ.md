@@ -876,6 +876,10 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 }
 ```
 
+The four channel fields follow **Error handling → Wire values**: all four
+are checked before anything is applied, so a malformed one leaves the whole
+config unchanged (`setup rejected — …`, `config  unchanged`).
+
 `report_dir` is validated **before any other key in the update is applied**:
 it must be an absolute path on the daemon host, name an existing directory,
 and accept a probe file (`<dir>/.ac-write-probe-<pid>-<nanos>`, created with
@@ -1565,6 +1569,10 @@ across `reconnect_input` can't be preserved).
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused. Any present `fft_n`
+that is not an integer in 0–4294967295 — `null` and strings included — gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
+missing `freq_hz` or `level_dbfs` refuses the whole request.
+
 Both `interval` and `fft_n` are live-reconfigurable — see
 `set_monitor_params` below.
 
@@ -1682,6 +1690,10 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+`channels` absent, `null` or `[]` plays on the configured output; a list
+with any invalid element is refused and nothing is emitted.
+
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
 
@@ -1714,6 +1726,8 @@ Plays continuous pink noise until stopped.
   "channels":   [<int>, ...]   // optional
 }
 ```
+
+`channels` is read exactly as in `generate`. See **Error handling → Wire values** for how a malformed field is refused.
 
 The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
 never clamped.
@@ -2049,6 +2063,8 @@ fields on the same entry stay untouched.
 }
 ```
 
+See **Error handling → Wire values** for how a malformed field is refused.
+
 **Request — clear**
 ```json
 {
@@ -2067,7 +2083,11 @@ fields on the same entry stay untouched.
 Validation: `freqs_hz` must be strictly increasing and finite, length
 in `[16, 4096]`; `gain_db` must match length and be finite. Failures
 return `{ "ok": false, "error": "<reason>" }` and leave the prior
-curve (if any) untouched.
+curve (if any) untouched. The arrays are read positionally: any invalid
+element (non-number, or not finite as a 32-bit float) rejects the whole
+upload, naming `freqs_hz[i]` / `gain_db[i]` and the partner value at the
+same index — elements are never dropped. A length mismatch names both
+lengths.
 
 ---
 
@@ -2253,6 +2273,10 @@ in the list once per iteration and emits one `transfer_stream` DATA frame
 per pair (each tagged with its own `meas_channel` / `ref_channel`). The
 legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
 `pairs` must be non-empty and every channel index must be within range.
+See **Error handling → Wire values** for how a malformed field is refused:
+a malformed `pairs[i][j]`, `meas_channel` or `ref_channel` is refused as
+`transfer_stream not started`, and a non-array `pairs` is refused rather than
+falling back to the legacy form.
 `weighting`/`integration` apply to every pair in the session; invalid values
 reply `{"ok": false, "error": "..."}` before the worker spawns.
 
@@ -3216,6 +3240,51 @@ When the guard fires:
 ---
 
 ## Error handling
+
+### Wire values
+
+A value a request supplies is either exactly valid or the **whole request
+is refused** — no default, no worker, no write, no config change (#431).
+Applies to every channel field (`channels`, `output_channel`,
+`input_channel`, `reference_channel`, `reference_output_channel`,
+`pairs[i][j]`, `meas_channel`, `ref_channel`) and to the positional
+`calibrate_mic_curve` arrays.
+
+| wire value | meaning |
+|---|---|
+| field absent | configured default |
+| `channels`: `null` or `[]` | configured default |
+| `reference_channel` / `reference_output_channel`: `null` | clear |
+| integer in 0–4294967295 | that channel |
+| anything else present — string, float, negative, > 4294967295, `null` on a non-nullable scalar, non-array `channels`/`pairs`, any bad array element | refused |
+
+Values are never narrowed: 4294967296 is refused, not read as channel 0.
+`fft_n` (`monitor_spectrum`, `set_monitor_params`) and `bpo`
+(`set_ioct_bpo`) above u32 get their existing domain errors.
+
+Refusal layout — a headline, then 9-space-indented `label  value` lines,
+the first always `received` (the JSON text of the value, cut at 64
+characters with `…`):
+
+```text
+generate not started — channels[0] must be an integer
+         received  "bad"
+         stimulus  silent
+```
+
+`<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
+`must be a finite number`, `must be an array`.
+
+| command | headline | state line |
+|---|---|---|
+| `generate`, `generate_pink` | `<cmd> not started` | `stimulus  silent` |
+| `transfer_stream` | `transfer_stream not started` | `stimulus  silent` |
+| `calibrate` | `calibration not started` | `stimulus  silent` |
+| `calibrate_spl` | `SPL calibration not started` | — |
+| `calibrate_mic_curve` | `mic curve not saved` / `mic curve not cleared` | `data  existing curve unchanged` (plus `paired field  <other>[i] = <value>` when the partner element is valid) |
+| `monitor_spectrum` | `monitor not started` | — |
+| `setup` | `setup rejected` | `config  unchanged` |
+| `get_calibration` | `calibration lookup rejected` | — |
 
 ### Invalid JSON
 ```json

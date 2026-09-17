@@ -46,6 +46,56 @@ fn parse_pairs_missing_fields_errors() {
     let cmd = json!({});
     assert!(parse_transfer_pairs(&cmd).is_err());
 }
+
+/// #431: a pair element above u32 used to wrap to channel 0.
+#[test]
+fn parse_pairs_refuses_u32_overflow() {
+    let err = parse_transfer_pairs(&json!({ "pairs": [[4294967296u64, 3]] })).unwrap_err();
+    assert!(
+        err.contains("pairs[0][0] is outside 0\u{2013}4294967295"),
+        "{err}"
+    );
+    assert!(err.contains("received  4294967296"), "{err}");
+    assert!(err.contains("stimulus  silent"), "{err}");
+    let err = parse_transfer_pairs(&json!({ "pairs": [[0, 3], [1, -1]] })).unwrap_err();
+    assert!(err.contains("pairs[1][1]"), "{err}");
+    assert_eq!(
+        parse_transfer_pairs(&json!({ "pairs": [[4294967295u64, 3]] })).unwrap(),
+        vec![(u32::MAX, 3)]
+    );
+}
+
+#[test]
+fn parse_pairs_refuses_non_array_pairs() {
+    let err = parse_transfer_pairs(&json!({ "pairs": 5, "meas_channel": 0, "ref_channel": 3 }))
+        .unwrap_err();
+    assert!(err.contains("pairs must be an array"), "{err}");
+}
+
+/// `pairs: null` is not an absent `pairs`: it must not fall through to the
+/// valid legacy fields.
+#[test]
+fn parse_pairs_refuses_null_pairs_despite_legacy_fields() {
+    let err = parse_transfer_pairs(&json!({ "pairs": null, "meas_channel": 0, "ref_channel": 3 }))
+        .unwrap_err();
+    assert!(err.contains("pairs must be an array"), "{err}");
+    assert!(err.contains("received  null"), "{err}");
+    assert!(err.contains("stimulus  silent"), "{err}");
+    assert_eq!(
+        parse_transfer_pairs(&json!({ "meas_channel": 0, "ref_channel": 3 })).unwrap(),
+        vec![(0, 3)]
+    );
+}
+
+/// #431: the legacy single-pair form wrapped the same way.
+#[test]
+fn parse_pairs_legacy_refuses_u32_overflow() {
+    let err = parse_transfer_pairs(&json!({ "meas_channel": 4294967296u64, "ref_channel": 3 }))
+        .unwrap_err();
+    assert!(err.contains("meas_channel is outside"), "{err}");
+    let err = parse_transfer_pairs(&json!({ "meas_channel": 0, "ref_channel": "3" })).unwrap_err();
+    assert!(err.contains("ref_channel must be an integer"), "{err}");
+}
 // ---- parse_params -------------------------------------------------
 //
 // These exist because `parse_params` reads no `ServerState` and no

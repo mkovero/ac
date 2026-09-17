@@ -73,7 +73,7 @@ pub(super) fn parse_generate(
         }
         "sine" => {
             let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
-                Some(args.remove(0))
+                Some(parse_channels(&args.remove(0))?)
             } else {
                 None
             };
@@ -99,7 +99,7 @@ pub(super) fn parse_generate(
         }
         "pink" => {
             let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
-                Some(args.remove(0))
+                Some(parse_channels(&args.remove(0))?)
             } else {
                 None
             };
@@ -156,9 +156,23 @@ mod tests {
         let p = parse(&args("generate sine 0-11 0dbu 1khz")).unwrap();
         match p.cmd {
             CommandKind::GenerateSine { channels, .. } => {
-                assert_eq!(channels, Some("0-11".into()));
+                assert_eq!(channels, Some((0..=11).collect::<Vec<u32>>()));
             }
             other => panic!("expected GenerateSine, got {other:?}"),
+        }
+    }
+
+    /// #431: a malformed channel spec used to parse `Ok` and later play on
+    /// channel 0 (`4294967296`) or on the configured output (`5-3`).
+    #[test]
+    fn test_generate_refuses_malformed_channel_spec() {
+        for line in [
+            "generate sine 4294967296",
+            "generate sine 5-3 1khz",
+            "generate pink 1,,2",
+            "generate pink 3-",
+        ] {
+            assert!(parse(&args(line)).is_err(), "{line} must not parse");
         }
     }
 

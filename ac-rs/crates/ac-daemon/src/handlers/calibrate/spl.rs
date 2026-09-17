@@ -18,7 +18,12 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate_spl");
     cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
-    let (out_ch, in_ch) = channels_from(cmd, &cfg);
+    let (out_ch, in_ch) = match channels_from(cmd, &cfg) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return json!({"ok": false, "error": e.refusal("SPL calibration not started", &[])})
+        }
+    };
     let capture_s = cmd.get("capture_s").and_then(Value::as_f64).unwrap_or(1.0);
 
     let pub_tx = state.pub_tx.clone();

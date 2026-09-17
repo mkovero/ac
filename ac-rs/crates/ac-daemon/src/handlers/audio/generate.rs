@@ -10,7 +10,7 @@ use crate::server::ServerState;
 
 use super::super::{
     busy_guard, cfg_guard, emission_guard, make_engine_for_state, resolve_output,
-    resolve_output_by_channel, send_pub, spawn_worker,
+    resolve_output_by_channel, send_pub, spawn_worker, wire,
 };
 
 /// Resolve the `channels` field in a generate command into playback ports.
@@ -23,20 +23,21 @@ use super::super::{
 /// Returns `Err` with a human-readable message when *any* channel is
 /// out of range — the caller surfaces it as a `400` reply instead of
 /// silently connecting to a non-existent port name and producing no
-/// audio.
+/// audio. An explicitly supplied list with any invalid element (#431) is
+/// refused the same way: it never falls back to the configured output.
 fn resolve_channels(
+    cmd_name: &str,
     cmd: &Value,
     cfg: &ac_core::config::Config,
     state: &ServerState,
 ) -> Result<Vec<String>, String> {
-    let channels: Vec<u32> = cmd
-        .get("channels")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_u64().map(|u| u as u32))
-                .collect()
-        })
+    let channels = wire::opt_u32_array(cmd, "channels")
+        .map_err(|e| {
+            e.refusal(
+                &format!("{cmd_name} not started"),
+                &[("stimulus", "silent")],
+            )
+        })?
         .unwrap_or_default();
     if channels.is_empty() {
         return Ok(vec![resolve_output(cfg, state)?]);
@@ -63,7 +64,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     // if it is above the fixed maximum — never clamped down to it.
     let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
-    let out_ports = match resolve_channels(cmd, &cfg, state) {
+    let out_ports = match resolve_channels("generate", cmd, &cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
@@ -124,7 +125,7 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     // #459: same refusal discipline as `generate` above.
     let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
-    let out_ports = match resolve_channels(cmd, &cfg, state) {
+    let out_ports = match resolve_channels("generate_pink", cmd, &cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
