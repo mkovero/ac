@@ -2786,11 +2786,11 @@ mod tests {
         let mut h = vec![0.0_f64; CC_LEN];
         h[CC_T0] = 1.0;
         let (mut y1, mut y2) = (0.0_f64, 0.0_f64);
-        for n in CC_T0 + 1..CC_LEN {
+        for (k, v) in h.iter_mut().enumerate().skip(CC_T0 + 1) {
             // y[n] = b1·δ[n − 1 − t0] + a1·y[n − 1] + a2·y[n − 2]
-            let x1 = if n == CC_T0 + 1 { 1.0 } else { 0.0 };
+            let x1 = if k == CC_T0 + 1 { 1.0 } else { 0.0 };
             let y = b1 * x1 + a1 * y1 + a2 * y2;
-            h[n] += GAIN * y;
+            *v += GAIN * y;
             (y2, y1) = (y1, y);
         }
         if let Some(top) = top_hz {
