@@ -312,13 +312,33 @@ fn capture(k: &Kernel, case: &Case, index: usize) -> Vec<f64> {
     h
 }
 
-/// A case's outcomes under the shipped rule, through `ir_stats`, and under
-/// the rejected revision-2 rule, inline.
+/// A case's outcomes under the shipped rule, through `ir_stats`, without
+/// and with the true distance typed, and under the rejected revision-2
+/// rule, inline.
 #[derive(Debug, Clone, Copy)]
 struct Scored {
     case: Case,
     shipped: Outcome,
+    with_distance: Outcome,
+    /// The flight time produced with the distance typed, seconds.
+    flight_with_distance_s: Option<f64>,
     rejected: Outcome,
+}
+
+/// The distance whose `d / c` is exactly the first path's flight time
+/// (`T0 − centre − τ`), at the default speed of sound.
+fn true_distance_m() -> f64 {
+    let flight = (T0 - LEN / 2) as f64 / SR as f64 - TAU_S;
+    flight * crate::shared::conversions::speed_of_sound_from_config(None)
+}
+
+/// The window around `d / c` the true distance allows, in seconds re
+/// `d / c`, computed from the constants rather than read from the check.
+fn true_window_s() -> (f64, f64) {
+    let d = true_distance_m();
+    let c = crate::shared::conversions::speed_of_sound_from_config(None);
+    let eps = (DISTANCE_TAPE_TOLERANCE_M + DISTANCE_SPEED_OF_SOUND_REL_TOL * d) / c;
+    (-eps, eps + ARRIVAL_EXCESS_DELAY_ALLOWANCE_S)
 }
 
 /// Revision 2's thresholds: `EarlierComparable` at 6 dB, the SNR gate at
@@ -337,9 +357,16 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
     let mut report = ir_report_with_custom_ir_band(h, SR, k.f2_hz);
     report.interface_latency = Some(measured_tau(TAU_S));
     let stats = report.ir_stats().expect("an impulse response");
+    report.position = Some(PositionSnapshot {
+        distance_m: Some(true_distance_m()),
+        ..Default::default()
+    });
+    let with = report.ir_stats().expect("an impulse response");
     Scored {
         case: *case,
         shipped: score(stats.flight_time_s.is_some(), stats.arrival_index),
+        with_distance: score(with.flight_time_s.is_some(), with.arrival_index),
+        flight_with_distance_s: with.flight_time_s,
         rejected,
     }
 }
@@ -404,9 +431,24 @@ fn falsification_suite() {
         .map(|(i, case)| run(&kernels[case.kernel], case, i))
         .collect();
 
-    print_table(&kernels, &scored, |s| s.shipped, "shipped rule");
+    print_table(
+        &kernels,
+        &scored,
+        |s| s.shipped,
+        "shipped rule, no distance",
+    );
+    print_table(
+        &kernels,
+        &scored,
+        |s| s.with_distance,
+        "shipped rule, true distance",
+    );
     print_table(&kernels, &scored, |s| s.rejected, "revision 2, inline");
 
+    let expected_s =
+        true_distance_m() / crate::shared::conversions::speed_of_sound_from_config(None);
+    let (low_s, high_s) = true_window_s();
+    let mut rejected_wrong_in_s1 = 0;
     let mut violations = Vec::new();
     for s in &scored {
         let c = &s.case;
@@ -415,25 +457,162 @@ fn falsification_suite() {
             "{} {:.0} Hz, second path {:+} dB at {} ms + {} (polarity {:+}), background {:?}",
             k.name, k.f2_hz, c.level_db, c.separation_ms, c.fraction, c.polarity, c.background
         );
-        if let Outcome::Wrong { error } = s.shipped {
-            if c.resolved() && c.level_db <= 15.0 {
-                violations.push(format!("S1: produced {error:+} — {label}"));
-            }
-            if c.level_db <= 0.0 {
-                violations.push(format!("S4: produced {error:+} — {label}"));
-            }
-            if error <= 0 || error as f64 > c.separation_samples() + 2.0 {
-                violations.push(format!("S3: error {error:+} outside (0, D + 2] — {label}"));
+        let s1_region = c.resolved() && c.level_db <= 15.0;
+        for (outcome, distance) in [(s.shipped, "no distance"), (s.with_distance, "distance")] {
+            if let Outcome::Wrong { error } = outcome {
+                // S1: resolved and no more than 15 dB stronger → never wrong.
+                if s1_region {
+                    violations.push(format!("S1: produced {error:+}, {distance} — {label}"));
+                }
+                // S4: a weaker or equal second path → never wrong.
+                if c.level_db <= 0.0 {
+                    violations.push(format!("S4: produced {error:+}, {distance} — {label}"));
+                }
+                // S3: the residual is late, and no later than the second path.
+                if error <= 0 || error as f64 > c.separation_samples() + 2.0 {
+                    violations.push(format!(
+                        "S3: error {error:+} outside (0, D + 2], {distance} — {label}"
+                    ));
+                }
             }
         }
+        // S2 (and S3's distance bound): with a distance, every produced
+        // flight time lies inside the window.
+        if let Some(flight_s) = s.flight_with_distance_s {
+            let excess_s = flight_s - expected_s;
+            if !(low_s..=high_s).contains(&excess_s) {
+                violations.push(format!(
+                    "S2: flight {:+.1} samples re d/c outside the window — {label}",
+                    excess_s * SR as f64
+                ));
+            }
+        }
+        if s1_region && matches!(s.rejected, Outcome::Wrong { .. }) {
+            rejected_wrong_in_s1 += 1;
+        }
     }
+    println!(
+        "S1 region, revision 2 inline: {rejected_wrong_in_s1} produced wrong \
+         (S5 needs at least 1)"
+    );
     for v in violations.iter().take(40) {
         println!("{v}");
     }
+    for tag in ["S1", "S2", "S3", "S4"] {
+        let n = violations.iter().filter(|v| v.starts_with(tag)).count();
+        println!("{tag}: {n} violations");
+    }
+    // S5: the rejected rule, run inline over S1's region, is wrong at least
+    // once — so S1 is able to go red.
+    assert!(
+        rejected_wrong_in_s1 >= 1,
+        "S5: revision 2 produced no wrong arrival in S1's region, so S1 cannot fail"
+    );
     assert!(
         violations.is_empty(),
         "{} violations; first: {}",
         violations.len(),
         violations[0]
+    );
+}
+
+/// `kernel` plus `draw` scaled so the capture's measured band-limited SNR
+/// ([`IrStats::band_limited_snr_db`]) is `snr_db`, to within 0.01 dB and
+/// never below it.
+fn at_measured_snr(kernel: &[f64], draw: &[f64], snr_db: f64) -> MeasurementReport {
+    let build = |scale: f64| {
+        let h = kernel
+            .iter()
+            .zip(draw)
+            .map(|(k, n)| k + scale * n)
+            .collect();
+        let mut r = ir_report_with_custom_ir_band(h, SR, IR_DEFAULT_F2_HZ);
+        r.interface_latency = Some(measured_tau(TAU_S));
+        r
+    };
+    let snr = |r: &MeasurementReport| r.ir_stats().unwrap().band_limited_snr_db.unwrap();
+    // Start from the whole-draw RMS above the corner, as the suite scales.
+    let hp = |x: &[f64]| zero_phase_high_pass(x, SR, ARRIVAL_HIGH_PASS_CORNER_HZ);
+    let mut scale = ir_peak(&hp(kernel)).1 / rms(&hp(draw)) * 10f64.powf(-snr_db / 20.0);
+    for _ in 0..4 {
+        scale *= 10f64.powf((snr(&build(scale)) - snr_db) / 20.0);
+    }
+    // The pre-region is noise-dominated, so the SNR is linear in dB of
+    // `scale`; a hair smaller lands on or above the target.
+    let report = build(scale * (1.0 - 1e-5));
+    let measured = snr(&report);
+    assert!(
+        (snr_db..snr_db + 0.01).contains(&measured),
+        "test setup: SNR {measured}, wanted {snr_db}"
+    );
+    report
+}
+
+/// Earlier-comparable firings on `draws` background draws at a measured
+/// arrival SNR of exactly `snr_db`, under `rule`.
+fn earlier_comparable_on_noise(kernel: &[f64], snr_db: f64, rule: ArrivalRule) -> usize {
+    (0..50)
+        .filter(|seed| {
+            let draw = background_draw(LEN, 53_700 + seed);
+            let report = at_measured_snr(kernel, &draw, snr_db);
+            let MeasurementData::ImpulseResponse { linear_ir, .. } = &report.data[0].data else {
+                unreachable!()
+            };
+            let a = band_limited_arrival_under(
+                linear_ir,
+                SR,
+                IR_DEFAULT_F2_HZ,
+                ir_peak(linear_ir).0,
+                rule,
+            );
+            assert_eq!(a.arrival_index, T0, "draw {seed}: test setup");
+            assert!(
+                !matches!(a.cross_check, ArrivalCrossCheck::BandLimitedSnrLow { .. }),
+                "draw {seed}: refused on SNR at {snr_db} dB"
+            );
+            matches!(a.cross_check, ArrivalCrossCheck::EarlierComparable { .. })
+        })
+        .count()
+}
+
+/// #537 architect revision 3: [`ARRIVAL_SNR_MIN_DB`] and
+/// [`ARRIVAL_EARLIER_COMPARABLE_DB`] only work together. Recorded
+/// background (phase-randomised, 50 seeded draws, default 0.4 s gate)
+/// under a single ideal impulse, at an arrival SNR of exactly the gate:
+/// the earlier-comparable guard must fire on no draw — noise peaks sit
+/// about 12.5 dB above their RMS, so under the −20 dB level. The same
+/// draws at 30 dB, with only the SNR gate moved there (computed inline),
+/// must make it fire on some: the refusal on noise, under the wrong
+/// reason, that moving either constant alone brings back.
+///
+/// Recorded, not asserted: the pure-delay ESS kernel carries its own
+/// high-passed skirt at −26.2 dB one sample past the lobe window (pupu's
+/// cable read −26.1 dB there), so background at the gate adds to a level
+/// already 6 dB under the guard, and it fires on some draws. That is a
+/// refusal, never a produced number; the coupling above covers noise
+/// peaks, not a pulse's skirt plus noise.
+#[test]
+fn snr_gate_keeps_background_peaks_below_the_earlier_comparable_level() {
+    let mut spike = vec![0.0; LEN];
+    spike[T0] = 1.0;
+    let moved_alone = ArrivalRule {
+        snr_min_db: 30.0,
+        ..ArrivalRule::SHIPPED
+    };
+    let at_gate = earlier_comparable_on_noise(&spike, ARRIVAL_SNR_MIN_DB, ArrivalRule::SHIPPED);
+    let at_30 = earlier_comparable_on_noise(&spike, 30.0, moved_alone);
+    let skirt = earlier_comparable_on_noise(
+        &pure_delay(&band(IR_DEFAULT_F2_HZ)),
+        ARRIVAL_SNR_MIN_DB,
+        ArrivalRule::SHIPPED,
+    );
+    println!(
+        "EarlierComparable on noise: {at_gate}/50 at the gate, {at_30}/50 at 30 dB; \
+         pure-delay kernel at the gate {skirt}/50 (recorded)"
+    );
+    assert_eq!(at_gate, 0, "the guard fires on background at the SNR gate");
+    assert!(
+        at_30 > 0,
+        "at 30 dB the guard never fires on background, so this test cannot show the coupling"
     );
 }

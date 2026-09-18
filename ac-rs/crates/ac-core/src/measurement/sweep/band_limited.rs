@@ -1,13 +1,22 @@
 //! The arrival of a deconvolved impulse response read off the IR
-//! high-passed at [`ARRIVAL_HIGH_PASS_CORNER_HZ`] (#537).
+//! high-passed at [`ARRIVAL_HIGH_PASS_CORNER_HZ`] (#537): a **band-limited
+//! delay estimate at the corner**.
 //!
 //! A room mode can put the broadband maximum of a speaker capture well
-//! after the direct sound: on pupu at 2 m a ~55 Hz mode's first swing sat
-//! about 16 ms after the direct sound and 24 dB above the direct HF, so
+//! after the sound's first arrival: on pupu at 2 m a ~55 Hz mode's first
+//! swing sat about 16 ms after it and 24 dB above its HF content, so
 //! `argmax |h|` ([`super::ir_peak`]) read a stable, plausible and wrong
 //! arrival. High-passing the IR before picking removes such a component
-//! (the mode sits more than four octaves below the corner) while leaving
-//! the direct sound's HF edge in place.
+//! (the mode sits more than four octaves below the corner).
+//!
+//! What the pick is, and is not (#537 architect revision 3, operator
+//! ruling 2026-09-18): the peak of the IR's content above the corner. On a
+//! real loudspeaker it depends on the corner — the same 17 pupu IRs read a
+//! flight of +634 samples at 1 kHz and +596 at 2 kHz, while the cable read
+//! 0 at both — so it is not an identified direct path. A later path
+//! stronger than the first can be picked; the guards in
+//! `measurement::report` refuse that where they can and bound the error
+//! where they cannot.
 //!
 //! The filter is zero-phase: a 4th-order Butterworth high-pass run
 //! forward over the IR, then forward over the time-reversed result, so the

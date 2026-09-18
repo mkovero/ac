@@ -78,17 +78,32 @@ pub const PRE_IMPULSE_SNR_BASIS: &str = "fixed threshold, scored for the default
 /// [`PRE_IMPULSE_SNR_MIN_DB`], which gates the broadband deconvolution and
 /// keeps its meaning.
 ///
-/// Provenance: derived from ISO 3382-1:2009 §A.3.4, which reads the start
-/// of a filtered IR as the point where it "first rises significantly above
-/// the background but is more than 20 dB below the maximum" — a trigger
-/// that exists only when the filtered IR has more than 20 dB between its
-/// maximum and its background. The clause states the trigger, not a gate;
-/// [`ARRIVAL_SNR_BASIS`] says only that much. Below this value a looser
-/// rule would need rig evidence that it is reliable, and none exists.
-pub const ARRIVAL_SNR_MIN_DB: f64 = 20.0;
+/// Provenance (#537 architect revision 3): derived — ISO 3382-1:2009
+/// §A.3.4's trigger level, 20 dB, plus the peak-over-RMS of band-limited
+/// background across the default 0.4 s gate, about 12.5 dB. The clause
+/// reads the start of a filtered IR as the point where it "first rises
+/// significantly above the background but is more than 20 dB below the
+/// maximum"; for that trigger to sit above the background's *peaks*, not
+/// only its RMS, the SNR must clear 20 dB by the noise crest. Also measured
+/// on synthesis: the prototype suite refused every capture on noise at
+/// 30 dB and none at 35 dB. Rig headroom: 50.8–53.9 dB at 2 kHz on pupu.
+///
+/// **Coupled** to [`ARRIVAL_EARLIER_COMPARABLE_DB`] and to the gate length:
+/// below this value, background peaks reach the earlier-comparable level
+/// and that guard fires on noise, naming the wrong reason. The
+/// coupled-constants test in `arrival_suite.rs` fails if either moves
+/// alone. A longer typed gate raises the noise crest, which errs toward
+/// refusal.
+///
+/// Was 20.0 dB (revision 2): §A.3.4's trigger level taken as the gate on
+/// its own. Falsified by the prototype suite once the earlier-comparable
+/// guard moved to 20 dB: at an arrival SNR of 30 dB every capture was
+/// refused as an earlier arrival rather than on its SNR.
+pub const ARRIVAL_SNR_MIN_DB: f64 = 35.0;
 
 /// What [`ARRIVAL_SNR_MIN_DB`] rests on, as printed under the arrival SNR.
-pub const ARRIVAL_SNR_BASIS: &str = "ISO 3382-1:2009 \u{a7}A.3.4: trigger > 20 dB below maximum";
+pub const ARRIVAL_SNR_BASIS: &str =
+    "ISO 3382-1:2009 \u{a7}A.3.4 trigger (\u{2212}20 dB) above noise peaks";
 
 /// How far the broadband peak compared against ([`ArrivalCrossCheck`]'s
 /// `r`) may sit from the band-limited arrival, either way, before the
@@ -108,17 +123,54 @@ pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 
 /// An earlier high-passed sample within this many dB of the band-limited
 /// maximum makes the arrival [`ArrivalCrossCheck::EarlierComparable`]
-/// (#537): the pick may be a strong HF reflection, not the direct sound.
+/// (#537): the pick may be a later, stronger path than the first one.
 ///
-/// Provenance: measured (#537 architect revision 2). On the pupu captures
-/// the largest high-passed sample more than one corner period before the
-/// arrival sat at −26 dB (cable) to −38 dB (speaker).
-pub const ARRIVAL_EARLIER_COMPARABLE_DB: f64 = 6.0;
+/// Provenance (#537 architect revision 3): derived from ISO 3382-1:2009
+/// §A.3.4's trigger level ("more than 20 dB below the maximum") — an
+/// earlier path strong enough to set the standard's start point is strong
+/// enough to disqualify the pick. Measured for headroom: on the 17 pupu
+/// captures of 2026-09-18 the largest high-passed sample more than one
+/// corner period before the arrival sat at −33.6 dB (speaker) and
+/// −26.1 dB (cable), 13.6 and 6.1 dB clear of it. Coupled to
+/// [`ARRIVAL_SNR_MIN_DB`].
+///
+/// Was 6.0 dB (revision 2), measured as the same headroom with a margin.
+/// Falsified by the prototype falsification suite: with a later copy
+/// stronger than the first path and separated by at least 0.5 ms, revision 2
+/// produced a wrong flight time in 502 of 720 cases, usually as a plain
+/// `Agrees`; at 20 dB, 71.
+pub const ARRIVAL_EARLIER_COMPARABLE_DB: f64 = 20.0;
+
+/// Hand-tape tolerance on a typed `position.distance_m`, in metres: half of
+/// [`DistanceCheck`]'s window below and above `d / c` comes from it.
+///
+/// Provenance: measured — hand-tape repeatability on the rig, ±5 cm
+/// (#537 architect revision 3).
+pub const DISTANCE_TAPE_TOLERANCE_M: f64 = 0.05;
+
+/// Relative uncertainty of the speed of sound [`DistanceCheck`] divides by,
+/// as a fraction.
+///
+/// Provenance: derived — c at 20 ± 10 °C varies by 0.606·10 / 343 ≈ 1.8 %,
+/// rounded up (#537 architect revision 3). Covers an unset temperature.
+pub const DISTANCE_SPEED_OF_SOUND_REL_TOL: f64 = 0.02;
+
+/// How much later than `d / c` (plus its tolerance) a flight time may sit
+/// and still be [`DistanceCheck::Consistent`], in seconds: the
+/// loudspeaker's excess-delay budget.
+///
+/// Provenance: **assumed** (#537 architect revision 3). The anchor is the
+/// Genelec 1083's measured excess of +36 samples (0.38 ms) at 2 m on pupu
+/// (flight +596 against d/c = 559.8 at 343 m/s); the 0.5 m position read
+/// +58 (0.60 ms), untaped. A DSP loudspeaker whose processing latency
+/// exceeds it is refused ([`DistanceCheck::TooLate`]), not misread. The rig
+/// check on #537 is where this value gets measured.
+pub const ARRIVAL_EXCESS_DELAY_ALLOWANCE_S: f64 = 0.001;
 
 /// A second local maximum of the high-passed IR within one corner period of
 /// the pick and less than this many dB below it makes the arrival
 /// [`ArrivalCrossCheck::ArrivalAmbiguous`] (#537 architect revision 2): the
-/// pick may be one half-cycle off the direct sound's first lobe.
+/// pick may be one half-cycle off its pulse's first lobe.
 ///
 /// Provenance: measured. Healthy picks on the pupu captures (2026-09-18,
 /// Genelec 1083, 2 kHz corner) cleared 4.9–6.5 dB (9.4 dB on the cable);
@@ -443,9 +495,16 @@ impl MeasurementReport {
         // the flight time derived from it does not.
         //
         // #537: an arrival its cross-check disputes is never subtracted
-        // from either — the arrival is not shown to be the direct sound.
+        // from either — the pick may not be the first path's delay.
+        //
+        // #537 architect revision 3: nor is one that falls outside the
+        // window a typed distance allows. The check scores the stored-τ
+        // subtraction whether or not another layer withholds it, so a
+        // read-out can name every reason a flight time is missing.
+        let distance_check = distance_check(self, arrival_s);
         let flight_time_s = match (&self.interface_latency, &arrival_check) {
             _ if arrival_cross_check.withholds_flight_time() => None,
+            _ if distance_check.withholds_flight_time() => None,
             (Some(InterfaceLatency::Measured(m)), _)
                 if m.session_check
                     .as_ref()
@@ -491,6 +550,7 @@ impl MeasurementReport {
             arrival_s,
             arrival_check,
             flight_time_s,
+            distance_check,
             interface_latency_enumeration,
             interface_latency_check,
             pre_impulse_snr_db,
@@ -650,6 +710,34 @@ pub(super) fn causal_bound(
         (Err(reference_reason), None) => {
             CausalBound::Unavailable(MissingBoundInput::Both { reference_reason })
         }
+    }
+}
+
+/// Score `arrival_s − τ` against the typed distance (#537 architect
+/// revision 3, operator ruling 3). τ is the capture pair's stored
+/// `interface_latency` — the one [`IrStats::flight_time_s`] subtracts — not
+/// the same-capture reference: this checks the flight time, not the onset
+/// bound. Runs whether or not another layer withholds the flight time.
+pub(super) fn distance_check(report: &MeasurementReport, arrival_s: f64) -> DistanceCheck {
+    let position = report.position.as_ref();
+    let Some(distance_m) = position.and_then(|p| p.distance_m) else {
+        return DistanceCheck::NotGiven;
+    };
+    if !(distance_m.is_finite() && distance_m > 0.0) {
+        return DistanceCheck::NotPositive { distance_m };
+    }
+    let Some(InterfaceLatency::Measured(m)) = &report.interface_latency else {
+        return DistanceCheck::NoLatency { distance_m };
+    };
+    let temperature_c = position.and_then(|p| p.temperature_c);
+    let window = DistanceWindow::new(distance_m, temperature_c);
+    let excess_s = arrival_s - m.tau_s - window.expected_s;
+    if excess_s < window.low_s {
+        DistanceCheck::TooEarly { window, excess_s }
+    } else if excess_s > window.high_s {
+        DistanceCheck::TooLate { window, excess_s }
+    } else {
+        DistanceCheck::Consistent { window, excess_s }
     }
 }
 
@@ -851,8 +939,14 @@ pub struct IrStats {
     /// to catch.
     pub arrival_check: ArrivalCheck,
     /// `arrival_s − interface_latency.tau_s` — the one τ subtraction this
-    /// report can offer: a peak arrival minus a peak-picked τ. `None`
-    /// whenever [`Self::arrival_cross_check`] withholds it (#537).
+    /// report can offer: a peak arrival minus a peak-picked τ. With the
+    /// arrival band-limited (#537) it is a **band-limited delay estimate at
+    /// the corner** of [`Self::arrival_source`]: the same IR reads
+    /// differently at another corner, and nothing here identifies the
+    /// direct path. [`Self::distance_check`] is the only evidence about the
+    /// path, and it says only whether the number fits the typed distance.
+    /// `None` whenever [`Self::arrival_cross_check`] or
+    /// [`Self::distance_check`] withholds it.
     /// `Some` only when `interface_latency` is a measured
     /// τ for *this* capture pair **and** `arrival_check` is not a
     /// disagreement; `None` on `PeriodShift`/`Mismatch` even though
@@ -863,6 +957,11 @@ pub struct IrStats {
     /// [`Self::interface_latency_check`] is refused (#466), whatever
     /// `arrival_check` says.
     pub flight_time_s: Option<f64>,
+    /// The flight time scored against the typed `position.distance_m`
+    /// (#537 architect revision 3). [`DistanceCheck::TooEarly`] and
+    /// [`DistanceCheck::TooLate`] withhold [`Self::flight_time_s`]. Scored
+    /// even when another layer withholds it, so every reason can be named.
+    pub distance_check: DistanceCheck,
     /// How the capture pair's stored τ — the one [`Self::flight_time_s`]
     /// subtracts — related to this capture's device-enumeration epoch
     /// (#461), copied from `interface_latency`. `None` when that is not a
@@ -1014,6 +1113,97 @@ impl ArrivalCrossCheck {
             ArrivalCrossCheck::Agrees { gap }
             | ArrivalCrossCheck::BroadbandLater { gap }
             | ArrivalCrossCheck::BroadbandEarlier { gap } => Some(gap),
+            _ => None,
+        }
+    }
+}
+
+/// The window a typed distance allows a flight time in (#537 architect
+/// revision 3): `expected_s + low_s … expected_s + high_s`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DistanceWindow {
+    /// The typed `position.distance_m`.
+    pub distance_m: f64,
+    /// The speed of sound the window divides by, from
+    /// [`crate::shared::conversions::speed_of_sound_from_config`].
+    pub speed_of_sound_m_s: f64,
+    /// The recorded temperature `speed_of_sound_m_s` came from; `None` when
+    /// the default was assumed.
+    pub temperature_c: Option<f64>,
+    /// `d / c`, seconds.
+    pub expected_s: f64,
+    /// `−ε`, seconds, with `ε = (`[`DISTANCE_TAPE_TOLERANCE_M`]` +
+    /// `[`DISTANCE_SPEED_OF_SOUND_REL_TOL`]`·d) / c`. A zero-phase peak
+    /// cannot precede its path, so only the tape, c or τ can put a flight
+    /// time below this.
+    pub low_s: f64,
+    /// `ε + `[`ARRIVAL_EXCESS_DELAY_ALLOWANCE_S`], seconds.
+    pub high_s: f64,
+}
+
+impl DistanceWindow {
+    /// The window for `distance_m` at `temperature_c`.
+    pub fn new(distance_m: f64, temperature_c: Option<f64>) -> Self {
+        let c = crate::shared::conversions::speed_of_sound_from_config(temperature_c);
+        let epsilon_s =
+            (DISTANCE_TAPE_TOLERANCE_M + DISTANCE_SPEED_OF_SOUND_REL_TOL * distance_m) / c;
+        Self {
+            distance_m,
+            speed_of_sound_m_s: c,
+            temperature_c,
+            expected_s: distance_m / c,
+            low_s: -epsilon_s,
+            high_s: epsilon_s + ARRIVAL_EXCESS_DELAY_ALLOWANCE_S,
+        }
+    }
+}
+
+/// The flight time against the typed distance (#537 architect revision 3).
+/// The only evidence about the path the instrument has, and all it says is
+/// *consistent with the distance* — never *direct*. `excess_s` is
+/// `flight − d / c`, seconds, compared against the window in seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DistanceCheck {
+    /// No distance typed. The flight time is produced unchecked.
+    NotGiven,
+    /// A distance was typed but is not a finite positive length (a `0m`
+    /// cable, say): nothing to check against. Not a verdict.
+    NotPositive { distance_m: f64 },
+    /// A distance was typed but no stored τ exists, so there is no flight
+    /// time to check. Not a verdict.
+    NoLatency { distance_m: f64 },
+    /// Inside the window.
+    Consistent {
+        window: DistanceWindow,
+        excess_s: f64,
+    },
+    /// Earlier than the window allows. Withholds the flight time.
+    TooEarly {
+        window: DistanceWindow,
+        excess_s: f64,
+    },
+    /// Later than the window allows. Withholds the flight time.
+    TooLate {
+        window: DistanceWindow,
+        excess_s: f64,
+    },
+}
+
+impl DistanceCheck {
+    /// Whether this check withholds [`IrStats::flight_time_s`].
+    pub fn withholds_flight_time(&self) -> bool {
+        matches!(
+            self,
+            DistanceCheck::TooEarly { .. } | DistanceCheck::TooLate { .. }
+        )
+    }
+
+    /// The window and the excess, when a verdict was reached.
+    pub fn scored(&self) -> Option<(&DistanceWindow, f64)> {
+        match self {
+            DistanceCheck::Consistent { window, excess_s }
+            | DistanceCheck::TooEarly { window, excess_s }
+            | DistanceCheck::TooLate { window, excess_s } => Some((window, *excess_s)),
             _ => None,
         }
     }
@@ -2474,12 +2664,25 @@ mod tests {
         assert_eq!(stats.flight_time_s, None);
     }
 
-    /// The same pair 6.5 dB apart does not fire: the bound is 6 dB.
+    /// The same pair 20.5 dB apart does not fire: the bound is 20 dB
+    /// (architect revision 3). 14.2 dB — the ux example — does.
     #[test]
     fn cross_check_earlier_comparable_does_not_fire_below_its_bound() {
         let mut ir = cc_floor();
+        ir[CC_T0] = 0.5 * 10f64.powf(-14.2 / 20.0);
+        ir[CC_T0 + 288] = 0.5;
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert!(
+            matches!(
+                stats.arrival_cross_check,
+                ArrivalCrossCheck::EarlierComparable { .. }
+            ),
+            "{:?}",
+            stats.arrival_cross_check
+        );
+        let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
-        ir[CC_T0 + 288] = 0.5 * 10f64.powf(6.5 / 20.0);
+        ir[CC_T0 + 288] = 0.5 * 10f64.powf(20.5 / 20.0);
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
         assert!(
             matches!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees { .. }),
@@ -2725,14 +2928,15 @@ mod tests {
         );
     }
 
-    /// QA on PR #538: the 20 dB band-limited SNR gate fires exactly below
-    /// 20 dB, across a sweep of floors straddling it (uniform noise: its
-    /// maximum is at most √3·rms, so no other standing pre-empts it).
+    /// QA on PR #538: the band-limited SNR gate fires exactly below
+    /// [`ARRIVAL_SNR_MIN_DB`] (35 dB since architect revision 3), across a
+    /// sweep of floors straddling it (uniform noise: its maximum is at most
+    /// √3·rms, so no other standing pre-empts it).
     #[test]
-    fn band_limited_snr_gate_fires_exactly_below_twenty_db() {
+    fn band_limited_snr_gate_fires_exactly_below_its_threshold() {
         let (mut saw_low, mut saw_ok) = (false, false);
         for step in 0..40 {
-            let amp = 0.09 * 10f64.powf(step as f64 / 76.0); // ≈ 25 dB … 15 dB
+            let amp = 0.016 * 10f64.powf(step as f64 / 76.0); // ≈ 40 dB … 30 dB
             let mut ir = hashed_uniform_noise(CC_LEN, amp, 3);
             ir[CC_T0] += 1.0;
             let s = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
@@ -2806,6 +3010,162 @@ mod tests {
         assert_eq!(stats.onset_rule, revised.rule);
     }
 
+    // ─── #537 architect revision 3: the distance check ───────────────────
+
+    /// A single spike at `CC_T0` (flight 598 − 96 = 502 samples) with `d`
+    /// typed, no temperature.
+    fn distance_report(distance_m: Option<f64>) -> MeasurementReport {
+        let mut ir = cc_floor();
+        ir[CC_T0] = 0.5;
+        let mut r = cross_check_report(ir, 20_000.0);
+        r.position = Some(PositionSnapshot {
+            distance_m,
+            ..Default::default()
+        });
+        r
+    }
+
+    /// The distance that puts `excess` samples of flight past `d / c`.
+    fn distance_for_excess(excess: f64) -> f64 {
+        let c = crate::shared::conversions::speed_of_sound_from_config(None);
+        (502.0 - excess) / 96_000.0 * c
+    }
+
+    /// The window is `d/c − ε … d/c + ε + A`, `ε = (5 cm + 2 %·d) / c`: at
+    /// 2 m and 343 m/s, −25.2 … +121.2 samples (the ux arithmetic).
+    #[test]
+    fn distance_window_is_tape_and_c_either_side_plus_the_allowance_late() {
+        let w = DistanceWindow::new(2.0, None);
+        let c = crate::shared::conversions::speed_of_sound_from_config(None);
+        assert_eq!(w.speed_of_sound_m_s, c);
+        assert!((w.expected_s - 2.0 / c).abs() < 1e-15);
+        let eps = (0.05 + 0.02 * 2.0) / c;
+        assert!((w.low_s + eps).abs() < 1e-15);
+        assert!((w.high_s - eps - 0.001).abs() < 1e-15);
+        if c == 343.0 {
+            assert!(
+                (w.low_s * 96_000.0 + 25.19).abs() < 0.01,
+                "{}",
+                w.low_s * 96_000.0
+            );
+            assert!((w.high_s * 96_000.0 - 121.19).abs() < 0.01);
+        }
+        let warm = DistanceWindow::new(2.0, Some(30.0));
+        assert_eq!(warm.temperature_c, Some(30.0));
+        assert!(warm.speed_of_sound_m_s > c);
+    }
+
+    /// Inside the window: `Consistent`, the excess carried, the flight time
+    /// produced. Just outside either edge: withheld, the verdict naming the
+    /// side. The comparison is in seconds.
+    #[test]
+    fn distance_check_withholds_a_flight_outside_its_window() {
+        let stats = distance_report(Some(distance_for_excess(36.0)))
+            .ir_stats()
+            .unwrap();
+        match stats.distance_check {
+            DistanceCheck::Consistent { excess_s, .. } => {
+                assert!((excess_s * 96_000.0 - 36.0).abs() < 1e-6, "{excess_s}")
+            }
+            ref other => panic!("{other:?}"),
+        }
+        assert!(stats.flight_time_s.is_some());
+
+        // The window scales with d, so each edge is solved for d: the flight
+        // is 502 samples, and d/c ± the window edge must equal it.
+        let c = crate::shared::conversions::speed_of_sound_from_config(None);
+        let flight_s = 502.0 / 96_000.0;
+        let tape = DISTANCE_TAPE_TOLERANCE_M;
+        let rel = DISTANCE_SPEED_OF_SOUND_REL_TOL;
+        let early_edge = (flight_s * c + tape) / (1.0 - rel);
+        let late_edge = ((flight_s - ARRIVAL_EXCESS_DELAY_ALLOWANCE_S) * c - tape) / (1.0 + rel);
+        let one_sample_m = c / 96_000.0;
+        for (distance, early, late) in [
+            (early_edge + one_sample_m, true, false),
+            (early_edge - one_sample_m, false, false),
+            (late_edge + one_sample_m, false, false),
+            (late_edge - one_sample_m, false, true),
+        ] {
+            let stats = distance_report(Some(distance)).ir_stats().unwrap();
+            let check = &stats.distance_check;
+            assert_eq!(
+                matches!(check, DistanceCheck::TooEarly { .. }),
+                early,
+                "{distance}: {check:?}"
+            );
+            assert_eq!(
+                matches!(check, DistanceCheck::TooLate { .. }),
+                late,
+                "{distance}: {check:?}"
+            );
+            assert_eq!(stats.flight_time_s.is_none(), early || late, "{distance}");
+            assert_eq!(
+                stats.arrival_cross_check,
+                ArrivalCrossCheck::Agrees { gap: 0 },
+                "the IR side agrees; only the distance withholds"
+            );
+        }
+    }
+
+    /// No distance: `NotGiven`, flight time produced. A typed `0m`: not a
+    /// verdict, never read as "not given". No stored τ: nothing to check.
+    #[test]
+    fn distance_check_names_why_it_did_not_score() {
+        let stats = distance_report(None).ir_stats().unwrap();
+        assert_eq!(stats.distance_check, DistanceCheck::NotGiven);
+        assert!(stats.flight_time_s.is_some());
+        let mut r = distance_report(None);
+        r.position = None;
+        assert_eq!(
+            r.ir_stats().unwrap().distance_check,
+            DistanceCheck::NotGiven
+        );
+
+        let stats = distance_report(Some(0.0)).ir_stats().unwrap();
+        assert_eq!(
+            stats.distance_check,
+            DistanceCheck::NotPositive { distance_m: 0.0 }
+        );
+        assert!(stats.flight_time_s.is_some());
+
+        let mut r = distance_report(Some(2.0));
+        r.interface_latency = None;
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.distance_check,
+            DistanceCheck::NoLatency { distance_m: 2.0 }
+        );
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// The distance is scored even when the cross-check withholds the
+    /// flight time, so both reasons can be named.
+    #[test]
+    fn distance_check_scores_under_a_withholding_cross_check() {
+        let mut ir = cc_floor();
+        ir[CC_T0] = 0.5;
+        ir[CC_T0 + 288] = 0.5 * 10f64.powf(2.0 / 20.0);
+        let mut r = cross_check_report(ir, 20_000.0);
+        // The pick is the reflection, 288 samples late: 2 m allows it no
+        // more than ~121.
+        r.position = Some(PositionSnapshot {
+            distance_m: Some(distance_for_excess(0.0)),
+            ..Default::default()
+        });
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::EarlierComparable { .. }
+        ));
+        match stats.distance_check {
+            DistanceCheck::TooLate { excess_s, .. } => {
+                assert!((excess_s * 96_000.0 - 288.0).abs() < 1e-6)
+            }
+            ref other => panic!("{other:?}"),
+        }
+        assert_eq!(stats.flight_time_s, None);
+    }
+
     /// Replay (#537 rig check step 0): print the revised rule's reading of
     /// every `*.json` report under `$AC_IR_REPLAY_DIR`, one line each, to
     /// compare against the architect's `revised.out` without emitting.
@@ -2834,9 +3194,21 @@ mod tests {
                 .flight_time_s
                 .map_or("-".to_string(), |f| format!("{}", (f * fs).round()));
             let opt = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:.2}"));
+            let distance = match &s.distance_check {
+                DistanceCheck::Consistent { excess_s, .. } => {
+                    format!("Consistent excess={:+.1}", excess_s * fs)
+                }
+                DistanceCheck::TooEarly { excess_s, .. } => {
+                    format!("TooEarly excess={:+.1}", excess_s * fs)
+                }
+                DistanceCheck::TooLate { excess_s, .. } => {
+                    format!("TooLate excess={:+.1}", excess_s * fs)
+                }
+                other => format!("{other:?}"),
+            };
             println!(
                 "{} f2={:.0} {:?} arrival={} flight={} gap={:?} margin={} lobe_offset={:?} \
-                 arrival_snr={}",
+                 arrival_snr={} distance_check={}",
                 path.file_name().unwrap().to_string_lossy(),
                 f2.unwrap_or(f64::NAN),
                 s.arrival_cross_check,
@@ -2846,6 +3218,7 @@ mod tests {
                 opt(s.arrival_lobe_margin_db),
                 s.arrival_lobe_offset,
                 opt(s.band_limited_snr_db),
+                distance,
             );
         }
     }
