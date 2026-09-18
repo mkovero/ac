@@ -30,6 +30,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod arrival_suite;
 mod csv;
 #[cfg(test)]
 mod fixtures;

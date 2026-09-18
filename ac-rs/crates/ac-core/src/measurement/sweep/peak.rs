@@ -82,7 +82,7 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::measurement::sweep::onset::aic_change_point;
     use crate::measurement::sweep::{
@@ -311,48 +311,63 @@ mod tests {
         );
     }
 
-    /// #537: a healthy two-way DUT — #346's fixture, in both bands and at
-    /// both group delays — must come out `Agrees` under the band-limited
-    /// arrival's guards and cross-check, with the lobe margin clear of
-    /// 3 dB (architect revision 2). Otherwise every healthy speaker capture
-    /// would be refused or marked. The arrival must also land on the HF
-    /// component's delay `t0`, not on the low component `G + (taps − 1)/2`
-    /// later, and not a half-cycle off: a wrong-lobe pick with a margin
-    /// under the tolerance would otherwise pass.
+    /// #537 architect revision 3, item 5: #346's two-way DUT, in both bands
+    /// and at both group delays, never *produces* a band-limited arrival more
+    /// than 5 samples from the HF component's delay `t0` — the property the
+    /// fixture exists for. Revision 2 required `Agrees` in all four; the
+    /// Rust gave `ArrivalAmbiguous` in three (developer stop, 2026-09-18),
+    /// and revision 3 replaced the requirement with this one, stating each
+    /// standing as a documented fact:
+    /// - narrow (A and B): `ArrivalAmbiguous`, a correct refusal. At 48 kHz
+    ///   the 9-tap boxcar passes 2–5 kHz at gain 1.0 against the HF
+    ///   component's 0.3, so the pick lands on the low component (+13), with
+    ///   a half-cycle within about 1 dB of it.
+    /// - A rig-like: `Agrees`, on `t0`.
+    /// - B rig-like: `ArrivalAmbiguous`, margin about 2.6 dB, with the pick
+    ///   on `t0`. **A known false refusal of a correct pick**, recorded here
+    ///   as the rule's cost. It is not a reason to retune
+    ///   [`crate::measurement::report::ARRIVAL_LOBE_MARGIN_MIN_DB`].
     #[test]
-    fn two_way_dut_band_limited_arrival_agrees_with_the_broadband_peak() {
-        use crate::measurement::report::{
-            band_limited_arrival, ArrivalCrossCheck, ARRIVAL_LOBE_MARGIN_MIN_DB,
-        };
-        for (name, band, sr, shape) in [
-            ("A narrow", band_a as fn(u32) -> SweepParams, 48_000, &TWO_WAY_NARROW),
-            ("B narrow", band_b, 48_000, &TWO_WAY_NARROW),
-            ("A rig-like", band_a, 96_000, &TWO_WAY_RIG_LIKE),
-            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE),
+    fn two_way_dut_band_limited_arrival_is_never_produced_off_t0() {
+        use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
+        const BUDGET: i64 = 5;
+        for (name, band, sr, shape, ambiguous, pick_on_t0) in [
+            (
+                "A narrow",
+                band_a as fn(u32) -> SweepParams,
+                48_000,
+                &TWO_WAY_NARROW,
+                true,
+                false,
+            ),
+            ("B narrow", band_b, 48_000, &TWO_WAY_NARROW, true, false),
+            ("A rig-like", band_a, 96_000, &TWO_WAY_RIG_LIKE, false, true),
+            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE, true, true),
         ] {
             let p = band(sr);
             let r = two_way_bounded(&p, shape);
             let peak = (r.centre as i64 + r.peak) as usize;
             let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
-            assert!(
-                matches!(a.cross_check, ArrivalCrossCheck::Agrees { .. }),
-                "{name}: {:?}, arrival {} vs peak {peak}, SNR {:?}, margin {:?}",
-                a.cross_check,
-                a.arrival_index,
-                a.band_limited_snr_db,
-                a.lobe_margin_db
+            let arrival = a.arrival_index as i64 - r.centre as i64 - TWO_WAY_T0;
+            let context = format!(
+                "{name}: {:?}, arrival t0 {arrival:+}, margin {:?}, SNR {:?}",
+                a.cross_check, a.lobe_margin_db, a.band_limited_snr_db
             );
-            let margin = a.lobe_margin_db.expect("band-limited");
-            assert!(
-                margin >= ARRIVAL_LOBE_MARGIN_MIN_DB,
-                "{name}: lobe margin {margin} dB"
+            if !a.cross_check.withholds_flight_time() {
+                assert!(arrival.abs() <= BUDGET, "produced off t0 — {context}");
+            }
+            assert_eq!(
+                matches!(a.cross_check, ArrivalCrossCheck::ArrivalAmbiguous { .. }),
+                ambiguous,
+                "{context}"
             );
-            let arrival = a.arrival_index as i64 - r.centre as i64;
-            assert!(
-                (arrival - TWO_WAY_T0).abs() <= 1,
-                "{name}: arrival {arrival} must be t0 {TWO_WAY_T0} ± 1 (broadband peak {})",
-                r.peak
-            );
+            if !ambiguous {
+                assert!(
+                    matches!(a.cross_check, ArrivalCrossCheck::Agrees { .. }),
+                    "{context}"
+                );
+            }
+            assert_eq!(arrival.abs() <= 1, pick_on_t0, "{context}");
         }
     }
 
@@ -438,7 +453,7 @@ mod tests {
 
     /// `t0` of [`two_way_bounded`]'s full-band component, as an offset
     /// from the gate centre.
-    const TWO_WAY_T0: i64 = 1_000;
+    pub(crate) const TWO_WAY_T0: i64 = 1_000;
 
     fn band_a(sample_rate: u32) -> SweepParams {
         SweepParams {
@@ -459,7 +474,7 @@ mod tests {
     }
 
     /// Shape of the two-way DUT's low component.
-    struct TwoWayShape {
+    pub(crate) struct TwoWayShape {
         /// Extra delay of the low component past `t0`, samples.
         g: usize,
         /// Boxcar low-pass length, samples.
@@ -469,13 +484,13 @@ mod tests {
     /// The branch's original fixture: small group delay.
     const TWO_WAY_NARROW: TwoWayShape = TwoWayShape { g: 8, taps: 9 };
     /// Rig-like group delay at 96 kHz (onset-to-peak gap ≥ 23 samples).
-    const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape { g: 24, taps: 33 };
+    pub(crate) const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape { g: 24, taps: 33 };
 
-    struct TwoWay {
+    pub(crate) struct TwoWay {
         /// The windowed linear IR.
-        ir: Vec<f64>,
+        pub(crate) ir: Vec<f64>,
         /// Gate centre index in `ir`.
-        centre: usize,
+        pub(crate) centre: usize,
         /// Enforced causal bound, absolute index in `ir`.
         bound_index: usize,
         estimate: OnsetEstimate,
@@ -508,7 +523,7 @@ mod tests {
     /// (linear phase, `(taps − 1)/2` samples of its own delay), then run the
     /// bounded onset picker with the bound 5 cm of flight at 343 m/s before
     /// `t0` (7 samples at 48 kHz, 14 at 96 kHz).
-    fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
+    pub(crate) fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
         const LOW_GAIN: f32 = 1.0;
         const HIGH_GAIN: f32 = 0.3;
         const C: f64 = 343.0;

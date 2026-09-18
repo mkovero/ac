@@ -69,6 +69,10 @@ pub use onset::{
     ONSET_SEARCH_WINDOW_S,
 };
 pub use peak::ir_peak;
+/// #346's two-way DUT builder, shared with #537's falsification suite as its
+/// speaker kernel (architect revision 3).
+#[cfg(test)]
+pub(crate) use peak::tests::{two_way_bounded, TWO_WAY_RIG_LIKE, TWO_WAY_T0};
 pub use tail_decay::{check_tail_decay, TailDecayCheck};
 
 /// Parameters for a Farina log sweep.

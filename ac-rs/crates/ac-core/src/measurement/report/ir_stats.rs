@@ -6,8 +6,8 @@
 use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
 use crate::measurement::sweep::{
     band_limit_available, band_limit_top_hz, ir_peak, lobe_window_samples, pre_impulse_snr_db,
-    second_lobe, zero_phase_high_pass, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, WindowLimit,
-    ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
+    second_lobe, zero_phase_high_pass, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput,
+    OnsetEstimate, OnsetPick, WindowLimit, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
 };
 use crate::shared::calibration::{
     compare_tau_readings, EnumerationCheck, LayerVerdict, TauComparison, TauDisagreement,
@@ -190,6 +190,26 @@ fn comparable_broadband_peak(linear_ir: &[f64], from: usize, peak_index: usize) 
     (r, level_db)
 }
 
+/// The two thresholds of [`band_limited_arrival`] that #537 architect
+/// revision 3 re-scored. One value ships ([`ArrivalRule::SHIPPED`]); the
+/// falsification suite runs the rejected revision-2 values through the same
+/// code, so it measures the rule it rejects rather than a copy of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ArrivalRule {
+    /// See [`ARRIVAL_SNR_MIN_DB`].
+    pub(crate) snr_min_db: f64,
+    /// See [`ARRIVAL_EARLIER_COMPARABLE_DB`].
+    pub(crate) earlier_comparable_db: f64,
+}
+
+impl ArrivalRule {
+    /// The shipped constants.
+    pub(crate) const SHIPPED: Self = Self {
+        snr_min_db: ARRIVAL_SNR_MIN_DB,
+        earlier_comparable_db: ARRIVAL_EARLIER_COMPARABLE_DB,
+    };
+}
+
 /// Pick the arrival of `linear_ir` off the IR high-passed at
 /// [`ARRIVAL_HIGH_PASS_CORNER_HZ`] and cross-check it against the broadband
 /// IR, whose argmax is `peak_index` (#537). The standings are checked in
@@ -203,6 +223,23 @@ pub(crate) fn band_limited_arrival(
     sample_rate_hz: u32,
     f2_hz: f64,
     peak_index: usize,
+) -> BandLimitedArrival {
+    band_limited_arrival_under(
+        linear_ir,
+        sample_rate_hz,
+        f2_hz,
+        peak_index,
+        ArrivalRule::SHIPPED,
+    )
+}
+
+/// [`band_limited_arrival`] under `rule`'s thresholds.
+pub(crate) fn band_limited_arrival_under(
+    linear_ir: &[f64],
+    sample_rate_hz: u32,
+    f2_hz: f64,
+    peak_index: usize,
+    rule: ArrivalRule,
 ) -> BandLimitedArrival {
     let corner_hz = ARRIVAL_HIGH_PASS_CORNER_HZ;
     if !band_limit_available(sample_rate_hz, f2_hz, corner_hz) {
@@ -245,15 +282,14 @@ pub(crate) fn band_limited_arrival(
     let argmax_gap = peak_index as i64 - arrival_index as i64;
     let mut broadband_delta_level_db = None;
     // A NaN SNR (a non-finite IR) withholds like a low one.
-    let cross_check = if snr_db.is_nan() || snr_db < ARRIVAL_SNR_MIN_DB {
+    let cross_check = if snr_db.is_nan() || snr_db < rule.snr_min_db {
         ArrivalCrossCheck::BandLimitedSnrLow { snr_db }
     } else if let Some(l) = lobe.filter(|l| l.margin_db < ARRIVAL_LOBE_MARGIN_MIN_DB) {
         ArrivalCrossCheck::ArrivalAmbiguous {
             margin_db: l.margin_db,
             offset: l.offset,
         }
-    } else if let Some(level_db) = earlier_level_db.filter(|l| *l >= -ARRIVAL_EARLIER_COMPARABLE_DB)
-    {
+    } else if let Some(level_db) = earlier_level_db.filter(|l| *l >= -rule.earlier_comparable_db) {
         ArrivalCrossCheck::EarlierComparable {
             index: earlier.0,
             level_db,
@@ -2446,10 +2482,7 @@ mod tests {
         ir[CC_T0 + 288] = 0.5 * 10f64.powf(6.5 / 20.0);
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
         assert!(
-            matches!(
-                stats.arrival_cross_check,
-                ArrivalCrossCheck::Agrees { .. }
-            ),
+            matches!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees { .. }),
             "{:?}",
             stats.arrival_cross_check
         );
@@ -2582,7 +2615,11 @@ mod tests {
         let ir = ringing_direct_sound(Some(4_000.0));
 
         // The rejected rule, inline: band available, argmax of |h_hp|.
-        assert!(band_limit_available(96_000, 4_000.0, ARRIVAL_HIGH_PASS_CORNER_HZ));
+        assert!(band_limit_available(
+            96_000,
+            4_000.0,
+            ARRIVAL_HIGH_PASS_CORNER_HZ
+        ));
         let h_hp = zero_phase_high_pass(&ir, 96_000, ARRIVAL_HIGH_PASS_CORNER_HZ);
         let (rejected, _) = ir_peak(&h_hp);
         let lobe = second_lobe(&h_hp, rejected, 48).expect("a neighbouring lobe");
@@ -2753,10 +2790,7 @@ mod tests {
                 &stats.causal_bound,
             )
         };
-        let rejected = onset_with(onset_floor(pre_impulse_region(
-            linear_ir,
-            stats.peak_index,
-        )));
+        let rejected = onset_with(onset_floor(pre_impulse_region(linear_ir, stats.peak_index)));
         assert_eq!(rejected.pick, OnsetPick::Declined, "{}", rejected.rule);
         // The floor only gates whether the window holds anything above it;
         // the revised floor must let the search run.
@@ -2788,8 +2822,8 @@ mod tests {
         files.sort();
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
-            let report: MeasurementReport = serde_json::from_str(&text)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let report: MeasurementReport =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let f2 = report.data.iter().find_map(|p| match &p.data {
                 MeasurementData::ImpulseResponse { f2_hz, .. } => Some(*f2_hz),
                 _ => None,
