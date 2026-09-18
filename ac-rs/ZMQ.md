@@ -2235,9 +2235,9 @@ the tone alone, so `delta` is an upper bound.
 **Rules.**
 - **Voltage probe:** 1000 Hz at −40 dBFS, 150 ms settle, one 0.3 s capture,
   in its own engine lifecycle. Loop gain = `fundamental_dbfs − drive_dbfs`.
-  Refused on `|Δ| > 0.10 dB` (provisional until the rig record), judged only
-  when the in-lobe tone SNR ≥ `S_min` (≈ 50.8 dB). A capture error or an xrun
-  is `not_measured`, never refused.
+  Refused on `|Δ| > 0.02 dB` (the tolerance rule on the rig-measured `s`),
+  judged only when the in-lobe tone SNR ≥ `S_min` (≈ 64.8 dB). A capture
+  error or an xrun is `not_measured`, never refused.
 - **Latency:** `session_check` measures τ twice on the loopback and compares
   it with the τ stored for the same conditions; `plot_ir` uses its own
   same-capture reference leg. Any whole-sample difference is refused.

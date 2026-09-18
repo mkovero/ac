@@ -36,10 +36,13 @@
 //! `k = t(1 − α/2, n − 1)·√2 = 4.897·√2 = 6.93` for `n = 20`, `α = 1e-4`
 //! (provenance: derived; √2 because Δ is the difference of two single
 //! probes). `s` is the standard deviation of 20 checks on the rig
-//! (provenance: measured — **pending**, rig step 1). Until that record
-//! exists the constant is a provisional 0.10 dB (provenance: assumed). The
+//! (provenance: measured — PR #534 rig record at `7a27b3f2`, 2026-09-18,
+//! FF400 loopback: `s = 3.16e-5 dB`, `n = 20`), so `k·s = 2.2e-4 dB`. The
 //! 0.02 dB floor is twice the 0.01 dB print resolution (provenance:
-//! assumed). The rule refuses on `|Δ| > T`.
+//! assumed), and it is the binding term: `T = 0.02 dB`. The measurement
+//! shows the floor sits ≈ 91× above `k·s`, so repeat runs are not refused;
+//! it does not make 0.02 dB itself a measured number. The rule refuses on
+//! `|Δ| > T`.
 //!
 //! [`PROBE_SNR_MIN_DB`] is not a free constant: it is the in-lobe SNR at
 //! which noise inside the tone's main lobe biases the loop gain by at most
@@ -59,9 +62,10 @@ use super::tau::{compare_tau_readings, TauComparison, TauConditions};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Level tolerance, dB. **Provisional** (provenance: assumed) until rig
-/// step 1 measures `s` — see the module doc for the rule that replaces it.
-pub const LOOP_GAIN_TOLERANCE_DB: f64 = 0.10;
+/// Level tolerance, dB: `max(k·s, floor)` on the rig step 1 `s`
+/// (provenance: `s` measured, 3.16e-5 dB, n = 20; the binding term is the
+/// floor, provenance assumed) — see the module doc.
+pub const LOOP_GAIN_TOLERANCE_DB: f64 = 0.02;
 
 /// Lower bound on the tolerance: 2× the 0.01 dB print resolution
 /// (provenance: assumed).
@@ -72,7 +76,7 @@ pub const LOOP_GAIN_TOLERANCE_K: f64 = 6.93;
 
 /// Minimum in-lobe SNR for a present tone at [`LOOP_GAIN_TOLERANCE_DB`]:
 /// `snr_min_for_tolerance(LOOP_GAIN_TOLERANCE_DB)` (provenance: derived).
-pub const PROBE_SNR_MIN_DB: f64 = 50.804_982_967_692_37;
+pub const PROBE_SNR_MIN_DB: f64 = 64.794_385_932_644_27;
 
 /// Probe tone frequency, Hz — the same tone `calibrate` step 2 captures.
 pub const PROBE_FREQ_HZ: f64 = 1000.0;
@@ -1339,7 +1343,7 @@ mod tests {
         match &v {
             LayerVerdict::Unverified { reason, .. } => {
                 assert!(reason.contains("tone SNR"), "{reason}");
-                assert!(reason.contains("need 50.8 dB"), "{reason}");
+                assert!(reason.contains("need 64.8 dB"), "{reason}");
             }
             _ => unreachable!(),
         }
@@ -2115,6 +2119,24 @@ mod tests {
         }
         assert_eq!(tolerance_from_repeatability(0.0), 0.02);
         assert!((tolerance_from_repeatability(0.1) - 0.693).abs() < 1e-12);
+    }
+
+    /// `s` from rig step 1 (PR #534 rig record at `7a27b3f2`, n = 20,
+    /// 2026-09-18).
+    const RIG_STEP1_S_DB: f64 = 3.16e-5;
+
+    #[test]
+    fn shipped_tolerance_is_the_rule_on_the_measured_s() {
+        // Fails on the provisional 0.10 dB, and on any value nobody measured.
+        assert_eq!(
+            LOOP_GAIN_TOLERANCE_DB,
+            tolerance_from_repeatability(RIG_STEP1_S_DB),
+            "LOOP_GAIN_TOLERANCE_DB must be max(6.93·s, floor) on the recorded s"
+        );
+        // The rejected provisional value is not what the rule yields.
+        assert_ne!(tolerance_from_repeatability(RIG_STEP1_S_DB), 0.10);
+        // And S_min follows it (64.79 dB at 0.02).
+        assert!((PROBE_SNR_MIN_DB - 64.794_385_932_644_27).abs() < 1e-9);
     }
 
     #[test]
