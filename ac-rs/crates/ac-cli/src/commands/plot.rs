@@ -1335,16 +1335,24 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
 /// numbers by construction. No distance figure — #391 removed the
 /// ms → m conversion this used to also print.
 fn print_ir_report(report_frame: Option<&serde_json::Value>) {
-    use ac_core::measurement::report::{IrVerdict, MeasurementReport};
+    use ac_core::measurement::report::{IrVerdict, MeasurementReport, ReportReadError};
 
     let Some(value) = report_frame.and_then(|f| f.get("report")) else {
         eprintln!("  !! no measurement/report frame — nothing to summarise");
         return;
     };
-    let report: MeasurementReport = match serde_json::from_value(value.clone()) {
+    let report = match MeasurementReport::from_value(value.clone()) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("  !! could not decode report: {e}");
+        Err(ReportReadError::UnsupportedSchema { found, supported }) => {
+            eprintln!(
+                "  !! unsupported measurement report schema — found v{found}, supported v{}–v{}",
+                supported.start(),
+                supported.end()
+            );
+            return;
+        }
+        Err(ReportReadError::Malformed(msg)) => {
+            eprintln!("  !! could not decode report: {msg}");
             return;
         }
     };

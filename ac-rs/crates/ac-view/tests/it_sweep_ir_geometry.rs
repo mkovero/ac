@@ -8,7 +8,7 @@
 
 use ac_core::measurement::report::{
     GateParams, IntegrationParams, MeasurementData, MeasurementMethod, MeasurementPayload,
-    MeasurementReport, ProcessingChain, StimulusParams, SCHEMA_VERSION,
+    MeasurementReport, ProcessingChain, StimulusParams, MIN_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 use ac_scene::SweepIrFault;
 use ac_view::view::draw_sweep_ir_panel;
@@ -157,6 +157,11 @@ fn a_load_failure_paints_its_own_header_and_detail_not_a_trace() {
         SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: 9.7,
             reason: "pre-impulse SNR below threshold".to_string(),
+        },
+        // #429: two-line detail must reach the screen as one text shape.
+        SweepIrFault::UnsupportedSchema {
+            found: 999,
+            supported: MIN_SCHEMA_VERSION..=SCHEMA_VERSION,
         },
     ] {
         let mut harness = Harness::new_ui(|ui| {
