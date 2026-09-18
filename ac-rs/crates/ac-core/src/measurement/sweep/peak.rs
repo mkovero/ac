@@ -313,36 +313,45 @@ mod tests {
 
     /// #537: a healthy two-way DUT — #346's fixture, in both bands and at
     /// both group delays — must come out `Agrees` under the band-limited
-    /// arrival's cross-check. Otherwise every healthy speaker capture
-    /// would be marked.
+    /// arrival's guards and cross-check, with the lobe margin clear of
+    /// 3 dB (architect revision 2). Otherwise every healthy speaker capture
+    /// would be refused or marked. The arrival must also land on the HF
+    /// component's delay `t0`, not on the low component `G + (taps − 1)/2`
+    /// later, and not a half-cycle off: a wrong-lobe pick with a margin
+    /// under the tolerance would otherwise pass.
     #[test]
     fn two_way_dut_band_limited_arrival_agrees_with_the_broadband_peak() {
-        use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
-        for (name, r, p) in [
-            (
-                "A narrow",
-                two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW),
-                band_a(48_000),
-            ),
-            (
-                "B narrow",
-                two_way_bounded(&band_b(48_000), &TWO_WAY_NARROW),
-                band_b(48_000),
-            ),
-            (
-                "A rig-like",
-                two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE),
-                band_a(96_000),
-            ),
+        use crate::measurement::report::{
+            band_limited_arrival, ArrivalCrossCheck, ARRIVAL_LOBE_MARGIN_MIN_DB,
+        };
+        for (name, band, sr, shape) in [
+            ("A narrow", band_a as fn(u32) -> SweepParams, 48_000, &TWO_WAY_NARROW),
+            ("B narrow", band_b, 48_000, &TWO_WAY_NARROW),
+            ("A rig-like", band_a, 96_000, &TWO_WAY_RIG_LIKE),
+            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE),
         ] {
+            let p = band(sr);
+            let r = two_way_bounded(&p, shape);
             let peak = (r.centre as i64 + r.peak) as usize;
             let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
-            assert_eq!(
+            assert!(
+                matches!(a.cross_check, ArrivalCrossCheck::Agrees { .. }),
+                "{name}: {:?}, arrival {} vs peak {peak}, SNR {:?}, margin {:?}",
                 a.cross_check,
-                ArrivalCrossCheck::Agrees,
-                "{name}: arrival {} vs peak {peak}, SNR {:?}",
                 a.arrival_index,
-                a.band_limited_snr_db
+                a.band_limited_snr_db,
+                a.lobe_margin_db
+            );
+            let margin = a.lobe_margin_db.expect("band-limited");
+            assert!(
+                margin >= ARRIVAL_LOBE_MARGIN_MIN_DB,
+                "{name}: lobe margin {margin} dB"
+            );
+            let arrival = a.arrival_index as i64 - r.centre as i64;
+            assert!(
+                (arrival - TWO_WAY_T0).abs() <= 1,
+                "{name}: arrival {arrival} must be t0 {TWO_WAY_T0} ± 1 (broadband peak {})",
+                r.peak
             );
         }
     }

@@ -41,9 +41,9 @@ mod provenance;
 pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
     arrival_cross_check_tolerance_samples, ArrivalCheck, ArrivalCrossCheck, ArrivalSource, IrStats,
-    IrVerdict, OnsetStanding, ARRIVAL_CROSS_CHECK_BASIS, ARRIVAL_CROSS_CHECK_TOLERANCE_S,
-    ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, PRE_IMPULSE_SNR_BASIS,
-    PRE_IMPULSE_SNR_MIN_DB,
+    IrVerdict, OnsetStanding, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
+    ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
+    ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
 };
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,

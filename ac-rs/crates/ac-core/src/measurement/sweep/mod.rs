@@ -50,8 +50,8 @@ mod peak;
 mod tail_decay;
 
 pub use band_limited::{
-    band_limit_available, band_limit_top_hz, band_limited_peak, zero_phase_high_pass,
-    ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
+    band_limit_available, band_limit_top_hz, band_limited_peak, lobe_window_samples, second_lobe,
+    zero_phase_high_pass, SecondLobe, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
 };
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
 pub use defaults::{

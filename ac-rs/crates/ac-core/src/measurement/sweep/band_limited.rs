@@ -26,19 +26,27 @@ use super::ir_peak;
 
 /// Corner of the high-pass the arrival is picked through, in Hz.
 ///
-/// Provenance: measured. On pupu (2026-09-18, Genelec 1083 at 2 m) a
-/// 1–10 kHz sweep read the arrival at +634/+635 samples against about 598
-/// expected for 2 m, while the default 20 Hz–20 kHz sweep's broadband peak
-/// read +2137/+2138 — the maximum of a ~55 Hz room mode, more than four
-/// octaves below this corner.
-pub const ARRIVAL_HIGH_PASS_CORNER_HZ: f64 = 1000.0;
+/// Provenance: measured (#537 architect revision 2), by offline re-analysis
+/// of the 14 speaker and cable captures recorded on pupu at PR #538's first
+/// head (2026-09-18, Genelec 1083, FF400 at 96 kHz). At this corner the
+/// half-cycle next to the pick sat 4.9–6.5 dB below it on every speaker
+/// capture and 9.4 dB on the cable, and the flight time read +596 at 2 m
+/// (≈598 expected from the transfer-stream delay), +198 at 0.5 m and 0 on
+/// the cable. At 1 kHz the same margin was 0.4–1.7 dB: a 20 Hz–2 kHz sweep
+/// hopped one half-cycle, 35 samples late, and the 2 m reading carried
+/// about 36 samples of crossover group delay. The default sweep's
+/// broadband peak there read +2137/+2138 — the maximum of a ~55 Hz room
+/// mode, more than five octaves below this corner.
+pub const ARRIVAL_HIGH_PASS_CORNER_HZ: f64 = 2000.0;
 
 /// The band-limited arrival needs the stimulus to reach at least this
 /// multiple of the corner — one octave above it. Below that the high-passed
-/// IR holds little of the sweep's own energy, and the arrival falls back to
-/// the broadband peak.
+/// IR holds no octave of the sweep's own energy; the arrival falls back to
+/// the broadband peak and the flight time is withheld.
 ///
-/// Provenance: assumed (#537 architect decision).
+/// Provenance: derived — the minimum for an octave of high-passed IR to
+/// exist (#537 architect revision 2). It does not protect the pick against
+/// a half-cycle hop; the lobe margin ([`second_lobe`]) does.
 pub const BAND_LIMIT_MIN_F2_RATIO: f64 = 2.0;
 
 /// Butterworth Q of each biquad section of a 4th-order design:
@@ -103,15 +111,21 @@ pub fn zero_phase_high_pass(linear_ir: &[f64], sample_rate_hz: u32, corner_hz: f
 
 /// Index and magnitude of the largest-magnitude sample of `linear_ir`
 /// high-passed at `corner_hz` ([`zero_phase_high_pass`]), with
-/// [`ir_peak`]'s tie and NaN rules. `None` when [`band_limit_available`]
-/// excludes the band — the caller falls back to the broadband peak.
+/// [`ir_peak`]'s tie rule. `None` when [`band_limit_available`] excludes
+/// the band — the caller falls back to the broadband peak — and when any
+/// input sample is not finite: unlike [`ir_peak`], which skips a NaN, the
+/// recursive filter carries one into every later output sample, so no pick
+/// off the filtered IR would mean anything.
 pub fn band_limited_peak(
     linear_ir: &[f64],
     sample_rate_hz: u32,
     f2_hz: f64,
     corner_hz: f64,
 ) -> Option<(usize, f64)> {
-    if linear_ir.is_empty() || !band_limit_available(sample_rate_hz, f2_hz, corner_hz) {
+    if linear_ir.is_empty()
+        || !band_limit_available(sample_rate_hz, f2_hz, corner_hz)
+        || linear_ir.iter().any(|v| !v.is_finite())
+    {
         return None;
     }
     Some(ir_peak(&zero_phase_high_pass(
@@ -119,6 +133,63 @@ pub fn band_limited_peak(
         sample_rate_hz,
         corner_hz,
     )))
+}
+
+/// Half-width of the window [`second_lobe`] searches, in samples:
+/// `round(fs / corner_hz)`, one corner period (48 samples at 96 kHz and
+/// 2 kHz).
+///
+/// Provenance: derived (#537 architect revision 2). Adjacent half-cycles of
+/// a pulse band-limited above the corner lie within one corner period; the
+/// hops observed on pupu were 17–18 samples at 2 kHz and 33–36 at 1 kHz.
+pub fn lobe_window_samples(sample_rate_hz: u32, corner_hz: f64) -> usize {
+    (sample_rate_hz as f64 / corner_hz).round() as usize
+}
+
+/// The largest other local maximum of a high-passed IR's magnitude near its
+/// pick ([`second_lobe`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SecondLobe {
+    /// `lobe − pick`, signed samples: negative when the lobe is before the
+    /// pick, i.e. when the pick may be a half-cycle late.
+    pub offset: i64,
+    /// `20·log10(|pick| / |lobe|)`, dB: how far the lobe sits below the
+    /// pick. Never negative, since the pick is the maximum.
+    pub margin_db: f64,
+}
+
+/// The largest local maximum of `|h_hp|` within `±window` samples of
+/// `pick`, excluding the pick itself (#537 architect revision 2). A local
+/// maximum is a sample above its left neighbour and not below its right
+/// one; the IR's first and last samples are never one. `None` when the
+/// window holds no other maximum — the margin is then unbounded.
+///
+/// The margin is the statistic that separates a right pick from a
+/// half-cycle hop: on the pupu captures healthy picks cleared 4.9 dB and
+/// the wrong ones stayed under 1.1 dB.
+pub fn second_lobe(h_hp: &[f64], pick: usize, window: usize) -> Option<SecondLobe> {
+    let n = h_hp.len();
+    if pick >= n || n < 3 {
+        return None;
+    }
+    let lo = pick.saturating_sub(window).max(1);
+    let hi = (pick + window).min(n - 2);
+    let (index, magnitude) = (lo..=hi)
+        .filter(|&i| i != pick)
+        .filter(|&i| {
+            let (l, c, r) = (h_hp[i - 1].abs(), h_hp[i].abs(), h_hp[i + 1].abs());
+            c > l && c >= r
+        })
+        .map(|i| (i, h_hp[i].abs()))
+        .fold(None, |best: Option<(usize, f64)>, (i, m)| match best {
+            Some((_, bm)) if bm >= m => best,
+            _ => Some((i, m)),
+        })?;
+    // `magnitude` is above its left neighbour's, so it is positive.
+    Some(SecondLobe {
+        offset: index as i64 - pick as i64,
+        margin_db: 20.0 * (h_hp[pick].abs() / magnitude).log10(),
+    })
 }
 
 /// Sample `k` (1-based) of the odd extension before (`before`) or after the
@@ -184,8 +255,8 @@ mod tests {
     }
 
     /// Two passes of a Butterworth: −6.02 dB at the corner, flat an octave
-    /// above it within 0.1 dB, and more than 90 dB down four octaves below
-    /// (where the rig's 55 Hz room mode sat against the 1 kHz corner).
+    /// above it within 0.1 dB, and more than 90 dB down at the rig's 55 Hz
+    /// room mode, more than five octaves below the corner.
     #[test]
     fn magnitude_is_squared_butterworth() {
         let n = SR as usize;
@@ -195,10 +266,10 @@ mod tests {
             let y = zero_phase_high_pass(&x, SR, ARRIVAL_HIGH_PASS_CORNER_HZ);
             20.0 * (rms(&y[mid.clone()]) / rms(&x[mid.clone()])).log10()
         };
-        let at_corner = gain_db(1000.0);
+        let at_corner = gain_db(ARRIVAL_HIGH_PASS_CORNER_HZ);
         assert!((at_corner + 6.02).abs() < 0.05, "corner gain {at_corner}");
-        let above = gain_db(4000.0);
-        assert!(above.abs() < 0.1, "4 kHz gain {above}");
+        let above = gain_db(2.0 * ARRIVAL_HIGH_PASS_CORNER_HZ);
+        assert!(above.abs() < 0.1, "octave-above gain {above}");
         let mode = gain_db(55.0);
         assert!(mode < -90.0, "55 Hz gain {mode}");
     }
@@ -248,5 +319,68 @@ mod tests {
             None
         );
         assert_eq!(band_limited_peak(&[], 96_000, 20_000.0, 1000.0), None);
+    }
+
+    /// QA on PR #538: a NaN sample. `ir_peak` skips it; the filter would
+    /// carry it into every later output and land the pick on index 0, so
+    /// the band-limited rule refuses the IR instead — and says so.
+    #[test]
+    fn band_limited_peak_refuses_a_non_finite_sample() {
+        let mut x = vec![0.0_f64; 4096];
+        x[1500] = 1.0;
+        assert_eq!(
+            band_limited_peak(&x, SR, 20_000.0, ARRIVAL_HIGH_PASS_CORNER_HZ).map(|p| p.0),
+            Some(1500),
+            "test setup"
+        );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            x[100] = bad;
+            assert_eq!(ir_peak(&x).0, if bad.is_nan() { 1500 } else { 100 });
+            // The rejected behaviour, computed inline: filtering anyway.
+            let filtered = zero_phase_high_pass(&x, SR, ARRIVAL_HIGH_PASS_CORNER_HZ);
+            assert!(filtered.iter().all(|v| !v.is_finite()), "{bad}");
+            assert_eq!(
+                band_limited_peak(&x, SR, 20_000.0, ARRIVAL_HIGH_PASS_CORNER_HZ),
+                None,
+                "{bad}"
+            );
+        }
+    }
+
+    /// The lobe window is one corner period in whole samples.
+    #[test]
+    fn lobe_window_is_one_corner_period() {
+        assert_eq!(lobe_window_samples(96_000, 2_000.0), 48);
+        assert_eq!(lobe_window_samples(48_000, 2_000.0), 24);
+        assert_eq!(lobe_window_samples(44_100, 2_000.0), 22);
+    }
+
+    /// The second lobe is the largest other local maximum inside the
+    /// window, signed by side; one outside the window, or a sample that is
+    /// not a local maximum, does not count.
+    #[test]
+    fn second_lobe_takes_the_largest_other_maximum_in_the_window() {
+        let mut h = vec![0.0_f64; 400];
+        h[200] = 1.0;
+        h[183] = -0.9; // a maximum of |h|, 17 before
+        h[220] = 0.5; // a smaller one, 20 after
+        h[260] = 0.95; // larger, but outside ±48
+        h[199] = 0.99; // the pick's own shoulder: not a local maximum
+        let lobe = second_lobe(&h, 200, 48).unwrap();
+        assert_eq!(lobe.offset, -17);
+        assert!((lobe.margin_db - 20.0 * (1.0 / 0.9f64).log10()).abs() < 1e-12);
+
+        h[183] = 0.0;
+        let lobe = second_lobe(&h, 200, 48).unwrap();
+        assert_eq!(lobe.offset, 20);
+        assert!((lobe.margin_db - 20.0 * 2.0f64.log10()).abs() < 1e-12);
+
+        h[220] = 0.0;
+        assert_eq!(second_lobe(&h, 200, 48), None, "no other maximum");
+        // The window edge clamps to the IR; the end samples never count.
+        let mut edge = vec![0.0_f64; 10];
+        edge[2] = 1.0;
+        edge[0] = 0.8;
+        assert_eq!(second_lobe(&edge, 2, 48), None);
     }
 }
