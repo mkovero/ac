@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::calibration::EnumerationCheck;
+use crate::shared::calibration::{EnumerationCheck, LayerVerdict};
 
 /// The measurement technique. `kind` is a discriminant so new methods
 /// (Farina sweep, pink-noise, etc.) extend the enum without breaking
@@ -80,6 +80,12 @@ pub struct StandardsCitation {
 /// [`crate::shared::calibration::Calibration::tau_for`]'s refusal rule
 /// (#281). Both cases are archived: "no τ" is itself provenance a reader
 /// needs, and is what stops a distance being derived downstream (#283).
+///
+/// The `Measured` variant is large since it carries its frozen session-check
+/// verdict (#466). The enum is held once or twice per report, never in bulk,
+/// so it is not boxed: boxing would change every construction site for no
+/// measurable saving.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum InterfaceLatency {
@@ -117,6 +123,19 @@ pub struct MeasuredLatency {
     /// treats as [`EnumerationCheck::NotRecorded`] — never as `Same`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enumeration: Option<EnumerationCheck>,
+    /// The session check's verdict on this stored τ, frozen at capture
+    /// (#466, schema v11). Set only on `interface_latency`, on every v11
+    /// `plot_ir` run that resolves a τ; `None` on `reference_stored_latency`
+    /// and on a report written before v11. A `refused` verdict keeps this
+    /// value in the report but withholds the flight time derived from it
+    /// ([`super::IrStats::flight_time_s`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_check: Option<LayerVerdict>,
+    /// Cal key of the reference loopback configured when `session_check`
+    /// was made; `None` when none was configured. Lets a reader name the
+    /// loopback in a `not_covered` line without parsing the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_check_loopback: Option<String>,
 }
 
 /// Round-trip latency of the **reference** loopback pair, measured from a
@@ -223,6 +242,12 @@ pub struct CalibrationSnapshot {
     /// they're looking at were mic-corrected, and against which file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_response: Option<MicResponseRef>,
+    /// The session check's verdict on the voltage layer, frozen at capture
+    /// (#466, schema v11). When `refused`, both `vrms_at_0dbfs_*` are
+    /// `None`: the values in the report are in dBFS. Absent on v1-v10
+    /// reports, which readers show as "not recorded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage_check: Option<LayerVerdict>,
 }
 
 /// Pointer-style record of a mic-response curve attached to a channel
@@ -359,6 +384,10 @@ mod tests {
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
+            voltage_check: Some(crate::shared::calibration::LayerVerdict::unverified(
+                crate::shared::calibration::session::UnverifiedCause::NoLoopback,
+                "no reference loopback configured",
+            )),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: CalibrationSnapshot = serde_json::from_str(&json).unwrap();
@@ -379,10 +408,12 @@ mod tests {
             ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
+            voltage_check: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
         assert!(!json.contains("mic_response"), "{json}");
+        assert!(!json.contains("voltage_check"), "{json}");
     }
 
     // ─── ProcessingChain (#105) ─────────────────────────────────────────

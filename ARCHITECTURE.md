@@ -156,4 +156,26 @@ of the exact-match key and never causes a refusal: resolution prefers
 the newest same-epoch entry, and a stored τ from another epoch (or with
 no recorded epoch, or on a backend that cannot observe one) resolves
 with an `EnumerationCheck` that every τ-consuming output prints as
-UNVERIFIED. Turning that flag into a verification or refusal is #466.
+UNVERIFIED.
+
+A fingerprint only sees events that leave a trace, so the voltage and τ
+layers are also **checked by measurement** against the configured
+reference loopback (`calibration/session.rs`, #466). `ac calibrate`
+stores a loop-gain baseline beside the voltage scale; the check plays a
+1 kHz probe at the default drive and compares loop gain, and compares a
+fresh τ with the stored one. The check runs **fresh at emission**: every
+command that drives an output (`plot*`, `sweep*`, `generate*`,
+`test_*`) probes inside its own worker before it emits, and `plot_ir`
+judges τ from its same-capture reference leg; `ac calibrate check` runs
+it on demand. Views that do not emit (`monitor`, `transfer`, the
+calibration queries) read the latest recorded result. **Time rule:** a
+`verified` result applies only within the same daemon process, the same
+device epoch and the same stored value; a `refused` result is persisted
+in `session_refusals.json` and stands until a check on that loopback
+passes or a new value is stored. **Pair rule:** a refusal propagates —
+voltage to every voltage entry, τ to every entry on the same device,
+backend, rate and period — and verification never does. A refused layer
+is withheld from every derived figure (dBu, `gain_db`, flight time), and
+a level typed in dBu/Vrms over a refused scale is refused outright; the
+check detects and never repairs. The voltage layer stays a scalar
+offset.

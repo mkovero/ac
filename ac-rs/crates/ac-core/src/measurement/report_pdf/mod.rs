@@ -516,6 +516,7 @@ mod tests {
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
+            voltage_check: None,
         });
         r.position = Some(PositionSnapshot {
             temperature_c: Some(21.3),

@@ -235,8 +235,8 @@ pub fn cmd_group(name: &str) -> Option<Group> {
         "sweep_level" | "sweep_frequency" | "generate" | "generate_pink" => Some(Group::Output),
         "monitor_spectrum" => Some(Group::Input),
         "transfer_stream" => Some(Group::Transfer),
-        "plot" | "plot_level" | "plot_ir" | "calibrate" | "calibrate_spl" | "probe"
-        | "test_hardware" | "test_dut" => Some(Group::Exclusive),
+        "plot" | "plot_level" | "plot_ir" | "calibrate" | "calibrate_spl" | "session_check"
+        | "probe" | "test_hardware" | "test_dut" => Some(Group::Exclusive),
         _ => None,
     }
 }

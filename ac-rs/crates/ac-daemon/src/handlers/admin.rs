@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use ac_core::shared::calibration::{Calibration, DeviceEpoch, EnumerationCheck, TauEntry};
 
+use crate::handlers::checks;
 use crate::server::ServerState;
 
 use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache, wire};
@@ -434,9 +435,13 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // #466: the live session check is computed at reply time, from the
+    // records this process holds and the refusal record as read now.
+    let recorded = checks::Recorded::now(state);
+    let refusal_record = checks::refusal_record_value(recorded.view());
     match Calibration::load(out_ch, in_ch, None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
-        Ok(None) => json!({"ok": true, "found": false}),
+        Ok(None) => json!({"ok": true, "found": false, "refusal_record": refusal_record}),
         Ok(Some(cal)) => json!({
             "ok":                                true,
             "found":                             true,
@@ -447,14 +452,18 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
             "mic_sensitivity_dbfs_at_94db_spl":  cal.mic_sensitivity_dbfs_at_94db_spl,
             "mic_response":                      cal.mic_response,
             "tau_history":                       tau_history_with_live_check(&cal.tau_history),
+            "loop_gain_baseline":                cal.loop_gain_baseline,
+            "session_check":                     checks::live_block(&recorded, &cal),
+            "refusal_record":                    refusal_record,
         }),
     }
 }
 
-pub fn list_calibrations(_state: &ServerState) -> Value {
+pub fn list_calibrations(state: &ServerState) -> Value {
     match Calibration::load_all(None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
         Ok(cals) => {
+            let recorded = checks::Recorded::now(state);
             let list: Vec<Value> = cals
                 .iter()
                 .map(|c| {
@@ -465,10 +474,16 @@ pub fn list_calibrations(_state: &ServerState) -> Value {
                         "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
                         "mic_response":                      c.mic_response,
                         "tau_history":                       tau_history_with_live_check(&c.tau_history),
+                        "loop_gain_baseline":                c.loop_gain_baseline,
+                        "session_check":                     checks::live_block(&recorded, c),
                     })
                 })
                 .collect();
-            json!({"ok": true, "calibrations": list})
+            json!({
+                "ok": true,
+                "calibrations": list,
+                "refusal_record": checks::refusal_record_value(recorded.view()),
+            })
         }
     }
 }

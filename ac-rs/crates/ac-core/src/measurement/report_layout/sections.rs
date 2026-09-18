@@ -4,6 +4,8 @@ use super::{Row, Section};
 use crate::measurement::report::{
     CalibrationSnapshot, MeasurementMethod, MeasurementReport, PositionSnapshot, ProcessingChain,
 };
+use crate::shared::calibration::session::{unverified_head, whole_seconds, DeltaBound};
+use crate::shared::calibration::LayerVerdict;
 use crate::shared::conversions::speed_of_sound_at;
 
 /// Document-identity rows, rendered under the title rather than in a
@@ -80,6 +82,48 @@ fn stimulus_rows(r: &MeasurementReport) -> Vec<Row> {
     ]
 }
 
+/// The frozen session-check verdict on the voltage layer (#466). The
+/// report freezes the head only: a parse error or a missing loopback that
+/// was true at capture says nothing to a reader a month later.
+fn voltage_check_text(check: Option<&LayerVerdict>) -> String {
+    let Some(check) = check else {
+        return "not recorded".to_string();
+    };
+    match check {
+        LayerVerdict::Verified(e) => format!(
+            "verified {}, loop gain \u{394} {:+.2} dB (tolerance \u{b1}{:.2} dB)",
+            whole_seconds(&e.checked_at),
+            e.delta,
+            e.tolerance
+        ),
+        LayerVerdict::Refused {
+            evidence: e,
+            via: Some(via),
+            ..
+        } => format!(
+            "REFUSED via [{via}], loop gain moved {:+.2} dB; values in dBFS",
+            e.delta
+        ),
+        LayerVerdict::Refused {
+            evidence: e,
+            delta_bound: Some(DeltaBound::AtMost),
+            ..
+        } => format!(
+            "REFUSED {}, loop gain \u{394} \u{2264} {:+.2} dB, no tone; values in dBFS",
+            whole_seconds(&e.checked_at),
+            e.delta
+        ),
+        LayerVerdict::Refused { evidence: e, .. } => format!(
+            "REFUSED {}, loop gain \u{394} {:+.2} dB; values in dBFS",
+            whole_seconds(&e.checked_at),
+            e.delta
+        ),
+        LayerVerdict::Unverified { cause, reason } => {
+            format!("UNVERIFIED \u{2014} {}", unverified_head(*cause, reason))
+        }
+    }
+}
+
 /// The three orthogonal calibration layers (voltage / SPL pistonphone /
 /// mic frequency-response curve), so a printed report carries the cal
 /// context its values were captured under. See #102.
@@ -113,6 +157,10 @@ fn calibration_section(cal: Option<&CalibrationSnapshot>) -> Section {
             format!("{v:.6} V"),
         ));
     }
+    rows.push(Row::new(
+        "voltage check",
+        voltage_check_text(c.voltage_check.as_ref()),
+    ));
     rows.push(Row::new(
         "reference",
         format!("{:.2} Hz @ {:.2} dBFS", c.ref_freq_hz, c.ref_level_dbfs),
@@ -227,6 +275,9 @@ mod tests {
     use super::super::Body;
     use super::*;
     use crate::measurement::report::MicResponseRef;
+    use crate::shared::calibration::session::{
+        CheckSource, Evidence, UnverifiedCause, VerdictUnit,
+    };
 
     fn find<'a>(rows: &'a [Row], label: &str) -> Option<&'a Row> {
         rows.iter().find(|r| r.label == label)
@@ -253,7 +304,76 @@ mod tests {
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
+            voltage_check: None,
         }
+    }
+
+    fn check_row(check: Option<LayerVerdict>) -> String {
+        let mut c = full_calibration();
+        c.voltage_check = check;
+        let rows = rows_of(&calibration_section(Some(&c))).to_vec();
+        find(&rows, "voltage check").expect("row").value.clone()
+    }
+
+    fn evidence(delta: f64) -> Evidence {
+        Evidence {
+            measured: -0.60 + delta,
+            stored: -0.60,
+            delta,
+            tolerance: 0.10,
+            unit: VerdictUnit::Db,
+            stored_at: "2026-09-15T23:43:04Z".into(),
+            checked_at: "2026-09-16T14:02:11.250Z".into(),
+            source: CheckSource::Probe,
+        }
+    }
+
+    #[test]
+    fn voltage_check_row_renders_every_state() {
+        assert_eq!(check_row(None), "not recorded");
+        assert_eq!(
+            check_row(Some(LayerVerdict::Verified(evidence(-0.01)))),
+            "verified 2026-09-16T14:02:11Z, loop gain \u{394} -0.01 dB (tolerance \u{b1}0.10 dB)"
+        );
+        assert_eq!(
+            check_row(Some(LayerVerdict::Refused {
+                evidence: evidence(3.02),
+                via: None,
+                delta_bound: None
+            })),
+            "REFUSED 2026-09-16T14:02:11Z, loop gain \u{394} +3.02 dB; values in dBFS"
+        );
+        assert_eq!(
+            check_row(Some(LayerVerdict::Refused {
+                evidence: evidence(-58.62),
+                via: None,
+                delta_bound: Some(DeltaBound::AtMost)
+            })),
+            "REFUSED 2026-09-16T14:02:11Z, loop gain \u{394} \u{2264} -58.62 dB, no tone; values in dBFS"
+        );
+        assert_eq!(
+            check_row(Some(LayerVerdict::Refused {
+                evidence: evidence(3.02),
+                via: Some("out1_in1".into()),
+                delta_bound: None
+            })),
+            "REFUSED via [out1_in1], loop gain moved +3.02 dB; values in dBFS"
+        );
+        assert_eq!(
+            check_row(Some(LayerVerdict::unverified(
+                UnverifiedCause::NoLoopback,
+                "no reference loopback configured"
+            ))),
+            "UNVERIFIED \u{2014} no reference loopback configured"
+        );
+        assert_eq!(
+            check_row(Some(LayerVerdict::unverified(
+                UnverifiedCause::RefusalsUnreadable,
+                "session_refusals.json unreadable: expected value at line 1 column 1; \
+                 check: its permissions and contents, beside cal.json"
+            ))),
+            "UNVERIFIED \u{2014} session_refusals.json unreadable"
+        );
     }
 
     #[test]

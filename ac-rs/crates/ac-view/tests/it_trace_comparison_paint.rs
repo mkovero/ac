@@ -46,6 +46,7 @@ fn scene(smoothing: Smoothing) -> TransferScene {
         column_bins: Vec::new(),
         stages: Vec::new(),
         fault: None,
+        calibration: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(

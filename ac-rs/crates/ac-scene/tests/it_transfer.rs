@@ -55,6 +55,7 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         column_bins: Vec::new(),
         stages: Vec::new(),
         fault: None,
+        calibration: None,
     }
 }
 

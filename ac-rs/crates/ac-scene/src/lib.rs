@@ -47,6 +47,7 @@ pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use sweep_ir::{SweepIrFault, SweepIrScene};
 pub use ticks::{Axis, Tick};
 pub use transfer::{
-    BandLabel, DerotMode, DisplayModes, Meter, MeterState, Smoothing, TransferInput, TransferScene,
+    BandLabel, CalibrationReadout, CalibrationState, DerotMode, DisplayModes, Meter, MeterState,
+    Smoothing, TransferInput, TransferScene,
 };
 pub use wire::{IrWireFrame, MtwStage, WireDrive, WireFrame};

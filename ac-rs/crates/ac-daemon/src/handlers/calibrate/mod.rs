@@ -18,17 +18,21 @@ use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
 
 use crate::server::ServerState;
 
+use ac_core::shared::calibration::session::{ProbeReading, PROBE_FREQ_HZ, PROBE_SNR_MIN_DB};
+use ac_core::shared::calibration::LoopGainBaseline;
+
 use super::{
-    busy_guard, capture_rms, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms,
-    resolve_input, resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
-    wire, CalReply,
+    busy_guard, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms, resolve_input,
+    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, wire, CalReply,
 };
 
 mod mic_curve;
+pub(crate) mod session_check;
 mod spl;
 mod tau;
 
 pub use mic_curve::{calibrate_mic_curve, set_mic_correction_enabled};
+pub use session_check::{session_check, SessionChecks};
 pub use spl::calibrate_spl;
 
 use tau::{measure_tau_twice, tau_result, TAU_METHOD};
@@ -141,6 +145,110 @@ fn apply_cal_reading(field: &mut Option<f64>, reply: CalReply, scale: f64) -> &'
     }
 }
 
+/// What `calibrate` did with the stored loop-gain baseline (#466) — the
+/// `cal_done` `loop_gain_state`.
+#[derive(Debug, Clone, PartialEq)]
+enum LoopGainOutcome {
+    /// A new baseline was measured and stored.
+    Measured,
+    /// Both prompts were skipped: the entry is left as found.
+    Unchanged,
+    /// A leg kept its old value while the other moved, so the old baseline
+    /// no longer describes the stored pair. `reason` names that leg.
+    Removed { reason: String },
+    /// Legs were measured but no baseline could be recorded. `reason` is an
+    /// observation.
+    NotRecorded { reason: String },
+}
+
+impl LoopGainOutcome {
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Unchanged => "unchanged",
+            Self::Removed { .. } => "removed",
+            Self::NotRecorded { .. } => "not_recorded",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Removed { reason } | Self::NotRecorded { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// The baseline-write rule (#466). A baseline is written only when at least
+/// one leg was measured, none kept an old value, the drive is the default
+/// the session check uses, and the step-2 block holds a clean tone. A
+/// baseline measured now never vouches for itself: `calibrate` records no
+/// session-check verdict.
+fn apply_loop_gain(
+    baseline: &mut Option<LoopGainBaseline>,
+    replies: (CalReply, CalReply),
+    states: (&str, &str),
+    reading: &ProbeReading,
+    drive_dbfs: f64,
+    measured_at: String,
+    epoch: ac_core::shared::calibration::DeviceEpoch,
+) -> LoopGainOutcome {
+    let (out_reply, in_reply) = replies;
+    let (out_state, in_state) = states;
+    if out_reply == CalReply::Skip && in_reply == CalReply::Skip {
+        return LoopGainOutcome::Unchanged;
+    }
+    let had = baseline.take().is_some();
+    let removed_note = if had {
+        "; earlier baseline removed"
+    } else {
+        ""
+    };
+    for (name, state) in [("Output", out_state), ("Input", in_state)] {
+        if state == "unchanged" {
+            return LoopGainOutcome::Removed {
+                reason: format!("{name} unchanged, not measured now"),
+            };
+        }
+    }
+    if out_state != "measured" && in_state != "measured" {
+        return LoopGainOutcome::Removed {
+            reason: "no voltage leg stored".to_string(),
+        };
+    }
+    if (drive_dbfs - DEFAULT_LEVEL_DBFS).abs() > 1e-9 {
+        return LoopGainOutcome::NotRecorded {
+            reason: format!(
+                "calibrated at {drive_dbfs:.1} dBFS; session check drives {DEFAULT_LEVEL_DBFS:.1} dBFS{removed_note}"
+            ),
+        };
+    }
+    let unusable = match (&reading.capture, reading.xruns_delta, reading.snr_db()) {
+        (Err(e), _, _) => Some(format!("capture failed: {e}")),
+        (_, x, _) if x > 0 => Some("xrun during capture".to_string()),
+        (_, _, None) => Some(format!("no tone found at {PROBE_FREQ_HZ:.0} Hz")),
+        (_, _, Some(snr)) if snr < PROBE_SNR_MIN_DB => Some(format!(
+            "tone SNR {snr:.1} dB, need {PROBE_SNR_MIN_DB:.1} dB"
+        )),
+        _ => None,
+    };
+    if let Some(reason) = unusable {
+        return LoopGainOutcome::NotRecorded {
+            reason: format!("{reason}{removed_note}"),
+        };
+    }
+    *baseline = Some(LoopGainBaseline {
+        loop_gain_db: reading
+            .loop_gain_db(drive_dbfs)
+            .expect("a tone with an SNR has a level"),
+        freq_hz: PROBE_FREQ_HZ,
+        drive_dbfs,
+        measured_at,
+        epoch,
+    });
+    LoopGainOutcome::Measured
+}
+
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
     cfg_guard!(state);
@@ -243,9 +351,25 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         // capture briefly before prompting (after a short settle so the
         // fresh tone fills the ring). If the input is silent / unwired,
         // fall back to assuming loopback (`captured_dbfs = ref_dbfs`).
-        eng.flush_capture();
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        let captured_rms = capture_rms(&mut *eng, 0.3);
+        //
+        // #466: one captured block feeds both the RMS below (unchanged
+        // `in_scale` path) and the loop-gain estimator the session check
+        // uses, with the same settle and length, so the baseline and the
+        // check read the loop the same way. A capture error still reads as
+        // 0.0 RMS here, as before; the estimator keeps it as an error.
+        let (block, block_xruns) = session_check::capture_probe_block(&mut *eng);
+        let captured_rms = match &block {
+            Ok(data) => {
+                let sum_sq: f64 = data.iter().map(|&x| (x as f64).powi(2)).sum();
+                (sum_sq / data.len().max(1) as f64).sqrt()
+            }
+            Err(_) => 0.0,
+        };
+        let loop_reading = session_check::reading_from_block(
+            block.as_deref().map_err(Clone::clone),
+            eng.sample_rate(),
+            block_xruns,
+        );
         let captured_dbfs = rms_to_dbfs(captured_rms);
         let in_dbfs_for_scale = if captured_dbfs > -80.0 {
             captured_dbfs
@@ -354,6 +478,15 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         if let Some(entry) = tau_outcome.stored_entry(TAU_METHOD, &session) {
             cal.tau_history.push(entry);
         }
+        let loop_gain = apply_loop_gain(
+            &mut cal.loop_gain_baseline,
+            (out_reply, in_reply),
+            (out_state, in_state),
+            &loop_reading,
+            ref_dbfs,
+            ac_core::shared::time::now_utc_iso8601(),
+            crate::audio::epoch::current_epoch(backend),
+        );
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
@@ -380,6 +513,19 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             "backend":              backend,
         });
         tau_outcome.write_frame(&mut cal_done_frame);
+        // #466: what happened to the loop-gain baseline, and the values now
+        // stored (the kept ones on `unchanged`).
+        cal_done_frame["loop_gain_state"] = json!(loop_gain.state());
+        let stored_gain = cal.loop_gain_baseline.as_ref();
+        cal_done_frame["loop_gain_db"] = json!(stored_gain.map(|b| b.loop_gain_db));
+        cal_done_frame["loop_gain_drive_dbfs"] = json!(stored_gain.map(|b| b.drive_dbfs));
+        cal_done_frame["loop_gain_freq_hz"] = json!(stored_gain.map(|b| b.freq_hz));
+        cal_done_frame["loop_gain_measured_at"] = json!(stored_gain.map(|b| &b.measured_at));
+        if let Some(reason) = loop_gain.reason() {
+            cal_done_frame["loop_gain_reason"] = json!(reason);
+        }
+        // Full precision, for the coupling check against `session_check`.
+        cal_done_frame["loop_gain_probe"] = json!(loop_reading.summary(ref_dbfs));
         finish_cal(&pub_tx, "calibrate", &key, cal_done_frame, save_err);
     });
 
@@ -412,4 +558,132 @@ pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {
         let _ = t.send(reply);
     }
     json!({"ok": true})
+}
+
+#[cfg(test)]
+mod loop_gain_tests {
+    use super::*;
+    use ac_core::shared::calibration::session::ToneReading;
+    use ac_core::shared::calibration::DeviceEpoch;
+
+    fn epoch() -> DeviceEpoch {
+        DeviceEpoch::NotObservable {
+            reason: "test".into(),
+        }
+    }
+
+    fn clean() -> ProbeReading {
+        ProbeReading {
+            capture: Ok(()),
+            xruns_delta: 0,
+            total_peak_dbfs: -40.6,
+            tone: Some(ToneReading {
+                fundamental_dbfs: -40.6,
+                noise_floor_dbfs: -160.0,
+                n: 28_800,
+            }),
+        }
+    }
+
+    fn old() -> Option<LoopGainBaseline> {
+        Some(LoopGainBaseline {
+            loop_gain_db: -1.0,
+            freq_hz: 1000.0,
+            drive_dbfs: -40.0,
+            measured_at: "2026-09-01T00:00:00Z".into(),
+            epoch: epoch(),
+        })
+    }
+
+    fn run(
+        b: &mut Option<LoopGainBaseline>,
+        replies: (CalReply, CalReply),
+        states: (&str, &str),
+        reading: &ProbeReading,
+        drive: f64,
+    ) -> LoopGainOutcome {
+        apply_loop_gain(b, replies, states, reading, drive, "now".into(), epoch())
+    }
+
+    #[test]
+    fn both_legs_measured_at_the_default_drive_records_the_gain() {
+        let mut b = old();
+        let o = run(
+            &mut b,
+            (CalReply::Value(1.0), CalReply::Value(1.0)),
+            ("measured", "measured"),
+            &clean(),
+            -40.0,
+        );
+        assert_eq!(o, LoopGainOutcome::Measured);
+        let b = b.unwrap();
+        assert!((b.loop_gain_db - (-0.6)).abs() < 1e-9);
+        assert_eq!(b.measured_at, "now");
+    }
+
+    #[test]
+    fn both_prompts_skipped_leaves_the_entry_as_found() {
+        let mut b = old();
+        let o = run(
+            &mut b,
+            (CalReply::Skip, CalReply::Skip),
+            ("unchanged", "unchanged"),
+            &clean(),
+            -40.0,
+        );
+        assert_eq!(o, LoopGainOutcome::Unchanged);
+        assert_eq!(b, old());
+    }
+
+    #[test]
+    fn a_kept_leg_beside_a_measured_one_removes_the_baseline() {
+        let mut b = old();
+        let o = run(
+            &mut b,
+            (CalReply::Value(1.0), CalReply::Skip),
+            ("measured", "unchanged"),
+            &clean(),
+            -40.0,
+        );
+        assert_eq!(
+            o,
+            LoopGainOutcome::Removed {
+                reason: "Input unchanged, not measured now".into()
+            }
+        );
+        assert_eq!(b, None);
+    }
+
+    #[test]
+    fn a_non_default_drive_or_a_noisy_tone_records_nothing() {
+        let mut b = old();
+        let o = run(
+            &mut b,
+            (CalReply::Value(1.0), CalReply::Value(1.0)),
+            ("measured", "measured"),
+            &clean(),
+            -30.0,
+        );
+        assert_eq!(o.state(), "not_recorded");
+        assert!(o
+            .reason()
+            .unwrap()
+            .starts_with("calibrated at -30.0 dBFS; session check drives -40.0 dBFS"));
+        assert_eq!(b, None);
+
+        let mut noisy = clean();
+        // In-lobe SNR ≈ 36 dB, below `S_min`.
+        noisy.tone.as_mut().unwrap().noise_floor_dbfs = -40.0;
+        let mut b = None;
+        let o = run(
+            &mut b,
+            (CalReply::Value(1.0), CalReply::Skip),
+            ("measured", "absent"),
+            &noisy,
+            -40.0,
+        );
+        assert_eq!(o.state(), "not_recorded");
+        assert!(o.reason().unwrap().starts_with("tone SNR"), "{o:?}");
+        assert_eq!(b, None);
+    }
 }

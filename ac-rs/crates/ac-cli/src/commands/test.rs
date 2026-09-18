@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use super::{check_ack, get_cal, level_to_dbfs};
+use super::{
+    await_session_check, check_ack, consumes_voltage, get_cal, level_to_dbfs, level_unit,
+    print_consumer_check,
+};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -53,13 +56,21 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
         _ => unreachable!(),
     };
 
+    let mut cal = get_cal(client);
+    let consumes = consumes_voltage(cal.as_ref(), None);
     let mut json = serde_json::json!({"cmd": "test_hardware"});
     if dmm {
         json["dmm"] = true.into();
     }
 
-    check_ack(client.send_cmd(&json, None), "test_hardware");
-    println!("\n  Hardware test\n");
+    let ack = check_ack(client.send_cmd(&json, None), "test_hardware");
+    println!("\n  Hardware test");
+    // #466: the stored output scale feeds the DMM rows; its check prints first.
+    let wait = await_session_check(client, "test_hardware", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, None, consumes).is_err() {
+        std::process::exit(1);
+    }
+    println!();
 
     io::print_freq_header(false);
 
@@ -111,17 +122,27 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     // operator's final #459 ruling exempts self-test level rows.
     let _ = level_defaulted;
 
-    let cal = get_cal(client);
+    let mut cal = get_cal(client);
     let have_cal = cal.is_some();
     let level_db = level_to_dbfs(level, cal.as_ref());
+    let consumes = consumes_voltage(cal.as_ref(), Some(level));
 
-    let mut json = serde_json::json!({"cmd": "test_dut", "level_dbfs": level_db});
+    let mut json = serde_json::json!({
+        "cmd": "test_dut",
+        "level_dbfs": level_db,
+        "level_unit": level_unit(level),
+    });
     if compare {
         json["compare"] = true.into();
     }
 
-    check_ack(client.send_cmd(&json, None), "test_dut");
-    println!("\n  DUT test\n");
+    let ack = check_ack(client.send_cmd(&json, None), "test_dut");
+    println!("\n  DUT test");
+    let wait = await_session_check(client, "test_dut", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, Some(level), consumes).is_err() {
+        std::process::exit(1);
+    }
+    println!();
 
     io::print_freq_header(have_cal);
 

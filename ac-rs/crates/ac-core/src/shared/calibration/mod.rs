@@ -87,16 +87,29 @@
 //! epoch is compared at lookup and reported as a flag; it is not part of the
 //! exact-match key and never refuses a value.
 //!
+//! # Stored layers are checked per session (#466)
+//!
+//! A stored τ and a stored voltage scale can both go stale through events
+//! their keys cannot record (an interface reset that moved the analog level
+//! by +6 dB while ALSA readback still showed the baseline). Where a reference
+//! loopback is patched, [`session`] judges a fresh loopback measurement
+//! against the stored layer — `calibrate` records the loop gain it measured
+//! as [`LoopGainBaseline`] for that purpose. A refused voltage layer is
+//! withheld with [`Calibration::without_voltage`], which leaves SPL and the
+//! mic curve untouched: the layers stay parallel under refusal too.
+//!
 //! # Where each layer lives
 //!
 //! One file per layer, so "parallel, not composed" is a module boundary
 //! and not only a paragraph: [`tau`] (τ), [`mic_response`] (mic curve),
 //! and this module (voltage + SPL, the two fields read off the same raw
 //! amplitude). [`epoch`] holds τ's enumeration epoch and its comparison.
-//! [`store`] owns `cal.json` for all of them.
+//! [`session`] holds the per-session verdict rules. [`store`] owns
+//! `cal.json` for all of them, and `session_refusals.json` beside it.
 
 mod epoch;
 mod mic_response;
+pub mod session;
 mod store;
 mod tau;
 
@@ -105,7 +118,11 @@ pub use epoch::{
     BOUNDARY_HOST_REBOOTED, BOUNDARY_NODES_SEPARATOR,
 };
 pub use mic_response::{parse_mic_curve, MicResponse};
-pub use store::{cal_key, default_cal_path};
+pub use session::{LayerVerdict, LoopGainBaseline};
+pub use store::{
+    cal_key, default_cal_path, default_session_refusals_path, read_session_refusals,
+    write_session_refusals, RefusalsReadError, SESSION_REFUSALS_FILE,
+};
 pub use tau::{
     compare_tau_readings, ResolvedTau, TauComparison, TauConditions, TauDisagreement, TauEntry,
     TauRefusal,
@@ -142,6 +159,10 @@ pub struct CalibrationEntry {
     /// [`Calibration::tau_history`]. Append-only; never overwritten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tau_history: Vec<TauEntry>,
+    /// The loopback gain `calibrate` measured with both legs (#466) — the
+    /// value a session check compares a fresh probe against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_gain_baseline: Option<LoopGainBaseline>,
 }
 
 fn default_ref_freq() -> f64 {
@@ -165,6 +186,10 @@ pub struct Calibration {
     /// Interface-latency (τ) measurement history for this channel pair.
     /// Append-only — see [`TauEntry`] / [`Calibration::tau_for`].
     pub tau_history: Vec<TauEntry>,
+    /// Loop gain measured by `calibrate`, see [`session`]. `None` until a
+    /// run with both voltage legs measured at the default drive records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_gain_baseline: Option<LoopGainBaseline>,
 }
 
 /// Reference SPL of an acoustic pistonphone calibrator. ANSI S1.40 / IEC
@@ -185,7 +210,24 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
             tau_history: Vec::new(),
+            loop_gain_baseline: None,
         }
+    }
+
+    /// This calibration with the voltage layer withheld (#466): both
+    /// `vrms_at_0dbfs_*` set to `None`, every other layer unchanged, so a
+    /// consumer takes its existing uncalibrated branch for voltage only.
+    pub fn without_voltage(&self) -> Calibration {
+        Calibration {
+            vrms_at_0dbfs_out: None,
+            vrms_at_0dbfs_in: None,
+            ..self.clone()
+        }
+    }
+
+    /// Whether either voltage leg is stored.
+    pub fn has_voltage(&self) -> bool {
+        self.vrms_at_0dbfs_out.is_some() || self.vrms_at_0dbfs_in.is_some()
     }
 
     /// Convert a dBFS output level to physical Vrms using calibration.
@@ -242,6 +284,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl,
             mic_response,
             tau_history,
+            loop_gain_baseline,
         } = self;
         CalibrationEntry {
             output_channel: *output_channel,
@@ -253,6 +296,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl: *mic_sensitivity_dbfs_at_94db_spl,
             mic_response: mic_response.clone(),
             tau_history: tau_history.clone(),
+            loop_gain_baseline: loop_gain_baseline.clone(),
         }
     }
 
@@ -267,6 +311,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl,
             mic_response,
             tau_history,
+            loop_gain_baseline,
         } = e;
         Self {
             output_channel: *output_channel,
@@ -278,6 +323,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl: *mic_sensitivity_dbfs_at_94db_spl,
             mic_response: mic_response.clone(),
             tau_history: tau_history.clone(),
+            loop_gain_baseline: loop_gain_baseline.clone(),
         }
     }
 }
@@ -359,5 +405,37 @@ mod tests {
         assert_eq!(cal.out_vrms(-6.0), out_before);
         assert_eq!(cal.in_vrms(0.5), in_before);
         assert_eq!(cal.dbfs_to_dbspl(-20.0), spl_before);
+    }
+
+    /// #466: withholding the voltage layer moves only the voltage-derived
+    /// values — SPL, the mic curve, τ and the baseline stay as stored.
+    #[test]
+    fn without_voltage_strips_only_the_voltage_layer() {
+        let mut cal = Calibration::new(0, 0);
+        cal.vrms_at_0dbfs_out = Some(1.234);
+        cal.vrms_at_0dbfs_in = Some(0.567);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+        cal.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0011931));
+
+        let spl_before = cal.dbfs_to_dbspl(-20.0);
+        let offset_before = cal.spl_offset_db();
+        let stripped = cal.without_voltage();
+
+        assert_eq!(stripped.out_vrms(-6.0), None);
+        assert_eq!(stripped.in_vrms(0.5), None);
+        assert!(!stripped.has_voltage());
+        assert!(cal.has_voltage());
+        assert_eq!(stripped.dbfs_to_dbspl(-20.0), spl_before);
+        assert_eq!(stripped.spl_offset_db(), offset_before);
+        assert_eq!(stripped.tau_history, cal.tau_history);
+        assert_eq!(
+            Calibration {
+                vrms_at_0dbfs_out: cal.vrms_at_0dbfs_out,
+                vrms_at_0dbfs_in: cal.vrms_at_0dbfs_in,
+                ..stripped
+            },
+            cal
+        );
     }
 }

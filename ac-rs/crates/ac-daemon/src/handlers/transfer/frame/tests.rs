@@ -42,8 +42,56 @@ fn test_ctx() -> PairCtx {
         ri: 1,
         meas_cal: None,
         ref_cal: None,
+        meas_voltage_check: None,
+        ref_voltage_check: None,
         meas_curve: None,
     }
+}
+
+/// #466 (R4-4): `voltage` names what is applied, and `voltage_check` rides
+/// every leg whose stored calibration had a scale.
+#[test]
+fn cal_tags_carry_the_voltage_verdict_under_the_presence_rule() {
+    use ac_core::shared::calibration::session::{
+        CheckSource, Evidence, UnverifiedCause, VerdictUnit,
+    };
+    use ac_core::shared::calibration::LayerVerdict;
+    let mut stored = Calibration::new(0, 2);
+    stored.vrms_at_0dbfs_in = Some(1.5);
+    let refused = LayerVerdict::Refused {
+        evidence: Evidence {
+            measured: 2.42,
+            stored: -0.6,
+            delta: 3.02,
+            tolerance: 0.1,
+            unit: VerdictUnit::Db,
+            stored_at: "2026-09-15T23:43:04Z".into(),
+            checked_at: "2026-09-16T14:02:11.000Z".into(),
+            source: CheckSource::Probe,
+        },
+        via: None,
+        delta_bound: None,
+    };
+    let unverified = LayerVerdict::unverified(
+        UnverifiedCause::NoLoopback,
+        "no reference loopback configured",
+    );
+
+    // (i) refused: the scale is withheld and the verdict says why.
+    let gated = stored.without_voltage();
+    let tags = cal_tags_value(Some(&gated), None, Some(&refused), None, "none", false);
+    assert_eq!(tags["meas"]["voltage"], "none");
+    assert_eq!(tags["meas"]["voltage_check"]["state"], "refused");
+
+    // (ii) no stored scale: no verdict key at all.
+    let tags = cal_tags_value(None, None, None, None, "none", false);
+    assert!(tags["meas"].get("voltage_check").is_none(), "{tags}");
+    assert!(tags["ref"].get("voltage_check").is_none(), "{tags}");
+
+    // (iii) applied but unverified: `on`, carrying the verdict.
+    let tags = cal_tags_value(Some(&stored), None, Some(&unverified), None, "none", false);
+    assert_eq!(tags["meas"]["voltage"], "on");
+    assert_eq!(tags["meas"]["voltage_check"]["cause"], "no_loopback");
 }
 
 /// One Welch segment of a correlated pair: ref is a tone, meas is the

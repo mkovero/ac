@@ -14,6 +14,8 @@ use ac_core::shared::emission_level::{
 
 use crate::server::ServerState;
 
+use crate::handlers::checks::{self, Gate, LevelUnit};
+
 use super::super::{
     busy_guard, cfg_guard, emission_guard, emission_range_guard, make_engine_for_state,
     resolve_output, send_pub, spawn_worker,
@@ -40,6 +42,15 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     // reasoning. The per-point clamp the ramp loop below used to carry is
     // gone; every point between two in-range endpoints is in range.
     let (start_dbfs, stop_dbfs) = emission_range_guard!(state, &cfg, start_dbfs, stop_dbfs);
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let pair_cal = match checks::gate_pair_cal(&cfg, level_unit) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let gate = Gate::plan(state, &cfg, "sweep_level", pair_cal, level_unit, false);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -53,7 +64,20 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let backend = eng.backend_name();
 
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "start_dbfs": start_dbfs,
+        "stop_dbfs": stop_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
+
     let worker = spawn_worker(state, "sweep_level", move |stop| {
+        if gate.run(&pub_tx, true).is_err() {
+            return;
+        }
         if let Err(e) = eng.start(&[out_port], None) {
             send_pub(
                 &pub_tx,
@@ -88,14 +112,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_level".to_string(), worker);
     }
-    json!({
-        "ok": true,
-        "out_port": out_port_reply,
-        "start_dbfs": start_dbfs,
-        "stop_dbfs": stop_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }
 
 pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
@@ -114,6 +131,15 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let cfg = state.cfg.lock().unwrap().clone();
     // #459: `sweep_frequency` puts a stimulus on a physical output.
     let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
+    let level_unit = match LevelUnit::from_request(cmd) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    let pair_cal = match checks::gate_pair_cal(&cfg, level_unit) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let gate = Gate::plan(state, &cfg, "sweep_frequency", pair_cal, level_unit, false);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -128,7 +154,19 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     };
     let backend = eng.backend_name();
 
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    gate.write_reply(&mut reply);
+
     let worker = spawn_worker(state, "sweep_frequency", move |stop| {
+        if gate.run(&pub_tx, true).is_err() {
+            return;
+        }
         if let Err(e) = eng.start(&[out_port], None) {
             send_pub(
                 &pub_tx,
@@ -162,11 +200,5 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_frequency".to_string(), worker);
     }
-    json!({
-        "ok": true,
-        "out_port": out_port_reply,
-        "level_dbfs": level_dbfs,
-        "max_dbfs": MAX_EMISSION_DBFS,
-        "backend": backend,
-    })
+    reply
 }

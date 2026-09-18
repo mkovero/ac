@@ -493,6 +493,8 @@ mod tests {
             output_port: "out1".into(),
             input_port: "in1".into(),
             enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         })
     }
 
@@ -635,6 +637,8 @@ mod tests {
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
             enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
@@ -684,6 +688,8 @@ mod tests {
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
             enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
@@ -771,6 +777,41 @@ mod tests {
         }
     }
 
+    /// #466 (R6-4): a stored τ the session check refused never reaches the
+    /// marker. `ir_stats` withholds the flight time, so the marker falls to
+    /// the round trip.
+    #[test]
+    fn arrival_marker_never_uses_a_refused_latency() {
+        use ac_core::measurement::report::{InterfaceLatency, MeasuredLatency};
+        use ac_core::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
+        use ac_core::shared::calibration::LayerVerdict;
+
+        let mut r = gated_report_with_delayed_peak();
+        let InterfaceLatency::Measured(m) = measured_tau(0.0001) else {
+            unreachable!("measured_tau builds a measured latency")
+        };
+        r.interface_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+            session_check: Some(LayerVerdict::Refused {
+                evidence: Evidence {
+                    measured: 1743.0,
+                    stored: 1711.0,
+                    delta: 32.0,
+                    tolerance: 0.0,
+                    unit: VerdictUnit::Samples,
+                    stored_at: "2026-08-16T00:00:00Z".into(),
+                    checked_at: "2026-08-16T01:00:00Z".into(),
+                    source: CheckSource::Explicit,
+                },
+                via: Some("out1_in1".into()),
+                delta_bound: None,
+            }),
+            ..m
+        }));
+        let text = SweepIrScene::from_report(&r).unwrap().arrival.text;
+        assert!(text.contains("round trip"), "{text}");
+        assert!(!text.contains("flight"), "{text}");
+    }
+
     /// #461: with the reference check agreeing, the flag is the only suffix.
     #[test]
     fn arrival_marker_flags_an_unverified_latency_when_the_check_agrees() {
@@ -790,6 +831,8 @@ mod tests {
             output_port: "out1".into(),
             input_port: "in1".into(),
             enumeration: Some(EnumerationCheck::NotRecorded),
+            session_check: None,
+            session_check_loopback: None,
         }));
         let tau_s = 0.002;
         r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
@@ -810,6 +853,8 @@ mod tests {
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
             enumeration: Some(EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         }));
         let stats = r.ir_stats().unwrap();
         assert_eq!(
@@ -855,6 +900,8 @@ mod tests {
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
             enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
+            session_check: None,
+            session_check_loopback: None,
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();

@@ -92,6 +92,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
         mic_sensitivity_dbfs_at_94db_spl: Some(-20.0),
         mic_response: None,
         tau_history: Vec::new(),
+        loop_gain_baseline: None,
     };
     let meta = SnapshotMeta {
         format_version: FORMAT_VERSION,
@@ -104,6 +105,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
                 weighting: "Z".to_string(),
                 integration: "fast".to_string(),
                 calibration: Some(meas_cal),
+                voltage_check: None,
             },
             ChannelMeta {
                 role: "ref".to_string(),
@@ -111,6 +113,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
                 weighting: "Z".to_string(),
                 integration: "fast".to_string(),
                 calibration: None,
+                voltage_check: None,
             },
         ],
         session: SessionMeta {

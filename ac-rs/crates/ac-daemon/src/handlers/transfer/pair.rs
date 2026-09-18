@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use ac_core::shared::calibration::Calibration;
+use ac_core::shared::calibration::{Calibration, LayerVerdict};
 
 /// A pair's held delay lock (#226). `driving` records whether the drive
 /// was on at the tick this lock was accepted — the qualifier the drive
@@ -39,8 +39,16 @@ pub(super) struct PairCtx {
     pub(super) mi: usize,
     /// Index of the reference channel in the capture buffers / `rings`.
     pub(super) ri: usize,
+    /// Each leg's calibration as applied: a voltage scale the session
+    /// check refused is withheld here (#466).
     pub(super) meas_cal: Option<Calibration>,
     pub(super) ref_cal: Option<Calibration>,
+    /// The session check's recorded voltage verdict per leg, decided once at
+    /// session start (#466). `Some` exactly when that leg's **stored**
+    /// calibration has `vrms_at_0dbfs_in` — the presence rule of
+    /// `cal_tags.*.voltage_check`.
+    pub(super) meas_voltage_check: Option<LayerVerdict>,
+    pub(super) ref_voltage_check: Option<LayerVerdict>,
     /// `meas_cal`'s mic-curve, lifted out because the mag/phase/re/im
     /// correction path takes it alone and must stay untouched
     /// (additive-only discipline). A ref-leg curve is refused at launch,

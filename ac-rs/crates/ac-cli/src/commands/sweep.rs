@@ -1,4 +1,7 @@
-use super::{check_ack, get_cal, level_to_dbfs, print_level, print_level_range};
+use super::{
+    await_session_check, check_ack, consumes_voltage, get_cal, level_to_dbfs, level_unit,
+    print_consumer_check, print_level, print_level_range,
+};
 use crate::client::AcClient;
 use crate::parse::CommandKind;
 
@@ -14,9 +17,16 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
         _ => unreachable!(),
     };
 
-    let cal = get_cal(client);
+    let mut cal = get_cal(client);
     let start_db = level_to_dbfs(start, cal.as_ref());
     let stop_db = level_to_dbfs(stop, cal.as_ref());
+    // A physical endpoint makes the whole ramp physical.
+    let typed = if level_unit(start) != "dbfs" {
+        start
+    } else {
+        stop
+    };
+    let consumes = consumes_voltage(cal.as_ref(), Some(typed));
 
     println!("\n  Sweep: {freq:.0} Hz  |  {duration:.1}s");
 
@@ -28,11 +38,17 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
                 "start_dbfs": start_db,
                 "stop_dbfs": stop_db,
                 "duration": duration,
+                "level_unit": level_unit(typed),
             }),
             None,
         ),
         "sweep_level",
     );
+    // #466: the level block waits for the session check.
+    let wait = await_session_check(client, "sweep_level", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, Some(typed), consumes).is_err() {
+        std::process::exit(1);
+    }
     print_level_range(
         ack.get("start_dbfs").and_then(|v| v.as_f64()),
         ack.get("stop_dbfs").and_then(|v| v.as_f64()),
@@ -60,8 +76,9 @@ pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &
         _ => unreachable!(),
     };
 
-    let cal = get_cal(client);
+    let mut cal = get_cal(client);
     let level_db = level_to_dbfs(level, cal.as_ref());
+    let consumes = consumes_voltage(cal.as_ref(), Some(level));
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
@@ -75,11 +92,16 @@ pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &
                 "stop_hz": stop_hz,
                 "level_dbfs": level_db,
                 "duration": duration,
+                "level_unit": level_unit(level),
             }),
             None,
         ),
         "sweep_frequency",
     );
+    let wait = await_session_check(client, "sweep_frequency", &ack, 30_000);
+    if print_consumer_check(wait, &mut cal, Some(level), consumes).is_err() {
+        std::process::exit(1);
+    }
     print_level(
         ack.get("level_dbfs").and_then(|v| v.as_f64()),
         level_defaulted,

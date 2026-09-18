@@ -301,7 +301,13 @@ pub(super) struct ChannelState {
     /// Resolved input port; used only by the multi-channel
     /// `reconnect_input` path.
     pub(super) in_port: String,
+    /// The calibration as applied: a voltage scale the session check
+    /// refused is already withheld here (#466).
     pub(super) cal: Option<Calibration>,
+    /// The session check's recorded verdict on this channel's stored
+    /// voltage scale, taken once at monitor start; `None` when the channel
+    /// stores no scale.
+    pub(super) voltage_check: Option<ac_core::shared::calibration::LayerVerdict>,
     /// Per-channel SPL offset (= 94 - mic_sens_dbfs); `None` when the
     /// channel hasn't been pistonphone-calibrated. Cached once at start
     /// — re-running `calibrate_spl` requires a `monitor` restart, same
@@ -369,6 +375,7 @@ impl ChannelState {
         channel: u32,
         in_port: String,
         cal: Option<Calibration>,
+        voltage_check: Option<ac_core::shared::calibration::LayerVerdict>,
         sr: u32,
         freq_hz: f64,
         caps: &RingCaps,
@@ -382,6 +389,7 @@ impl ChannelState {
             channel,
             in_port,
             cal,
+            voltage_check,
             spl_offset,
             mic_curve,
             loudness_fir,

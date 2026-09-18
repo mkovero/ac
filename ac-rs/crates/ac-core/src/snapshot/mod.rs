@@ -23,7 +23,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::shared::calibration::Calibration;
+use crate::shared::calibration::{Calibration, LayerVerdict};
 
 /// Current `.acsnap` schema version. Bump on any breaking `meta.json`
 /// layout change (e.g. a future 32-bit FLAC path) — readers must refuse
@@ -45,8 +45,14 @@ pub struct ChannelMeta {
     pub weighting: String,
     pub integration: String,
     /// Full 3-layer calibration in effect for this channel at capture
-    /// time. `None` when the channel had no cal entry at all.
+    /// time. `None` when the channel had no cal entry at all. When
+    /// `voltage_check` is refused this holds no voltage scale.
     pub calibration: Option<Calibration>,
+    /// The session check's verdict on this channel's voltage layer, as the
+    /// capture applied it (#466). `None` on a snapshot written before the
+    /// field existed, and on a channel with no stored voltage scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage_check: Option<LayerVerdict>,
 }
 
 /// Session configuration in effect at capture time — enough to reproduce
@@ -272,6 +278,7 @@ mod tests {
                     weighting: "Z".to_string(),
                     integration: "fast".to_string(),
                     calibration: None,
+                    voltage_check: None,
                 })
                 .collect(),
             session: SessionMeta {
@@ -453,6 +460,7 @@ mod tests {
             mic_sensitivity_dbfs_at_94db_spl: Some(-20.0),
             mic_response: None,
             tau_history: Vec::new(),
+            loop_gain_baseline: None,
         };
         let meta = SnapshotMeta {
             format_version: FORMAT_VERSION,
@@ -465,6 +473,7 @@ mod tests {
                     weighting: "Z".to_string(), // capture-time — stays untouched
                     integration: "fast".to_string(),
                     calibration: Some(meas_cal),
+                    voltage_check: None,
                 },
                 ChannelMeta {
                     role: "ref".to_string(),
@@ -472,6 +481,7 @@ mod tests {
                     weighting: "Z".to_string(),
                     integration: "fast".to_string(),
                     calibration: None,
+                    voltage_check: None,
                 },
             ],
             session: SessionMeta {
@@ -623,6 +633,7 @@ mod tests {
             mic_sensitivity_dbfs_at_94db_spl: Some(-26.0),
             mic_response: None,
             tau_history: Vec::new(),
+            loop_gain_baseline: None,
         };
 
         let meta = SnapshotMeta {
@@ -636,6 +647,7 @@ mod tests {
                     weighting: "Z".to_string(),
                     integration: "fast".to_string(),
                     calibration: Some(meas_cal),
+                    voltage_check: None,
                 },
                 ChannelMeta {
                     role: "ref".to_string(),
@@ -643,6 +655,7 @@ mod tests {
                     weighting: "Z".to_string(),
                     integration: "fast".to_string(),
                     calibration: None,
+                    voltage_check: None,
                 },
             ],
             session: SessionMeta {
@@ -739,6 +752,7 @@ mod tests {
                         weighting: "Z".to_string(),
                         integration: "fast".to_string(),
                         calibration: None,
+                        voltage_check: None,
                     },
                     ChannelMeta {
                         role: "ref".to_string(),
@@ -746,6 +760,7 @@ mod tests {
                         weighting: "Z".to_string(),
                         integration: "fast".to_string(),
                         calibration: None,
+                        voltage_check: None,
                     },
                 ],
                 session: SessionMeta {
