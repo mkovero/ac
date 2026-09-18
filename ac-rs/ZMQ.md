@@ -1407,7 +1407,8 @@ isn't (a different fault), or not checked (no reference, no stored τ for the
 reference pair, or a reference reading that failed its own gates). Gates the
 one τ subtraction the report can offer: `IrStats::flight_time_s` is withheld
 on either disagreement, even though `interface_latency` is measured, and
-produced normally when the check is `agree` or `unchecked`.
+produced normally when the check is `agree` or `unchecked` — unless the
+arrival's own cross-check (#537, below) withholds it.
 
 What this cannot catch: it proves this capture's lifetime matches the
 lifetime the **reference** pair was last calibrated in, not the lifetime the
@@ -1418,6 +1419,28 @@ reference pair itself was calibrated: `calibrate` would have stored the
 shifted value, this run's same-capture reading agrees with it, and the check
 reports `agree`. Absent on reports written before v9, and whenever `plot_ir`
 has no reference configured.
+
+**Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
+read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
+high-passed at 1 kHz with zero phase (a 4th-order Butterworth run forward
+and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
+broadband peak. A zero-phase filter leaves a pure delay's peak on the same
+sample, so the arrival still pairs with `calibrate`'s peak-picked τ. When
+the payload's `f2_hz` (capped at Nyquist) is below twice the corner, the
+arrival is the broadband peak (`ArrivalSource::Peak`). `peak_index`,
+`pre_impulse_snr_db` and `verdict` stay broadband. `IrStats::arrival_cross_check`
+compares the two peaks, first match wins: `BandLimitUnavailable` (flight
+time produced, not cross-checked); `BandLimitedSnrLow` (the high-passed
+IR's pre-impulse SNR `band_limited_snr_db` is below 20 dB, ISO 3382-1:2009
+§A.3.4 — withheld); `EarlierComparable` (a high-passed sample more than
+2.0 ms before the arrival is within 6 dB of it — withheld);
+`BroadbandEarlier` (the broadband peak is more than 2.0 ms earlier —
+withheld); `BroadbandLater` (more than 2.0 ms later — produced and marked);
+`Agrees`. The 2.0 ms and 6 dB bounds are assumed, not rig-scored. The onset
+diagnostic searches before the arrival, not the broadband peak. Nothing
+here is on the wire or in the report JSON: `IrStats` is derived on read,
+so re-reading a report written before #537 re-derives its arrival under
+this rule, and its printed arrival and flight time can change.
 
 **DATA**
 ```json
@@ -1566,7 +1589,9 @@ lack it, which readers treat as no reference.
 
 `report.position.distance_m` is the request's `distance_m`, recorded when
 supplied. It is an **input** to the causal bound, converted to seconds inside
-`ir_stats`, never a read-out: no ms → m figure returns (#391). From v7,
+`ir_stats`, never a read-out: no ms → m figure returns (#391). The bound
+limits only the onset diagnostic's search, which since #537 runs before the
+band-limited arrival; it never moves the arrival itself. From v7,
 `position` may be present carrying only `distance_m`.
 
 When `cfg.report_dir` is configured the daemon also writes the pair

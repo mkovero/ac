@@ -32,6 +32,17 @@
 //! [`ir_peak`] result may always be differenced against another
 //! [`ir_peak`] result, from any capture, because the band-invariance
 //! above is what makes that pairing cancel.
+//!
+//! A zero-phase band-limited peak ([`crate::measurement::sweep::band_limited_peak`],
+//! #537) pairs like a peak: high-passing a centred pulse with zero phase
+//! narrows its skirt but does not move its centre, so the band-limited peak
+//! of a pure delay lands on the same sample as [`ir_peak`] in any band this
+//! file's test uses, and may be differenced against a stored `calibrate` τ.
+//! ISO 3382-1:2009 §A.3.4 allows a start "from the broadband or high
+//! frequency impulse responses and the measured delay of the filters"; the
+//! zero-phase filter makes that delay zero. A threshold or onset read off
+//! the band-limited IR would not pair — it sits on the skirt, exactly as
+//! above.
 
 /// Index and magnitude of the largest-magnitude sample of a linear IR.
 ///
@@ -177,6 +188,40 @@ mod tests {
         );
     }
 
+    /// #537: the claim that licenses picking the arrival off a zero-phase
+    /// high-passed IR. On the same pure-delay chain as the band-invariance
+    /// test above, the band-limited peak lands exactly on the modelled delay
+    /// in both configurations — the same sample [`ir_peak`] picks — so it
+    /// cancels against a peak-picked τ the way [`ir_peak`] does.
+    #[test]
+    fn band_limited_peak_offset_is_band_invariant_and_equals_ir_peak() {
+        use crate::measurement::sweep::{band_limited_peak, ARRIVAL_HIGH_PASS_CORNER_HZ};
+        let sr = 48_000u32;
+        let delay = 1_000usize;
+        let window_len = 2_048usize;
+        for p in [band_a(sr), band_b(sr)] {
+            let x = log_sweep(&p).unwrap();
+            let mut y = vec![0.0_f32; x.len() + delay];
+            y[delay..].copy_from_slice(&x);
+            let full = deconvolve_full(&y, &inverse_sweep(&p).unwrap());
+            let irs = extract_irs(&full, &p, 1, window_len).unwrap();
+            let centre = window_len / 2;
+            let (peak, _) = ir_peak(&irs.linear);
+            let (band_limited, _) =
+                band_limited_peak(&irs.linear, sr, p.f2_hz, ARRIVAL_HIGH_PASS_CORNER_HZ)
+                    .expect("both bands reach two octaves above the corner");
+            assert_eq!(
+                band_limited as i64 - centre as i64,
+                delay as i64,
+                "{p:?}: the band-limited peak must land exactly on the modelled delay"
+            );
+            assert_eq!(
+                band_limited, peak,
+                "{p:?}: band-limited peak equals ir_peak"
+            );
+        }
+    }
+
     /// Build a pure-delay capture at `params` (`y(n) = x(n − delay)`),
     /// deconvolve it, and return `(peak_offset, onset_offset)`, each the
     /// signed sample offset from the gate centre.
@@ -264,6 +309,42 @@ mod tests {
             "band A's pick {} is right and must pass the edge guard",
             a.onset
         );
+    }
+
+    /// #537: a healthy two-way DUT — #346's fixture, in both bands and at
+    /// both group delays — must come out `Agrees` under the band-limited
+    /// arrival's cross-check. Otherwise every healthy speaker capture
+    /// would be marked.
+    #[test]
+    fn two_way_dut_band_limited_arrival_agrees_with_the_broadband_peak() {
+        use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
+        for (name, r, p) in [
+            (
+                "A narrow",
+                two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW),
+                band_a(48_000),
+            ),
+            (
+                "B narrow",
+                two_way_bounded(&band_b(48_000), &TWO_WAY_NARROW),
+                band_b(48_000),
+            ),
+            (
+                "A rig-like",
+                two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE),
+                band_a(96_000),
+            ),
+        ] {
+            let peak = (r.centre as i64 + r.peak) as usize;
+            let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
+            assert_eq!(
+                a.cross_check,
+                ArrivalCrossCheck::Agrees,
+                "{name}: arrival {} vs peak {peak}, SNR {:?}",
+                a.arrival_index,
+                a.band_limited_snr_db
+            );
+        }
     }
 
     /// #346 architect revision 3: the guard fires on a rig-like two-way

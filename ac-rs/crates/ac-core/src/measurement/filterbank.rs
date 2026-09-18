@@ -54,12 +54,12 @@ impl Iec61260Class {
 
 /// Single biquad in Direct Form II transposed.
 #[derive(Debug, Clone, Copy)]
-struct Biquad {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
+pub(crate) struct Biquad {
+    pub(crate) b0: f64,
+    pub(crate) b1: f64,
+    pub(crate) b2: f64,
+    pub(crate) a1: f64,
+    pub(crate) a2: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +97,7 @@ impl BandFilter {
     }
 }
 
-fn apply_df2t(bq: &Biquad, z: &mut [f64; 2], x: f64) -> f64 {
+pub(crate) fn apply_df2t(bq: &Biquad, z: &mut [f64; 2], x: f64) -> f64 {
     let y = bq.b0 * x + z[0];
     z[0] = bq.b1 * x - bq.a1 * y + z[1];
     z[1] = bq.b2 * x - bq.a2 * y;

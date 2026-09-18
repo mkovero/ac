@@ -298,17 +298,36 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         );
     }
     // #346 AC4 / #378: the onset rule must still reach the terminal in
-    // its own labelled block, and the onset-to-peak distance must not read
-    // as the arrival. Row 2 under `arrival` names the peak rule; this run
-    // has no distance, and row 3 of the onset block says so.
+    // its own labelled block, and the onset-to-arrival distance must say it
+    // is not used. Row 2 under `arrival` names the band-limited peak rule
+    // (#537); this run has no distance, and row 3 of the onset block says so.
     assert!(
         stdout.contains("onset         at sample ")
             && stdout.contains("(AIC change-point pick, 10.0 ms window)"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("from peak (largest magnitude sample)"),
-        "arrival row 2 must name the peak rule (#346 AC4):\n{stdout}"
+        stdout.contains("from peak of IR high-passed at 1 kHz (zero-phase)"),
+        "arrival row 2 must name the band-limited peak rule (#346 AC4, #537):\n{stdout}"
+    );
+    // #537: the arrival's own SNR gate and the cross-check against the
+    // broadband peak print on a passing run, tolerance included, so a pass
+    // is not silent. A fake loopback's two peaks are the same sample.
+    for want in [
+        "  arrival SNR   ",
+        "(above 1 kHz, required \u{2265} 20.0 dB)",
+        "                ISO 3382-1:2009 \u{a7}A.3.4: trigger > 20 dB below maximum",
+        "  broadband \u{394}   +0 samples  (+0.000 ms, broadband peak \u{2212} arrival)",
+        "                tolerance \u{b1}96 samples (\u{b1}2.0 ms), assumed \u{2014} not rig-scored",
+    ] {
+        assert!(
+            stdout.contains(want),
+            "passing run missing {want:?} (#537):\n{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("check: IR below"),
+        "an agreeing cross-check prints no check row (#537):\n{stdout}"
     );
     assert!(
         !stdout.contains("5 cm earlier"),
@@ -339,8 +358,8 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "the ref latency line is always printed (#460):\n{stdout}"
     );
     assert!(
-        stdout.contains("118 samples before peak, not the arrival"),
-        "onset-to-peak distance must print as not the arrival (#378):\n{stdout}"
+        stdout.contains("118 samples before arrival, not used for flight time"),
+        "onset-to-arrival distance must print as not used (#378, #537):\n{stdout}"
     );
     assert!(
         !stdout.contains("onset-derived"),

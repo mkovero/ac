@@ -229,12 +229,23 @@ pub(super) fn ir_report_with_custom_ir(
     linear_ir: Vec<f64>,
     sample_rate_hz: u32,
 ) -> MeasurementReport {
+    ir_report_with_custom_ir_band(linear_ir, sample_rate_hz, 20_000.0)
+}
+
+/// [`ir_report_with_custom_ir`] with the payload's sweep top `f2_hz` set —
+/// the band-limited arrival (#537) reads it to decide whether the band
+/// reaches an octave above its corner.
+pub(super) fn ir_report_with_custom_ir_band(
+    linear_ir: Vec<f64>,
+    sample_rate_hz: u32,
+    f2_hz: f64,
+) -> MeasurementReport {
     let mut r = sample_impulse_response_report();
     r.data = vec![MeasurementPayload {
         data: MeasurementData::ImpulseResponse {
             sample_rate_hz,
             f1_hz: 20.0,
-            f2_hz: 20_000.0,
+            f2_hz,
             duration_s: 1.0,
             linear_ir,
             noise_tail_start_s: None,
@@ -244,6 +255,70 @@ pub(super) fn ir_report_with_custom_ir(
         gate: None,
     }];
     r
+}
+
+/// White noise, uniform in `±amplitude`, from a fixed hash of the index and
+/// `seed` so a fixture is reproducible.
+pub(super) fn hashed_uniform_noise(len: usize, amplitude: f64, seed: u64) -> Vec<f64> {
+    (0..len as u64)
+        .map(|i| {
+            let mut s =
+                (i ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            s ^= s >> 31;
+            s = s.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            s ^= s >> 29;
+            let u = (s >> 11) as f64 / (1u64 << 53) as f64;
+            (2.0 * u - 1.0) * amplitude
+        })
+        .collect()
+}
+
+/// #537's acceptance case, at 96 kHz with a 20 Hz–20 kHz payload band and
+/// a 0.4 s window (the `plot_ir` default length): a direct broadband
+/// impulse at `t0` (2 m of flight after the gate centre) and a 55 Hz room
+/// mode whose first large swing, `mode_peak`, lands 15 ms after it at
+/// 21.9 dB above the direct sound. The mode builds up over 10 ms under a
+/// raised-cosine envelope, so its onset carries no edge the high-pass could
+/// read as an arrival, and decays with a 50 ms time constant. The envelope
+/// is flat and the cosine at its crest on `mode_peak`, so the broadband
+/// maximum sits exactly there. The noise floor (±1e-7) is too small to move
+/// that maximum by a sample.
+pub(super) struct RoomModeCapture {
+    pub(super) report: MeasurementReport,
+    pub(super) t0: usize,
+    pub(super) mode_peak: usize,
+}
+
+pub(super) fn direct_plus_room_mode_report() -> RoomModeCapture {
+    const SR: u32 = 96_000;
+    const WINDOW_LEN: usize = 38_400;
+    const DIRECT: f64 = 0.08;
+    const MODE: f64 = 1.0;
+    const MODE_HZ: f64 = 55.0;
+    const RISE_S: f64 = 0.010;
+    const DECAY_S: f64 = 0.050;
+    let sr = SR as f64;
+    let centre = WINDOW_LEN / 2;
+    let t0 = centre + 598;
+    let mode_peak = t0 + (0.015 * sr) as usize;
+    let mut ir = hashed_uniform_noise(WINDOW_LEN, 1e-7, 537);
+    ir[t0] += DIRECT;
+    for (n, v) in ir.iter_mut().enumerate() {
+        let t = (n as f64 - mode_peak as f64) / sr;
+        let envelope = if t < -RISE_S {
+            0.0
+        } else if t <= 0.0 {
+            0.5 * (1.0 - (std::f64::consts::PI * (t + RISE_S) / RISE_S).cos())
+        } else {
+            (-t / DECAY_S).exp()
+        };
+        *v += MODE * envelope * (2.0 * std::f64::consts::PI * MODE_HZ * t).cos();
+    }
+    RoomModeCapture {
+        report: ir_report_with_custom_ir(ir, SR),
+        t0,
+        mode_peak,
+    }
 }
 
 /// A stored τ for the capture pair, resolved in the same enumeration epoch

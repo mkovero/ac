@@ -24,8 +24,8 @@
 //! forward verbatim; this module is where they become plain data.
 
 use ac_core::measurement::report::{
-    ArrivalCheck, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_BASIS,
-    PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, IrVerdict, MeasurementData, MeasurementReport,
+    PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -49,12 +49,53 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// device enumeration (#461) — crossed, not observable, not recorded, or a
 /// pre-v10 report with no check at all — carries `latency unverified`.
 ///
-/// Prefixed with the rule that produced the arrival (#346 UX revision 4):
-/// always `peak`, the only rule there is. The prefix stays although the
-/// marker always sits on the visible peak, because it is acceptance
-/// criterion 4's tag on a screenshot.
+/// Prefixed with the rule that produced the arrival (#346 UX revision 4,
+/// #537 UX): `peak above 1 kHz:` for the band-limited peak, with the corner
+/// formatted from [`ArrivalSource::BandLimitedPeak`], or `peak` for the
+/// broadband one. The marker sits on the arrival, which is no longer
+/// necessarily the tallest peak on screen, so the prefix says which peak it
+/// marks; the cross-check suffix says why the tallest one is not it. Both
+/// are acceptance criterion 4's tag on a screenshot.
+///
+/// The cross-check suffix ([`ArrivalCrossCheck`]) comes straight after the
+/// value's word, before the #359/#461 suffixes, which keep their order.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
-    format!("peak {}", arrival_marker_value(stats))
+    match stats.arrival_source {
+        ArrivalSource::BandLimitedPeak { corner_hz } => format!(
+            "peak above {}: {}",
+            format_corner(corner_hz),
+            arrival_marker_value(stats)
+        ),
+        ArrivalSource::Peak => format!("peak {}", arrival_marker_value(stats)),
+    }
+}
+
+/// A high-pass corner as the marker prints it: `1 kHz`, `500 Hz`.
+fn format_corner(corner_hz: f64) -> String {
+    if corner_hz >= 1000.0 {
+        format!("{} kHz", corner_hz / 1000.0)
+    } else {
+        format!("{corner_hz} Hz")
+    }
+}
+
+/// The arrival cross-check's part of the marker (#537 UX). Empty on
+/// `Agrees`.
+fn cross_check_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
+    let gap_ms = |gap: i64| gap as f64 / stats.sample_rate_hz as f64 * 1000.0;
+    match stats.arrival_cross_check {
+        ArrivalCrossCheck::Agrees => String::new(),
+        ArrivalCrossCheck::BroadbandLater { gap } | ArrivalCrossCheck::BroadbandEarlier { gap } => {
+            format!(", broadband \u{394} {:+.2} ms", gap_ms(gap))
+        }
+        ArrivalCrossCheck::BandLimitUnavailable { .. } => ", not cross-checked".to_string(),
+        ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => {
+            format!(", arrival SNR {snr_db:.1} dB")
+        }
+        ArrivalCrossCheck::EarlierComparable { level_db, .. } => {
+            format!(", earlier peak {level_db:+.1} dB")
+        }
+    }
 }
 
 /// [`arrival_marker_text`] without the rule prefix.
@@ -63,31 +104,37 @@ fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String
     // #461: `latency unverified` qualifies the number, so it comes before
     // `ref unchecked`, which qualifies a check.
     let latency_unverified = stats.interface_latency_unverified();
-    let (value_ms, suffix) = match (stats.flight_time_s, &stats.arrival_check) {
-        (Some(ft), ArrivalCheck::Unchecked { .. }) if latency_unverified => {
-            (ft * 1000.0, " flight, latency unverified, ref unchecked")
+    let (value_ms, word, tail) = match (stats.flight_time_s, &stats.arrival_check) {
+        (Some(ft), ArrivalCheck::Unchecked { .. }) if latency_unverified => (
+            ft * 1000.0,
+            "flight",
+            ", latency unverified, ref unchecked".to_string(),
+        ),
+        (Some(ft), ArrivalCheck::Unchecked { .. }) => {
+            (ft * 1000.0, "flight", ", ref unchecked".to_string())
         }
-        (Some(ft), ArrivalCheck::Unchecked { .. }) => (ft * 1000.0, " flight, ref unchecked"),
-        (Some(ft), _) if latency_unverified => (ft * 1000.0, " flight, latency unverified"),
-        (Some(ft), _) => (ft * 1000.0, " flight"),
+        (Some(ft), _) if latency_unverified => {
+            (ft * 1000.0, "flight", ", latency unverified".to_string())
+        }
+        (Some(ft), _) => (ft * 1000.0, "flight", String::new()),
         (None, ArrivalCheck::PeriodShift(d)) => {
             let n = d
                 .periods
                 .expect("PeriodShift always carries a period count");
-            return format!(
-                "{arrival_ms:.2} ms round trip, {}-period shift",
-                n.unsigned_abs()
-            );
+            (
+                arrival_ms,
+                "round trip",
+                format!(", {}-period shift", n.unsigned_abs()),
+            )
         }
-        (None, ArrivalCheck::Mismatch(d)) => {
-            return format!(
-                "{arrival_ms:.2} ms round trip, ref \u{394} {:+} samples",
-                d.delta_samples
-            );
-        }
-        (None, _) => (arrival_ms, " round trip"),
+        (None, ArrivalCheck::Mismatch(d)) => (
+            arrival_ms,
+            "round trip",
+            format!(", ref \u{394} {:+} samples", d.delta_samples),
+        ),
+        (None, _) => (arrival_ms, "round trip", String::new()),
     };
-    format!("{value_ms:.2} ms{suffix}")
+    format!("{value_ms:.2} ms {word}{}{tail}", cross_check_suffix(stats))
 }
 
 /// Mirrors [`crate::ir::IrScene`]'s own downsample target — display
@@ -575,7 +622,10 @@ mod tests {
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        let want = format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0);
+        let want = format!(
+            "peak above 1 kHz: {:.2} ms round trip",
+            stats.arrival_s * 1000.0
+        );
         assert_eq!(scene.arrival.text, want);
     }
 
@@ -592,7 +642,10 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(
             scene.arrival.text,
-            format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0),
+            format!(
+                "peak above 1 kHz: {:.2} ms round trip",
+                stats.arrival_s * 1000.0
+            ),
             "no measured \u{3c4} on this report — arrival text must be the raw round trip: {}",
             scene.arrival.text
         );
@@ -649,7 +702,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "peak {:.2} ms round trip, 1-period shift",
+                "peak above 1 kHz: {:.2} ms round trip, 1-period shift",
                 stats.arrival_s * 1000.0
             ),
             "a period shift must name itself on the round trip, not read as flight: {}",
@@ -701,7 +754,10 @@ mod tests {
             .flight_time_s
             .expect("Agree must produce a flight time")
             * 1000.0;
-        assert_eq!(scene.arrival.text, format!("peak {flight_ms:.2} ms flight"));
+        assert_eq!(
+            scene.arrival.text,
+            format!("peak above 1 kHz: {flight_ms:.2} ms flight")
+        );
     }
 
     /// #359: a flight time computed alongside `Unchecked` must say so — the
@@ -724,7 +780,7 @@ mod tests {
             * 1000.0;
         assert_eq!(
             scene.arrival.text,
-            format!("peak {flight_ms:.2} ms flight, ref unchecked")
+            format!("peak above 1 kHz: {flight_ms:.2} ms flight, ref unchecked")
         );
     }
 
@@ -754,7 +810,10 @@ mod tests {
         };
 
         let (text, ms) = with_check(Some(EnumerationCheck::Same));
-        assert_eq!(text, format!("peak {ms:.2} ms flight, ref unchecked"));
+        assert_eq!(
+            text,
+            format!("peak above 1 kHz: {ms:.2} ms flight, ref unchecked")
+        );
 
         for check in [
             Some(EnumerationCheck::Crossed {
@@ -770,7 +829,7 @@ mod tests {
             let (text, ms) = with_check(check.clone());
             assert_eq!(
                 text,
-                format!("peak {ms:.2} ms flight, latency unverified, ref unchecked"),
+                format!("peak above 1 kHz: {ms:.2} ms flight, latency unverified, ref unchecked"),
                 "{check:?}"
             );
             assert!(!text.contains("rebooted"), "the boundary stays in the CLI");
@@ -864,7 +923,7 @@ mod tests {
         let flight_ms = stats.flight_time_s.unwrap() * 1000.0;
         assert_eq!(
             SweepIrScene::from_report(&r).unwrap().arrival.text,
-            format!("peak {flight_ms:.2} ms flight, latency unverified")
+            format!("peak above 1 kHz: {flight_ms:.2} ms flight, latency unverified")
         );
     }
 
@@ -913,7 +972,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "peak {:.2} ms round trip, ref \u{394} {:+} samples",
+                "peak above 1 kHz: {:.2} ms round trip, ref \u{394} {:+} samples",
                 stats.arrival_s * 1000.0,
                 d.delta_samples,
             )
@@ -921,24 +980,118 @@ mod tests {
         assert!(!scene.arrival.text.contains("flight"));
     }
 
-    /// #346 UX revision 4: the marker names the rule that produced the
-    /// arrival, `peak`, on every onset standing — including `Unscored`,
-    /// where the rejected revision printed `onset`.
+    /// #346 UX revision 4, #537 UX: the marker names the rule that produced
+    /// the arrival — `peak above 1 kHz:` — on every onset standing,
+    /// including `Unscored`, where the rejected revision printed `onset`.
     #[test]
     fn arrival_marker_names_the_rule_that_produced_the_arrival() {
-        use ac_core::measurement::report::{ArrivalSource, OnsetStanding};
+        use ac_core::measurement::report::OnsetStanding;
         let r = gated_report_with_delayed_peak();
         let mut stats = r.ir_stats().unwrap();
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(
+            stats.arrival_source,
+            ArrivalSource::BandLimitedPeak { corner_hz: 1000.0 }
+        );
         let value = arrival_marker_value(&stats);
         for standing in [OnsetStanding::NoCausalBound, OnsetStanding::Unscored] {
             stats.onset_standing = standing;
             assert_eq!(
                 arrival_marker_text(&stats),
-                format!("peak {value}"),
+                format!("peak above 1 kHz: {value}"),
                 "{standing:?}"
             );
         }
+        stats.arrival_source = ArrivalSource::Peak;
+        assert_eq!(arrival_marker_text(&stats), format!("peak {value}"));
+    }
+
+    /// #537 UX's marker table, one row per cross-check standing, on the
+    /// rig case's numbers (96 kHz). The standing's suffix comes before the
+    /// #359/#461 suffixes.
+    #[test]
+    fn arrival_marker_names_the_cross_check_standing() {
+        let r = gated_report_with_delayed_peak();
+        let base = r.ir_stats().unwrap();
+        let with = |cc: ArrivalCrossCheck, flight_ms: Option<f64>, arrival_ms: f64| {
+            let mut s = base.clone();
+            s.sample_rate_hz = 96_000;
+            s.arrival_cross_check = cc;
+            s.flight_time_s = flight_ms.map(|ms| ms / 1000.0);
+            s.arrival_s = arrival_ms / 1000.0;
+            s.arrival_check = ArrivalCheck::Agree;
+            s.interface_latency_enumeration =
+                Some(ac_core::shared::calibration::EnumerationCheck::Same);
+            s
+        };
+        let cases = [
+            (
+                with(ArrivalCrossCheck::Agrees, Some(3.458), 21.281),
+                "peak above 1 kHz: 3.46 ms flight",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BroadbandLater { gap: 1_502 },
+                    Some(6.615),
+                    24.438,
+                ),
+                "peak above 1 kHz: 6.62 ms flight, broadband \u{394} +15.65 ms",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 14.2 },
+                    None,
+                    24.438,
+                ),
+                "peak above 1 kHz: 24.44 ms round trip, arrival SNR 14.2 dB",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::EarlierComparable {
+                        index: 0,
+                        level_db: -2.0,
+                    },
+                    None,
+                    24.438,
+                ),
+                "peak above 1 kHz: 24.44 ms round trip, earlier peak -2.0 dB",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BroadbandEarlier { gap: -410 },
+                    None,
+                    20.17,
+                ),
+                "peak above 1 kHz: 20.17 ms round trip, broadband \u{394} -4.27 ms",
+            ),
+        ];
+        for (stats, want) in cases {
+            assert_eq!(arrival_marker_text(&stats), want);
+        }
+        let mut unavailable = with(
+            ArrivalCrossCheck::BandLimitUnavailable {
+                band_top_hz: 500.0,
+                required_hz: 2_000.0,
+            },
+            Some(22.26),
+            40.083,
+        );
+        unavailable.arrival_source = ArrivalSource::Peak;
+        assert_eq!(
+            arrival_marker_text(&unavailable),
+            "peak 22.26 ms flight, not cross-checked"
+        );
+        let mut shifted = with(
+            ArrivalCrossCheck::BroadbandLater { gap: 1_502 },
+            Some(6.615),
+            24.438,
+        );
+        shifted.arrival_check = ArrivalCheck::Unchecked {
+            reason: String::new(),
+        };
+        assert_eq!(
+            arrival_marker_text(&shifted),
+            "peak above 1 kHz: 6.62 ms flight, broadband \u{394} +15.65 ms, ref unchecked"
+        );
     }
 
     #[test]

@@ -577,30 +577,161 @@ fn short_onset_rule(
     lines
 }
 
-/// Row 2 under `arrival` (#346 UX revision 4): the rule that produced the
-/// arrival. One string: the arrival is always the magnitude peak. Takes the
-/// source so a second [`ArrivalSource`] variant fails to compile here
-/// rather than printing this text silently.
+/// Row 2 under `arrival` (#346 UX revision 4, #537 UX): the rule that
+/// produced the arrival, with the corner formatted from the source, never a
+/// literal. `ArrivalSource::Peak` arises only when the band did not allow the
+/// band-limited rule, so it says `not band-limited`. Takes the source so a
+/// new [`ArrivalSource`] variant fails to compile here rather than printing
+/// this text silently.
 ///
 /// [`ArrivalSource`]: ac_core::measurement::report::ArrivalSource
 fn arrival_source_line(source: &ac_core::measurement::report::ArrivalSource) -> String {
     use ac_core::measurement::report::ArrivalSource;
     let text = match source {
-        ArrivalSource::Peak => "from peak (largest magnitude sample)",
+        ArrivalSource::Peak => "from peak (largest magnitude sample), not band-limited".to_string(),
+        ArrivalSource::BandLimitedPeak { corner_hz } => format!(
+            "from peak of IR high-passed at {} (zero-phase)",
+            format_corner(*corner_hz)
+        ),
     };
     format!("{CONT_INDENT}{text}")
 }
 
-/// The onset block's last row (#346 UX revision 4): the onset-to-peak gap,
-/// always qualified `, not the arrival`. `None` when the onset is not
-/// before the peak — a declined picker reports the peak.
+/// A high-pass corner as the #537 rows print it: `1 kHz`, `500 Hz`.
+fn format_corner(corner_hz: f64) -> String {
+    if corner_hz >= 1000.0 {
+        format!("{} kHz", corner_hz / 1000.0)
+    } else {
+        format!("{corner_hz} Hz")
+    }
+}
+
+/// The corner of a band-limited arrival, as `above 1 kHz`. `None` when the
+/// arrival is the broadband peak.
+fn above_corner(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
+    match stats.arrival_source {
+        ac_core::measurement::report::ArrivalSource::BandLimitedPeak { corner_hz } => {
+            Some(format!("above {}", format_corner(corner_hz)))
+        }
+        ac_core::measurement::report::ArrivalSource::Peak => None,
+    }
+}
+
+/// Why the band-limited arrival could not run (#537 UX), shared by the three
+/// rows that say so.
+fn band_limit_unavailable_reason(band_top_hz: f64, required_hz: f64) -> String {
+    format!("sweep ends at {band_top_hz:.0} Hz, needs \u{2265} {required_hz:.0} Hz")
+}
+
+/// The `earlier peak` row under the source row (#537 UX), on
+/// `EarlierComparable` only: the evidence for withholding, placed on the
+/// arrival it disputes.
+fn earlier_peak_line(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
+    use ac_core::measurement::report::ArrivalCrossCheck;
+    let ArrivalCrossCheck::EarlierComparable { index, level_db } = stats.arrival_cross_check else {
+        return None;
+    };
+    let above = above_corner(stats).unwrap_or_default();
+    Some(format!(
+        "{CONT_INDENT}earlier peak {above}: {} samples before, {level_db:+.1} dB",
+        stats.arrival_index.saturating_sub(index)
+    ))
+}
+
+/// The `arrival SNR` block (#537 UX): the band-limited IR's pre-impulse SNR
+/// beside the gate it is held to, and what that gate rests on. On
+/// `BandLimitUnavailable`, one row saying why it was not measured.
+fn arrival_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
+    use ac_core::measurement::report::{ArrivalCrossCheck, ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB};
+    if let ArrivalCrossCheck::BandLimitUnavailable {
+        band_top_hz,
+        required_hz,
+    } = stats.arrival_cross_check
+    {
+        return vec![format!(
+            "{}not measured \u{2014} {}",
+            label_prefix("arrival SNR"),
+            band_limit_unavailable_reason(band_top_hz, required_hz)
+        )];
+    }
+    let Some(snr) = stats.band_limited_snr_db else {
+        return Vec::new();
+    };
+    let above = above_corner(stats).unwrap_or_default();
+    let value = if snr.is_finite() {
+        format!("{snr:.1} dB  ({above}, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB)")
+    } else {
+        format!("\u{221e} dB  ({above}, zero measured floor)")
+    };
+    vec![
+        format!("{}{value}", label_prefix("arrival SNR")),
+        format!("{CONT_INDENT}{ARRIVAL_SNR_BASIS}"),
+    ]
+}
+
+/// The `broadband Δ` block (#537 UX): the cross-check as a signed number,
+/// the tolerance it was compared to with that tolerance's provenance, and —
+/// outside the tolerance only — where to look. Never a verdict word.
+fn broadband_delta_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
+    use ac_core::measurement::report::{
+        arrival_cross_check_tolerance_samples, ArrivalCrossCheck, ARRIVAL_CROSS_CHECK_BASIS,
+        ARRIVAL_CROSS_CHECK_TOLERANCE_S,
+    };
+    if let ArrivalCrossCheck::BandLimitUnavailable {
+        band_top_hz,
+        required_hz,
+    } = stats.arrival_cross_check
+    {
+        return vec![format!(
+            "{}not computed \u{2014} {}",
+            label_prefix("broadband \u{394}"),
+            band_limit_unavailable_reason(band_top_hz, required_hz)
+        )];
+    }
+    let Some(delta) = stats.broadband_delta_samples() else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        format!(
+            "{}{delta:+} samples  ({:+.3} ms, broadband peak \u{2212} arrival)",
+            label_prefix("broadband \u{394}"),
+            delta as f64 / stats.sample_rate_hz as f64 * 1000.0
+        ),
+        format!(
+            "{CONT_INDENT}tolerance \u{b1}{} samples (\u{b1}{:.1} ms), {ARRIVAL_CROSS_CHECK_BASIS}",
+            arrival_cross_check_tolerance_samples(stats.sample_rate_hz),
+            ARRIVAL_CROSS_CHECK_TOLERANCE_S * 1000.0
+        ),
+    ];
+    let corner = match stats.arrival_source {
+        ac_core::measurement::report::ArrivalSource::BandLimitedPeak { corner_hz } => {
+            format_corner(corner_hz)
+        }
+        ac_core::measurement::report::ArrivalSource::Peak => String::new(),
+    };
+    match stats.arrival_cross_check {
+        ArrivalCrossCheck::BroadbandLater { .. } => lines.push(format!(
+            "{CONT_INDENT}check: IR below {corner}, speaker and mic placement"
+        )),
+        ArrivalCrossCheck::BroadbandEarlier { .. } => lines.push(format!(
+            "{CONT_INDENT}check: direct path above {corner}, mic axis, obstructions"
+        )),
+        _ => {}
+    }
+    lines
+}
+
+/// The onset block's last row (#346 UX revision 4, #537 UX): the
+/// onset-to-arrival gap, always qualified `, not used for flight time`.
+/// `None` when the onset is not before the arrival — a declined picker
+/// reports the arrival.
 fn onset_gap_line(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
-    if stats.onset_index >= stats.peak_index {
+    if stats.onset_index >= stats.arrival_index {
         return None;
     }
     Some(format!(
-        "{CONT_INDENT}{} samples before peak, not the arrival",
-        stats.peak_index - stats.onset_index
+        "{CONT_INDENT}{} samples before arrival, not used for flight time",
+        stats.arrival_index - stats.onset_index
     ))
 }
 
@@ -1328,6 +1459,89 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
     }
 }
 
+/// The `flight time` block with #537's cross-check folded in. A standing
+/// that withholds the flight time takes the `withheld` row — fixing τ would
+/// not help — and a τ-side reason follows on one `also:` row. Otherwise the
+/// #359/#461/#466 rows print as before, with the standing's mark (if any)
+/// directly under the value, above `latency UNVERIFIED` and the reference
+/// line: the mark qualifies the arrival, which is upstream of τ.
+fn flight_time_block(
+    stats: &ac_core::measurement::report::IrStats,
+    interface_latency: Option<&ac_core::measurement::report::InterfaceLatency>,
+) -> Vec<String> {
+    use ac_core::measurement::report::{
+        ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_SNR_MIN_DB,
+    };
+    let withheld = match stats.arrival_cross_check {
+        ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => Some(format!(
+            "arrival SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB"
+        )),
+        ArrivalCrossCheck::EarlierComparable { .. } => Some(format!(
+            "earlier peak within {ARRIVAL_EARLIER_COMPARABLE_DB:.1} dB (above)"
+        )),
+        ArrivalCrossCheck::BroadbandEarlier { .. } => {
+            Some("broadband peak is earlier (see broadband \u{394})".to_string())
+        }
+        _ => None,
+    };
+    if let Some(reason) = withheld {
+        let mut lines = vec![format!(
+            "{}withheld \u{2014} {reason}",
+            label_prefix("flight time")
+        )];
+        if let Some(also) = tau_withheld_reason(stats, interface_latency) {
+            lines.push(format!("{CONT_INDENT}also: {also}"));
+        }
+        return lines;
+    }
+    let mut lines = flight_time_line(stats);
+    let mark = match stats.arrival_cross_check {
+        ArrivalCrossCheck::BroadbandLater { gap } => Some(format!(
+            "{CONT_INDENT}broadband peak disagrees by {gap:+} samples (below)"
+        )),
+        ArrivalCrossCheck::BandLimitUnavailable {
+            band_top_hz,
+            required_hz,
+        } => Some(format!(
+            "{CONT_INDENT}not cross-checked \u{2014} {}",
+            band_limit_unavailable_reason(band_top_hz, required_hz)
+        )),
+        _ => None,
+    };
+    if let Some(mark) = mark {
+        lines.insert(1, mark);
+    }
+    lines
+}
+
+/// The reason [`flight_time_line`] would give for no flight time on the τ
+/// side, in its words: for the `also:` row under a withheld arrival. `None`
+/// when τ would have allowed one.
+fn tau_withheld_reason(
+    stats: &ac_core::measurement::report::IrStats,
+    interface_latency: Option<&ac_core::measurement::report::InterfaceLatency>,
+) -> Option<String> {
+    use ac_core::measurement::report::{ArrivalCheck, InterfaceLatency};
+    match &stats.arrival_check {
+        ArrivalCheck::PeriodShift(_) => {
+            return Some("ref \u{394} is a period shift (below)".to_string())
+        }
+        ArrivalCheck::Mismatch(_) => return Some("ref \u{394} is not zero (below)".to_string()),
+        _ => {}
+    }
+    if stats
+        .interface_latency_check
+        .as_ref()
+        .is_some_and(LayerVerdict::is_refused)
+    {
+        return Some("stored latency refused (below)".to_string());
+    }
+    match interface_latency {
+        Some(InterfaceLatency::Measured(_)) => None,
+        _ => Some("no stored latency for this pair (below)".to_string()),
+    }
+}
+
 /// The read-out: arrival (samples and ms, re gate centre), peak,
 /// pre-impulse SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
@@ -1371,11 +1585,19 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>) {
         );
         // #346: the rule that produced the arrival, on the row under it.
         println!("{}", arrival_source_line(&stats.arrival_source));
+        if let Some(line) = earlier_peak_line(&stats) {
+            println!("{line}");
+        }
         // #359: the one τ subtraction this report can offer, gated by
-        // `arrival_check` — sits directly under `arrival` so the two
-        // primary values stack. Never printed on a failed deconvolution
-        // (#376's rule that a failed capture prints no arrival).
-        for line in flight_time_line(&stats) {
+        // `arrival_check` and (#537) the arrival's cross-check — sits
+        // directly under `arrival` so the two primary values stack. Never
+        // printed on a failed deconvolution (#376's rule that a failed
+        // capture prints no arrival).
+        for line in flight_time_block(&stats, report.interface_latency.as_ref()) {
+            println!("{line}");
+        }
+        // #537: the arrival's own gate, under the value it decides.
+        for line in arrival_snr_lines(&stats) {
             println!("{line}");
         }
     }
@@ -1388,6 +1610,11 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>) {
     if matches!(stats.verdict, IrVerdict::Failed { .. }) {
         println!("                diagnostic only \u{2014} not a valid arrival");
     } else {
+        // #537: the cross-check as evidence, next to the peak it is
+        // measured from.
+        for line in broadband_delta_lines(&stats) {
+            println!("{line}");
+        }
         // #346 UX: the onset is its own labelled block, a diagnostic
         // beside `peak`. The
         // rule that produced it reaches the terminal as a short derived tag
@@ -1405,8 +1632,8 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>) {
         for line in &onset_lines[1..] {
             println!("{CONT_INDENT}{line}");
         }
-        // The onset-to-peak gap: the loudspeaker's group-delay excess, and
-        // the quantity #378's AC6 found moving with position. Printed on
+        // The onset-to-arrival gap: the loudspeaker's group-delay excess,
+        // and the quantity #378's AC6 found moving with position. Printed on
         // every capture so an operator who moves the mic sees it move.
         if let Some(line) = onset_gap_line(&stats) {
             println!("{line}");
@@ -1733,15 +1960,16 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, arrival_source_line, captured_line, collect_sweep_frames,
-        deconvolution_failed_lines, enumeration_lines, flight_time_line, guard_outcome,
+        arrival_check_lines, arrival_snr_lines, arrival_source_line, broadband_delta_lines,
+        captured_line, collect_sweep_frames, deconvolution_failed_lines, earlier_peak_line,
+        enumeration_lines, flight_time_block, flight_time_line, guard_outcome,
         interface_latency_lines, ir_stimulus_lines, label_prefix, onset_gap_line,
         pre_impulse_snr_lines, reference_latency_lines, reference_stored_latency_lines,
         report_files_lines, short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
-        ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
-        MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
+        ArrivalCheck, ArrivalCrossCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict,
+        MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
     use ac_core::shared::calibration::{EnumerationCheck, LayerVerdict, TauDisagreement};
@@ -2154,27 +2382,42 @@ mod tests {
         assert_eq!(not_run, head, "no guard row when the guard did not run");
     }
 
-    /// #346 UX revision 4: row 2 under `arrival` is one fixed string. Tested
-    /// against the rejected text: it names no onset and points nowhere
-    /// `(below)`, because no per-capture condition decides the arrival.
+    /// #346 UX revision 4, #537 UX: row 2 under `arrival` names the rule,
+    /// with the corner formatted from the source. It names no onset and
+    /// points nowhere `(below)`. The broadband peak is only the rule when
+    /// the band did not allow the band-limited one, and says so.
     #[test]
-    fn arrival_source_line_names_the_peak_rule() {
-        let line = arrival_source_line(&ArrivalSource::Peak);
+    fn arrival_source_line_names_the_rule_and_its_corner() {
+        let band_limited =
+            arrival_source_line(&ArrivalSource::BandLimitedPeak { corner_hz: 1000.0 });
         assert_eq!(
-            line,
-            format!("{CONT_INDENT}from peak (largest magnitude sample)")
+            band_limited,
+            format!("{CONT_INDENT}from peak of IR high-passed at 1 kHz (zero-phase)")
         );
-        assert!(!line.contains("onset"), "{line:?}");
-        assert!(!line.contains("(below)"), "{line:?}");
-        assert!(line.chars().count() <= 80, "{line:?}");
+        assert_eq!(
+            arrival_source_line(&ArrivalSource::BandLimitedPeak { corner_hz: 2500.0 }),
+            format!("{CONT_INDENT}from peak of IR high-passed at 2.5 kHz (zero-phase)")
+        );
+        let peak = arrival_source_line(&ArrivalSource::Peak);
+        assert_eq!(
+            peak,
+            format!("{CONT_INDENT}from peak (largest magnitude sample), not band-limited")
+        );
+        for line in [band_limited, peak] {
+            assert!(!line.contains("onset"), "{line:?}");
+            assert!(!line.contains("(below)"), "{line:?}");
+            assert!(line.chars().count() <= 80, "{line:?}");
+        }
     }
 
-    /// #346 UX revision 4: the gap row says `not the arrival` on every
-    /// onset standing, and is absent when the onset is not before the peak.
+    /// #537 UX: the gap row is measured to the arrival, not the peak, and
+    /// says `not used for flight time` on every onset standing; it is absent
+    /// when the onset is not before the arrival.
     #[test]
-    fn onset_gap_line_always_says_not_the_arrival() {
+    fn onset_gap_line_is_measured_to_the_arrival() {
         let mut stats = stats_with(None, ArrivalCheck::Agree);
-        stats.peak_index = 10_503;
+        stats.peak_index = 12_005;
+        stats.arrival_index = 10_503;
         stats.onset_index = 10_483;
         for standing in [
             OnsetStanding::Unscored,
@@ -2192,12 +2435,12 @@ mod tests {
             assert_eq!(
                 onset_gap_line(&stats),
                 Some(format!(
-                    "{CONT_INDENT}20 samples before peak, not the arrival"
+                    "{CONT_INDENT}20 samples before arrival, not used for flight time"
                 )),
                 "{standing:?}"
             );
         }
-        stats.onset_index = stats.peak_index;
+        stats.onset_index = stats.arrival_index;
         assert_eq!(onset_gap_line(&stats), None);
     }
 
@@ -2682,7 +2925,10 @@ mod tests {
             onset_index: 590,
             onset_rule: String::new(),
             causal_bound: unbounded(),
-            arrival_source: ArrivalSource::Peak,
+            arrival_source: ArrivalSource::BandLimitedPeak { corner_hz: 1000.0 },
+            arrival_index: 600,
+            band_limited_snr_db: Some(40.0),
+            arrival_cross_check: ArrivalCrossCheck::Agrees,
             onset_standing: OnsetStanding::NoCausalBound,
             delay_samples: 88,
             arrival_s: 88.0 / 96_000.0,
@@ -3457,5 +3703,258 @@ mod tests {
             pre_impulse_snr_lines(&silent),
             vec!["  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string()]
         );
+    }
+    // ─── #537: the band-limited arrival's rows ───────────────────────────
+
+    /// #537 UX's rig case: pupu, 2 m, default band, τ 1711, arrival +635
+    /// after τ and the broadband peak +1502 samples after the arrival.
+    fn broadband_later_stats() -> IrStats {
+        let mut stats = stats_with(Some(635.0 / 96_000.0), ArrivalCheck::Agree);
+        stats.arrival_index = 2_346;
+        stats.peak_index = 2_346 + 1_502;
+        stats.band_limited_snr_db = Some(45.6);
+        stats.arrival_cross_check = ArrivalCrossCheck::BroadbandLater { gap: 1_502 };
+        stats
+    }
+
+    fn stored_tau() -> InterfaceLatency {
+        checked_tau(EnumerationCheck::Same, None, None)
+    }
+
+    /// `BroadbandLater`: the flight time is printed and marked on the row
+    /// under it; `broadband Δ` carries the number, the tolerance and where
+    /// to look.
+    #[test]
+    fn broadband_later_prints_the_flight_time_marked() {
+        let stats = broadband_later_stats();
+        let tau = stored_tau();
+        assert_eq!(
+            flight_time_block(&stats, Some(&tau)),
+            vec![
+                format!(
+                    "{}+635 samples  (+6.615 ms, arrival \u{2212} latency)",
+                    label_prefix("flight time")
+                ),
+                format!("{CONT_INDENT}broadband peak disagrees by +1502 samples (below)"),
+            ]
+        );
+        assert_eq!(
+            broadband_delta_lines(&stats),
+            vec![
+                format!(
+                    "{}+1502 samples  (+15.646 ms, broadband peak \u{2212} arrival)",
+                    label_prefix("broadband \u{394}")
+                ),
+                format!(
+                    "{CONT_INDENT}tolerance \u{b1}192 samples (\u{b1}2.0 ms), assumed \u{2014} not \
+                     rig-scored"
+                ),
+                format!("{CONT_INDENT}check: IR below 1 kHz, speaker and mic placement"),
+            ]
+        );
+        assert_eq!(
+            arrival_snr_lines(&stats),
+            vec![
+                format!(
+                    "{}45.6 dB  (above 1 kHz, required \u{2265} 20.0 dB)",
+                    label_prefix("arrival SNR")
+                ),
+                format!("{CONT_INDENT}ISO 3382-1:2009 \u{a7}A.3.4: trigger > 20 dB below maximum"),
+            ]
+        );
+    }
+
+    /// The mark sits above #461's `latency UNVERIFIED` and #477's reference
+    /// line: it qualifies the arrival, which is upstream of τ.
+    #[test]
+    fn the_cross_check_mark_precedes_the_latency_rows() {
+        let mut stats = broadband_later_stats();
+        stats.arrival_check = ArrivalCheck::Unchecked {
+            reason: String::new(),
+        };
+        stats.interface_latency_enumeration = None;
+        let lines = flight_time_block(&stats, Some(&stored_tau()));
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert!(lines[1].contains("broadband peak disagrees"));
+        assert!(lines[2].contains("latency UNVERIFIED"));
+        assert!(lines[3].contains("reference check not run"));
+    }
+
+    /// `Agrees`: no mark, no `check:` row — but the tolerance still prints,
+    /// so a pass is not silent.
+    #[test]
+    fn agrees_prints_no_mark_and_no_check_row() {
+        let mut stats = stats_with(Some(332.0 / 96_000.0), ArrivalCheck::Agree);
+        stats.peak_index = stats.arrival_index + 148;
+        let lines = flight_time_block(&stats, Some(&stored_tau()));
+        assert_eq!(lines, flight_time_line(&stats));
+        assert_eq!(lines.len(), 1);
+        let delta = broadband_delta_lines(&stats);
+        assert_eq!(delta.len(), 2, "{delta:#?}");
+        assert!(delta[0].contains("+148 samples  (+1.542 ms"));
+        assert!(delta[1].contains("tolerance"));
+    }
+
+    /// Each withholding standing takes the `withheld` row, naming its
+    /// evidence row.
+    #[test]
+    fn withholding_standings_name_their_reason_on_the_flight_time_row() {
+        let tau = stored_tau();
+        let cases = [
+            (
+                ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 14.2 },
+                "withheld \u{2014} arrival SNR 14.2 dB, required \u{2265} 20.0 dB",
+            ),
+            (
+                ArrivalCrossCheck::EarlierComparable {
+                    index: 312,
+                    level_db: -2.0,
+                },
+                "withheld \u{2014} earlier peak within 6.0 dB (above)",
+            ),
+            (
+                ArrivalCrossCheck::BroadbandEarlier { gap: -410 },
+                "withheld \u{2014} broadband peak is earlier (see broadband \u{394})",
+            ),
+        ];
+        for (standing, want) in cases {
+            let mut stats = stats_with(None, ArrivalCheck::Agree);
+            stats.arrival_cross_check = standing.clone();
+            assert_eq!(
+                flight_time_block(&stats, Some(&tau)),
+                vec![format!("{}{want}", label_prefix("flight time"))],
+                "{standing:?}"
+            );
+        }
+    }
+
+    /// Withheld for two reasons: the arrival's takes the row, τ's follows on
+    /// one `also:` row in #359/#466's words.
+    #[test]
+    fn a_second_reason_follows_on_an_also_row() {
+        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 14.2 };
+        assert_eq!(
+            flight_time_block(&stats, None),
+            vec![
+                format!(
+                    "{}withheld \u{2014} arrival SNR 14.2 dB, required \u{2265} 20.0 dB",
+                    label_prefix("flight time")
+                ),
+                format!("{CONT_INDENT}also: no stored latency for this pair (below)"),
+            ]
+        );
+        stats.arrival_check = ArrivalCheck::Mismatch(TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 0.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        });
+        assert_eq!(
+            flight_time_block(&stats, Some(&stored_tau()))[1],
+            format!("{CONT_INDENT}also: ref \u{394} is not zero (below)")
+        );
+    }
+
+    /// `EarlierComparable`: the evidence row under the source row.
+    #[test]
+    fn earlier_comparable_prints_the_earlier_peak_under_the_source() {
+        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        stats.arrival_index = 600;
+        stats.arrival_cross_check = ArrivalCrossCheck::EarlierComparable {
+            index: 312,
+            level_db: -2.0,
+        };
+        assert_eq!(
+            earlier_peak_line(&stats),
+            Some(format!(
+                "{CONT_INDENT}earlier peak above 1 kHz: 288 samples before, -2.0 dB"
+            ))
+        );
+        stats.arrival_cross_check = ArrivalCrossCheck::Agrees;
+        assert_eq!(earlier_peak_line(&stats), None);
+    }
+
+    /// `BroadbandEarlier`: a negative Δ and the direct-path check row.
+    #[test]
+    fn broadband_earlier_names_the_direct_path_to_check() {
+        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        stats.peak_index = stats.arrival_index - 410;
+        stats.arrival_cross_check = ArrivalCrossCheck::BroadbandEarlier { gap: -410 };
+        let lines = broadband_delta_lines(&stats);
+        assert!(lines[0].contains("-410 samples  (-4.271 ms"), "{lines:#?}");
+        assert_eq!(
+            lines[2],
+            format!("{CONT_INDENT}check: direct path above 1 kHz, mic axis, obstructions")
+        );
+    }
+
+    /// `BandLimitUnavailable`: the broadband peak is the arrival; the flight
+    /// time is produced and says it is not cross-checked, and the two
+    /// band-limited rows say why they are absent.
+    #[test]
+    fn band_limit_unavailable_rows_say_why() {
+        let mut stats = stats_with(Some(2_137.0 / 96_000.0), ArrivalCheck::Agree);
+        stats.arrival_source = ArrivalSource::Peak;
+        stats.band_limited_snr_db = None;
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitUnavailable {
+            band_top_hz: 500.0,
+            required_hz: 2_000.0,
+        };
+        let why = "sweep ends at 500 Hz, needs \u{2265} 2000 Hz";
+        let lines = flight_time_block(&stats, Some(&stored_tau()));
+        assert_eq!(
+            lines[1],
+            format!("{CONT_INDENT}not cross-checked \u{2014} {why}")
+        );
+        assert_eq!(
+            arrival_snr_lines(&stats),
+            vec![format!(
+                "{}not measured \u{2014} {why}",
+                label_prefix("arrival SNR")
+            )]
+        );
+        assert_eq!(
+            broadband_delta_lines(&stats),
+            vec![format!(
+                "{}not computed \u{2014} {why}",
+                label_prefix("broadband \u{394}")
+            )]
+        );
+    }
+
+    /// Every #537 row fits 80 columns at a 96 kHz five-digit sample count.
+    #[test]
+    fn band_limited_rows_fit_80_columns() {
+        let mut wide = broadband_later_stats();
+        wide.peak_index = wide.arrival_index + 38_399;
+        wide.arrival_cross_check = ArrivalCrossCheck::BroadbandLater { gap: 38_399 };
+        let mut lines = flight_time_block(&wide, None);
+        lines.extend(broadband_delta_lines(&wide));
+        lines.extend(arrival_snr_lines(&wide));
+        let mut unavailable = wide.clone();
+        unavailable.arrival_cross_check = ArrivalCrossCheck::BandLimitUnavailable {
+            band_top_hz: 1_999.0,
+            required_hz: 2_000.0,
+        };
+        lines.extend(flight_time_block(&unavailable, Some(&stored_tau())));
+        lines.extend(broadband_delta_lines(&unavailable));
+        lines.extend(arrival_snr_lines(&unavailable));
+        let mut earlier = wide.clone();
+        earlier.arrival_cross_check = ArrivalCrossCheck::EarlierComparable {
+            index: 0,
+            level_db: -5.9,
+        };
+        lines.extend(earlier_peak_line(&earlier));
+        lines.extend(flight_time_block(&earlier, None));
+        for line in lines {
+            assert!(
+                line.chars().count() <= 80,
+                "line {line:?} runs to {} columns",
+                line.chars().count()
+            );
+        }
     }
 }

@@ -5,8 +5,9 @@
 
 use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
 use crate::measurement::sweep::{
-    ir_peak, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick,
-    WindowLimit,
+    band_limit_available, band_limit_top_hz, ir_peak, pre_impulse_snr_db, zero_phase_high_pass,
+    BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, WindowLimit,
+    ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
 };
 use crate::shared::calibration::{
     compare_tau_readings, EnumerationCheck, LayerVerdict, TauComparison, TauDisagreement,
@@ -71,6 +72,131 @@ pub const PRE_IMPULSE_SNR_MIN_DB: f64 = 18.0;
 /// and on a typed one (it was not). Changes with the provenance above.
 pub const PRE_IMPULSE_SNR_BASIS: &str = "fixed threshold, scored for the default sweep only";
 
+/// Minimum pre-impulse SNR of the high-passed IR, in dB, below which the
+/// band-limited arrival withholds the flight time (#537,
+/// [`ArrivalCrossCheck::BandLimitedSnrLow`]). Separate from
+/// [`PRE_IMPULSE_SNR_MIN_DB`], which gates the broadband deconvolution and
+/// keeps its meaning.
+///
+/// Provenance: derived from ISO 3382-1:2009 §A.3.4, which reads the start
+/// of a filtered IR as the point where it "first rises significantly above
+/// the background but is more than 20 dB below the maximum" — a trigger
+/// that exists only when the filtered IR has more than 20 dB between its
+/// maximum and its background. The clause states the trigger, not a gate;
+/// [`ARRIVAL_SNR_BASIS`] says only that much. Below this value a looser
+/// rule would need rig evidence that it is reliable, and none exists.
+pub const ARRIVAL_SNR_MIN_DB: f64 = 20.0;
+
+/// What [`ARRIVAL_SNR_MIN_DB`] rests on, as printed under the arrival SNR.
+pub const ARRIVAL_SNR_BASIS: &str = "ISO 3382-1:2009 \u{a7}A.3.4: trigger > 20 dB below maximum";
+
+/// How far the broadband peak may sit from the band-limited arrival, either
+/// way, before [`ArrivalCrossCheck`] names the disagreement (#537), in
+/// seconds.
+///
+/// Provenance: assumed. It sits between two measured values: a healthy
+/// multi-way speaker's broadband peak ran about 1.5 ms after its HF arrival
+/// (Genelec 1083 at 1 m, 2026-08-18), and #537's room mode put it 16 ms
+/// after. Rig check run 2 on #537 scores it; [`ARRIVAL_CROSS_CHECK_BASIS`]
+/// changes when it does.
+pub const ARRIVAL_CROSS_CHECK_TOLERANCE_S: f64 = 0.002;
+
+/// What [`ARRIVAL_CROSS_CHECK_TOLERANCE_S`] rests on, as printed under the
+/// broadband Δ.
+pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "assumed \u{2014} not rig-scored";
+
+/// An earlier high-passed sample within this many dB of the band-limited
+/// maximum makes the arrival [`ArrivalCrossCheck::EarlierComparable`]
+/// (#537): the pick may be a strong HF reflection, not the direct sound.
+///
+/// Provenance: assumed. It sits above the pre-ringing measured at the 25 %
+/// crossing (about −12 dB) on the 2026-08-18 Genelec 1083 capture.
+pub const ARRIVAL_EARLIER_COMPARABLE_DB: f64 = 6.0;
+
+/// [`ARRIVAL_CROSS_CHECK_TOLERANCE_S`] at `sample_rate_hz`, rounded to whole
+/// samples — the bound the cross-check compares against.
+pub fn arrival_cross_check_tolerance_samples(sample_rate_hz: u32) -> i64 {
+    (ARRIVAL_CROSS_CHECK_TOLERANCE_S * sample_rate_hz as f64).round() as i64
+}
+
+/// The arrival a linear IR yields under #537's rule, with its cross-check
+/// against the broadband peak.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BandLimitedArrival {
+    pub(crate) arrival_index: usize,
+    pub(crate) source: ArrivalSource,
+    pub(crate) band_limited_snr_db: Option<f64>,
+    pub(crate) cross_check: ArrivalCrossCheck,
+}
+
+/// Pick the arrival of `linear_ir` off the IR high-passed at
+/// [`ARRIVAL_HIGH_PASS_CORNER_HZ`] and cross-check it against the broadband
+/// peak `peak_index` (#537). The standings are checked in
+/// [`ArrivalCrossCheck`]'s order; the first that fires is the result.
+///
+/// When the stimulus does not reach [`BAND_LIMIT_MIN_F2_RATIO`] times the
+/// corner, the arrival is the broadband peak ([`ArrivalSource::Peak`]) and
+/// the standing is [`ArrivalCrossCheck::BandLimitUnavailable`].
+pub(crate) fn band_limited_arrival(
+    linear_ir: &[f64],
+    sample_rate_hz: u32,
+    f2_hz: f64,
+    peak_index: usize,
+) -> BandLimitedArrival {
+    let corner_hz = ARRIVAL_HIGH_PASS_CORNER_HZ;
+    if !band_limit_available(sample_rate_hz, f2_hz, corner_hz) {
+        return BandLimitedArrival {
+            arrival_index: peak_index,
+            source: ArrivalSource::Peak,
+            band_limited_snr_db: None,
+            cross_check: ArrivalCrossCheck::BandLimitUnavailable {
+                band_top_hz: band_limit_top_hz(sample_rate_hz, f2_hz),
+                required_hz: BAND_LIMIT_MIN_F2_RATIO * corner_hz,
+            },
+        };
+    }
+    let h_hp = zero_phase_high_pass(linear_ir, sample_rate_hz, corner_hz);
+    let (arrival_index, arrival_magnitude) = ir_peak(&h_hp);
+    let snr_db = pre_impulse_snr_db(&h_hp, arrival_index);
+    let tolerance = arrival_cross_check_tolerance_samples(sample_rate_hz);
+    let gap = peak_index as i64 - arrival_index as i64;
+
+    // Everything before `arrival − tolerance`: a sample closer than that is
+    // the pick's own skirt, or a disagreement too small to name. Not the
+    // SNR's pre-impulse region: its guard band (`len / 32`, 12.5 ms on the
+    // default 0.4 s window) is wider than a direct-to-reflection gap this
+    // check exists to see.
+    let earlier_end = arrival_index.saturating_sub(tolerance as usize);
+    let earlier = ir_peak(&h_hp[..earlier_end]);
+    let earlier_level_db = if earlier_end > 0 && arrival_magnitude > 0.0 && earlier.1 > 0.0 {
+        Some(20.0 * (earlier.1 / arrival_magnitude).log10())
+    } else {
+        None
+    };
+
+    let cross_check = if snr_db < ARRIVAL_SNR_MIN_DB {
+        ArrivalCrossCheck::BandLimitedSnrLow { snr_db }
+    } else if let Some(level_db) = earlier_level_db.filter(|l| *l >= -ARRIVAL_EARLIER_COMPARABLE_DB)
+    {
+        ArrivalCrossCheck::EarlierComparable {
+            index: earlier.0,
+            level_db,
+        }
+    } else if gap < -tolerance {
+        ArrivalCrossCheck::BroadbandEarlier { gap }
+    } else if gap > tolerance {
+        ArrivalCrossCheck::BroadbandLater { gap }
+    } else {
+        ArrivalCrossCheck::Agrees
+    };
+    BandLimitedArrival {
+        arrival_index,
+        source: ArrivalSource::BandLimitedPeak { corner_hz },
+        band_limited_snr_db: Some(snr_db),
+        cross_check,
+    }
+}
+
 impl MeasurementReport {
     /// Derived read-out quantities for the report's first
     /// `ImpulseResponse` payload: arrival timing, peak magnitude,
@@ -78,23 +204,29 @@ impl MeasurementReport {
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
     ///
-    /// Arrival (`delay_samples`/`arrival_s`) is always the IR's magnitude
-    /// peak ([`IrStats::arrival_source`] is [`ArrivalSource::Peak`]). The
-    /// onset estimate ([`crate::measurement::sweep::estimate_onset`]) is
-    /// carried beside it as a diagnostic, with its standing in
+    /// Arrival (`delay_samples`/`arrival_s`) is the magnitude peak of the IR
+    /// high-passed at [`ARRIVAL_HIGH_PASS_CORNER_HZ`] with zero phase
+    /// ([`ArrivalSource::BandLimitedPeak`], #537, operator ruling 2026-09-18),
+    /// cross-checked against the broadband peak in
+    /// [`IrStats::arrival_cross_check`]. When the stimulus does not reach an
+    /// octave above the corner it is the broadband peak
+    /// ([`ArrivalSource::Peak`]). The onset estimate
+    /// ([`crate::measurement::sweep::estimate_onset`]) is anchored on that
+    /// arrival and carried beside it as a diagnostic, with its standing in
     /// [`IrStats::onset_standing`]; it does not affect any number (#346
     /// architect revision 4, operator decision 2026-09-16).
     /// When this report carries both a measured same-capture reference
     /// latency and a recorded `position.distance_m`, the onset estimate is
     /// bound to reject any candidate earlier than pure flight time allows.
     pub fn ir_stats(&self) -> Option<IrStats> {
-        let (payload, sample_rate_hz, linear_ir) =
+        let (payload, sample_rate_hz, f2_hz, linear_ir) =
             self.data.iter().find_map(|p| match &p.data {
                 MeasurementData::ImpulseResponse {
                     sample_rate_hz,
+                    f2_hz,
                     linear_ir,
                     ..
-                } => Some((p, sample_rate_hz, linear_ir)),
+                } => Some((p, sample_rate_hz, *f2_hz, linear_ir)),
                 _ => None,
             })?;
         if linear_ir.is_empty() || *sample_rate_hz == 0 {
@@ -111,8 +243,18 @@ impl MeasurementReport {
         let pre_region = pre_impulse_region(linear_ir, peak_index);
         // Same formula `ac-daemon`'s τ gate calls (#368) — one definition
         // of "pre-impulse SNR", not two that can drift.
-        let pre_impulse_snr_db =
-            crate::measurement::sweep::pre_impulse_snr_db(linear_ir, peak_index);
+        let pre_impulse_snr_db = pre_impulse_snr_db(linear_ir, peak_index);
+
+        // #537: the arrival comes from the zero-phase high-passed IR and is
+        // cross-checked against the broadband peak above. The broadband
+        // peak, its pre-impulse region and `verdict` keep their meaning
+        // (#376/#501 are not re-scored here).
+        let BandLimitedArrival {
+            arrival_index,
+            source: arrival_source,
+            band_limited_snr_db,
+            cross_check: arrival_cross_check,
+        } = band_limited_arrival(linear_ir, *sample_rate_hz, f2_hz, peak_index);
 
         // The onset picker's validity gate runs off a *median* floor over
         // the same region, not off `pre_impulse_snr_db`'s RMS one — see
@@ -138,7 +280,7 @@ impl MeasurementReport {
 
         let onset = crate::measurement::sweep::estimate_onset(
             linear_ir,
-            peak_index,
+            arrival_index,
             *sample_rate_hz,
             onset_floor,
             &causal_bound,
@@ -148,12 +290,11 @@ impl MeasurementReport {
         let onset_index = onset.index;
         let onset_rule = onset.rule;
 
-        // The arrival is the magnitude peak, unconditionally (#346 architect
-        // revision 4). The bounded onset's pre-registered rig check refused
-        // to conclude (pupu, 2026-09-16, 0/12 captures passed the edge
-        // guard), and the operator accepted the peak with its tag.
-        let arrival_source = ArrivalSource::Peak;
-        let delay_samples = peak_index as i64 - centre as i64;
+        // The arrival is a peak — band-limited when the band allows (#537),
+        // never the onset: the bounded onset's pre-registered rig check
+        // refused to conclude (pupu, 2026-09-16, 0/12 captures passed the
+        // edge guard), and a peak is what pairs with a peak-picked τ (#351).
+        let delay_samples = arrival_index as i64 - centre as i64;
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
@@ -171,7 +312,11 @@ impl MeasurementReport {
         // #466: a stored τ the session check refused is never subtracted,
         // whatever `arrival_check` says — the value stays in the report,
         // the flight time derived from it does not.
+        //
+        // #537: an arrival its cross-check disputes is never subtracted
+        // from either — the arrival is not shown to be the direct sound.
         let flight_time_s = match (&self.interface_latency, &arrival_check) {
+            _ if arrival_cross_check.withholds_flight_time() => None,
             (Some(InterfaceLatency::Measured(m)), _)
                 if m.session_check
                     .as_ref()
@@ -206,6 +351,9 @@ impl MeasurementReport {
             onset_rule,
             causal_bound,
             arrival_source,
+            arrival_index,
+            band_limited_snr_db,
+            arrival_cross_check,
             onset_standing,
             delay_samples,
             arrival_s,
@@ -489,16 +637,16 @@ pub struct IrStats {
     pub sample_rate_hz: u32,
     /// Length of the gated linear IR, in samples.
     pub window_len: usize,
-    /// Index of the peak-magnitude sample within the gated IR, and what
-    /// `delay_samples` / `arrival_s` are derived from. On a
-    /// multi-way loudspeaker this sits a group-delay offset past the
-    /// wavefront, so a peak-derived absolute arrival carries that offset
-    /// (#346).
+    /// Index of the broadband peak-magnitude sample within the gated IR.
+    /// What [`Self::pre_impulse_snr_db`] and [`Self::verdict`] are read
+    /// from, and what [`Self::arrival_cross_check`] compares the arrival
+    /// against. The arrival itself is [`Self::arrival_index`] (#537).
     pub peak_index: usize,
     /// `|linear_ir[peak_index]|`.
     pub peak_magnitude: f64,
     /// Index of the estimated onset within the gated IR — see
-    /// [`crate::measurement::sweep::estimate_onset`]. A diagnostic, never
+    /// [`crate::measurement::sweep::estimate_onset`], searched before
+    /// [`Self::arrival_index`]. A diagnostic, never
     /// the arrival: #378's AC6 rig run (pupu, 2026-09-15) found the
     /// unbounded onset's 1.000 m → 2.000 m increment missing
     /// `transfer_stream`'s by 143.75 samples, against the peak's 8.62, and
@@ -516,13 +664,30 @@ pub struct IrStats {
     /// rather than re-deriving them; `min_admissible_index()` is the index.
     pub causal_bound: CausalBound,
     /// Which rule produced `delay_samples` / `arrival_s` (#346 acceptance
-    /// criterion 4). Always [`ArrivalSource::Peak`].
+    /// criterion 4): [`ArrivalSource::BandLimitedPeak`], or
+    /// [`ArrivalSource::Peak`] when the band does not allow it (#537).
     pub arrival_source: ArrivalSource,
+    /// Index of the arrival within the gated IR: the peak of the IR
+    /// high-passed per [`Self::arrival_source`], or [`Self::peak_index`]
+    /// when the source is [`ArrivalSource::Peak`]. What `delay_samples` /
+    /// `arrival_s` are derived from. On a multi-way loudspeaker a peak sits
+    /// a group-delay offset past the wavefront, so the arrival carries that
+    /// offset (#346); the high-pass removes a late low-frequency maximum
+    /// (#537), not that offset.
+    pub arrival_index: usize,
+    /// Pre-impulse SNR of the high-passed IR at [`Self::arrival_index`],
+    /// in dB, gated at [`ARRIVAL_SNR_MIN_DB`]. `None` when the arrival is
+    /// not band-limited.
+    pub band_limited_snr_db: Option<f64>,
+    /// The arrival's cross-check against the broadband peak (#537). Some
+    /// standings withhold [`Self::flight_time_s`]; see
+    /// [`ArrivalCrossCheck::withholds_flight_time`].
+    pub arrival_cross_check: ArrivalCrossCheck,
     /// The onset diagnostic's standing: the first of `onset_standing`'s
     /// conditions that failed, or [`OnsetStanding::Unscored`] when all
     /// held. It does not affect any number on this struct.
     pub onset_standing: OnsetStanding,
-    /// Signed offset of the arrival — `peak_index` — from the gate centre
+    /// Signed offset of the arrival — `arrival_index` — from the gate centre
     /// (`window_len / 2`), in samples. Positive means the response arrived after the
     /// zero-delay reference position.
     pub delay_samples: i64,
@@ -539,7 +704,8 @@ pub struct IrStats {
     /// to catch.
     pub arrival_check: ArrivalCheck,
     /// `arrival_s − interface_latency.tau_s` — the one τ subtraction this
-    /// report can offer: a peak arrival minus a peak-picked τ.
+    /// report can offer: a peak arrival minus a peak-picked τ. `None`
+    /// whenever [`Self::arrival_cross_check`] withholds it (#537).
     /// `Some` only when `interface_latency` is a measured
     /// τ for *this* capture pair **and** `arrival_check` is not a
     /// disagreement; `None` on `PeriodShift`/`Mismatch` even though
@@ -588,6 +754,17 @@ pub struct IrStats {
 }
 
 impl IrStats {
+    /// `peak_index − arrival_index`, signed samples: how far after the
+    /// arrival the broadband peak sits. `None` when the arrival is the
+    /// broadband peak itself ([`ArrivalCrossCheck::BandLimitUnavailable`]),
+    /// where there is nothing to compare.
+    pub fn broadband_delta_samples(&self) -> Option<i64> {
+        match self.arrival_cross_check {
+            ArrivalCrossCheck::BandLimitUnavailable { .. } => None,
+            _ => Some(self.peak_index as i64 - self.arrival_index as i64),
+        }
+    }
+
     /// Whether [`Self::flight_time_s`] rests on a stored τ that was not
     /// shown to belong to this capture's device enumeration (#461): any
     /// check other than `Same`, including a missing one. `false` when no
@@ -614,13 +791,65 @@ pub enum IrVerdict {
 }
 
 /// Which rule produced an [`IrStats`] arrival (#346 acceptance criterion 4).
-/// An enum so the tag is typed. A second variant needs a design decision
+/// An enum so the tag is typed. A new variant needs a design decision
 /// backed by a scored rig check (#346 architect revision 3, operator
-/// decision 2026-09-16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// decision 2026-09-16); `BandLimitedPeak` is #537's, with its rig check
+/// on that issue.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArrivalSource {
-    /// The magnitude peak (argmax |h|).
+    /// The broadband magnitude peak (argmax |h|). Only when the band does
+    /// not allow [`Self::BandLimitedPeak`].
     Peak,
+    /// The magnitude peak of the IR high-passed at `corner_hz` with zero
+    /// phase ([`crate::measurement::sweep::zero_phase_high_pass`], #537).
+    BandLimitedPeak { corner_hz: f64 },
+}
+
+/// The band-limited arrival's cross-check against the broadband peak
+/// (#537, operator option 4). The standings are checked in declaration
+/// order and the first that fires is the result. They only add to the
+/// existing gates (#376 `verdict`, #359 `arrival_check`, #466 session
+/// check): a flight time is produced only when every layer allows one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrivalCrossCheck {
+    /// The stimulus does not reach
+    /// [`crate::measurement::sweep::BAND_LIMIT_MIN_F2_RATIO`] times the
+    /// corner: `band_top_hz` (the payload's `f2_hz`, capped at Nyquist)
+    /// against `required_hz`. The arrival is the broadband peak and the
+    /// flight time is produced, not cross-checked — a check that could not
+    /// run is not a reason to withhold (the `ArrivalCheck::Unchecked`
+    /// precedent).
+    BandLimitUnavailable { band_top_hz: f64, required_hz: f64 },
+    /// The high-passed IR's pre-impulse SNR is below
+    /// [`ARRIVAL_SNR_MIN_DB`]. Withholds the flight time.
+    BandLimitedSnrLow { snr_db: f64 },
+    /// A high-passed sample more than the tolerance before the arrival is
+    /// within [`ARRIVAL_EARLIER_COMPARABLE_DB`] of it: the pick may be a
+    /// strong HF reflection. `index` is that sample (the largest such),
+    /// `level_db` its level re the arrival. Withholds the flight time.
+    EarlierComparable { index: usize, level_db: f64 },
+    /// The broadband peak is earlier than the arrival by more than the
+    /// tolerance (`gap` = peak − arrival, negative): something arrived
+    /// before the pick. Withholds the flight time.
+    BroadbandEarlier { gap: i64 },
+    /// The broadband peak is later than the arrival by more than the
+    /// tolerance (`gap` = peak − arrival, positive) — #537's room mode. The
+    /// flight time is produced and marked with the gap.
+    BroadbandLater { gap: i64 },
+    /// The broadband peak is within the tolerance of the arrival.
+    Agrees,
+}
+
+impl ArrivalCrossCheck {
+    /// Whether this standing withholds [`IrStats::flight_time_s`].
+    pub fn withholds_flight_time(&self) -> bool {
+        matches!(
+            self,
+            ArrivalCrossCheck::BandLimitedSnrLow { .. }
+                | ArrivalCrossCheck::EarlierComparable { .. }
+                | ArrivalCrossCheck::BroadbandEarlier { .. }
+        )
+    }
 }
 
 /// The standing of an [`IrStats`] onset diagnostic — one variant per
@@ -684,6 +913,11 @@ mod tests {
     use super::super::fixtures::*;
     use super::super::*;
     use super::*;
+
+    /// The arrival source every band-limited fixture here expects (#537).
+    const BAND_LIMITED: ArrivalSource = ArrivalSource::BandLimitedPeak {
+        corner_hz: ARRIVAL_HIGH_PASS_CORNER_HZ,
+    };
 
     #[test]
     fn ir_stats_reports_delay_samples_relative_to_gate_centre() {
@@ -974,7 +1208,8 @@ mod tests {
         assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
         assert!((stats.arrival_s - (peak_true as f64 - centre as f64) / 48_000.0).abs() < 1e-12);
         assert!(stats.onset_rule.contains("no causal bound"));
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(stats.arrival_index, stats.peak_index);
         assert_eq!(stats.onset_standing, OnsetStanding::NoCausalBound);
     }
 
@@ -1045,7 +1280,8 @@ mod tests {
         assert_eq!(stats.onset_index, wavefront, "test setup");
         assert_ne!(wavefront, peak_true, "test setup");
 
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(stats.arrival_index, stats.peak_index);
         assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
         assert_ne!(
             stats.delay_samples,
@@ -1085,7 +1321,8 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(stats.onset_standing, OnsetStanding::Unscored, "test setup");
         assert_eq!(stats.onset_index, wavefront, "test setup");
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(stats.arrival_index, stats.peak_index);
         let ft = stats.flight_time_s.expect("flight time");
         let peak_ft = (peak_true as f64 - centre as f64) / sr as f64 - tau_s;
         let onset_ft = (wavefront as f64 - centre as f64) / sr as f64 - tau_s;
@@ -1253,7 +1490,8 @@ mod tests {
             stats.onset_standing,
             stats.onset_rule
         );
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(stats.arrival_index, stats.peak_index);
         assert_eq!(stats.delay_samples, stats.peak_index as i64 - centre as i64);
     }
 
@@ -1947,6 +2185,194 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(stats.flight_time_s, None);
         assert!(!stats.interface_latency_unverified());
+    }
+
+    // ─── #537: band-limited arrival and its cross-check ──────────────────
+
+    /// #537 acceptance, tested against the rejected implementation: a
+    /// direct impulse at `t0` and a 55 Hz room mode 15 ms later, 21.9 dB
+    /// above it. The broadband peak — computed inline, the rule `ir_stats`
+    /// used before this issue — lands on the mode. The arrival must be `t0`,
+    /// standing `BroadbandLater`, and the flight time produced but marked.
+    #[test]
+    fn room_mode_after_the_direct_sound_does_not_move_the_arrival() {
+        let RoomModeCapture {
+            mut report,
+            t0,
+            mode_peak,
+        } = direct_plus_room_mode_report();
+        let sr = 96_000u32;
+        let MeasurementData::ImpulseResponse { linear_ir, .. } = &report.data[0].data else {
+            unreachable!()
+        };
+        let (rejected, _) = ir_peak(linear_ir);
+        assert_eq!(
+            rejected, mode_peak,
+            "the failing case: the broadband peak is t0 + 15 ms"
+        );
+        assert_eq!(mode_peak - t0, 1_440, "test setup: 15 ms at 96 kHz");
+
+        let tau_s = 1_711.0 / sr as f64;
+        report.interface_latency = Some(measured_tau(tau_s));
+        let stats = report.ir_stats().unwrap();
+        assert_eq!(stats.verdict, IrVerdict::Ok, "test setup");
+        assert_eq!(stats.peak_index, mode_peak);
+        assert!(
+            stats.arrival_index.abs_diff(t0) <= 1,
+            "arrival {} must be t0 {t0} ± 1",
+            stats.arrival_index
+        );
+        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::BroadbandLater {
+                gap: mode_peak as i64 - stats.arrival_index as i64
+            }
+        );
+        assert!(stats.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
+        let centre = linear_ir.len() / 2;
+        let ft = stats
+            .flight_time_s
+            .expect("BroadbandLater produces the flight time");
+        let want = (stats.arrival_index as f64 - centre as f64) / sr as f64 - tau_s;
+        assert!((ft - want).abs() < 1e-12, "{ft} vs {want}");
+        assert!(
+            !stats.arrival_cross_check.withholds_flight_time()
+                && stats.arrival_cross_check != ArrivalCrossCheck::Agrees,
+            "the flight time is marked, not plain"
+        );
+        assert_eq!(
+            stats.broadband_delta_samples(),
+            Some(mode_peak as i64 - stats.arrival_index as i64)
+        );
+    }
+
+    /// 96 kHz, 0.4 s window, a ±1e-7 floor, and the stored τ every
+    /// cross-check firing case below subtracts (so a `None` flight time is
+    /// the standing's doing, not a missing τ).
+    fn cross_check_report(ir: Vec<f64>, f2_hz: f64) -> MeasurementReport {
+        let mut r = ir_report_with_custom_ir_band(ir, 96_000, f2_hz);
+        r.interface_latency = Some(measured_tau(0.001));
+        r
+    }
+
+    const CC_LEN: usize = 38_400;
+    const CC_T0: usize = CC_LEN / 2 + 598;
+
+    fn cc_floor() -> Vec<f64> {
+        hashed_uniform_noise(CC_LEN, 1e-7, 1)
+    }
+
+    /// A single spike: the band-limited and broadband peaks are the same
+    /// sample, so the standing is `Agrees` and the flight time is plain.
+    #[test]
+    fn cross_check_agrees_on_a_single_spike() {
+        let mut ir = cc_floor();
+        ir[CC_T0] = 0.5;
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert_eq!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees);
+        assert_eq!(stats.arrival_index, CC_T0);
+        assert_eq!(stats.broadband_delta_samples(), Some(0));
+        assert!(stats.flight_time_s.is_some());
+    }
+
+    /// An HF reflection 2 dB stronger than the direct sound, 3 ms later:
+    /// both peaks pick the reflection, and the direct sound 288 samples
+    /// earlier is within 6 dB of it. Withheld.
+    #[test]
+    fn cross_check_earlier_comparable_fires_on_a_stronger_late_reflection() {
+        let mut ir = cc_floor();
+        let reflection = CC_T0 + 288;
+        ir[CC_T0] = 0.5;
+        ir[reflection] = 0.5 * 10f64.powf(2.0 / 20.0);
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert_eq!(stats.arrival_index, reflection, "test setup");
+        assert_eq!(stats.peak_index, reflection, "test setup");
+        match stats.arrival_cross_check {
+            ArrivalCrossCheck::EarlierComparable { index, level_db } => {
+                assert_eq!(index, CC_T0);
+                assert!((level_db + 2.0).abs() < 0.05, "level {level_db}");
+            }
+            other => panic!("expected EarlierComparable, got {other:?}"),
+        }
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// The same pair 6.5 dB apart does not fire: the bound is 6 dB.
+    #[test]
+    fn cross_check_earlier_comparable_does_not_fire_below_its_bound() {
+        let mut ir = cc_floor();
+        ir[CC_T0] = 0.5;
+        ir[CC_T0 + 288] = 0.5 * 10f64.powf(6.5 / 20.0);
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert_eq!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees);
+    }
+
+    /// A strong LF-only component (a Gaussian, σ = 2 ms, nothing left of it
+    /// above 1 kHz) 5 ms before a weaker HF direct sound: the broadband peak
+    /// is earlier than the arrival by more than the tolerance. Withheld.
+    #[test]
+    fn cross_check_broadband_earlier_fires_on_an_earlier_lf_component() {
+        let mut ir = cc_floor();
+        let lf_centre = CC_T0 - 480;
+        for (n, v) in ir.iter_mut().enumerate() {
+            let t = (n as f64 - lf_centre as f64) / 192.0;
+            *v += (-0.5 * t * t).exp();
+        }
+        ir[CC_T0] += 0.3;
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert_eq!(stats.peak_index, lf_centre, "test setup");
+        assert_eq!(stats.arrival_index, CC_T0);
+        assert_eq!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::BroadbandEarlier { gap: -480 }
+        );
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// White noise raised until the high-passed IR's pre-impulse SNR is
+    /// under the 20 dB gate. Withheld, with the measured SNR carried.
+    #[test]
+    fn cross_check_band_limited_snr_low_fires_on_raised_hf_noise() {
+        let mut ir = hashed_uniform_noise(CC_LEN, 0.25, 2);
+        ir[CC_T0] += 1.0;
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        let snr = stats.band_limited_snr_db.unwrap();
+        assert!(snr < ARRIVAL_SNR_MIN_DB, "test setup: SNR {snr}");
+        assert_eq!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::BandLimitedSnrLow { snr_db: snr }
+        );
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// A sweep that ends at 500 Hz has no octave above the 1 kHz corner: the
+    /// arrival falls back to the broadband peak, and the flight time is
+    /// produced, not cross-checked.
+    #[test]
+    fn cross_check_unavailable_below_an_octave_above_the_corner() {
+        let mut ir = cc_floor();
+        ir[CC_T0] = 0.5;
+        let stats = cross_check_report(ir, 500.0).ir_stats().unwrap();
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::BandLimitUnavailable {
+                band_top_hz: 500.0,
+                required_hz: 2_000.0
+            }
+        );
+        assert_eq!(stats.band_limited_snr_db, None);
+        assert_eq!(stats.broadband_delta_samples(), None);
+        assert!(stats.flight_time_s.is_some());
+    }
+
+    /// The tolerance is 2.0 ms in whole samples.
+    #[test]
+    fn cross_check_tolerance_is_two_ms_in_samples() {
+        assert_eq!(arrival_cross_check_tolerance_samples(96_000), 192);
+        assert_eq!(arrival_cross_check_tolerance_samples(48_000), 96);
     }
 }
 
