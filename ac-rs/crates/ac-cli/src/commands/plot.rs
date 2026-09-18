@@ -5,6 +5,7 @@ use super::{
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
+use ac_core::measurement::report::{MeasurementReport, ReportReadError};
 use ac_core::shared::calibration::LayerVerdict;
 
 pub fn run(
@@ -309,13 +310,27 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         ack.get("duration").and_then(|v| v.as_f64()),
         ack.get("tail_s").and_then(|v| v.as_f64()),
     );
-    print_ir_report(report_frame.as_ref());
+    // Decoded once through the checked reader (#429): the summary and the
+    // notes both read this accepted value, so a refused schema version
+    // leaves nothing of the report body to print.
+    let report = match decode_ir_report(report_frame.as_ref()) {
+        Ok(r) => Some(r),
+        Err(line) => {
+            eprintln!("{line}");
+            None
+        }
+    };
+    if let Some(r) = report.as_ref() {
+        print_ir_report(r);
+    }
     if let Some(done) = done_frame.as_ref() {
         for line in report_files_lines(done) {
             println!("{line}");
         }
     }
-    print_ir_notes(report_frame.as_ref());
+    for line in ir_notes_lines(report.as_ref()) {
+        println!("{line}");
+    }
 }
 
 /// Which `plot ir` stimulus fields the operator typed; the rest are the
@@ -1328,34 +1343,34 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
     }
 }
 
+/// The `measurement/report` frame's body through the checked reader
+/// (#429). `Err` is the refusal line for stderr — missing frame,
+/// unsupported schema version, or undecodable body; nothing of a refused
+/// report reaches the operator.
+fn decode_ir_report(report_frame: Option<&serde_json::Value>) -> Result<MeasurementReport, String> {
+    let Some(value) = report_frame.and_then(|f| f.get("report")) else {
+        return Err("  !! no measurement/report frame — nothing to summarise".to_string());
+    };
+    match MeasurementReport::from_value(value.clone()) {
+        Ok(r) => Ok(r),
+        Err(ReportReadError::UnsupportedSchema { found, supported }) => Err(format!(
+            "  !! unsupported measurement report schema — found v{found}, supported v{}–v{}",
+            supported.start(),
+            supported.end()
+        )),
+        Err(ReportReadError::Malformed(msg)) => Err(format!("  !! could not decode report: {msg}")),
+    }
+}
+
 /// The read-out: arrival (samples and ms, re gate centre), peak,
 /// pre-impulse SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
 /// frame, so the printed numbers and the archived ones are the same
 /// numbers by construction. No distance figure — #391 removed the
 /// ms → m conversion this used to also print.
-fn print_ir_report(report_frame: Option<&serde_json::Value>) {
-    use ac_core::measurement::report::{IrVerdict, MeasurementReport, ReportReadError};
+fn print_ir_report(report: &MeasurementReport) {
+    use ac_core::measurement::report::IrVerdict;
 
-    let Some(value) = report_frame.and_then(|f| f.get("report")) else {
-        eprintln!("  !! no measurement/report frame — nothing to summarise");
-        return;
-    };
-    let report = match MeasurementReport::from_value(value.clone()) {
-        Ok(r) => r,
-        Err(ReportReadError::UnsupportedSchema { found, supported }) => {
-            eprintln!(
-                "  !! unsupported measurement report schema — found v{found}, supported v{}–v{}",
-                supported.start(),
-                supported.end()
-            );
-            return;
-        }
-        Err(ReportReadError::Malformed(msg)) => {
-            eprintln!("  !! could not decode report: {msg}");
-            return;
-        }
-    };
     let Some(stats) = report.ir_stats() else {
         eprintln!("  !! report carries no impulse-response payload to summarise");
         return;
@@ -1613,19 +1628,16 @@ fn print_ir_result(
 /// The report's `notes`: the ISO 18233 §6.3.2 measured tail-decay verdict
 /// and the §B.5 linear-deconvolution artefact statement, one line each.
 /// Printed last, and printed verbatim from the report so the operator
-/// reads exactly what the archive records (#283).
-fn print_ir_notes(report_frame: Option<&serde_json::Value>) {
-    let Some(notes) = report_frame
-        .and_then(|f| f.get("report"))
-        .and_then(|r| r.get("notes"))
-        .and_then(|v| v.as_str())
-    else {
-        return;
+/// reads exactly what the archive records (#283). Takes the decoded
+/// report, not the raw frame, so a report the checked reader refused
+/// (#429) has no notes to print.
+fn ir_notes_lines(report: Option<&MeasurementReport>) -> Vec<String> {
+    let Some(notes) = report.and_then(|r| r.notes.as_deref()) else {
+        return Vec::new();
     };
-    println!();
-    for line in notes.lines() {
-        println!("  {line}");
-    }
+    std::iter::once(String::new())
+        .chain(notes.lines().map(|line| format!("  {line}")))
+        .collect()
 }
 
 /// Whether a sweep reached its terminal `done` frame. Anything else — a
@@ -1742,10 +1754,11 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 mod tests {
     use super::{
         arrival_check_lines, arrival_source_line, captured_line, collect_sweep_frames,
-        deconvolution_failed_lines, enumeration_lines, flight_time_line, guard_outcome,
-        interface_latency_lines, ir_stimulus_lines, label_prefix, onset_gap_line,
-        pre_impulse_snr_lines, reference_latency_lines, reference_stored_latency_lines,
-        report_files_lines, short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
+        decode_ir_report, deconvolution_failed_lines, enumeration_lines, flight_time_line,
+        guard_outcome, interface_latency_lines, ir_notes_lines, ir_stimulus_lines, label_prefix,
+        onset_gap_line, pre_impulse_snr_lines, reference_latency_lines,
+        reference_stored_latency_lines, report_files_lines, short_onset_rule, wrap_comma_list,
+        IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
@@ -1754,6 +1767,53 @@ mod tests {
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
     use ac_core::shared::calibration::{EnumerationCheck, LayerVerdict, TauDisagreement};
     use std::collections::VecDeque;
+
+    /// #429 (Codex on PR #536): `plot ir` decodes the report frame once,
+    /// and the notes come from that decoded value. A future-schema
+    /// report carrying `notes` is refused, and its notes are not printed —
+    /// the raw read the notes helper used to do would have printed them.
+    #[test]
+    fn unsupported_report_schema_prints_no_notes() {
+        use ac_core::measurement::report::{MIN_SCHEMA_VERSION, SCHEMA_VERSION};
+        let future = SCHEMA_VERSION + 1;
+        let frame = serde_json::json!({"report": {
+            "schema_version": future,
+            "notes": "future-schema interpretation",
+        }});
+
+        // The rejected implementation: reading `notes` straight off the
+        // frame finds the text, so the fixture can make the check fail.
+        let raw = frame
+            .get("report")
+            .and_then(|r| r.get("notes"))
+            .and_then(|v| v.as_str());
+        assert_eq!(raw, Some("future-schema interpretation"));
+
+        let decoded = decode_ir_report(Some(&frame));
+        let refusal = decoded.as_ref().expect_err("future schema is refused");
+        assert_eq!(
+            refusal,
+            &format!(
+                "  !! unsupported measurement report schema \u{2014} found v{future}, \
+                 supported v{MIN_SCHEMA_VERSION}\u{2013}v{SCHEMA_VERSION}"
+            )
+        );
+        let notes = ir_notes_lines(decoded.ok().as_ref());
+        assert!(notes.is_empty(), "refused report printed notes: {notes:?}");
+        assert!(!notes.iter().any(|l| l.contains("future-schema")));
+    }
+
+    #[test]
+    fn missing_or_malformed_report_frame_is_refused() {
+        assert!(decode_ir_report(None)
+            .expect_err("no frame is refused")
+            .contains("no measurement/report frame"));
+        let no_version = serde_json::json!({"report": {"notes": "x"}});
+        assert!(decode_ir_report(Some(&no_version))
+            .expect_err("versionless report is refused")
+            .contains("could not decode report"));
+        assert!(ir_notes_lines(None).is_empty());
+    }
 
     fn point(freq_hz: f64) -> serde_json::Value {
         serde_json::json!({
