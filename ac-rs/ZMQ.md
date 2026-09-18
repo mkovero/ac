@@ -125,7 +125,17 @@ configured. Schema is versioned (currently `schema_version: 11`); the
 capture backend is archived at report top level. v11 (#466) adds
 `calibration.voltage_check` — the session check's verdict on the voltage
 scale, frozen at capture (a `LayerVerdict`, see [`session_check`](#session_check));
-when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`. Example payload:
+when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`.
+
+Consumers accept `schema_version` 1 through the current version and refuse
+anything else — including 0, a missing field, or a non-integer — before
+reading the body (#429). The reader boundary is
+`MeasurementReport::from_json` / `MeasurementReport::from_value` in
+`ac-core::measurement::report`; `ac-cli` (`ac report`, `ac plot ir`'s
+summary) and `ac-view`'s report loader all decode through it. Plain serde
+decoding (`serde_json::from_*::<MeasurementReport>`) is the unchecked
+structural decoder and bypasses the version gate; it is kept for internal
+and test decoding only. Example payload:
 
 ```json
 {
