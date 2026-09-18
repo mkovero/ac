@@ -1323,8 +1323,9 @@ a configured reference.
   "n_harmonics":  <int>,     // default 5
   "window_len":   <int>,     // requested IR gate length in samples;
                              // default round(0.4 s × engine sample rate)
-  "distance_m":   <float>    // optional, metres source to receiver; feeds only the
-                             // onset search's causal bound (#460)
+  "distance_m":   <float>    // optional, metres source to receiver; feeds the
+                             // onset search's causal bound (#460) and the
+                             // flight time's distance check (#537)
 }
 ```
 
@@ -1408,7 +1409,7 @@ reference pair, or a reference reading that failed its own gates). Gates the
 one τ subtraction the report can offer: `IrStats::flight_time_s` is withheld
 on either disagreement, even though `interface_latency` is measured, and
 produced normally when the check is `agree` or `unchecked` — unless the
-arrival's own cross-check (#537, below) withholds it.
+arrival's own cross-check or its distance check (#537, below) withholds it.
 
 What this cannot catch: it proves this capture's lifetime matches the
 lifetime the **reference** pair was last calibrated in, not the lifetime the
@@ -1422,25 +1423,43 @@ has no reference configured.
 
 **Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
 read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
-high-passed at 1 kHz with zero phase (a 4th-order Butterworth run forward
+high-passed at 2 kHz with zero phase (a 4th-order Butterworth run forward
 and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
-broadband peak. A zero-phase filter leaves a pure delay's peak on the same
-sample, so the arrival still pairs with `calibrate`'s peak-picked τ. When
-the payload's `f2_hz` (capped at Nyquist) is below twice the corner, the
-arrival is the broadband peak (`ArrivalSource::Peak`). `peak_index`,
-`pre_impulse_snr_db` and `verdict` stay broadband. `IrStats::arrival_cross_check`
-compares the two peaks, first match wins: `BandLimitUnavailable` (flight
-time produced, not cross-checked); `BandLimitedSnrLow` (the high-passed
-IR's pre-impulse SNR `band_limited_snr_db` is below 20 dB, ISO 3382-1:2009
-§A.3.4 — withheld); `EarlierComparable` (a high-passed sample more than
-2.0 ms before the arrival is within 6 dB of it — withheld);
-`BroadbandEarlier` (the broadband peak is more than 2.0 ms earlier —
-withheld); `BroadbandLater` (more than 2.0 ms later — produced and marked);
-`Agrees`. The 2.0 ms and 6 dB bounds are assumed, not rig-scored. The onset
-diagnostic searches before the arrival, not the broadband peak. Nothing
-here is on the wire or in the report JSON: `IrStats` is derived on read,
-so re-reading a report written before #537 re-derives its arrival under
-this rule, and its printed arrival and flight time can change.
+broadband peak. The number is a **band-limited delay estimate at that
+corner**, not an identified direct path: on a real loudspeaker it moves
+with the corner (the same pupu captures read +634 samples of flight at
+1 kHz and +596 at 2 kHz), and a later path stronger than the first can be
+picked. A zero-phase filter leaves a pure delay's peak on the same sample,
+so the arrival still pairs with `calibrate`'s peak-picked τ. When the
+payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
+is the broadband peak (`ArrivalSource::Peak`) and the flight time is
+withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband.
+`IrStats::arrival_cross_check` guards the pick and compares it with the
+broadband IR, first match wins: `BandLimitUnavailable` (withheld);
+`BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR
+`band_limited_snr_db` is below 35 dB — ISO 3382-1:2009 §A.3.4's −20 dB
+trigger above the background's peaks — withheld); `ArrivalAmbiguous`
+(another local maximum of the high-passed IR within one corner period is
+less than 3 dB below the pick — withheld); `EarlierComparable` (a
+high-passed sample more than one corner period before the arrival is within
+20 dB of it — withheld); `BroadbandEarlier` (the broadband maximum is more
+than 2.0 ms earlier — withheld); `BroadbandLater` (the earliest broadband
+peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
+than 2.0 ms later — produced and marked); `Agrees`. The onset diagnostic
+searches before the arrival, not the broadband peak.
+
+`IrStats::distance_check` scores `arrival − stored τ` against
+`position.distance_m` when one is recorded: it must lie in
+`[d/c − ε, d/c + ε + 1.0 ms]`, `ε = (5 cm + 2 %·d)/c`, with c from
+`position.temperature_c` (343 m/s assumed without one). Outside it,
+`TooEarly` or `TooLate` withholds the flight time; inside, `Consistent`
+carries the excess over `d/c`. The 1.0 ms loudspeaker allowance is assumed.
+Without a distance it is `NotGiven` and the flight time is produced
+unchecked. It is the only evidence about the path the report has, and it
+says only whether the number fits the distance. Nothing here is on the wire
+or in the report JSON: `IrStats` is derived on read, so re-reading a report
+written before #537 re-derives its arrival under this rule, and its printed
+arrival and flight time can change.
 
 **DATA**
 ```json
@@ -1588,10 +1607,13 @@ setup reference)` is what no reference looks like; reports written before v7
 lack it, which readers treat as no reference.
 
 `report.position.distance_m` is the request's `distance_m`, recorded when
-supplied. It is an **input** to the causal bound, converted to seconds inside
-`ir_stats`, never a read-out: no ms → m figure returns (#391). The bound
-limits only the onset diagnostic's search, which since #537 runs before the
-band-limited arrival; it never moves the arrival itself. From v7,
+supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
+read-out: no ms → m figure returns (#391). It feeds two things. The causal
+bound limits only the onset diagnostic's search, which since #537 runs before
+the band-limited arrival; it never moves the arrival itself. And since #537
+it bounds the flight time from both sides (`IrStats::distance_check`, above):
+from below by the flight time `d/c` allows, and from above by that plus the
+loudspeaker allowance, withholding the flight time outside the window. From v7,
 `position` may be present carrying only `distance_m`.
 
 When `cfg.report_dir` is configured the daemon also writes the pair

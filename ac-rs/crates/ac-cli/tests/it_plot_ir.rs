@@ -307,18 +307,25 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "printed summary missing the onset rule line (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("from peak of IR high-passed at 1 kHz (zero-phase)"),
+        stdout.contains("from peak of IR high-passed at 2 kHz (zero-phase)"),
         "arrival row 2 must name the band-limited peak rule (#346 AC4, #537):\n{stdout}"
     );
-    // #537: the arrival's own SNR gate and the cross-check against the
-    // broadband peak print on a passing run, tolerance included, so a pass
-    // is not silent. A fake loopback's two peaks are the same sample.
+    // #537: the arrival's lobe margin, its own SNR gate and the cross-check
+    // against the broadband peak print on a passing run, thresholds and
+    // target included, so a pass is not silent. A fake loopback's two peaks
+    // are the same sample. No distance was typed, and the distance row says
+    // the flight time was not checked against one (architect revision 3).
     for want in [
+        "                second lobe ",
+        "dB down (required \u{2265} 3.0 dB)",
+        "  distance      not given \u{2014} flight time not checked (token: 1m)",
         "  arrival SNR   ",
-        "(above 1 kHz, required \u{2265} 20.0 dB)",
-        "                ISO 3382-1:2009 \u{a7}A.3.4: trigger > 20 dB below maximum",
+        "(above 2 kHz, required \u{2265} 35.0 dB)",
+        "                ISO 3382-1:2009 \u{a7}A.3.4 trigger (\u{2212}20 dB) above noise peaks",
         "  broadband \u{394}   +0 samples  (+0.000 ms, broadband peak \u{2212} arrival)",
-        "                tolerance \u{b1}96 samples (\u{b1}2.0 ms), assumed \u{2014} not rig-scored",
+        "                to broadband peak at sample ",
+        ", 0.0 dB (first \u{2265} \u{2212}6.0 dB)",
+        "                tolerance \u{b1}96 samples (\u{b1}2.0 ms), rig-scored on 1 speaker",
     ] {
         assert!(
             stdout.contains(want),
