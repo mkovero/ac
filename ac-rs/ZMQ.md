@@ -1473,10 +1473,14 @@ bandwidth they are one pulse. In both cases the produced arrival is late,
 never early. Without a distance the error is bounded only by the separation
 D between the two paths (to within 2 samples): at most about 0.5 ms in case
 2, and in case 1 as large as D, which can be several ms. With a distance
-recorded, a produced flight time also lies inside the distance window, so
-the error is at most `A + ε(d) = 1.0 ms + (0.05 m + 0.02·d)/c`: 1.15 ms as
-d → 0, 1.18 ms at 0.5 m and 1.26 ms at 2 m at 343 m/s, rising 0.058 ms per
-metre. A (the 1.0 ms loudspeaker allowance) is assumed, not measured.
+recorded, a produced flight time also lies inside the distance window
+`[d/c − ε(d), d/c + ε(d) + A]`, so the error is at most `min(D, A + 2ε(d))`
+with `A + 2ε(d) = 1.0 ms + 2·(0.05 m + 0.02·d)/c`: 1.29 ms as d → 0,
+1.35 ms at 0.5 m, 1.41 ms at 1 m and 1.52 ms at 2 m at 343 m/s, rising
+0.117 ms per metre. It is 2ε, not ε, because the typed distance is itself
+uncertain by ε: the true path can sit on the window's low edge and the
+picked one on its high edge. A (the 1.0 ms loudspeaker allowance) is
+assumed, not measured.
 
 **DATA**
 ```json

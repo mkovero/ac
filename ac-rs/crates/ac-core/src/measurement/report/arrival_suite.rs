@@ -477,7 +477,9 @@ fn falsification_suite() {
             }
         }
         // S2 (and S3's distance bound): with a distance, every produced
-        // flight time lies inside the window.
+        // flight time lies inside the window. That bound is ε + A about the
+        // exact typed distance; the operator-facing bound is the window
+        // width, see `distance_residual_reaches_the_full_window_width`.
         if let Some(flight_s) = s.flight_with_distance_s {
             let excess_s = flight_s - expected_s;
             if !(low_s..=high_s).contains(&excess_s) {
@@ -567,6 +569,51 @@ fn at_measured_snr(kernel: &[f64], draw: &[f64], snr_db: f64) -> MeasurementRepo
         "test setup: SNR {measured}, wanted {snr_db}"
     );
     report
+}
+
+/// The with-distance residual is bounded by the window's width, A + 2ε(d),
+/// not A + ε(d) (#537 architect revision 5): a typed distance off by ε puts
+/// the true path on the window's low edge, and a later path more than 20 dB
+/// stronger, midway between A + ε and A + 2ε, is produced. The first assert
+/// measures the rejected bound: if it ever fails, the window has narrowed
+/// and the docs overstate the bound. The second holds the stated one, with
+/// S3's 2-sample pick allowance.
+#[test]
+fn distance_residual_reaches_the_full_window_width() {
+    let c = crate::shared::conversions::speed_of_sound_from_config(None);
+    let flight_true = (T0 - LEN / 2) as f64 / SR as f64 - TAU_S;
+    let rel = DISTANCE_SPEED_OF_SOUND_REL_TOL;
+    let d_typed = (flight_true * c + DISTANCE_TAPE_TOLERANCE_M) / (1.0 - rel);
+    let eps = (DISTANCE_TAPE_TOLERANCE_M + rel * d_typed) / c;
+    let a_plus_eps = ARRIVAL_EXCESS_DELAY_ALLOWANCE_S + eps;
+    let width = ARRIVAL_EXCESS_DELAY_ALLOWANCE_S + 2.0 * eps;
+    // Midway between the rejected bound and the window's width.
+    let d_samples = ((a_plus_eps + width) / 2.0 * SR as f64).round() as usize;
+    let mut ir = vec![0.0; LEN];
+    ir[T0] = 0.05; // −26 dB: below EarlierComparable's 20 dB, residual case 1
+    ir[T0 + d_samples] = 1.0;
+    let mut report = ir_report_with_custom_ir_band(ir, SR, 20_000.0);
+    report.interface_latency = Some(measured_tau(TAU_S));
+    report.position = Some(PositionSnapshot {
+        distance_m: Some(d_typed),
+        ..Default::default()
+    });
+    let s = report.ir_stats().unwrap();
+    let err = s.flight_time_s.expect("produced: Agrees and Consistent") - flight_true;
+    println!(
+        "typed {d_typed:.4} m: error {:.3} ms, A + ε {:.3} ms, A + 2ε {:.3} ms",
+        err * 1e3,
+        a_plus_eps * 1e3,
+        width * 1e3
+    );
+    assert!(
+        err > a_plus_eps,
+        "the rejected bound A + ε is exceeded: {err}"
+    );
+    assert!(
+        err <= width + 2.0 / SR as f64,
+        "but never past the window: {err}"
+    );
 }
 
 /// Earlier-comparable firings on `draws` background draws at a measured

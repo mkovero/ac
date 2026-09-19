@@ -134,7 +134,7 @@ pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 /// guard stops at −20 dB: an earlier path further below the maximum passes,
 /// and the pick lands on the later one. That gap is the residual the
 /// operator accepted on 2026-09-19, late only and bounded by the separation
-/// (by A + ε with a distance; see `ac-rs/ZMQ.md` §"Band-limited arrival
+/// (by A + 2ε(d) with a distance; see `ac-rs/ZMQ.md` §"Band-limited arrival
 /// (#537)"). The falsification suite shows 20 dB holds inside its stated
 /// region; no measurement makes it the right edge.
 ///
