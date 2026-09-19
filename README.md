@@ -156,6 +156,12 @@ measured by `ac calibrate` on a loopback and archived with a report's
 `interface_latency` field. It has no wiring residual and no room in it,
 and it is the one correction `ac plot ir`'s printed flight-time figure
 still applies, when a matching τ was measured for that run.
+That flight-time figure is a band-limited delay estimate at 2 kHz, not an
+identified direct path: when an earlier path sits more than about 20 dB
+below a later one, or two paths are less than 0.5 ms apart, it can read
+late (never early) by up to their separation, and by at most
+1.0 ms + (0.05 m + 0.02·d)/c (1.26 ms at 2 m) when a distance d is
+recorded. See `ac-rs/ZMQ.md` §"Band-limited arrival (#537)".
 
 ## Commands
 

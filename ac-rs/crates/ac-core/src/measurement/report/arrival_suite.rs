@@ -502,6 +502,27 @@ fn falsification_suite() {
         let n = violations.iter().filter(|v| v.starts_with(tag)).count();
         println!("{tag}: {n} violations");
     }
+    // Each kernel's S1/S4 rows must be able to go red, or say plainly that
+    // they cannot: a kernel that produces nothing makes them vacuous there.
+    for (ki, k) in kernels.iter().enumerate() {
+        let right = scored
+            .iter()
+            .filter(|s| s.case.kernel == ki && s.shipped == Outcome::Right)
+            .count();
+        if k.name == "two-way" && k.f2_hz == 10_000.0 {
+            // #346's B rig-like: ArrivalAmbiguous on every case, the known
+            // false refusal recorded in peak.rs. If this starts producing,
+            // S1/S4 gain a kernel; re-read the table before trusting a green.
+            assert_eq!(right, 0, "{} {:.0} Hz now produces", k.name, k.f2_hz);
+        } else {
+            assert!(
+                right > 0,
+                "{} {:.0} Hz produces nothing: S1/S4 vacuous",
+                k.name,
+                k.f2_hz
+            );
+        }
+    }
     // S5: the rejected rule, run inline over S1's region, is wrong at least
     // once — so S1 is able to go red.
     assert!(

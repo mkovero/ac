@@ -125,11 +125,21 @@ pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 /// maximum makes the arrival [`ArrivalCrossCheck::EarlierComparable`]
 /// (#537): the pick may be a later, stronger path than the first one.
 ///
-/// Provenance (#537 architect revision 3): derived from ISO 3382-1:2009
-/// §A.3.4's trigger level ("more than 20 dB below the maximum") — an
-/// earlier path strong enough to set the standard's start point is strong
-/// enough to disqualify the pick. Measured for headroom: on the 17 pupu
-/// captures of 2026-09-18 the largest high-passed sample more than one
+/// Provenance (#537 architect revision 4): assumed, the level borrowed from
+/// ISO 3382-1:2009 §A.3.4 ("more than 20 dB below the maximum"). This guard
+/// does not implement the clause and is not derived from it. The clause
+/// takes the start at the first point significantly above the background,
+/// with the 20 dB as an upper limit on that trigger, so it would take an
+/// earlier path at −25 or −30 dB that stands above the background. This
+/// guard stops at −20 dB: an earlier path further below the maximum passes,
+/// and the pick lands on the later one. That gap is the residual the
+/// operator accepted on 2026-09-19, late only and bounded by the separation
+/// (by A + ε with a distance; see `ac-rs/ZMQ.md` §"Band-limited arrival
+/// (#537)"). The falsification suite shows 20 dB holds inside its stated
+/// region; no measurement makes it the right edge.
+///
+/// Measured for headroom: on the 17 pupu captures of 2026-09-18 the
+/// largest high-passed sample more than one
 /// corner period before the arrival sat at −33.6 dB (speaker) and
 /// −26.1 dB (cable), 13.6 and 6.1 dB clear of it. Coupled to
 /// [`ARRIVAL_SNR_MIN_DB`].

@@ -1428,8 +1428,8 @@ and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
 broadband peak. The number is a **band-limited delay estimate at that
 corner**, not an identified direct path: on a real loudspeaker it moves
 with the corner (the same pupu captures read +634 samples of flight at
-1 kHz and +596 at 2 kHz), and a later path stronger than the first can be
-picked. A zero-phase filter leaves a pure delay's peak on the same sample,
+1 kHz and +596 at 2 kHz), and in the residual cases stated below it lands
+on a later path than the first. A zero-phase filter leaves a pure delay's peak on the same sample,
 so the arrival still pairs with `calibrate`'s peak-picked τ. When the
 payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
 is the broadband peak (`ArrivalSource::Peak`) and the flight time is
@@ -1460,6 +1460,23 @@ says only whether the number fits the distance. Nothing here is on the wire
 or in the report JSON: `IrStats` is derived on read, so re-reading a report
 written before #537 re-derives its arrival under this rule, and its printed
 arrival and flight time can change.
+
+**Residual: produced late, never early (accepted by the operator,
+2026-09-19).** Two cases are not resolvable from this IR, and a flight time
+can be produced in both. (1) An earlier path more than about 20 dB below a
+later, stronger one: `EarlierComparable` stops at 20 dB, so the earlier path
+passes as background and the later one is picked. ISO 3382-1 §A.3.4 would
+take such a path as the start point if it stands above the background; this
+rule borrows the clause's 20 dB level and does not implement the clause.
+(2) Two paths less than one corner period (0.5 ms at 2 kHz) apart: at this
+bandwidth they are one pulse. In both cases the produced arrival is late,
+never early. Without a distance the error is bounded only by the separation
+D between the two paths (to within 2 samples): at most about 0.5 ms in case
+2, and in case 1 as large as D, which can be several ms. With a distance
+recorded, a produced flight time also lies inside the distance window, so
+the error is at most `A + ε(d) = 1.0 ms + (0.05 m + 0.02·d)/c`: 1.15 ms as
+d → 0, 1.18 ms at 0.5 m and 1.26 ms at 2 m at 343 m/s, rising 0.058 ms per
+metre. A (the 1.0 ms loudspeaker allowance) is assumed, not measured.
 
 **DATA**
 ```json
