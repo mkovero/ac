@@ -23,6 +23,8 @@
 //! Rendering target and fault text are #286/#308's UX comment, carried
 //! forward verbatim; this module is where they become plain data.
 
+use std::ops::RangeInclusive;
+
 use ac_core::measurement::report::{
     ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, IrVerdict, MeasurementData,
     MeasurementReport, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
@@ -206,6 +208,15 @@ pub enum SweepIrFault {
     /// display's "gate absent -> fail" requirement (#308 review, risk
     /// 1).
     NoGate,
+    /// The file is a `MeasurementReport` whose integer `schema_version`
+    /// this build does not read (#429) — refused before its body was
+    /// decoded, so it says nothing about the payload kind. Carries the
+    /// version found and the range this build reads, both straight from
+    /// `ReportReadError::UnsupportedSchema`.
+    UnsupportedSchema {
+        found: u64,
+        supported: RangeInclusive<u32>,
+    },
     /// [`MeasurementReport::ir_stats`]'s `verdict` is `Failed` (#376):
     /// pre-impulse SNR too low, or non-finite, to trust the peak as a
     /// deconvolution result rather than noise-floor pickup. Carries the
@@ -237,6 +248,7 @@ impl SweepIrFault {
         match self {
             SweepIrFault::NotASweepDerivedIr => "IR — file open failed".to_string(),
             SweepIrFault::NoGate => "IR — sweep-derived     no gate on this report".to_string(),
+            SweepIrFault::UnsupportedSchema { .. } => "Report not opened".to_string(),
             SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db,
                 reason,
@@ -277,6 +289,11 @@ impl SweepIrFault {
                  not an ungated sweep"
                     .to_string()
             }
+            SweepIrFault::UnsupportedSchema { found, supported } => format!(
+                "unsupported report schema v{found}\nthis version reads v{}–v{}",
+                supported.start(),
+                supported.end()
+            ),
             SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db,
                 reason,
@@ -448,7 +465,7 @@ mod tests {
     use super::*;
     use ac_core::measurement::report::{
         GateParams, IntegrationParams, InterfaceLatency, MeasuredLatency, MeasurementMethod,
-        MeasurementPayload, ProcessingChain, StimulusParams, SCHEMA_VERSION,
+        MeasurementPayload, ProcessingChain, StimulusParams, MIN_SCHEMA_VERSION, SCHEMA_VERSION,
     };
 
     fn base_report() -> MeasurementReport {
@@ -1439,6 +1456,23 @@ mod tests {
         ] {
             assert!(detail.contains("check"));
         }
+        // #429: the schema refusal states evidence (found vs. readable
+        // range), not a cause, and its digits come from the constants.
+        let unsupported = unsupported_schema_fault();
+        assert_eq!(unsupported.header(), "Report not opened");
+        assert_eq!(
+            unsupported.detail(),
+            format!(
+                "unsupported report schema v999\nthis version reads v{MIN_SCHEMA_VERSION}–v{SCHEMA_VERSION}"
+            )
+        );
+    }
+
+    fn unsupported_schema_fault() -> SweepIrFault {
+        SweepIrFault::UnsupportedSchema {
+            found: 999,
+            supported: MIN_SCHEMA_VERSION..=SCHEMA_VERSION,
+        }
     }
 
     #[test]
@@ -1450,6 +1484,17 @@ mod tests {
         assert_ne!(
             SweepIrFault::NotASweepDerivedIr.detail(),
             SweepIrFault::NoGate.detail()
+        );
+        // #429: a schema refusal is not evidence about payload kind, so it
+        // must not read as "not a sweep-derived IR".
+        let unsupported = unsupported_schema_fault();
+        assert_ne!(
+            unsupported.header(),
+            SweepIrFault::NotASweepDerivedIr.header()
+        );
+        assert_ne!(
+            unsupported.detail(),
+            SweepIrFault::NotASweepDerivedIr.detail()
         );
     }
 }

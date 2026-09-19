@@ -7,6 +7,15 @@
 //! that see an unknown version must refuse to decode. See
 //! `ARCHITECTURE.md` for the tiered model.
 //!
+//! The supported read boundary is [`MeasurementReport::from_json`] and
+//! [`MeasurementReport::from_value`] (#429): both accept
+//! `schema_version` in [`MIN_SCHEMA_VERSION`]`..=`[`SCHEMA_VERSION`] and
+//! refuse anything else with a [`ReportReadError`] before the body is
+//! decoded. Every shipped reader goes through them. The `Deserialize`
+//! impl is the unchecked structural decoder, kept for internal and test
+//! decoding; a plain `serde_json::from_*::<MeasurementReport>` bypasses
+//! the version gate.
+//!
 //! This module owns the report envelope — the version, the top-level
 //! struct, and its JSON form. The rest is split by what it describes:
 //!
@@ -24,7 +33,9 @@
 //! Each of those modules carries its own tests; the sample reports they
 //! share live in the test-only [`fixtures`].
 
+use std::fmt;
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -138,6 +149,45 @@ pub use provenance::{
 ///   refused verdict withholds `IrStats::flight_time_s`.
 pub const SCHEMA_VERSION: u32 = 11;
 
+/// Oldest `schema_version` [`MeasurementReport::from_json`] /
+/// [`MeasurementReport::from_value`] still read (#429). Everything from
+/// here to [`SCHEMA_VERSION`] decodes; the legacy `data` shapes of v1-v3
+/// are converted by the `Deserialize` impl.
+pub const MIN_SCHEMA_VERSION: u32 = 1;
+
+/// Why [`MeasurementReport::from_json`] / [`MeasurementReport::from_value`]
+/// refused a report (#429).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportReadError {
+    /// Not JSON, not an object, `schema_version` missing or not a
+    /// non-negative integer, or the body did not decode.
+    Malformed(String),
+    /// An integer `schema_version` outside
+    /// [`MIN_SCHEMA_VERSION`]`..=`[`SCHEMA_VERSION`], including 0. The
+    /// body was not read. `found` is `u64` so an oversized value is
+    /// reported as found, never truncated.
+    UnsupportedSchema {
+        found: u64,
+        supported: RangeInclusive<u32>,
+    },
+}
+
+impl fmt::Display for ReportReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReportReadError::Malformed(msg) => write!(f, "malformed MeasurementReport: {msg}"),
+            ReportReadError::UnsupportedSchema { found, supported } => write!(
+                f,
+                "unsupported measurement report schema: found v{found}, supported v{}–v{}",
+                supported.start(),
+                supported.end()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReportReadError {}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
     pub schema_version: u32,
@@ -237,6 +287,40 @@ impl MeasurementReport {
         serde_json::to_string_pretty(self).context("encode MeasurementReport as JSON")
     }
 
+    /// Checked decode from JSON text (#429). Parses, then applies the one
+    /// version gate in [`MeasurementReport::from_value`].
+    pub fn from_json(text: &str) -> std::result::Result<Self, ReportReadError> {
+        let value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| ReportReadError::Malformed(format!("not JSON: {e}")))?;
+        Self::from_value(value)
+    }
+
+    /// Checked decode from a JSON value (#429). Refuses a `schema_version`
+    /// outside [`MIN_SCHEMA_VERSION`]`..=`[`SCHEMA_VERSION`] before the
+    /// body is read; otherwise delegates to the structural `Deserialize`.
+    pub fn from_value(value: serde_json::Value) -> std::result::Result<Self, ReportReadError> {
+        let Some(obj) = value.as_object() else {
+            return Err(ReportReadError::Malformed(
+                "report is not a JSON object".to_string(),
+            ));
+        };
+        let Some(raw) = obj.get("schema_version") else {
+            return Err(ReportReadError::Malformed(
+                "report has no schema_version".to_string(),
+            ));
+        };
+        let Some(found) = raw.as_u64() else {
+            return Err(ReportReadError::Malformed(
+                "report schema_version is not an integer".to_string(),
+            ));
+        };
+        let supported = MIN_SCHEMA_VERSION..=SCHEMA_VERSION;
+        if found < u64::from(*supported.start()) || found > u64::from(*supported.end()) {
+            return Err(ReportReadError::UnsupportedSchema { found, supported });
+        }
+        serde_json::from_value(value).map_err(|e| ReportReadError::Malformed(e.to_string()))
+    }
+
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let json = self.to_json()?;
         if let Some(parent) = path.parent() {
@@ -311,8 +395,7 @@ mod tests {
             "integration": {"duration_s":1.0,"window":"hann"},
             "data": {"kind":"frequency_response","points":[]}
         }"#;
-        let r: MeasurementReport =
-            serde_json::from_str(legacy).expect("legacy v2 report must still decode");
+        let r = MeasurementReport::from_json(legacy).expect("legacy v2 report must still decode");
         assert_eq!(r.schema_version, 2);
         assert_eq!(r.backend, None);
         assert_eq!(r.processing_chain, ProcessingChain::default());
@@ -348,8 +431,7 @@ mod tests {
             },
             "data": {"kind":"frequency_response","points":[]}
         }"#;
-        let r: MeasurementReport =
-            serde_json::from_str(legacy).expect("legacy v1 report must still decode");
+        let r = MeasurementReport::from_json(legacy).expect("legacy v1 report must still decode");
         let cal = r.calibration.expect("calibration block present");
         assert!(cal.mic_sensitivity_dbfs_at_94db_spl.is_none());
         assert!(cal.mic_response.is_none());
@@ -397,8 +479,7 @@ mod tests {
             "processing_chain": {"weighting":"a","time_integration":"fast","mic_correction_applied":true},
             "data": {"kind":"spectrum_bands","bpo":3,"class":"Class 1","centres_hz":[100.0],"levels_dbfs":[-30.0]}
         }"#;
-        let r: MeasurementReport =
-            serde_json::from_str(legacy).expect("legacy v3 report must still decode");
+        let r = MeasurementReport::from_json(legacy).expect("legacy v3 report must still decode");
         assert_eq!(r.schema_version, 3);
         assert_eq!(r.processing_chain.weighting, "a");
         assert_eq!(r.data.len(), 1);
@@ -433,5 +514,132 @@ mod tests {
         assert_eq!(r2.data.len(), 2);
         assert_eq!(r2.data[1].standard.len(), 2);
         assert_eq!(r2.data[1].gate.as_ref().unwrap().f_low_hz, 50.0);
+    }
+
+    // ─── #429: checked constructors refuse unsupported versions ─────────
+
+    /// The current fixture's JSON with `schema_version` rewritten to `v`.
+    fn sample_value_at(v: serde_json::Value) -> serde_json::Value {
+        let mut value = serde_json::to_value(sample_report()).unwrap();
+        value["schema_version"] = v;
+        value
+    }
+
+    #[test]
+    fn checked_constructors_round_trip_the_current_report() {
+        let r = sample_report();
+        let json = r.to_json().unwrap();
+        assert_eq!(MeasurementReport::from_json(&json).unwrap(), r);
+        let value = serde_json::to_value(&r).unwrap();
+        assert_eq!(MeasurementReport::from_value(value).unwrap(), r);
+    }
+
+    #[test]
+    fn every_supported_version_decodes_through_the_gate() {
+        for v in MIN_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let value = sample_value_at(serde_json::json!(v));
+            let r = MeasurementReport::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("v{v} must decode: {e}"));
+            assert_eq!(r.schema_version, v);
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(MeasurementReport::from_json(&text).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn minimal_v5_report_decodes_through_from_json() {
+        // v4 array-shaped `data`, no optional v5+ blocks present.
+        let v5 = r#"{
+            "schema_version": 5,
+            "ac_version": "0.2.0",
+            "timestamp_utc": "2026-06-01T00:00:00Z",
+            "method": {"kind":"stepped_sine","n_points":1},
+            "stimulus": {"sample_rate_hz":48000,"f_start_hz":1000,"f_stop_hz":1000,"level_dbfs":-20,"n_points":1},
+            "integration": {"duration_s":1.0,"window":"hann"},
+            "data": [{"data": {"kind":"frequency_response","points":[]}, "standard": []}]
+        }"#;
+        let r = MeasurementReport::from_json(v5).expect("v5 report must decode");
+        assert_eq!(r.schema_version, 5);
+        assert_eq!(r.data.len(), 1);
+        assert!(r.interface_latency.is_none());
+    }
+
+    #[test]
+    fn unsupported_versions_are_refused_with_found_and_supported() {
+        // `SCHEMA_VERSION + 1` is the case that goes red if the constant is
+        // bumped without the gate meaning to accept it; 999 alone would not.
+        for found in [0u64, 999, u64::from(SCHEMA_VERSION) + 1, u64::MAX] {
+            let value = sample_value_at(serde_json::json!(found));
+            let expected = ReportReadError::UnsupportedSchema {
+                found,
+                supported: MIN_SCHEMA_VERSION..=SCHEMA_VERSION,
+            };
+            assert_eq!(
+                MeasurementReport::from_value(value.clone()),
+                Err(expected.clone())
+            );
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(MeasurementReport::from_json(&text), Err(expected));
+        }
+    }
+
+    #[test]
+    fn unsupported_version_is_refused_before_the_body_is_read() {
+        // A future report whose body the current struct cannot decode still
+        // reads as a version refusal, not as malformed.
+        let future = r#"{"schema_version": 999, "data": "a shape nobody knows"}"#;
+        assert!(matches!(
+            MeasurementReport::from_json(future),
+            Err(ReportReadError::UnsupportedSchema { found: 999, .. })
+        ));
+    }
+
+    #[test]
+    fn missing_or_non_integer_schema_version_is_malformed() {
+        let mut missing = serde_json::to_value(sample_report()).unwrap();
+        missing.as_object_mut().unwrap().remove("schema_version");
+        let cases = [
+            missing,
+            sample_value_at(serde_json::json!("11")),
+            sample_value_at(serde_json::json!(-1)),
+            sample_value_at(serde_json::json!(5.5)),
+            serde_json::json!([1, 2, 3]),
+        ];
+        for value in cases {
+            assert!(
+                matches!(
+                    MeasurementReport::from_value(value.clone()),
+                    Err(ReportReadError::Malformed(_))
+                ),
+                "{value}"
+            );
+        }
+        assert!(matches!(
+            MeasurementReport::from_json("not json at all"),
+            Err(ReportReadError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn supported_version_with_a_bad_body_is_malformed() {
+        let bad = r#"{"schema_version": 11, "data": []}"#;
+        assert!(matches!(
+            MeasurementReport::from_json(bad),
+            Err(ReportReadError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn unsupported_schema_display_names_found_and_range() {
+        let e = ReportReadError::UnsupportedSchema {
+            found: 999,
+            supported: MIN_SCHEMA_VERSION..=SCHEMA_VERSION,
+        };
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "unsupported measurement report schema: found v999, supported v1–v{SCHEMA_VERSION}"
+            )
+        );
     }
 }

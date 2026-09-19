@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use ac_core::measurement::report::MeasurementReport;
+use ac_core::measurement::report::{MeasurementReport, ReportReadError};
 use ac_scene::{SweepIrFault, SweepIrScene};
 use anyhow::{Context, Result};
 
@@ -19,19 +19,28 @@ use anyhow::{Context, Result};
 /// decode failure means for display (see [`open_sweep_ir`]).
 pub fn open_local(path: &Path) -> Result<MeasurementReport> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&text)
+    MeasurementReport::from_json(&text)
         .with_context(|| format!("parse {} as a MeasurementReport", path.display()))
 }
 
 /// Open a local report file and build the Frame C scene in one call —
 /// the orchestration a future file-open UI (#256) will call once it
-/// exists. A read/decode failure and a decoded-but-wrong-shape report
-/// both collapse to [`SweepIrFault::NotASweepDerivedIr`]: the UX
-/// comment groups "unparseable" and "parses as a different shape" as
-/// one failure mode, since neither can be told apart from the other
-/// without asserting a cause this loader doesn't have.
+/// exists. A read failure, a malformed report, and a decoded-but-wrong-
+/// shape report all collapse to [`SweepIrFault::NotASweepDerivedIr`]:
+/// the UX comment groups "unparseable" and "parses as a different shape"
+/// as one failure mode, since neither can be told apart from the other
+/// without asserting a cause this loader doesn't have. A report whose
+/// integer `schema_version` this build does not read is the exception
+/// (#429): it maps to [`SweepIrFault::UnsupportedSchema`], because the
+/// version is evidence read from the envelope, not a guessed cause.
 pub fn open_sweep_ir(path: &Path) -> Result<SweepIrScene, SweepIrFault> {
-    let report = open_local(path).map_err(|_| SweepIrFault::NotASweepDerivedIr)?;
+    let text = std::fs::read_to_string(path).map_err(|_| SweepIrFault::NotASweepDerivedIr)?;
+    let report = MeasurementReport::from_json(&text).map_err(|e| match e {
+        ReportReadError::UnsupportedSchema { found, supported } => {
+            SweepIrFault::UnsupportedSchema { found, supported }
+        }
+        ReportReadError::Malformed(_) => SweepIrFault::NotASweepDerivedIr,
+    })?;
     SweepIrScene::from_report(&report)
 }
 
@@ -62,5 +71,28 @@ mod tests {
         let result = open_sweep_ir(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(result, Err(SweepIrFault::NotASweepDerivedIr));
+    }
+
+    #[test]
+    fn open_sweep_ir_reports_unsupported_schema_for_a_future_version() {
+        use ac_core::measurement::report::{MIN_SCHEMA_VERSION, SCHEMA_VERSION};
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "ac-view-report-flow-schema-test-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, br#"{"schema_version": 999}"#).expect("write scratch file");
+        let result = open_sweep_ir(&path);
+        let local = open_local(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result,
+            Err(SweepIrFault::UnsupportedSchema {
+                found: 999,
+                supported: MIN_SCHEMA_VERSION..=SCHEMA_VERSION,
+            })
+        );
+        assert!(local.is_err());
     }
 }
