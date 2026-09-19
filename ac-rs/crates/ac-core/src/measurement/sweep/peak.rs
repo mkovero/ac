@@ -32,6 +32,17 @@
 //! [`ir_peak`] result may always be differenced against another
 //! [`ir_peak`] result, from any capture, because the band-invariance
 //! above is what makes that pairing cancel.
+//!
+//! A zero-phase band-limited peak ([`crate::measurement::sweep::band_limited_peak`],
+//! #537) pairs like a peak: high-passing a centred pulse with zero phase
+//! narrows its skirt but does not move its centre, so the band-limited peak
+//! of a pure delay lands on the same sample as [`ir_peak`] in any band this
+//! file's test uses, and may be differenced against a stored `calibrate` τ.
+//! ISO 3382-1:2009 §A.3.4 allows a start "from the broadband or high
+//! frequency impulse responses and the measured delay of the filters"; the
+//! zero-phase filter makes that delay zero. A threshold or onset read off
+//! the band-limited IR would not pair — it sits on the skirt, exactly as
+//! above.
 
 /// Index and magnitude of the largest-magnitude sample of a linear IR.
 ///
@@ -71,7 +82,7 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::measurement::sweep::onset::aic_change_point;
     use crate::measurement::sweep::{
@@ -177,6 +188,40 @@ mod tests {
         );
     }
 
+    /// #537: the claim that licenses picking the arrival off a zero-phase
+    /// high-passed IR. On the same pure-delay chain as the band-invariance
+    /// test above, the band-limited peak lands exactly on the modelled delay
+    /// in both configurations — the same sample [`ir_peak`] picks — so it
+    /// cancels against a peak-picked τ the way [`ir_peak`] does.
+    #[test]
+    fn band_limited_peak_offset_is_band_invariant_and_equals_ir_peak() {
+        use crate::measurement::sweep::{band_limited_peak, ARRIVAL_HIGH_PASS_CORNER_HZ};
+        let sr = 48_000u32;
+        let delay = 1_000usize;
+        let window_len = 2_048usize;
+        for p in [band_a(sr), band_b(sr)] {
+            let x = log_sweep(&p).unwrap();
+            let mut y = vec![0.0_f32; x.len() + delay];
+            y[delay..].copy_from_slice(&x);
+            let full = deconvolve_full(&y, &inverse_sweep(&p).unwrap());
+            let irs = extract_irs(&full, &p, 1, window_len).unwrap();
+            let centre = window_len / 2;
+            let (peak, _) = ir_peak(&irs.linear);
+            let (band_limited, _) =
+                band_limited_peak(&irs.linear, sr, p.f2_hz, ARRIVAL_HIGH_PASS_CORNER_HZ)
+                    .expect("both bands reach two octaves above the corner");
+            assert_eq!(
+                band_limited as i64 - centre as i64,
+                delay as i64,
+                "{p:?}: the band-limited peak must land exactly on the modelled delay"
+            );
+            assert_eq!(
+                band_limited, peak,
+                "{p:?}: band-limited peak equals ir_peak"
+            );
+        }
+    }
+
     /// Build a pure-delay capture at `params` (`y(n) = x(n − delay)`),
     /// deconvolve it, and return `(peak_offset, onset_offset)`, each the
     /// signed sample offset from the gate centre.
@@ -266,6 +311,66 @@ mod tests {
         );
     }
 
+    /// #537 architect revision 3, item 5: #346's two-way DUT, in both bands
+    /// and at both group delays, never *produces* a band-limited arrival more
+    /// than 5 samples from the HF component's delay `t0` — the property the
+    /// fixture exists for. Revision 2 required `Agrees` in all four; the
+    /// Rust gave `ArrivalAmbiguous` in three (developer stop, 2026-09-18),
+    /// and revision 3 replaced the requirement with this one, stating each
+    /// standing as a documented fact:
+    /// - narrow (A and B): `ArrivalAmbiguous`, a correct refusal. At 48 kHz
+    ///   the 9-tap boxcar passes 2–5 kHz at gain 1.0 against the HF
+    ///   component's 0.3, so the pick lands on the low component (+13), with
+    ///   a half-cycle within about 1 dB of it.
+    /// - A rig-like: `Agrees`, on `t0`.
+    /// - B rig-like: `ArrivalAmbiguous`, margin about 2.6 dB, with the pick
+    ///   on `t0`. **A known false refusal of a correct pick**, recorded here
+    ///   as the rule's cost. It is not a reason to retune
+    ///   [`crate::measurement::report::ARRIVAL_LOBE_MARGIN_MIN_DB`].
+    #[test]
+    fn two_way_dut_band_limited_arrival_is_never_produced_off_t0() {
+        use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
+        const BUDGET: i64 = 5;
+        for (name, band, sr, shape, ambiguous, pick_on_t0) in [
+            (
+                "A narrow",
+                band_a as fn(u32) -> SweepParams,
+                48_000,
+                &TWO_WAY_NARROW,
+                true,
+                false,
+            ),
+            ("B narrow", band_b, 48_000, &TWO_WAY_NARROW, true, false),
+            ("A rig-like", band_a, 96_000, &TWO_WAY_RIG_LIKE, false, true),
+            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE, true, true),
+        ] {
+            let p = band(sr);
+            let r = two_way_bounded(&p, shape);
+            let peak = (r.centre as i64 + r.peak) as usize;
+            let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
+            let arrival = a.arrival_index as i64 - r.centre as i64 - TWO_WAY_T0;
+            let context = format!(
+                "{name}: {:?}, arrival t0 {arrival:+}, margin {:?}, SNR {:?}",
+                a.cross_check, a.lobe_margin_db, a.band_limited_snr_db
+            );
+            if !a.cross_check.withholds_flight_time() {
+                assert!(arrival.abs() <= BUDGET, "produced off t0 — {context}");
+            }
+            assert_eq!(
+                matches!(a.cross_check, ArrivalCrossCheck::ArrivalAmbiguous { .. }),
+                ambiguous,
+                "{context}"
+            );
+            if !ambiguous {
+                assert!(
+                    matches!(a.cross_check, ArrivalCrossCheck::Agrees { .. }),
+                    "{context}"
+                );
+            }
+            assert_eq!(arrival.abs() <= 1, pick_on_t0, "{context}");
+        }
+    }
+
     /// #346 architect revision 3: the guard fires on a rig-like two-way
     /// edge-follower. 96 kHz, band A, `G = 24`, 33-tap boxcar, bound
     /// `t0 − 14` (5 cm). The unguarded bounded pick lands well after `t0`,
@@ -348,7 +453,7 @@ mod tests {
 
     /// `t0` of [`two_way_bounded`]'s full-band component, as an offset
     /// from the gate centre.
-    const TWO_WAY_T0: i64 = 1_000;
+    pub(crate) const TWO_WAY_T0: i64 = 1_000;
 
     fn band_a(sample_rate: u32) -> SweepParams {
         SweepParams {
@@ -369,7 +474,7 @@ mod tests {
     }
 
     /// Shape of the two-way DUT's low component.
-    struct TwoWayShape {
+    pub(crate) struct TwoWayShape {
         /// Extra delay of the low component past `t0`, samples.
         g: usize,
         /// Boxcar low-pass length, samples.
@@ -379,13 +484,13 @@ mod tests {
     /// The branch's original fixture: small group delay.
     const TWO_WAY_NARROW: TwoWayShape = TwoWayShape { g: 8, taps: 9 };
     /// Rig-like group delay at 96 kHz (onset-to-peak gap ≥ 23 samples).
-    const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape { g: 24, taps: 33 };
+    pub(crate) const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape { g: 24, taps: 33 };
 
-    struct TwoWay {
+    pub(crate) struct TwoWay {
         /// The windowed linear IR.
-        ir: Vec<f64>,
+        pub(crate) ir: Vec<f64>,
         /// Gate centre index in `ir`.
-        centre: usize,
+        pub(crate) centre: usize,
         /// Enforced causal bound, absolute index in `ir`.
         bound_index: usize,
         estimate: OnsetEstimate,
@@ -418,7 +523,7 @@ mod tests {
     /// (linear phase, `(taps − 1)/2` samples of its own delay), then run the
     /// bounded onset picker with the bound 5 cm of flight at 343 m/s before
     /// `t0` (7 samples at 48 kHz, 14 at 96 kHz).
-    fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
+    pub(crate) fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
         const LOW_GAIN: f32 = 1.0;
         const HIGH_GAIN: f32 = 0.3;
         const C: f64 = 343.0;

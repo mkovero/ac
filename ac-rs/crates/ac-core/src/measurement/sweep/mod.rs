@@ -31,13 +31,15 @@
 //! inverse filter and convolves them, `harmonics` cuts the result into
 //! per-order impulse responses, `tail_decay` runs the ISO 18233 §6.3.2
 //! capture-adequacy check on it, and `gated` turns the linear IR into a
-//! quasi-anechoic frequency response. Everything is re-exported here, so
+//! quasi-anechoic frequency response, and `band_limited` picks the arrival
+//! off the IR high-passed with zero phase (#537). Everything is re-exported here, so
 //! callers keep using `measurement::sweep::<item>` paths.
 
 use anyhow::{bail, Result};
 
 use crate::measurement::report::StandardsCitation;
 
+mod band_limited;
 mod deconv;
 mod defaults;
 mod floor;
@@ -47,6 +49,10 @@ mod onset;
 mod peak;
 mod tail_decay;
 
+pub use band_limited::{
+    band_limit_available, band_limit_top_hz, band_limited_peak, lobe_window_samples, second_lobe,
+    zero_phase_high_pass, SecondLobe, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
+};
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
 pub use defaults::{
     ir_default_window_len, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
@@ -63,6 +69,10 @@ pub use onset::{
     ONSET_SEARCH_WINDOW_S,
 };
 pub use peak::ir_peak;
+/// #346's two-way DUT builder, shared with #537's falsification suite as its
+/// speaker kernel (architect revision 3).
+#[cfg(test)]
+pub(crate) use peak::tests::{two_way_bounded, TWO_WAY_RIG_LIKE, TWO_WAY_T0};
 pub use tail_decay::{check_tail_decay, TailDecayCheck};
 
 /// Parameters for a Farina log sweep.
