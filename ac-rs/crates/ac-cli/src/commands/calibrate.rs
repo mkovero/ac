@@ -280,6 +280,8 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
                     "          ",
                     true,
                 ));
+                // #544: whether this entry carries an inter-pair offset.
+                lines.extend(render_offset_leg(data, tau_s, sample_rate));
                 lines
             }
             None => vec![format!("  {:<8}not measured", "Delay:")],
@@ -330,6 +332,97 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
         // #368 that still sends it renders here, on the raw value, rather
         // than asserting the wiring conclusion #368 removed.
         _ => vec![format!("  {:<8}not measured (state: {state})", "Delay:")],
+    }
+}
+
+/// The consequence every unmeasured `Offset:` row prints (#544 UX): a
+/// calibrate run that stores τ without an offset leads to a withheld flight
+/// time later, so the run says so now.
+const OFFSET_CONSEQUENCE: &str = "plot ir withholds flight time for this pair until measured";
+
+/// The `Offset:` row of a `measured` τ (#544 UX), directly after the
+/// `Delay:` block: the inter-pair offset this run stored, or why it stored
+/// none. `tau_reference_state` absent (a daemon before #544) prints nothing.
+/// The offset is the difference of two picks, so both picks' SNR is
+/// evidence: the reference pick's is printed beside the `Delay:` one's.
+fn render_offset_leg(
+    data: &serde_json::Value,
+    tau_s: f64,
+    sample_rate: Option<u64>,
+) -> Vec<String> {
+    let Some(state) = data.get("tau_reference_state").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let label = format!("  {:<8}", "Offset:");
+    let threshold = data.get("tau_snr_threshold_db").and_then(|v| v.as_f64());
+    let snr_line = || {
+        let snr = data
+            .get("tau_reference_pre_impulse_snr_db")
+            .and_then(|v| v.as_f64())?;
+        Some(match threshold {
+            Some(t) => format!(
+                "{TAU_EVIDENCE_INDENT}ref peak SNR {snr:.1} dB pre-impulse, threshold {t:.1} dB"
+            ),
+            None => format!("{TAU_EVIDENCE_INDENT}ref peak SNR {snr:.1} dB pre-impulse"),
+        })
+    };
+    let unmeasured = |why: &str| {
+        vec![
+            format!("{label}not measured ({why})"),
+            format!("{TAU_EVIDENCE_INDENT}{OFFSET_CONSEQUENCE}"),
+        ]
+    };
+    match state {
+        "measured" => {
+            let reference_tau_s = data.get("tau_reference_s").and_then(|v| v.as_f64());
+            let offset = data.get("tau_offset_samples").and_then(|v| v.as_i64());
+            let (Some(reference_tau_s), Some(offset)) = (reference_tau_s, offset) else {
+                return vec![format!("{label}not measured (state: {state})")];
+            };
+            let port = |key: &str| data.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+            let mut lines = vec![
+                format!(
+                    "{label}{offset:+} samples   ({:+.4} ms, this pair \u{2212} ref pair, stored)",
+                    (tau_s - reference_tau_s) * 1000.0
+                ),
+                format!(
+                    "{TAU_EVIDENCE_INDENT}ref {} \u{2192} {}",
+                    port("tau_reference_output_port"),
+                    port("tau_reference_input_port")
+                ),
+                format!(
+                    "{TAU_EVIDENCE_INDENT}ref {} in the same captures, identical in both",
+                    samples_clause(reference_tau_s, sample_rate)
+                ),
+            ];
+            lines.extend(snr_line());
+            lines
+        }
+        "same_pair" => vec![format!(
+            "{label}0 samples   (this pair is the reference loopback)"
+        )],
+        "not_configured" => unmeasured("no reference loopback configured"),
+        "not_supported" => unmeasured("this backend cannot capture a reference leg"),
+        "refused" => {
+            let mut lines = vec![format!(
+                "{label}not measured (reference leg refused), Delay stored"
+            )];
+            if let Some(reason) = data.get("tau_reference_reason").and_then(|v| v.as_str()) {
+                let (observation, places) =
+                    ac_core::shared::calibration::session::split_check(reason);
+                lines.extend(super::plot::indented_wrapped(
+                    observation,
+                    TAU_EVIDENCE_INDENT,
+                ));
+                if let Some(places) = places {
+                    lines.extend(tau_check_lines(places));
+                }
+            }
+            lines.extend(snr_line());
+            lines.push(format!("{TAU_EVIDENCE_INDENT}{OFFSET_CONSEQUENCE}"));
+            lines
+        }
+        _ => vec![format!("{label}not measured (state: {state})")],
     }
 }
 
@@ -964,6 +1057,62 @@ fn render_tau_history_leg_with(
         ));
     }
 
+    lines.extend(show_offset_lines(&history, entry));
+    lines
+}
+
+/// The `Offset:` row of `calibrate show` (#544 UX), under the `Delay:`
+/// block: the newest entry that carries a reference leg — the entry
+/// `pair_offset_for` prefers when its conditions match — or a row saying no
+/// entry does, which is every rig's state on first upgrade. `newest` is the
+/// entry the `Delay:` row printed.
+fn show_offset_lines(history: &[serde_json::Value], newest: &serde_json::Value) -> Vec<String> {
+    let has_reference = |e: &&serde_json::Value| e.get("reference").is_some_and(|r| r.is_object());
+    let measured_at = |e: &serde_json::Value| {
+        e.get("measured_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let Some(entry) = history
+        .iter()
+        .filter(has_reference)
+        .max_by_key(|e| measured_at(e))
+    else {
+        return vec![
+            "    Offset: not measured \u{2014} no Delay entry carries a reference leg".to_string(),
+        ];
+    };
+    let reference = &entry["reference"];
+    let tau_s = entry.get("tau_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let reference_tau_s = reference
+        .get("tau_s")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let sample_rate = entry
+        .get("conditions")
+        .and_then(|c| c.get("sample_rate"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let offset = ((tau_s - reference_tau_s) * sample_rate as f64).round() as i64;
+    let port = |key: &str| reference.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+    let mut lines = vec![
+        format!("    Offset: {offset:+} samples   this pair \u{2212} ref pair"),
+        format!(
+            "{SHOW_INDENT}ref {} \u{2192} {}",
+            port("output_port"),
+            port("input_port")
+        ),
+    ];
+    if std::ptr::eq(entry, newest) {
+        lines.push(format!("{SHOW_INDENT}measured with the Delay above"));
+    } else {
+        let at = measured_at(entry);
+        lines.push(format!(
+            "{SHOW_INDENT}measured {at}, {}, older entry",
+            ac_core::shared::time::age_from_iso8601(&at)
+        ));
+    }
     lines
 }
 
@@ -1685,7 +1834,7 @@ mod tests {
         let lines = render_tau_history_leg(&entry);
         // #363 split the value line: the value alone, then the evidence,
         // then the conditions and ports that were always there.
-        assert_eq!(lines.len(), 8, "got {lines:?}");
+        assert_eq!(lines.len(), 9, "got {lines:?}");
         assert_eq!(lines[0], "    Delay:  1.1931 ms   57 samples".to_string());
         // #461: an entry stored before tracking, from a daemon that sends no
         // live check, reads not recorded twice — never current.
@@ -1714,6 +1863,11 @@ mod tests {
         assert_eq!(
             lines[7],
             "            system:playback_3 \u{2192} system:capture_1".to_string()
+        );
+        // #544: an entry from before the reference leg was stored.
+        assert_eq!(
+            lines[8],
+            "    Offset: not measured \u{2014} no Delay entry carries a reference leg"
         );
     }
 
@@ -1751,11 +1905,177 @@ mod tests {
             lines[1]
         );
         assert_eq!(lines[6], "            jack, dev 0, 48000 Hz, period 256");
-        let last = lines.last().unwrap();
+        let last = &lines[lines.len() - 2];
         assert!(
             last.contains("+1 more") && last.contains("cal.json"),
             "got {last:?}"
         );
+        assert!(lines
+            .last()
+            .unwrap()
+            .starts_with("    Offset: not measured"));
+    }
+
+    fn history_entry(
+        tau_samples: f64,
+        measured_at: &str,
+        reference: Option<f64>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "conditions": {
+                "device": 0, "backend": "jack", "sample_rate": 96000, "period_size": 256,
+                "output_port": "system:playback_1", "input_port": "system:capture_1"
+            },
+            "tau_s": tau_samples / 96_000.0, "measured_at": measured_at,
+            "method": "farina_short_ess",
+            "reference": reference.map(|r| serde_json::json!({
+                "output_port": "system:playback_2", "input_port": "system:capture_2",
+                "tau_s": r / 96_000.0,
+            })),
+        })
+    }
+
+    /// #544 UX: `calibrate show`'s `Offset:` row reads the newest entry that
+    /// carries a reference leg — with the `Delay:` entry, or an older one
+    /// named as such — and its sign is `this pair − ref pair`.
+    #[test]
+    fn show_offset_row_reads_the_newest_entry_with_a_reference_leg() {
+        let with_delay = serde_json::json!({"key": "out0_in0", "tau_history": [
+            history_entry(1711.0, "2026-09-18T20:27:17Z", None),
+            history_entry(1757.0, "2026-09-21T16:05:40Z", Some(1711.0)),
+        ]});
+        let lines = render_tau_history_leg(&with_delay);
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("    Offset:"))
+            .unwrap();
+        assert_eq!(
+            lines[at..].to_vec(),
+            vec![
+                "    Offset: +46 samples   this pair \u{2212} ref pair",
+                "            ref system:playback_2 \u{2192} system:capture_2",
+                "            measured with the Delay above",
+            ]
+        );
+        let older = serde_json::json!({"key": "out0_in0", "tau_history": [
+            history_entry(1711.0, "2026-09-18T20:27:17Z", Some(1757.0)),
+            history_entry(1679.0, "2026-09-21T16:05:40Z", None),
+        ]});
+        let lines = render_tau_history_leg(&older);
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("    Offset:"))
+            .unwrap();
+        assert_eq!(
+            lines[at],
+            "    Offset: -46 samples   this pair \u{2212} ref pair"
+        );
+        assert!(
+            lines[at + 2].starts_with("            measured 2026-09-18T20:27:17Z, ")
+                && lines[at + 2].ends_with(", older entry"),
+            "{lines:?}"
+        );
+    }
+
+    fn measured_cal_done(reference: serde_json::Value) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "tau_state": "measured", "tau_s": 1711.0 / 96_000.0,
+            "tau_sample_rate": 96000, "tau_period_size": 256,
+            "tau_agreement_count": 2, "tau_reading_separation_s": 0.435,
+            "tau_pre_impulse_snr_db": 26.7, "tau_snr_threshold_db": 24.0,
+            "tau_enumeration": {"boot_id": "b", "recorded_at": "2026-09-21T15:02:11Z"},
+        });
+        for (k, v) in reference.as_object().unwrap() {
+            data[k] = v.clone();
+        }
+        data
+    }
+
+    fn offset_rows(data: &serde_json::Value) -> Vec<String> {
+        let lines = render_tau_leg(data);
+        match lines.iter().position(|l| l.starts_with("  Offset:")) {
+            Some(at) => lines[at..].to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    /// #544 UX: the `Offset:` row after `Delay:` in every
+    /// `tau_reference_state`, verbatim; nothing from a daemon before #544.
+    #[test]
+    fn cal_done_offset_row_renders_every_reference_state() {
+        let e = "          ";
+        assert_eq!(
+            offset_rows(&measured_cal_done(serde_json::json!({
+                "tau_reference_state": "measured", "tau_reference_s": 1711.0 / 96_000.0,
+                "tau_reference_output_port": "system:playback_2",
+                "tau_reference_input_port": "system:capture_2",
+                "tau_offset_samples": 0, "tau_reference_pre_impulse_snr_db": 28.4,
+            }))),
+            vec![
+                "  Offset: +0 samples   (+0.0000 ms, this pair \u{2212} ref pair, stored)"
+                    .to_string(),
+                format!("{e}ref system:playback_2 \u{2192} system:capture_2"),
+                format!("{e}ref 1711 samples in the same captures, identical in both"),
+                format!("{e}ref peak SNR 28.4 dB pre-impulse, threshold 24.0 dB"),
+            ]
+        );
+        assert_eq!(
+            offset_rows(&measured_cal_done(serde_json::json!({
+                "tau_reference_state": "measured", "tau_reference_s": 1665.0 / 96_000.0,
+                "tau_reference_output_port": "p", "tau_reference_input_port": "c",
+                "tau_offset_samples": 46, "tau_reference_pre_impulse_snr_db": 28.4,
+            })))[0],
+            "  Offset: +46 samples   (+0.4792 ms, this pair \u{2212} ref pair, stored)"
+        );
+        assert_eq!(
+            offset_rows(&measured_cal_done(
+                serde_json::json!({"tau_reference_state": "same_pair"})
+            )),
+            vec!["  Offset: 0 samples   (this pair is the reference loopback)"]
+        );
+        let consequence = format!("{e}plot ir withholds flight time for this pair until measured");
+        assert_eq!(
+            offset_rows(&measured_cal_done(
+                serde_json::json!({"tau_reference_state": "not_configured"})
+            )),
+            vec![
+                "  Offset: not measured (no reference loopback configured)".to_string(),
+                consequence.clone(),
+            ]
+        );
+        assert_eq!(
+            offset_rows(&measured_cal_done(
+                serde_json::json!({"tau_reference_state": "not_supported"})
+            )),
+            vec![
+                "  Offset: not measured (this backend cannot capture a reference leg)".to_string(),
+                consequence.clone(),
+            ]
+        );
+        assert_eq!(
+            offset_rows(&measured_cal_done(serde_json::json!({
+                "tau_reference_state": "refused",
+                "tau_reference_reason": "reference leg, reading 1 of 2: peak SNR 21.3 dB, need 24.0 dB",
+                "tau_reference_pre_impulse_snr_db": 21.3,
+            }))),
+            vec![
+                "  Offset: not measured (reference leg refused), Delay stored".to_string(),
+                format!("{e}reference leg, reading 1 of 2: peak SNR 21.3 dB, need 24.0 dB"),
+                format!("{e}ref peak SNR 21.3 dB pre-impulse, threshold 24.0 dB"),
+                consequence,
+            ]
+        );
+        assert!(offset_rows(&measured_cal_done(serde_json::json!({}))).is_empty());
+        for rows in [offset_rows(&measured_cal_done(serde_json::json!({
+            "tau_reference_state": "refused",
+            "tau_reference_reason": "reference leg: \u{3c4} readings disagree by 256 samples \
+                                     (1711.000 vs 1967.000 at 96000 Hz), exactly one period \
+                                     of 256 samples",
+        })))] {
+            for line in rows {
+                assert!(line.chars().count() <= 80, "{line:?}");
+            }
+        }
     }
 
     // ─── run_show τ evidence rendering — issues #347, #363 ──────────────
