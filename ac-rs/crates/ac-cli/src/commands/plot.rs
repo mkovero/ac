@@ -6,7 +6,6 @@ use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
 use ac_core::measurement::report::{MeasurementReport, ReportReadError};
-use ac_core::shared::calibration::LayerVerdict;
 
 pub fn run(
     cmd: &CommandKind,
@@ -498,6 +497,7 @@ fn short_onset_rule(
     onset_index: usize,
     bound: &ac_core::measurement::sweep::CausalBound,
     guard: Option<ac_core::measurement::sweep::EdgeGuard>,
+    offset_measured: bool,
 ) -> Vec<String> {
     if rule.contains("picker declined") {
         let case = rule
@@ -512,7 +512,7 @@ fn short_onset_rule(
         if bound_caused_it {
             // #460: the bound's own inputs put it there, so those are what
             // to check, not the gate.
-            lines.push(causal_bound_row(bound));
+            lines.extend(causal_bound_row(bound, offset_measured));
             lines.push("check: typed distance, reference loopback routing".to_string());
         } else {
             lines.push("check: gate length, peak position in gate".to_string());
@@ -556,7 +556,7 @@ fn short_onset_rule(
     ];
     // #460 AC3 / UX row 3: what the bound was built from, or which input
     // it lacked — always on the same row, so the eye finds the answer there.
-    lines.push(causal_bound_row(bound));
+    lines.extend(causal_bound_row(bound, offset_measured));
     if pinned {
         lines.push("onset may lie earlier than the window allows".to_string());
     }
@@ -721,9 +721,11 @@ fn distance_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> 
                 typed(*distance_m)
             )]
         }
+        // #544 UX: no latency means the flight time is withheld, and the
+        // flight time row above already says why.
         DistanceCheck::NoLatency { distance_m } => {
             return vec![format!(
-                "{label}{}: not checked \u{2014} no stored latency (below)",
+                "{label}{}: not checked \u{2014} flight time withheld (above)",
                 typed(*distance_m)
             )]
         }
@@ -771,7 +773,7 @@ fn distance_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> 
             "{CONT_INDENT}check: typed distance, IR before arrival, speaker DSP latency"
         )),
         DistanceCheck::TooEarly { .. } => lines.push(format!(
-            "{CONT_INDENT}check: typed distance, temperature, latency (below)"
+            "{CONT_INDENT}check: typed distance, temperature, ref latency, offset"
         )),
         _ => {}
     }
@@ -901,8 +903,15 @@ fn onset_gap_line(stats: &ac_core::measurement::report::IrStats) -> Option<Strin
 
 /// Onset block row 3 (#460 UX), printed from the bound's own fields rather
 /// than parsed from `onset_rule`. An assumed speed of sound is said so: an
-/// unset temperature silently uses the default `c`.
-fn causal_bound_row(bound: &ac_core::measurement::sweep::CausalBound) -> String {
+/// unset temperature silently uses the default `c`. `offset_measured` is
+/// whether the report's inter-pair offset is `measured` — the bound then
+/// includes it (#544 UX); an identity offset adds nothing and is not named.
+/// A row that would run past 80 columns at the onset block's 16-column
+/// indent wraps before `c` (display-only, as #494's wraps are).
+fn causal_bound_row(
+    bound: &ac_core::measurement::sweep::CausalBound,
+    offset_measured: bool,
+) -> Vec<String> {
     use ac_core::measurement::sweep::{CausalBound, MissingBoundInput};
     match bound {
         CausalBound::Enforced { inputs, .. } => {
@@ -910,16 +919,22 @@ fn causal_bound_row(bound: &ac_core::measurement::sweep::CausalBound) -> String 
                 Some(t) => format!("c {:.1} m/s at {t:.1} \u{b0}C", inputs.speed_of_sound_m_s),
                 None => format!("c {:.1} m/s assumed", inputs.speed_of_sound_m_s),
             };
-            format!("bound from ref latency + {} m, {c}", inputs.distance_m)
+            let offset = if offset_measured { "offset + " } else { "" };
+            let head = format!("bound from ref latency + {offset}{} m,", inputs.distance_m);
+            if 16 + head.chars().count() + 1 + c.chars().count() <= 80 {
+                vec![format!("{head} {c}")]
+            } else {
+                vec![head, c]
+            }
         }
         CausalBound::Unavailable(MissingBoundInput::Distance) => {
-            "no causal bound \u{2014} distance not given (token: 1m)".to_string()
+            vec!["no causal bound \u{2014} distance not given (token: 1m)".to_string()]
         }
         CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { .. }) => {
-            "no causal bound \u{2014} ref latency unavailable (below)".to_string()
+            vec!["no causal bound \u{2014} ref latency unavailable (below)".to_string()]
         }
         CausalBound::Unavailable(MissingBoundInput::Both { .. }) => {
-            "no causal bound \u{2014} no distance, ref latency unavailable".to_string()
+            vec!["no causal bound \u{2014} no distance, ref latency unavailable".to_string()]
         }
     }
 }
@@ -1047,10 +1062,6 @@ fn age_before_capture(measured_at: &str, report_timestamp_utc: &str) -> Option<S
 /// UX). Plain text so it reads without colour.
 pub(super) const UNVERIFIED: &str = "UNVERIFIED \u{2014} ";
 
-/// The action that clears a crossed or not-recorded enumeration flag
-/// (#461 UX). Printed only where re-running does clear it.
-const RECALIBRATE_CHECK: &str = "check: re-run `ac calibrate` with loopback patched";
-
 /// Width of the `nodes: ` label; continuation lines are indented by it so
 /// the node paths line up (#461 UX).
 const NODES_LABEL: &str = "nodes: ";
@@ -1123,72 +1134,22 @@ pub(super) fn indented_wrapped(text: &str, indent: &str) -> Vec<String> {
         .collect()
 }
 
-/// The verdict on a stored τ's device enumeration, under its `measured`
-/// line (#461 UX): verdict → `nodes:` → `check:`. Frozen report data only;
-/// nothing is recomputed. `None` is a report or daemon older than the check,
+/// How a stored value's device-enumeration epoch relates to this capture's,
+/// under its `measured` line (#461 UX, plain form per #466/#544 UX): the
+/// event is named, with no `UNVERIFIED` and no re-calibrate `check:`. Since
+/// #544 neither stored value it is printed under — `offset`, `ref stored` —
+/// is qualified by an enumeration: the offset's survival across one is what
+/// the rig check tests, and `ref stored` is only the drift readout. Frozen
+/// report data only; `None` is a report or daemon older than the check,
 /// which reads as not recorded — never as the same enumeration.
-///
-/// `ref_delta_agrees` is set for `ref stored` when this same capture's
-/// `ref Δ` agreed: a crossed boundary then points at that evidence instead
-/// of reading UNVERIFIED over `0 samples`, and needs no `check:`. The two
-/// cannot-tell states stay UNVERIFIED regardless — no boundary was named
-/// for the Δ to answer.
-fn enumeration_lines(
+fn answered_enumeration_lines(
     check: Option<&ac_core::shared::calibration::EnumerationCheck>,
-    ref_delta_agrees: bool,
 ) -> Vec<String> {
     use ac_core::shared::calibration::EnumerationCheck;
     match check {
         Some(EnumerationCheck::Same) => vec![format!(
             "{CONT_INDENT}same device enumeration as this capture"
         )],
-        Some(EnumerationCheck::Crossed { boundary, since }) => {
-            let (head, nodes) = split_boundary(boundary);
-            let at = since_clause(since.as_deref());
-            let mut lines = vec![if ref_delta_agrees {
-                format!("{CONT_INDENT}{head}{at} \u{2014} see ref \u{394}")
-            } else {
-                format!("{CONT_INDENT}{UNVERIFIED}{head}{at}")
-            }];
-            if let Some(list) = nodes {
-                lines.extend(nodes_lines(list, CONT_INDENT));
-            }
-            if !ref_delta_agrees {
-                lines.push(format!("{CONT_INDENT}{RECALIBRATE_CHECK}"));
-            }
-            lines
-        }
-        Some(EnumerationCheck::NotObservable { reason }) => {
-            let mut lines = vec![format!(
-                "{CONT_INDENT}{UNVERIFIED}device enumeration not observable"
-            )];
-            let (observation, places) = match reason.split_once("; check: ") {
-                Some((o, p)) => (o, Some(p)),
-                None => (reason.as_str(), None),
-            };
-            lines.extend(indented_wrapped(observation, CONT_INDENT));
-            if let Some(places) = places {
-                lines.extend(indented_wrapped(&format!("check: {places}"), CONT_INDENT));
-            }
-            lines
-        }
-        Some(EnumerationCheck::NotRecorded) | None => vec![
-            format!("{CONT_INDENT}{UNVERIFIED}entry predates enumeration tracking"),
-            format!("{CONT_INDENT}{RECALIBRATE_CHECK}"),
-        ],
-    }
-}
-
-/// [`enumeration_lines`] under a stored τ a session check measured (#466
-/// UX): the event is named plainly, without `UNVERIFIED` and without the
-/// re-calibrate `check:` — the verdict below answered it and carries its
-/// own `check:` line.
-fn answered_enumeration_lines(
-    check: Option<&ac_core::shared::calibration::EnumerationCheck>,
-) -> Vec<String> {
-    use ac_core::shared::calibration::EnumerationCheck;
-    match check {
-        Some(EnumerationCheck::Same) => enumeration_lines(check, false),
         Some(EnumerationCheck::Crossed { boundary, since }) => {
             let (head, nodes) = split_boundary(boundary);
             let mut lines = vec![format!(
@@ -1331,132 +1292,76 @@ pub(super) fn wrap_comma_list(prefix: &str, text: &str, max_cols: usize) -> Vec<
     lines
 }
 
-/// `latency` line (#359 UX): the τ subtracted from the arrival to produce
-/// `flight time`, plus its measured-date line. Always printed, mirroring
-/// `ref latency`'s own always-printed rule.
-fn interface_latency_lines(
-    latency: Option<&ac_core::measurement::report::InterfaceLatency>,
-    schema_version: u32,
+/// The `offset` block (#544 UX): the inter-pair offset the flight time adds
+/// to this capture's `ref latency`, directly under it so the two inputs sit
+/// together. Measured: the signed value with its sign convention, the two
+/// picks it is the difference of, and the provenance pair every stored
+/// value carries. Every other state is one row, plus the refusal's
+/// observations and `check:` when no offset is on file. Frozen report data
+/// only; the stored absolute τ of the capture pair is no longer printed
+/// here — it is not subtracted (it stays in the JSON report and in `ac
+/// calibrate show`).
+fn inter_pair_offset_lines(
+    offset: Option<&ac_core::measurement::report::InterPairOffset>,
     sample_rate_hz: u32,
     report_timestamp_utc: &str,
 ) -> Vec<String> {
-    use ac_core::measurement::report::InterfaceLatency;
-    match latency {
-        Some(InterfaceLatency::Measured(m)) => {
-            let samples = m.tau_s * sample_rate_hz as f64;
-            let refused = m
-                .session_check
-                .as_ref()
-                .is_some_and(LayerVerdict::is_refused);
+    use ac_core::measurement::report::InterPairOffset;
+    let label = label_prefix("offset");
+    match offset {
+        Some(InterPairOffset::Measured(m)) => {
+            let fs = sample_rate_hz as f64;
             let mut lines = vec![
                 format!(
-                    "{}{} ms  ({} samples, {})",
-                    label_prefix("latency"),
-                    format_ms_aligned(m.tau_s * 1000.0),
-                    format_samples(samples),
-                    if refused {
-                        "stored, not applied"
-                    } else {
-                        "stored"
-                    },
+                    "{label}{} samples  ({:+.4} ms, this pair \u{2212} ref pair, stored)",
+                    format_samples_signed(m.offset_s * fs),
+                    m.offset_s * 1000.0
+                ),
+                format!(
+                    "{CONT_INDENT}{} \u{2212} {} samples, both legs of one capture",
+                    format_samples(m.tau_s * fs),
+                    format_samples(m.reference_tau_s * fs)
                 ),
                 measured_line(&m.measured_at, report_timestamp_utc),
             ];
-            // #461: τ is per channel pair, so `ref Δ` never clears this one.
-            // #466: a measured verdict answered the event, so it is named
-            // plainly under one.
-            if m.session_check
-                .as_ref()
-                .is_some_and(LayerVerdict::is_decisive)
-            {
-                lines.extend(answered_enumeration_lines(m.enumeration.as_ref()));
-            } else {
-                lines.extend(enumeration_lines(m.enumeration.as_ref(), false));
-            }
-            lines.extend(session_check_latency_lines(m));
+            lines.extend(answered_enumeration_lines(Some(&m.enumeration)));
             lines
         }
-        Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("latency", reason),
-        None => {
-            let text = if schema_version < 5 {
-                "not recorded (report predates schema v5)"
-            } else {
-                "not recorded"
+        Some(InterPairOffset::Identity) => {
+            vec![format!("{label}0 samples  (this pair is the ref pair)")]
+        }
+        Some(InterPairOffset::NotConfigured) => vec![format!(
+            "{label}not looked up \u{2014} no reference configured"
+        )],
+        Some(InterPairOffset::Unavailable { reason }) => {
+            let (body, places) = match reason.split_once("; check: ") {
+                Some((body, places)) => (body, Some(places)),
+                None => (reason.as_str(), None),
             };
-            vec![format!("{}{text}", label_prefix("latency"))]
-        }
-    }
-}
-
-/// The session check's verdict on the capture pair's stored τ, under its
-/// `latency` lines (#466 UX, architect R6-5). Frozen report data only. A
-/// report with no verdict (before v11) and a verified one print nothing
-/// here: the session check block above carries a verified verdict.
-fn session_check_latency_lines(m: &ac_core::measurement::report::MeasuredLatency) -> Vec<String> {
-    use ac_core::shared::calibration::session::{split_check, UnverifiedCause};
-    let Some(verdict) = m.session_check.as_ref() else {
-        return Vec::new();
-    };
-    match verdict {
-        LayerVerdict::Verified(_) => Vec::new(),
-        LayerVerdict::Refused { evidence, via, .. } => {
-            let mut lines = vec![match via {
-                Some(via) => format!(
-                    "{CONT_INDENT}{}",
-                    super::calibrate::latency_refused_via(via, evidence.delta)
-                ),
-                None => format!(
-                    "{CONT_INDENT}REFUSED \u{2014} {:.0} samples read {} (\u{394} {:+.0})",
-                    evidence.measured, evidence.checked_at, evidence.delta
-                ),
-            }];
-            lines.extend(
-                super::calibrate::refusal_predates_line(
-                    m.enumeration.as_ref(),
-                    Some(&evidence.checked_at),
-                )
-                .map(|line| format!("{CONT_INDENT}{line}")),
-            );
-            if via.is_some() {
-                lines.push(format!(
-                    "{CONT_INDENT}check: `ac calibrate check`; if still refused,"
-                ));
-                lines.push(format!("{CONT_INDENT}re-run `ac calibrate` for this pair"));
-            } else {
-                lines.push(format!("{CONT_INDENT}{RECALIBRATE_CHECK}"));
+            let mut parts = body.split("; ");
+            let head = parts.next().unwrap_or_default();
+            let mut lines = vec![format!("{label}not measured \u{2014} {head}")];
+            for observation in parts {
+                lines.extend(indented_wrapped(observation, CONT_INDENT));
             }
-            lines
-        }
-        LayerVerdict::Unverified {
-            cause: UnverifiedCause::NotCovered,
-            ..
-        } => vec![match m.session_check_loopback.as_deref() {
-            Some(key) => {
-                format!("{CONT_INDENT}session check does not cover this pair (loopback [{key}])")
-            }
-            None => format!("{CONT_INDENT}session check does not cover this pair"),
-        }],
-        LayerVerdict::Unverified { reason, .. } => {
-            let (observation, places) = split_check(reason);
-            let mut lines = indented_wrapped(&format!("{UNVERIFIED}{observation}"), CONT_INDENT);
             if let Some(places) = places {
                 lines.extend(indented_wrapped(&format!("check: {places}"), CONT_INDENT));
             }
             lines
         }
+        None => vec![format!("{label}not recorded (report predates schema v12)")],
     }
 }
 
 /// `ref stored` line (#359 UX): the τ `calibrate` has on file for the
 /// *reference* pair — the second input to `ref \u{394}`, shown next to the
-/// first (`ref latency`). `ref_delta_agrees` is whether this capture's
-/// `ref Δ` agreed (#461 UX): see [`enumeration_lines`].
+/// first (`ref latency`). Since #544 the pair is the drift readout and
+/// gates nothing, so its enumeration prints in the plain form.
 fn reference_stored_latency_lines(
     stored: Option<&ac_core::measurement::report::InterfaceLatency>,
     schema_version: u32,
     sample_rate_hz: u32,
     report_timestamp_utc: &str,
-    ref_delta_agrees: bool,
 ) -> Vec<String> {
     use ac_core::measurement::report::InterfaceLatency;
     match stored {
@@ -1471,7 +1376,7 @@ fn reference_stored_latency_lines(
                 ),
                 measured_line(&m.measured_at, report_timestamp_utc),
             ];
-            lines.extend(enumeration_lines(m.enumeration.as_ref(), ref_delta_agrees));
+            lines.extend(answered_enumeration_lines(m.enumeration.as_ref()));
             lines
         }
         Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("ref stored", reason),
@@ -1486,7 +1391,7 @@ fn reference_stored_latency_lines(
     }
 }
 
-/// The four-line disagreement block (#359 UX), built from
+/// The disagreement block (#359 UX), built from
 /// [`ac_core::shared::calibration::TauDisagreement`]'s own fields rather
 /// than its `message()` (~170 columns, one line) — the same split
 /// `calibrate`'s own disagreement read-out makes. #347's phrases are
@@ -1528,14 +1433,8 @@ fn disagreement_lines(d: &ac_core::shared::calibration::TauDisagreement) -> Vec<
         d.reading1_s * d.sample_rate as f64,
         d.reading2_s * d.sample_rate as f64,
     ));
-    lines.push(format!(
-        "{CONT_INDENT}check: {}",
-        if d.periods.is_some() {
-            "re-run plot ir, then ac calibrate on both pairs"
-        } else {
-            "interface clock, device reconnects since measured"
-        }
-    ));
+    // #544 UX: no `check:` — a moved reference is the case the flight time
+    // compensates for, not a fault to act on.
     lines
 }
 
@@ -1569,83 +1468,51 @@ fn arrival_check_lines(
     }
 }
 
-/// `flight time` line (#359 UX), directly under `arrival`. `Some` prints
-/// the τ-corrected figure; `None` distinguishes a withheld correction (a
-/// detected `ref \u{394}` disagreement — the numbers exist, the check
-/// declined to combine them) from one that was never possible (no stored
-/// latency for this capture pair at all). `Some` alongside
-/// `ArrivalCheck::Unchecked` (case D — a flight time exists, but the
-/// same-capture corroboration never ran) gets a second, 16-space-indented
-/// continuation line naming that (codex-qa on PR #477): otherwise an
-/// unverified flight time prints identically to a checked one.
+/// `flight time` line (#359 UX, #544 UX), directly under `arrival`. `Some`
+/// prints the compensated figure with its formula; when this capture's
+/// reference moved against the stored one, a continuation line says so and
+/// that the live reference was used — the drift readout next to the value
+/// (#544 AC2), never a verdict. `None` names the [`LatencyBasis`] reason.
 ///
-/// #461: a flight time over a stored τ whose device enumeration is anything
-/// but `same` gets `latency UNVERIFIED — see latency (below)` directly under
-/// the value, above the reference-check line — a reader who stops at
-/// `flight time` would otherwise miss a caveat two blocks down.
+/// [`LatencyBasis`]: ac_core::measurement::report::LatencyBasis
 fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::ArrivalCheck;
-    match (stats.flight_time_s, &stats.arrival_check) {
-        (Some(ft), check) => {
-            let samples = ft * stats.sample_rate_hz as f64;
-            let mut lines = vec![format!(
-                "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
-                label_prefix("flight time"),
-                format_samples_signed(samples),
-                ft * 1000.0,
-            )];
-            if stats.interface_latency_unverified() {
-                lines.push(format!(
-                    "{CONT_INDENT}latency UNVERIFIED \u{2014} see latency (below)"
-                ));
+    let label = label_prefix("flight time");
+    let Some(ft) = stats.flight_time_s else {
+        return match basis_withheld_reason(stats) {
+            Some((reason, check)) => {
+                let mut lines = vec![format!("{label}withheld \u{2014} {reason}")];
+                lines.extend(check.map(|c| format!("{CONT_INDENT}check: {c}")));
+                lines
             }
-            if matches!(check, ArrivalCheck::Unchecked { .. }) {
-                lines.push(format!(
-                    "{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"
-                ));
-            }
-            lines
-        }
-        (None, ArrivalCheck::PeriodShift(_)) => vec![format!(
-            "{}withheld \u{2014} ref \u{394} is a period shift (below)",
-            label_prefix("flight time")
-        )],
-        (None, ArrivalCheck::Mismatch(_)) => vec![format!(
-            "{}withheld \u{2014} ref \u{394} is not zero (below)",
-            label_prefix("flight time")
-        )],
-        // #466: the stored τ is in the report but the session check refused
-        // it. After the #359 arms: their line is the more specific one.
-        (None, _)
-            if stats
-                .interface_latency_check
-                .as_ref()
-                .is_some_and(LayerVerdict::is_refused) =>
-        {
-            vec![format!(
-                "{}not shown \u{2014} stored latency refused (below)",
-                label_prefix("flight time")
-            )]
-        }
-        (None, _) => vec![format!(
-            "{}not shown \u{2014} no stored latency for this pair (below)",
-            label_prefix("flight time")
-        )],
+            // Only the arrival or distance guards withhold with a live
+            // basis, and `flight_time_block` names those before calling here.
+            None => vec![format!("{label}withheld")],
+        };
+    };
+    let samples = ft * stats.sample_rate_hz as f64;
+    let mut lines = vec![format!(
+        "{label}{} samples  ({:+.3} ms, arrival \u{2212} ref latency \u{2212} offset)",
+        format_samples_signed(samples),
+        ft * 1000.0,
+    )];
+    if let ArrivalCheck::PeriodShift(d) | ArrivalCheck::Mismatch(d) = &stats.arrival_check {
+        lines.push(format!(
+            "{CONT_INDENT}ref \u{394} {:+} samples, live reference used (below)",
+            d.delta_samples
+        ));
     }
+    lines
 }
 
 /// The `flight time` block with #537's guards folded in. A reason that
 /// withholds the flight time on the IR side (the cross-check) or against the
-/// typed distance takes the `withheld` row — fixing τ would not help — in
-/// that order, then τ (#537 UX revision 3); each further reason gets one
-/// `also:` row. Otherwise the #359/#461/#466 rows print as before, with the
-/// standing's mark (if any) directly under the value, above `latency
-/// UNVERIFIED` and the reference line: the mark qualifies the arrival, which
-/// is upstream of τ.
-fn flight_time_block(
-    stats: &ac_core::measurement::report::IrStats,
-    interface_latency: Option<&ac_core::measurement::report::InterfaceLatency>,
-) -> Vec<String> {
+/// typed distance takes the `withheld` row — fixing the latency would not
+/// help — in that order, then the latency basis (#544); each further reason
+/// gets one `also:` row. Otherwise [`flight_time_line`] prints, with the
+/// standing's mark (if any) directly under the value, above the drift line:
+/// the mark qualifies the arrival, which is upstream of the latency.
+fn flight_time_block(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{
         ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
         ARRIVAL_SNR_MIN_DB,
@@ -1677,8 +1544,8 @@ fn flight_time_block(
             "{}withheld \u{2014} {first}",
             label_prefix("flight time")
         )];
-        let tau = tau_withheld_reason(stats, interface_latency);
-        for also in reasons.chain(tau) {
+        let basis = basis_withheld_reason(stats).map(|(reason, _)| reason);
+        for also in reasons.chain(basis) {
             lines.push(format!("{CONT_INDENT}also: {also}"));
         }
         return lines;
@@ -1693,32 +1560,33 @@ fn flight_time_block(
     lines
 }
 
-/// The reason [`flight_time_line`] would give for no flight time on the τ
-/// side, in its words: for the `also:` row under a withheld arrival. `None`
-/// when τ would have allowed one.
-fn tau_withheld_reason(
+/// Why the latency basis has no latency (#544 UX), in the `flight time`
+/// row's words, with the `check:` places where the row carries one. `None`
+/// when the basis is live. Read from [`IrStats::latency_basis`], never
+/// re-derived from the report.
+///
+/// [`IrStats::latency_basis`]: ac_core::measurement::report::IrStats::latency_basis
+fn basis_withheld_reason(
     stats: &ac_core::measurement::report::IrStats,
-    interface_latency: Option<&ac_core::measurement::report::InterfaceLatency>,
-) -> Option<String> {
-    use ac_core::measurement::report::{ArrivalCheck, InterfaceLatency};
-    match &stats.arrival_check {
-        ArrivalCheck::PeriodShift(_) => {
-            return Some("ref \u{394} is a period shift (below)".to_string())
+) -> Option<(String, Option<String>)> {
+    use ac_core::measurement::report::{LatencyBasis, WithheldBasis};
+    let LatencyBasis::Withheld(why) = &stats.latency_basis else {
+        return None;
+    };
+    Some(match why {
+        WithheldBasis::PredatesV12 => ("report predates schema v12".to_string(), None),
+        WithheldBasis::NoReference => (
+            "no reference loopback configured".to_string(),
+            Some("ref out / ref in wiring, README \u{a7} Reference wiring".to_string()),
+        ),
+        WithheldBasis::ReferenceUnavailable { .. } => {
+            ("ref latency unavailable (below)".to_string(), None)
         }
-        ArrivalCheck::Mismatch(_) => return Some("ref \u{394} is not zero (below)".to_string()),
-        _ => {}
-    }
-    if stats
-        .interface_latency_check
-        .as_ref()
-        .is_some_and(LayerVerdict::is_refused)
-    {
-        return Some("stored latency refused (below)".to_string());
-    }
-    match interface_latency {
-        Some(InterfaceLatency::Measured(_)) => None,
-        _ => Some("no stored latency for this pair (below)".to_string()),
-    }
+        WithheldBasis::OffsetNotMeasured { .. } => (
+            "offset not measured for this pair (below)".to_string(),
+            None,
+        ),
+    })
 }
 
 /// The `measurement/report` frame's body through the checked reader
@@ -1783,7 +1651,7 @@ fn print_ir_report(report: &MeasurementReport) {
         // directly under `arrival` so the two primary values stack. Never
         // printed on a failed deconvolution (#376's rule that a failed
         // capture prints no arrival).
-        for line in flight_time_block(&stats, report.interface_latency.as_ref()) {
+        for line in flight_time_block(&stats) {
             println!("{line}");
         }
         // #537 architect revision 3: the flight time against the typed
@@ -1822,6 +1690,10 @@ fn print_ir_report(report: &MeasurementReport) {
             stats.onset_index,
             &stats.causal_bound,
             guard_outcome(&stats.onset_standing),
+            matches!(
+                report.inter_pair_offset,
+                Some(ac_core::measurement::report::InterPairOffset::Measured(_))
+            ),
         );
         println!("{}{}", label_prefix("onset"), onset_lines[0]);
         for line in &onset_lines[1..] {
@@ -1839,15 +1711,17 @@ fn print_ir_report(report: &MeasurementReport) {
     // position. All four print unconditionally, on a failed deconvolution
     // too: the reference leg is its own reading and says something about
     // this lifetime even when the IR itself failed.
-    for line in interface_latency_lines(
-        report.interface_latency.as_ref(),
-        report.schema_version,
+    for line in reference_latency_lines(report.reference_latency.as_ref(), stats.sample_rate_hz) {
+        println!("{line}");
+    }
+    // #544 UX: the offset takes the old capture-pair `latency` block's slot,
+    // directly under `ref latency`, so the flight time's two inputs sit
+    // together; `ref stored` and `ref Δ` follow as the drift group.
+    for line in inter_pair_offset_lines(
+        report.inter_pair_offset.as_ref(),
         stats.sample_rate_hz,
         &report.timestamp_utc,
     ) {
-        println!("{line}");
-    }
-    for line in reference_latency_lines(report.reference_latency.as_ref(), stats.sample_rate_hz) {
         println!("{line}");
     }
     for line in reference_stored_latency_lines(
@@ -1855,10 +1729,6 @@ fn print_ir_report(report: &MeasurementReport) {
         report.schema_version,
         stats.sample_rate_hz,
         &report.timestamp_utc,
-        matches!(
-            stats.arrival_check,
-            ac_core::measurement::report::ArrivalCheck::Agree
-        ),
     ) {
         println!("{line}");
     }
@@ -2152,20 +2022,21 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, arrival_snr_lines, arrival_source_line, broadband_delta_lines,
-        captured_line, collect_sweep_frames, decode_ir_report, deconvolution_failed_lines,
-        distance_lines, earlier_peak_line, enumeration_lines, flight_time_block, flight_time_line,
-        guard_outcome, interface_latency_lines, ir_notes_lines, ir_stimulus_lines, label_prefix,
-        onset_gap_line, pre_impulse_snr_lines, reference_latency_lines,
-        reference_stored_latency_lines, report_files_lines, second_lobe_line, short_onset_rule,
-        wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
+        answered_enumeration_lines, arrival_check_lines, arrival_snr_lines, arrival_source_line,
+        broadband_delta_lines, captured_line, collect_sweep_frames, decode_ir_report,
+        deconvolution_failed_lines, distance_lines, earlier_peak_line, flight_time_block,
+        flight_time_line, guard_outcome, inter_pair_offset_lines, ir_notes_lines,
+        ir_stimulus_lines, label_prefix, onset_gap_line, pre_impulse_snr_lines,
+        reference_latency_lines, reference_stored_latency_lines, report_files_lines,
+        second_lobe_line, short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
-        ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, InterfaceLatency, IrStats,
-        IrVerdict, MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
+        ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, InterPairOffset,
+        InterfaceLatency, IrStats, IrVerdict, LatencyBasis, LiveOffset, MeasuredInterPairOffset,
+        MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, ReferenceLatency, WithheldBasis,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
-    use ac_core::shared::calibration::{EnumerationCheck, LayerVerdict, TauDisagreement};
+    use ac_core::shared::calibration::{EnumerationCheck, TauDisagreement};
     use std::collections::VecDeque;
 
     /// #429 (Codex on PR #536): `plot ir` decodes the report frame once,
@@ -2408,7 +2279,7 @@ mod tests {
     fn short_onset_rule_surfaces_the_decline_line() {
         let rule = "onset picker declined (search window shorter than 2 samples) — index is \
                     the peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), None);
+        let lines = short_onset_rule(rule, 1479, &unbounded(), None, false);
         assert_eq!(
             lines,
             vec![
@@ -2426,7 +2297,7 @@ mod tests {
     fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
         let rule = "onset picker declined (a case invented by this test) — index is the peak, \
                     not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), None);
+        let lines = short_onset_rule(rule, 1479, &unbounded(), None, false);
         assert_eq!(lines[1], "a case invented by this test".to_string());
     }
 
@@ -2436,7 +2307,7 @@ mod tests {
     fn short_onset_rule_names_the_bound_inputs_when_the_bound_caused_the_decline() {
         let rule = "onset picker declined (causal bound at or after the peak) — index is the \
                     peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None), None);
+        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None), None, false);
         assert_eq!(
             lines,
             vec![
@@ -2452,7 +2323,7 @@ mod tests {
     fn short_onset_rule_reports_the_window_start_how_clear_the_pick_is_and_the_bound() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
                     causal bound enforced";
-        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)), None);
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)), None, false);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(
             lines[0],
@@ -2470,6 +2341,28 @@ mod tests {
     /// #460 AC3 / UX: the old `(search span, no geometry known)` named
     /// neither input. The window line now says only which limit set it, and
     /// row 3 names what was missing.
+    /// #544 UX: a measured offset is named in the bound row, an identity
+    /// offset is not; a row too wide for 80 columns wraps before `c`.
+    #[test]
+    fn the_bound_row_names_a_measured_offset() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced";
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, None), None, true);
+        assert!(
+            lines[2].starts_with("bound from ref latency + offset + 1 m, c ")
+                && lines[2].ends_with(" m/s assumed"),
+            "{lines:?}"
+        );
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, None), None, false);
+        assert!(
+            lines[2].starts_with("bound from ref latency + 1 m, c "),
+            "{lines:?}"
+        );
+        let lines = short_onset_rule(rule, 1369, &enforced(12.25, Some(-10.5)), None, true);
+        assert_eq!(lines[2], "bound from ref latency + offset + 12.25 m,");
+        assert!(lines[3].starts_with("c ") && lines[3].ends_with(" at -10.5 \u{b0}C"));
+    }
+
     #[test]
     fn short_onset_rule_names_the_missing_input_when_no_bound_applies() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
@@ -2493,7 +2386,8 @@ mod tests {
             ),
         ];
         for (missing, row) in cases {
-            let lines = short_onset_rule(rule, 519, &CausalBound::Unavailable(missing), None);
+            let lines =
+                short_onset_rule(rule, 519, &CausalBound::Unavailable(missing), None, false);
             assert_eq!(lines[1], "window start 455 (search span), pick 64 clear");
             assert_eq!(lines[2], row);
             assert!(
@@ -2510,7 +2404,7 @@ mod tests {
     fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
                     causal bound enforced at sample 10, search span is the tighter limit";
-        let lines = short_onset_rule(rule, 519, &enforced(1.0, None), None);
+        let lines = short_onset_rule(rule, 519, &enforced(1.0, None), None, false);
         assert_eq!(
             lines[1],
             "window start 455 (search span), pick 64 clear".to_string()
@@ -2524,7 +2418,7 @@ mod tests {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
                     causal bound enforced; pick landed on the window start — the true onset \
                     may lie earlier";
-        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None), None);
+        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None), None, false);
         assert_eq!(
             lines,
             vec![
@@ -2591,18 +2485,30 @@ mod tests {
         };
         let failed = |repick| Some(EdgeGuard::Failed { repick });
         assert_eq!(
-            short_onset_rule(rule, 10483, &enforced(2.0, None), failed(Some(10471))),
+            short_onset_rule(
+                rule,
+                10483,
+                &enforced(2.0, None),
+                failed(Some(10471)),
+                false
+            ),
             with_row("window start 5 cm earlier: pick moves to 10471 (-12)")
         );
         assert_eq!(
-            short_onset_rule(rule, 10483, &enforced(2.0, None), failed(Some(10486))),
+            short_onset_rule(
+                rule,
+                10483,
+                &enforced(2.0, None),
+                failed(Some(10486)),
+                false
+            ),
             with_row("window start 5 cm earlier: pick moves to 10486 (+3)")
         );
         let unchecked = "AIC change-point pick over a 10.0 ms window; window start at sample \
                          10463, causal bound enforced; no re-pick — the window cannot start 5 cm \
                          earlier, so the pick could not be checked";
         assert_eq!(
-            short_onset_rule(unchecked, 10483, &enforced(2.0, None), failed(None)),
+            short_onset_rule(unchecked, 10483, &enforced(2.0, None), failed(None), false),
             with_row("no re-pick — window cannot start 5 cm earlier")
         );
         let passed_rule = "AIC change-point pick over a 10.0 ms window; window start at sample \
@@ -2612,13 +2518,14 @@ mod tests {
             10483,
             &enforced(2.0, None),
             Some(EdgeGuard::Passed),
+            false,
         );
         assert_eq!(
             passed,
             with_row("window start 5 cm earlier: pick moves ≤ 1 sample"),
             "a passed guard is stated, not silent"
         );
-        let not_run = short_onset_rule(passed_rule, 10483, &enforced(2.0, None), None);
+        let not_run = short_onset_rule(passed_rule, 10483, &enforced(2.0, None), None, false);
         assert_eq!(not_run, head, "no guard row when the guard did not run");
     }
 
@@ -2862,56 +2769,120 @@ mod tests {
         })
     }
 
-    /// #359: the `latency` line — the value `flight time` subtracts — plus
-    /// its measured-date line, and the schema-version-dependent wording
-    /// when it was never recorded at all.
+    /// A measured offset of `offset` samples over a 1711-sample reference,
+    /// both legs of one 2026-09-21T16:05:40Z capture, with `enumeration`.
+    fn measured_offset(offset: f64, enumeration: EnumerationCheck) -> InterPairOffset {
+        InterPairOffset::Measured(MeasuredInterPairOffset {
+            offset_s: offset / 96_000.0,
+            tau_s: (1711.0 + offset) / 96_000.0,
+            reference_tau_s: 1711.0 / 96_000.0,
+            measured_at: "2026-09-21T16:05:40Z".into(),
+            output_port: "system:playback_1".into(),
+            input_port: "system:capture_1".into(),
+            reference_output_port: "system:playback_2".into(),
+            reference_input_port: "system:capture_2".into(),
+            sample_rate_hz: 96_000,
+            period_size: Some(256),
+            enumeration,
+        })
+    }
+
+    /// #544 UX: the `offset` block in every state, verbatim — the value with
+    /// its sign convention, the two picks it is the difference of, and the
+    /// provenance pair; one row for every other state, the pair named.
     #[test]
-    fn interface_latency_lines_print_the_measured_tau_or_the_reason() {
-        let measured = measured_tau(1711.4 / 96_000.0, Some(1024));
-        let lines = interface_latency_lines(Some(&measured), 10, 96_000, "2026-09-16T11:30:40Z");
-        assert_eq!(lines.len(), 3);
-        assert!(
-            lines[0].starts_with(&label_prefix("latency")),
-            "{:?}",
-            lines[0]
+    fn inter_pair_offset_lines_render_every_state() {
+        let ts = "2026-09-21T17:24:39Z";
+        let c = CONT_INDENT;
+        assert_eq!(
+            inter_pair_offset_lines(
+                Some(&measured_offset(0.0, EnumerationCheck::Same)),
+                96_000,
+                ts
+            ),
+            vec![
+                "  offset        +0 samples  (+0.0000 ms, this pair \u{2212} ref pair, stored)"
+                    .to_string(),
+                format!("{c}1711 \u{2212} 1711 samples, both legs of one capture"),
+                format!("{c}measured 2026-09-21T16:05:40Z, 78 min before capture"),
+                format!("{c}same device enumeration as this capture"),
+            ]
         );
-        assert!(lines[0].contains("ms"), "{:?}", lines[0]);
-        assert!(
-            lines[0].contains("1711.4 samples, stored"),
-            "{:?}",
-            lines[0]
+        // The sign is `this pair − ref pair`: a longer capture-pair path
+        // reads positive (memory: check the sign).
+        assert_eq!(
+            inter_pair_offset_lines(
+                Some(&measured_offset(
+                    46.0,
+                    EnumerationCheck::Crossed {
+                        boundary: "host rebooted".into(),
+                        since: Some("2026-09-21T16:40:02Z".into()),
+                    }
+                )),
+                96_000,
+                ts
+            ),
+            vec![
+                "  offset        +46 samples  (+0.4792 ms, this pair \u{2212} ref pair, stored)"
+                    .to_string(),
+                format!("{c}1757 \u{2212} 1711 samples, both legs of one capture"),
+                format!("{c}measured 2026-09-21T16:05:40Z, 78 min before capture"),
+                format!("{c}host rebooted at 2026-09-21T16:40:02Z"),
+            ]
+        );
+        assert!(inter_pair_offset_lines(
+            Some(&measured_offset(-46.0, EnumerationCheck::Same)),
+            96_000,
+            ts
+        )[0]
+        .starts_with("  offset        -46 samples  (-0.4792 ms"));
+        assert_eq!(
+            inter_pair_offset_lines(Some(&InterPairOffset::Identity), 96_000, ts),
+            vec!["  offset        0 samples  (this pair is the ref pair)"]
         );
         assert_eq!(
-            lines[1],
-            format!("{CONT_INDENT}measured 2026-09-15T09:10:40Z, 26.3 h before capture")
+            inter_pair_offset_lines(Some(&InterPairOffset::NotConfigured), 96_000, ts),
+            vec!["  offset        not looked up \u{2014} no reference configured"]
         );
-        assert_eq!(
-            lines[2],
-            format!("{CONT_INDENT}same device enumeration as this capture")
-        );
-
-        let refused = InterfaceLatency::Unavailable {
-            reason: "no calibration stored for this channel pair".into(),
+        let unavailable = |observations: &str| InterPairOffset::Unavailable {
+            reason: format!(
+                "[out0_in0] against ref [out1_in1]; {observations}; check: `ac calibrate` on \
+                 this pair, loopback in place"
+            ),
         };
-        let lines = interface_latency_lines(Some(&refused), 9, 96_000, "2026-09-16T11:30:40Z");
+        for observation in [
+            "\u{3c4} on file, reference leg not measured with it",
+            "no \u{3c4} on file for this pair",
+            "entry measured at period 512, this capture period 256",
+        ] {
+            assert_eq!(
+                inter_pair_offset_lines(Some(&unavailable(observation)), 96_000, ts),
+                vec![
+                    "  offset        not measured \u{2014} [out0_in0] against ref [out1_in1]"
+                        .to_string(),
+                    format!("{c}{observation}"),
+                    format!("{c}check: `ac calibrate` on this pair, loopback in place"),
+                ]
+            );
+        }
+        // Every differing field on a line of its own.
         assert_eq!(
-            lines,
-            vec![format!(
-                "{}none \u{2014} no calibration stored for this channel pair",
-                label_prefix("latency")
-            )]
+            inter_pair_offset_lines(
+                Some(&unavailable(
+                    "first differing field; second differing field"
+                )),
+                96_000,
+                ts
+            )[1..3]
+                .to_vec(),
+            vec![
+                format!("{c}first differing field"),
+                format!("{c}second differing field"),
+            ]
         );
-
         assert_eq!(
-            interface_latency_lines(None, 4, 48_000, "2026-09-16T11:30:40Z"),
-            vec![format!(
-                "{}not recorded (report predates schema v5)",
-                label_prefix("latency")
-            )]
-        );
-        assert_eq!(
-            interface_latency_lines(None, 9, 48_000, "2026-09-16T11:30:40Z"),
-            vec![format!("{}not recorded", label_prefix("latency"))]
+            inter_pair_offset_lines(None, 96_000, ts),
+            vec!["  offset        not recorded (report predates schema v12)"]
         );
     }
 
@@ -2939,113 +2910,71 @@ mod tests {
         }
     }
 
-    /// #461 UX: every enumeration state under `latency`, in the order
-    /// measured → verdict → nodes → check, with the exact wording.
+    /// #544 UX: every enumeration state under `offset` and `ref stored`, in
+    /// the plain form. Tested against the rejected rendering: #461's
+    /// `UNVERIFIED` head and its re-calibrate `check:` never print under
+    /// either — neither stored value is qualified by an enumeration any more.
     #[test]
-    fn interface_latency_lines_render_every_enumeration_state() {
-        let ts = "2026-09-16T13:52:10Z";
-        let tail = |check: Option<EnumerationCheck>| {
-            interface_latency_lines(Some(&with_check(check)), 10, 96_000, ts)[2..].to_vec()
-        };
+    fn offset_and_ref_stored_print_every_enumeration_state_plainly() {
+        let ts = "2026-09-21T17:24:39Z";
         let c = CONT_INDENT;
-        assert_eq!(
-            tail(Some(host_rebooted())),
-            vec![
-                format!("{c}UNVERIFIED \u{2014} host rebooted at 2026-09-16T13:41:52Z"),
-                format!("{c}check: re-run `ac calibrate` with loopback patched"),
-            ]
-        );
-        assert_eq!(
-            tail(Some(re_enumerated(
-                Some("2026-09-16T00:08:31Z"),
-                "/dev/fw1 new, /dev/snd/controlC1 re-created, /dev/fw2 gone"
-            ))),
-            vec![
-                format!(
-                    "{c}UNVERIFIED \u{2014} audio device re-enumerated at 2026-09-16T00:08:31Z"
-                ),
-                format!("{c}nodes: /dev/fw1 new, /dev/snd/controlC1 re-created,"),
-                format!("{c}       /dev/fw2 gone"),
-                format!("{c}check: re-run `ac calibrate` with loopback patched"),
-            ]
-        );
-        assert_eq!(
-            tail(Some(re_enumerated(None, "/dev/fw2 gone"))),
-            vec![
-                format!("{c}UNVERIFIED \u{2014} audio device re-enumerated after measurement"),
-                format!("{c}nodes: /dev/fw2 gone"),
-                format!("{c}check: re-run `ac calibrate` with loopback patched"),
-            ]
-        );
-        let not_recorded = vec![
-            format!("{c}UNVERIFIED \u{2014} entry predates enumeration tracking"),
-            format!("{c}check: re-run `ac calibrate` with loopback patched"),
+        let cases: Vec<(Option<EnumerationCheck>, Vec<String>)> = vec![
+            (
+                Some(host_rebooted()),
+                vec![format!("{c}host rebooted at 2026-09-16T13:41:52Z")],
+            ),
+            (
+                Some(re_enumerated(
+                    Some("2026-09-16T00:08:31Z"),
+                    "/dev/fw1 new, /dev/snd/controlC1 re-created, /dev/fw2 gone",
+                )),
+                vec![
+                    format!("{c}audio device re-enumerated at 2026-09-16T00:08:31Z"),
+                    format!("{c}nodes: /dev/fw1 new, /dev/snd/controlC1 re-created,"),
+                    format!("{c}       /dev/fw2 gone"),
+                ],
+            ),
+            (
+                Some(re_enumerated(None, "/dev/fw2 gone")),
+                vec![
+                    format!("{c}audio device re-enumerated after measurement"),
+                    format!("{c}nodes: /dev/fw2 gone"),
+                ],
+            ),
+            (
+                Some(EnumerationCheck::NotRecorded),
+                vec![format!("{c}entry predates enumeration tracking")],
+            ),
+            (
+                Some(EnumerationCheck::NotObservable {
+                    reason: "jack backend: no /dev/snd/controlC* or /dev/fw* nodes; \
+                             check: /dev and /proc readable by the daemon user"
+                        .into(),
+                }),
+                vec![
+                    format!("{c}device enumeration not observable"),
+                    format!("{c}jack backend: no /dev/snd/controlC* or /dev/fw* nodes"),
+                ],
+            ),
         ];
-        assert_eq!(tail(Some(EnumerationCheck::NotRecorded)), not_recorded);
-        assert_eq!(tail(None), not_recorded, "absent must never read as same");
+        for (check, want) in cases {
+            let stored =
+                reference_stored_latency_lines(Some(&with_check(check.clone())), 12, 96_000, ts);
+            assert_eq!(stored[2..].to_vec(), want, "ref stored {check:?}");
+            if let Some(epoch) = check.clone() {
+                let offset =
+                    inter_pair_offset_lines(Some(&measured_offset(0.0, epoch)), 96_000, ts);
+                assert_eq!(offset[3..].to_vec(), want, "offset {check:?}");
+            }
+            for line in &stored {
+                assert!(!line.contains("UNVERIFIED"), "{line:?}");
+                assert!(!line.contains("check:"), "{line:?}");
+            }
+        }
+        // Absent never reads as the same enumeration.
         assert_eq!(
-            tail(Some(EnumerationCheck::NotObservable {
-                reason: "cpal backend has no enumeration probe".into()
-            })),
-            vec![
-                format!("{c}UNVERIFIED \u{2014} device enumeration not observable"),
-                format!("{c}cpal backend has no enumeration probe"),
-            ]
-        );
-        assert_eq!(
-            tail(Some(EnumerationCheck::NotObservable {
-                reason: "jack backend: no /dev/snd/controlC* or /dev/fw* nodes; \
-                         check: /dev and /proc readable by the daemon user"
-                    .into()
-            })),
-            vec![
-                format!("{c}UNVERIFIED \u{2014} device enumeration not observable"),
-                format!("{c}jack backend: no /dev/snd/controlC* or /dev/fw* nodes"),
-                format!("{c}check: /dev and /proc readable by the daemon user"),
-            ]
-        );
-    }
-
-    /// #461 UX: `ref stored` crossed with an agreeing `ref Δ` points at that
-    /// evidence and drops `check:`; the cannot-tell states stay UNVERIFIED
-    /// even then, and `latency` is never cleared by `ref Δ`.
-    #[test]
-    fn reference_stored_crossed_with_an_agreeing_delta_points_at_the_delta() {
-        let ts = "2026-09-16T13:52:10Z";
-        let c = CONT_INDENT;
-        let stored = with_check(Some(host_rebooted()));
-        assert_eq!(
-            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, true)[2..].to_vec(),
-            vec![format!(
-                "{c}host rebooted at 2026-09-16T13:41:52Z \u{2014} see ref \u{394}"
-            )]
-        );
-        let stored = with_check(Some(re_enumerated(
-            Some("2026-09-16T00:08:31Z"),
-            "/dev/fw1 new",
-        )));
-        assert_eq!(
-            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, true)[2..].to_vec(),
-            vec![
-                format!(
-                    "{c}audio device re-enumerated at 2026-09-16T00:08:31Z \u{2014} see ref \u{394}"
-                ),
-                format!("{c}nodes: /dev/fw1 new"),
-            ]
-        );
-        assert_eq!(
-            reference_stored_latency_lines(Some(&stored), 10, 96_000, ts, false)[2],
-            format!("{c}UNVERIFIED \u{2014} audio device re-enumerated at 2026-09-16T00:08:31Z")
-        );
-        let unrecorded = with_check(Some(EnumerationCheck::NotRecorded));
-        assert!(
-            reference_stored_latency_lines(Some(&unrecorded), 10, 96_000, ts, true)[2]
-                .contains("UNVERIFIED"),
-            "no boundary was named for the Δ to answer"
-        );
-        assert_eq!(
-            enumeration_lines(Some(&EnumerationCheck::Same), true),
-            enumeration_lines(Some(&EnumerationCheck::Same), false)
+            reference_stored_latency_lines(Some(&with_check(None)), 12, 96_000, ts)[2],
+            format!("{c}entry predates enumeration tracking")
         );
     }
 
@@ -3060,7 +2989,7 @@ mod tests {
             Some(EnumerationCheck::Same),
             None,
         ] {
-            for line in enumeration_lines(check.as_ref(), false) {
+            for line in answered_enumeration_lines(check.as_ref()) {
                 for word in ["mechanism", "SYT", "phase", "boot id", "session"] {
                     assert!(!line.contains(word), "{line:?} names {word}");
                 }
@@ -3073,13 +3002,8 @@ mod tests {
     #[test]
     fn reference_stored_latency_lines_print_the_measured_tau_or_the_reason() {
         let measured = measured_tau(57.0 / 96_000.0, Some(64));
-        let lines = reference_stored_latency_lines(
-            Some(&measured),
-            10,
-            96_000,
-            "2026-09-16T11:30:40Z",
-            false,
-        );
+        let lines =
+            reference_stored_latency_lines(Some(&measured), 10, 96_000, "2026-09-16T11:30:40Z");
         assert_eq!(lines.len(), 3);
         assert!(
             lines[0].starts_with(&label_prefix("ref stored")),
@@ -3088,14 +3012,14 @@ mod tests {
         );
 
         assert_eq!(
-            reference_stored_latency_lines(None, 8, 96_000, "2026-09-16T11:30:40Z", false),
+            reference_stored_latency_lines(None, 8, 96_000, "2026-09-16T11:30:40Z"),
             vec![format!(
                 "{}not recorded (report predates schema v9)",
                 label_prefix("ref stored")
             )]
         );
         assert_eq!(
-            reference_stored_latency_lines(None, 9, 96_000, "2026-09-16T11:30:40Z", false),
+            reference_stored_latency_lines(None, 9, 96_000, "2026-09-16T11:30:40Z"),
             vec![format!(
                 "{}not looked up \u{2014} no reference configured",
                 label_prefix("ref stored")
@@ -3117,7 +3041,7 @@ mod tests {
             periods: Some(1),
         };
         let lines = arrival_check_lines(&ArrivalCheck::PeriodShift(d), Some(1024));
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("+1024 samples"), "{:?}", lines[0]);
         assert!(
             lines[1].contains("exactly 1 period of 1024 samples"),
@@ -3134,7 +3058,9 @@ mod tests {
             "{:?}",
             lines[3]
         );
-        assert!(lines[4].contains("check:"), "{:?}", lines[4]);
+        // #544 UX: a moved reference is the case the flight time compensates
+        // for — no `check:` row asks the reader to act on it.
+        assert!(!lines.iter().any(|l| l.contains("check:")), "{lines:?}");
     }
 
     /// #359 AC3, tested against the rejected implementation: a mismatch
@@ -3150,11 +3076,12 @@ mod tests {
             periods: None,
         };
         let lines = arrival_check_lines(&ArrivalCheck::Mismatch(d), Some(1024));
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
         assert!(lines[1].contains("not a period multiple"), "{:?}", lines[1]);
         for line in &lines {
             assert!(!line.contains("period shift"), "{line:?}");
             assert!(!line.contains("graph-buffering"), "{line:?}");
+            assert!(!line.contains("check:"), "{line:?}");
         }
     }
 
@@ -3192,11 +3119,16 @@ mod tests {
         );
     }
 
-    /// #359 QA (PR #477): `flight_time_line` is the value the arrival check
-    /// exists to gate — the CLI's headline new read-out — but shipped with
-    /// no test naming any of its four branches. Each arm here is the one
-    /// that fails if the match reorders or the wording drifts from what
-    /// `flight_time_line` actually prints.
+    /// A live basis over a 1711-sample reference with an identity offset.
+    fn live_identity() -> LatencyBasis {
+        LatencyBasis::Live {
+            reference_tau_s: 1711.0 / 96_000.0,
+            offset: LiveOffset::Identity,
+        }
+    }
+
+    /// Stats with `flight_time_s` and `arrival_check` as given, on a live
+    /// identity basis; withheld-basis tests set `latency_basis` themselves.
     fn stats_with(flight_time_s: Option<f64>, arrival_check: ArrivalCheck) -> IrStats {
         IrStats {
             sample_rate_hz: 96_000,
@@ -3217,10 +3149,9 @@ mod tests {
             delay_samples: 88,
             arrival_s: 88.0 / 96_000.0,
             arrival_check,
+            latency_basis: live_identity(),
             flight_time_s,
             distance_check: DistanceCheck::NotGiven,
-            interface_latency_enumeration: Some(EnumerationCheck::Same),
-            interface_latency_check: None,
             pre_impulse_snr_db: 40.0,
             gate_window_s: 0.01,
             gate_f_low_hz: 100.0,
@@ -3229,363 +3160,150 @@ mod tests {
         }
     }
 
-    // ─── #466: the session check's verdict on the stored τ ──────────────
-
-    fn tau_evidence(checked_at: &str) -> ac_core::shared::calibration::session::Evidence {
-        use ac_core::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
-        Evidence {
-            measured: 1743.0,
-            stored: 1711.0,
-            delta: 32.0,
-            tolerance: 0.0,
-            unit: VerdictUnit::Samples,
-            stored_at: "2026-09-15T23:43:04Z".into(),
-            checked_at: checked_at.into(),
-            source: CheckSource::Explicit,
+    fn withheld(stats: IrStats, why: WithheldBasis) -> IrStats {
+        IrStats {
+            flight_time_s: None,
+            latency_basis: LatencyBasis::Withheld(why),
+            ..stats
         }
     }
 
-    fn checked_tau(
-        enumeration: EnumerationCheck,
-        verdict: Option<LayerVerdict>,
-        loopback: Option<&str>,
-    ) -> InterfaceLatency {
-        InterfaceLatency::Measured(MeasuredLatency {
-            tau_s: 1711.0 / 96_000.0,
-            measured_at: "2026-09-15T23:43:04Z".into(),
-            method: "farina_short_ess".into(),
-            backend: "jack".into(),
-            sample_rate_hz: 96_000,
+    fn moved_by(delta_samples: i64) -> ArrivalCheck {
+        ArrivalCheck::Mismatch(TauDisagreement {
+            reading1_s: 1711.0 / 96_000.0,
+            reading2_s: (1711 + delta_samples) as f64 / 96_000.0,
+            delta_samples,
+            sample_rate: 96_000,
             period_size: Some(256),
-            output_port: "system:playback_2".into(),
-            input_port: "system:capture_2".into(),
-            enumeration: Some(enumeration),
-            session_check: verdict,
-            session_check_loopback: loopback.map(str::to_string),
+            periods: None,
         })
     }
 
-    /// UX rev 4, "refused, and the refusal predates a boundary": the whole
-    /// block, line for line.
+    /// #544 AC2, tested against the rejected rendering: a reference that
+    /// moved against the stored one used to withhold the flight time (`ref Δ
+    /// is not zero`, `ref Δ is a period shift`). Now the value prints, with
+    /// the drift on the line under it; at 0 there is no drift line.
     #[test]
-    fn a_refused_stored_tau_that_predates_a_reboot_renders_ux_block() {
-        let tau = checked_tau(
-            EnumerationCheck::Crossed {
-                boundary: "host rebooted".into(),
-                since: Some("2026-09-16T15:10:03Z".into()),
-            },
-            Some(LayerVerdict::Refused {
-                evidence: tau_evidence("2026-09-16T14:02:11Z"),
-                via: None,
-                delta_bound: None,
-            }),
-            Some("out1_in1"),
+    fn a_moved_reference_prints_the_flight_time_with_its_drift() {
+        let value = format!(
+            "{}+335 samples  (+3.490 ms, arrival \u{2212} ref latency \u{2212} offset)",
+            label_prefix("flight time")
         );
-        let c = CONT_INDENT;
+        let moved = stats_with(Some(335.0 / 96_000.0), moved_by(-32));
         assert_eq!(
-            interface_latency_lines(Some(&tau), 11, 96_000, "2026-09-16T15:19:04Z"),
+            flight_time_line(&moved),
             vec![
-                "  latency       17.8229 ms  (1711 samples, stored, not applied)".to_string(),
-                format!("{c}measured 2026-09-15T23:43:04Z, 15.6 h before capture"),
-                format!("{c}host rebooted at 2026-09-16T15:10:03Z"),
-                format!("{c}REFUSED \u{2014} 1743 samples read 2026-09-16T14:02:11Z (\u{394} +32)"),
-                format!("{c}refusal predates the reboot; stands until a check passes"),
-                format!("{c}check: re-run `ac calibrate` with loopback patched"),
+                value.clone(),
+                format!("{CONT_INDENT}ref \u{394} -32 samples, live reference used (below)"),
             ]
         );
-    }
-
-    /// UX rev 4, "acoustic pair, propagated refusal". A refusal made after
-    /// the boundary prints no `predates` line.
-    #[test]
-    fn a_propagated_refusal_renders_the_via_block() {
-        let tau = checked_tau(
-            EnumerationCheck::Same,
-            Some(LayerVerdict::Refused {
-                evidence: tau_evidence("2026-09-16T14:02:11Z"),
-                via: Some("out1_in1".into()),
-                delta_bound: None,
+        let shift = stats_with(
+            Some(335.0 / 96_000.0),
+            ArrivalCheck::PeriodShift(TauDisagreement {
+                reading1_s: 1711.0 / 96_000.0,
+                reading2_s: 1967.0 / 96_000.0,
+                delta_samples: 256,
+                sample_rate: 96_000,
+                period_size: Some(256),
+                periods: Some(1),
             }),
-            Some("out1_in1"),
-        );
-        let lines = interface_latency_lines(Some(&tau), 11, 96_000, "2026-09-16T13:54:44Z");
-        let c = CONT_INDENT;
-        assert_eq!(
-            lines[0],
-            "  latency       17.8229 ms  (1711 samples, stored, not applied)"
         );
         assert_eq!(
-            lines[2..].to_vec(),
-            vec![
-                format!("{c}same device enumeration as this capture"),
-                format!("{c}REFUSED \u{2014} via [out1_in1], whose \u{3c4} moved +32 samples"),
-                format!("{c}check: `ac calibrate check`; if still refused,"),
-                format!("{c}re-run `ac calibrate` for this pair"),
-            ]
+            flight_time_line(&shift)[1],
+            format!("{CONT_INDENT}ref \u{394} +256 samples, live reference used (below)")
         );
-
-        let after = checked_tau(
-            EnumerationCheck::Crossed {
-                boundary: "host rebooted".into(),
-                since: Some("2026-09-16T13:41:52Z".into()),
-            },
-            Some(LayerVerdict::Refused {
-                evidence: tau_evidence("2026-09-16T14:02:11Z"),
-                via: None,
-                delta_bound: None,
-            }),
-            None,
-        );
-        let lines = interface_latency_lines(Some(&after), 11, 96_000, "2026-09-16T15:19:04Z");
-        assert!(!lines.iter().any(|l| l.contains("predates")), "{lines:?}");
-        assert!(
-            !lines.iter().any(|l| l.contains("UNVERIFIED")),
-            "a measured verdict answered the boundary: {lines:?}"
-        );
-    }
-
-    /// `not_covered` names the loopback in lowercase; any other unverified
-    /// cause keeps the `(stored)` head and adds its verdict line.
-    #[test]
-    fn unverified_verdicts_keep_the_stored_head_and_add_their_line() {
-        use ac_core::shared::calibration::session::UnverifiedCause;
-        let c = CONT_INDENT;
-        let not_covered = checked_tau(
-            EnumerationCheck::Same,
-            Some(LayerVerdict::unverified(
-                UnverifiedCause::NotCovered,
-                "check covers [out1_in1], not [out0_in0]",
-            )),
-            Some("out1_in1"),
-        );
-        let lines = interface_latency_lines(Some(&not_covered), 11, 96_000, "2026-09-16T13:54:44Z");
-        assert!(lines[0].ends_with("(1711 samples, stored)"), "{lines:?}");
-        assert_eq!(
-            lines.last().unwrap(),
-            &format!("{c}session check does not cover this pair (loopback [out1_in1])")
-        );
-
-        let unreadable = checked_tau(
-            EnumerationCheck::Same,
-            Some(LayerVerdict::unverified(
-                UnverifiedCause::RefusalsUnreadable,
-                "session_refusals.json unreadable: expected value at line 1 column 1; \
-                 check: its permissions and contents, beside cal.json",
-            )),
-            None,
-        );
-        let lines = interface_latency_lines(Some(&unreadable), 11, 96_000, "2026-09-16T13:54:44Z");
-        assert!(lines[0].ends_with("(1711 samples, stored)"), "{lines:?}");
-        assert!(
-            lines.contains(&format!(
-                "{c}check: its permissions and contents, beside cal.json"
-            )),
-            "{lines:?}"
-        );
-        assert!(
-            lines.iter().any(|l| l.starts_with(&format!(
-                "{c}UNVERIFIED \u{2014} session_refusals.json unreadable"
-            ))),
-            "{lines:?}"
-        );
-
-        // A report from before v11: no verdict line at all.
-        let old = checked_tau(EnumerationCheck::Same, None, None);
-        assert_eq!(
-            interface_latency_lines(Some(&old), 10, 96_000, "2026-09-16T13:54:44Z").len(),
-            3
-        );
-    }
-
-    /// R6-5: the refused flight-time line sits after the #359 arms, so a
-    /// reference disagreement keeps its own, more specific line.
-    #[test]
-    fn flight_time_line_names_a_refused_stored_latency() {
-        let refused = LayerVerdict::Refused {
-            evidence: tau_evidence("2026-09-16T14:02:11Z"),
-            via: Some("out1_in1".into()),
-            delta_bound: None,
-        };
-        let mut stats = stats_with(
-            None,
+        for lines in [flight_time_line(&moved), flight_time_line(&shift)] {
+            assert!(!lines.iter().any(|l| l.contains("withheld")), "{lines:?}");
+        }
+        for check in [
+            ArrivalCheck::Agree,
             ArrivalCheck::Unchecked {
                 reason: String::new(),
             },
-        );
-        stats.interface_latency_check = Some(refused.clone());
-        assert_eq!(
-            flight_time_line(&stats),
-            vec![format!(
-                "{}not shown \u{2014} stored latency refused (below)",
-                label_prefix("flight time")
-            )]
-        );
-
-        let shift = TauDisagreement {
-            reading1_s: 0.0,
-            reading2_s: 1024.0 / 96_000.0,
-            delta_samples: 1024,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: Some(1),
-        };
-        let mut stats = stats_with(None, ArrivalCheck::PeriodShift(shift));
-        stats.interface_latency_check = Some(refused);
-        assert!(flight_time_line(&stats)[0].contains("period shift"));
+        ] {
+            assert_eq!(
+                flight_time_line(&stats_with(Some(335.0 / 96_000.0), check)),
+                vec![value.clone()]
+            );
+        }
     }
 
+    /// #544 UX: every withheld reason on the flight time row, in the
+    /// basis's words; `no reference loopback configured` carries its
+    /// `check:`.
     #[test]
     fn flight_time_line_names_every_branch_the_ux_spec_requires() {
-        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
-        let lines = flight_time_line(&agree);
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("samples"), "{lines:?}");
-        assert!(
-            !lines[0].contains("withheld") && !lines[0].contains("not shown"),
-            "{lines:?}"
-        );
+        let base = stats_with(None, ArrivalCheck::Agree);
+        let row = |why: WithheldBasis| flight_time_line(&withheld(base.clone(), why));
+        let label = label_prefix("flight time");
         assert_eq!(
-            lines[0],
-            format!(
-                "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
-                label_prefix("flight time")
-            )
-        );
-
-        let shift_d = TauDisagreement {
-            reading1_s: 0.0,
-            reading2_s: 1024.0 / 96_000.0,
-            delta_samples: 1024,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: Some(1),
-        };
-        assert_eq!(
-            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(shift_d))),
+            row(WithheldBasis::ReferenceUnavailable {
+                reason: "peak SNR 9.3 dB, need 24.0 dB".into()
+            }),
             vec![format!(
-                "{}withheld \u{2014} ref \u{394} is a period shift (below)",
-                label_prefix("flight time")
+                "{label}withheld \u{2014} ref latency unavailable (below)"
             )]
         );
-
-        let mismatch_d = TauDisagreement {
-            reading1_s: 0.0,
-            reading2_s: 16.0 / 96_000.0,
-            delta_samples: 16,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: None,
-        };
         assert_eq!(
-            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(mismatch_d))),
+            row(WithheldBasis::OffsetNotMeasured {
+                reason: "[out0_in0] against ref [out1_in1]; no \u{3c4} on file".into()
+            }),
             vec![format!(
-                "{}withheld \u{2014} ref \u{394} is not zero (below)",
-                label_prefix("flight time")
+                "{label}withheld \u{2014} offset not measured for this pair (below)"
             )]
         );
-
         assert_eq!(
-            flight_time_line(&stats_with(
-                None,
-                ArrivalCheck::Unchecked {
-                    reason: "no same-capture reference in this report".into(),
-                }
-            )),
+            row(WithheldBasis::NoReference),
+            vec![
+                format!("{label}withheld \u{2014} no reference loopback configured"),
+                format!(
+                    "{CONT_INDENT}check: ref out / ref in wiring, README \u{a7} Reference wiring"
+                ),
+            ]
+        );
+        assert_eq!(
+            row(WithheldBasis::PredatesV12),
             vec![format!(
-                "{}not shown \u{2014} no stored latency for this pair (below)",
-                label_prefix("flight time")
+                "{label}withheld \u{2014} report predates schema v12"
             )]
         );
     }
 
-    /// #461 UX: a flight time over a non-`same` stored τ carries
-    /// `latency UNVERIFIED — see latency (below)` directly under the value,
-    /// above the reference-check line. A v9 report (no check) is flagged.
+    /// #544 UX, tested against the rejected rendering: `latency UNVERIFIED —
+    /// see latency (below)` and `reference check not run — see ref Δ` never
+    /// print under a flight time — whatever the offset's enumeration, and
+    /// whether or not the drift check ran.
     #[test]
-    fn flight_time_line_flags_an_unverified_latency_above_the_reference_line() {
-        let c = CONT_INDENT;
-        let value = format!(
-            "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
-            label_prefix("flight time")
-        );
-        let flagged = format!("{c}latency UNVERIFIED \u{2014} see latency (below)");
-        for check in [
-            None,
-            Some(EnumerationCheck::NotRecorded),
-            Some(EnumerationCheck::Crossed {
+    fn a_flight_time_carries_no_unverified_or_unchecked_qualifier() {
+        for enumeration in [
+            EnumerationCheck::Same,
+            EnumerationCheck::NotRecorded,
+            EnumerationCheck::Crossed {
                 boundary: "host rebooted".into(),
                 since: None,
-            }),
+            },
         ] {
-            let mut stats = stats_with(
-                Some(88.0 / 96_000.0),
+            for check in [
+                ArrivalCheck::Agree,
                 ArrivalCheck::Unchecked {
                     reason: String::new(),
                 },
-            );
-            stats.interface_latency_enumeration = check.clone();
-            assert_eq!(
-                flight_time_line(&stats),
-                vec![
-                    value.clone(),
-                    flagged.clone(),
-                    format!("{c}reference check not run \u{2014} see ref \u{394}"),
-                ],
-                "{check:?}"
-            );
-            stats.arrival_check = ArrivalCheck::Agree;
-            assert_eq!(
-                flight_time_line(&stats),
-                vec![value.clone(), flagged.clone()],
-                "{check:?}"
-            );
+                moved_by(16),
+            ] {
+                let mut stats = stats_with(Some(88.0 / 96_000.0), check);
+                stats.latency_basis = LatencyBasis::Live {
+                    reference_tau_s: 1711.0 / 96_000.0,
+                    offset: LiveOffset::Measured {
+                        offset_s: 0.0,
+                        enumeration: enumeration.clone(),
+                    },
+                };
+                for line in flight_time_line(&stats) {
+                    assert!(!line.contains("UNVERIFIED"), "{line:?}");
+                    assert!(!line.contains("reference check not run"), "{line:?}");
+                }
+            }
         }
-        // Withheld: nothing to qualify.
-        let mut withheld = stats_with(
-            None,
-            ArrivalCheck::Unchecked {
-                reason: String::new(),
-            },
-        );
-        withheld.interface_latency_enumeration = None;
-        assert_eq!(flight_time_line(&withheld).len(), 1);
-    }
-
-    /// codex-qa on PR #477: a `Some` flight time alongside
-    /// `ArrivalCheck::Unchecked` (case D — a flight time was computed, but
-    /// the same-capture corroboration never ran, e.g. this pair's `ref
-    /// stored` misses on exact conditions) printed identically to a checked
-    /// value. The UX comment's field justification for
-    /// `reference check not run — see ref Δ` is explicit: "The architect's
-    /// `Unchecked` still passes a flight time through. This line keeps that
-    /// value from reading as checked." Asserts the continuation line is
-    /// present, 16-space indented, and that the checked (`Agree`) case does
-    /// not carry it.
-    #[test]
-    fn flight_time_line_qualifies_an_unchecked_value_as_not_verified() {
-        let unchecked = stats_with(
-            Some(88.0 / 96_000.0),
-            ArrivalCheck::Unchecked {
-                reason: "no same-capture reference in this report".into(),
-            },
-        );
-        assert_eq!(
-            flight_time_line(&unchecked),
-            vec![
-                format!(
-                    "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
-                    label_prefix("flight time")
-                ),
-                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
-            ]
-        );
-
-        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
-        assert_eq!(
-            flight_time_line(&agree).len(),
-            1,
-            "a checked flight time must not carry the unchecked qualifier"
-        );
     }
 
     /// Every line the onset block and the `ref latency` read-out can emit must
@@ -3639,13 +3357,16 @@ mod tests {
                         repick: Some(123_456),
                     }),
                 ] {
-                    for line in short_onset_rule(rule, 262_144, bound, guard) {
-                        assert!(
-                            16 + line.chars().count() <= 80,
-                            "line {:?} runs to {} columns",
-                            line,
-                            16 + line.chars().count()
-                        );
+                    // #544: `+ offset` joins the bound row when measured.
+                    for offset_measured in [false, true] {
+                        for line in short_onset_rule(rule, 262_144, bound, guard, offset_measured) {
+                            assert!(
+                                16 + line.chars().count() <= 80,
+                                "line {:?} runs to {} columns",
+                                line,
+                                16 + line.chars().count()
+                            );
+                        }
                     }
                 }
             }
@@ -3686,7 +3407,7 @@ mod tests {
             }
         }
 
-        // #359: `latency` / `ref stored` must wrap a long `TauRefusal`
+        // #359: `ref stored` must wrap a long `TauRefusal`
         // message (one that lists every differing field) at 80 columns
         // rather than running off the edge.
         let long_refusal = InterfaceLatency::Unavailable {
@@ -3698,22 +3419,9 @@ mod tests {
                      (requested system:capture_4, stored system:capture_3)"
                 .to_string(),
         };
-        for line in interface_latency_lines(Some(&long_refusal), 9, 96_000, "2026-09-16T11:30:40Z")
+        for line in
+            reference_stored_latency_lines(Some(&long_refusal), 9, 96_000, "2026-09-16T11:30:40Z")
         {
-            assert!(
-                line.chars().count() <= 80,
-                "line {:?} runs to {} columns",
-                line,
-                line.chars().count()
-            );
-        }
-        for line in reference_stored_latency_lines(
-            Some(&long_refusal),
-            9,
-            96_000,
-            "2026-09-16T11:30:40Z",
-            false,
-        ) {
             assert!(
                 line.chars().count() <= 80,
                 "line {:?} runs to {} columns",
@@ -3744,15 +3452,13 @@ mod tests {
             Some(EnumerationCheck::NotRecorded),
             None,
         ] {
-            for agrees in [false, true] {
-                for line in enumeration_lines(check.as_ref(), agrees) {
-                    assert!(
-                        line.chars().count() <= 80,
-                        "line {:?} runs to {} columns",
-                        line,
-                        line.chars().count()
-                    );
-                }
+            for line in answered_enumeration_lines(check.as_ref()) {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
             }
         }
 
@@ -3792,50 +3498,62 @@ mod tests {
             }
         }
 
-        // #359 QA (PR #477): `flight_time_line` joins this width-fit test
-        // too, per the UX comment's own instruction — widest `Some` case
-        // is a 96 kHz five-digit sample count, plus both withheld cases.
-        let wide_shift = TauDisagreement {
-            reading1_s: 17_110.0 / 96_000.0,
-            reading2_s: 18_134.0 / 96_000.0,
-            delta_samples: 1024,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: Some(1),
-        };
-        let wide_mismatch = TauDisagreement {
-            reading1_s: 17_110.0 / 96_000.0,
-            reading2_s: 17_126.0 / 96_000.0,
-            delta_samples: 16,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: None,
-        };
-        let flight_time_cases = [
-            flight_time_line(&stats_with(Some(65_535.0 / 96_000.0), ArrivalCheck::Agree)),
-            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(wide_shift))),
-            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(wide_mismatch))),
-            flight_time_line(&stats_with(
-                None,
-                ArrivalCheck::Unchecked {
-                    reason: String::new(),
-                },
-            )),
-            // codex-qa on PR #477: the `Some` + `Unchecked` continuation
-            // line (`reference check not run — see ref Δ`) joins this
-            // width-fit test too, at the same 96 kHz five-digit sample
-            // count as the `Agree` case above.
-            flight_time_line(&stats_with(
-                Some(65_535.0 / 96_000.0),
-                ArrivalCheck::Unchecked {
-                    reason: String::new(),
-                },
-            )),
-        ];
+        // #544 UX: every `flight time` row at its worst-case width — the
+        // +12000-sample / +125.000 ms value with a five-digit drift line, and
+        // every withheld reason.
+        let wide = stats_with(Some(12_000.0 / 96_000.0), moved_by(-17_110));
+        let mut flight_time_cases = vec![flight_time_line(&wide)];
+        assert_eq!(
+            flight_time_cases[0][0].chars().count(),
+            77,
+            "{:?}",
+            flight_time_cases[0][0]
+        );
+        for why in [
+            WithheldBasis::PredatesV12,
+            WithheldBasis::NoReference,
+            WithheldBasis::ReferenceUnavailable {
+                reason: String::new(),
+            },
+            WithheldBasis::OffsetNotMeasured {
+                reason: String::new(),
+            },
+        ] {
+            flight_time_cases.push(flight_time_line(&withheld(wide.clone(), why)));
+        }
         for lines in flight_time_cases {
             for line in lines {
                 assert!(
-                    line.chars().count() <= 80,
+                    line.chars().count() <= 79,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
+            }
+        }
+
+        // #544 UX: the `offset` block at a four-digit offset, a long
+        // refusal, and every other state.
+        let ts = "2026-09-21T17:24:39Z";
+        let long_unavailable = InterPairOffset::Unavailable {
+            reason: "[out10_in10] against ref [out11_in11]; entry measured against ref \
+                     system:playback_12 \u{2192} system:capture_12, this capture ref \
+                     system:playback_11 \u{2192} system:capture_11; entry measured at period \
+                     512, this capture period 256; check: `ac calibrate` on this pair, loopback \
+                     in place"
+                .into(),
+        };
+        for offset in [
+            Some(measured_offset(1_234.0, EnumerationCheck::Same)),
+            Some(measured_offset(-1_234.0, EnumerationCheck::NotRecorded)),
+            Some(long_unavailable),
+            Some(InterPairOffset::Identity),
+            Some(InterPairOffset::NotConfigured),
+            None,
+        ] {
+            for line in inter_pair_offset_lines(offset.as_ref(), 96_000, ts) {
+                assert!(
+                    line.chars().count() <= 79,
                     "line {:?} runs to {} columns",
                     line,
                     line.chars().count()
@@ -4002,10 +3720,6 @@ mod tests {
         stats
     }
 
-    fn stored_tau() -> InterfaceLatency {
-        checked_tau(EnumerationCheck::Same, None, None)
-    }
-
     /// A scored distance check at `distance_m` (default c) for a flight of
     /// `flight_samples` at 96 kHz.
     fn distance_scored(distance_m: f64, flight_samples: f64) -> DistanceCheck {
@@ -4041,13 +3755,14 @@ mod tests {
     fn the_headline_block_matches_ux_revision_3() {
         let stats = headline_stats();
         let mut lines: Vec<String> = second_lobe_line(&stats).into_iter().collect();
-        lines.extend(flight_time_block(&stats, Some(&stored_tau())));
+        lines.extend(flight_time_block(&stats));
         lines.extend(distance_lines(&stats));
         lines.extend(arrival_snr_lines(&stats));
         lines.extend(broadband_delta_lines(&stats));
         let want = [
             "                second lobe 40 samples after, 6.1 dB down (required \u{2265} 3.0 dB)",
-            "  flight time   +596 samples  (+6.208 ms, arrival \u{2212} latency)",
+            "  flight time   +596 samples  (+6.208 ms, arrival \u{2212} ref latency \u{2212} \
+             offset)",
             "  distance      2 m: +36 samples (+0.377 ms) re d/c, inside window",
             "                d/c +560 samples (+5.831 ms), c 343.0 m/s assumed",
             "                window \u{2212}25 \u{2026} +121 samples re d/c",
@@ -4087,7 +3802,7 @@ mod tests {
         late.flight_time_s = None;
         late.distance_check = distance_scored(2.0, 1_076.0);
         assert_eq!(
-            flight_time_block(&late, Some(&stored_tau())),
+            flight_time_block(&late),
             [format!(
                 "{}withheld \u{2014} later than 2 m allows (below)",
                 label_prefix("flight time")
@@ -4107,7 +3822,7 @@ mod tests {
         early.flight_time_s = None;
         early.distance_check = distance_scored(2.0, 512.0);
         assert_eq!(
-            flight_time_block(&early, Some(&stored_tau())),
+            flight_time_block(&early),
             [format!(
                 "{}withheld \u{2014} earlier than 2 m allows (below)",
                 label_prefix("flight time")
@@ -4120,12 +3835,14 @@ mod tests {
         );
         assert_eq!(
             lines[4],
-            "                check: typed distance, temperature, latency (below)"
+            "                check: typed distance, temperature, ref latency, offset"
         );
     }
 
-    /// The rows that are not verdicts: no distance, a typed 0 m, no stored
-    /// τ, and a flight time withheld upstream.
+    /// The rows that are not verdicts: no distance, a typed 0 m, no latency
+    /// basis, and a flight time withheld upstream. #544 UX: with no latency
+    /// the row points at the flight time's reason, never at the removed
+    /// `latency` row (`no stored latency (below)`).
     #[test]
     fn the_distance_row_says_why_it_did_not_score() {
         let mut stats = headline_stats();
@@ -4142,7 +3859,7 @@ mod tests {
         stats.distance_check = DistanceCheck::NoLatency { distance_m: 2.0 };
         assert_eq!(
             distance_lines(&stats),
-            ["  distance      2 m: not checked \u{2014} no stored latency (below)"]
+            ["  distance      2 m: not checked \u{2014} flight time withheld (above)"]
         );
         stats.flight_time_s = None;
         stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 31.2 };
@@ -4152,7 +3869,7 @@ mod tests {
             ["  distance      0.5 m: not checked \u{2014} flight time withheld (above)"]
         );
         assert_eq!(
-            flight_time_block(&stats, Some(&stored_tau())),
+            flight_time_block(&stats),
             [format!(
                 "{}withheld \u{2014} arrival SNR 31.2 dB, required \u{2265} 35.0 dB",
                 label_prefix("flight time")
@@ -4160,12 +3877,17 @@ mod tests {
         );
     }
 
-    /// UX revision 3's precedence: IR side, then distance, then τ — the
-    /// first takes the `withheld` row, each further reason one `also:` row.
+    /// UX revision 3's precedence: IR side, then distance, then the latency
+    /// basis (#544) — the first takes the `withheld` row, each further reason
+    /// one `also:` row. A moved reference is not a reason any more.
     #[test]
-    fn withheld_reasons_run_cross_check_then_distance_then_tau() {
-        let mut stats = headline_stats();
-        stats.flight_time_s = None;
+    fn withheld_reasons_run_cross_check_then_distance_then_basis() {
+        let mut stats = withheld(
+            headline_stats(),
+            WithheldBasis::OffsetNotMeasured {
+                reason: String::new(),
+            },
+        );
         stats.arrival_cross_check = ArrivalCrossCheck::EarlierComparable {
             index: stats.arrival_index - 312,
             level_db: -14.2,
@@ -4180,14 +3902,14 @@ mod tests {
             periods: None,
         });
         assert_eq!(
-            flight_time_block(&stats, Some(&stored_tau())),
+            flight_time_block(&stats),
             [
                 format!(
                     "{}withheld \u{2014} earlier peak within 20.0 dB (above)",
                     label_prefix("flight time")
                 ),
                 format!("{CONT_INDENT}also: later than 2 m allows (below)"),
-                format!("{CONT_INDENT}also: ref \u{394} is not zero (below)"),
+                format!("{CONT_INDENT}also: offset not measured for this pair (below)"),
             ]
         );
         // The distance is a reason, so its verdict prints.
@@ -4219,7 +3941,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            flight_time_block(&stats, Some(&stored_tau())),
+            flight_time_block(&stats),
             [format!(
                 "{}withheld \u{2014} second lobe within 3.0 dB (above)",
                 label_prefix("flight time")
@@ -4244,12 +3966,11 @@ mod tests {
     #[test]
     fn broadband_later_prints_the_flight_time_marked() {
         let stats = broadband_later_stats();
-        let tau = stored_tau();
         assert_eq!(
-            flight_time_block(&stats, Some(&tau)),
+            flight_time_block(&stats),
             vec![
                 format!(
-                    "{}+596 samples  (+6.208 ms, arrival \u{2212} latency)",
+                    "{}+596 samples  (+6.208 ms, arrival \u{2212} ref latency \u{2212} offset)",
                     label_prefix("flight time")
                 ),
                 format!("{CONT_INDENT}broadband peak disagrees by +1502 samples (below)"),
@@ -4275,20 +3996,16 @@ mod tests {
         );
     }
 
-    /// The mark sits above #461's `latency UNVERIFIED` and #477's reference
-    /// line: it qualifies the arrival, which is upstream of τ.
+    /// The mark sits above #544's drift line: it qualifies the arrival,
+    /// which is upstream of the latency.
     #[test]
-    fn the_cross_check_mark_precedes_the_latency_rows() {
+    fn the_cross_check_mark_precedes_the_drift_row() {
         let mut stats = broadband_later_stats();
-        stats.arrival_check = ArrivalCheck::Unchecked {
-            reason: String::new(),
-        };
-        stats.interface_latency_enumeration = None;
-        let lines = flight_time_block(&stats, Some(&stored_tau()));
-        assert_eq!(lines.len(), 4, "{lines:#?}");
+        stats.arrival_check = moved_by(-32);
+        let lines = flight_time_block(&stats);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
         assert!(lines[1].contains("broadband peak disagrees"));
-        assert!(lines[2].contains("latency UNVERIFIED"));
-        assert!(lines[3].contains("reference check not run"));
+        assert!(lines[2].contains("live reference used"));
     }
 
     /// `Agrees`: no mark, no `check:` row — but the target and the
@@ -4297,7 +4014,7 @@ mod tests {
     fn agrees_prints_no_mark_and_no_check_row() {
         let mut stats = stats_with(Some(332.0 / 96_000.0), ArrivalCheck::Agree);
         stats.arrival_cross_check = ArrivalCrossCheck::Agrees { gap: 148 };
-        let lines = flight_time_block(&stats, Some(&stored_tau()));
+        let lines = flight_time_block(&stats);
         assert_eq!(lines, flight_time_line(&stats));
         assert_eq!(lines.len(), 1);
         let delta = broadband_delta_lines(&stats);
@@ -4311,7 +4028,6 @@ mod tests {
     /// evidence row.
     #[test]
     fn withholding_standings_name_their_reason_on_the_flight_time_row() {
-        let tau = stored_tau();
         let cases = [
             (
                 ArrivalCrossCheck::BandLimitUnavailable {
@@ -4347,41 +4063,37 @@ mod tests {
             let mut stats = stats_with(None, ArrivalCheck::Agree);
             stats.arrival_cross_check = standing.clone();
             assert_eq!(
-                flight_time_block(&stats, Some(&tau)),
+                flight_time_block(&stats),
                 vec![format!("{}{want}", label_prefix("flight time"))],
                 "{standing:?}"
             );
         }
     }
 
-    /// Withheld for two reasons: the arrival's takes the row, τ's follows on
-    /// one `also:` row in #359/#466's words.
+    /// Withheld for two reasons: the arrival's takes the row, the basis's
+    /// follows on one `also:` row in the flight time row's words (#544). A
+    /// moved reference adds no row — tested against the rejected `also: ref
+    /// Δ is not zero`.
     #[test]
     fn a_second_reason_follows_on_an_also_row() {
-        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        let mut stats = withheld(
+            stats_with(None, ArrivalCheck::Agree),
+            WithheldBasis::NoReference,
+        );
         stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 14.2 };
         assert_eq!(
-            flight_time_block(&stats, None),
+            flight_time_block(&stats),
             vec![
                 format!(
                     "{}withheld \u{2014} arrival SNR 14.2 dB, required \u{2265} 35.0 dB",
                     label_prefix("flight time")
                 ),
-                format!("{CONT_INDENT}also: no stored latency for this pair (below)"),
+                format!("{CONT_INDENT}also: no reference loopback configured"),
             ]
         );
-        stats.arrival_check = ArrivalCheck::Mismatch(TauDisagreement {
-            reading1_s: 0.0,
-            reading2_s: 0.0,
-            delta_samples: 16,
-            sample_rate: 96_000,
-            period_size: Some(1024),
-            periods: None,
-        });
-        assert_eq!(
-            flight_time_block(&stats, Some(&stored_tau()))[1],
-            format!("{CONT_INDENT}also: ref \u{394} is not zero (below)")
-        );
+        stats.latency_basis = live_identity();
+        stats.arrival_check = moved_by(16);
+        assert_eq!(flight_time_block(&stats).len(), 1);
     }
 
     /// `EarlierComparable`: the evidence row under the source row.
@@ -4440,7 +4152,7 @@ mod tests {
         let why = "sweep ends at 2000 Hz, needs \u{2265} 4000 Hz";
         let mut mismatch = stats.clone();
         assert_eq!(
-            flight_time_block(&stats, Some(&stored_tau())),
+            flight_time_block(&stats),
             [format!(
                 "{}withheld \u{2014} {why}",
                 label_prefix("flight time")
@@ -4454,12 +4166,13 @@ mod tests {
             period_size: Some(256),
             periods: None,
         });
+        // #544: a moved reference is not an `also:` reason.
         assert_eq!(
-            flight_time_block(&mismatch, Some(&stored_tau())),
-            [
-                format!("{}withheld \u{2014} {why}", label_prefix("flight time")),
-                format!("{CONT_INDENT}also: ref \u{394} is not zero (below)"),
-            ]
+            flight_time_block(&mismatch),
+            [format!(
+                "{}withheld \u{2014} {why}",
+                label_prefix("flight time")
+            )]
         );
         assert_eq!(second_lobe_line(&stats), None);
         assert_eq!(
@@ -4488,7 +4201,7 @@ mod tests {
         wide.broadband_delta_level_db = Some(-5.9);
         wide.arrival_lobe_margin_db = Some(12.3);
         wide.arrival_lobe_offset = Some(-48);
-        let mut lines = flight_time_block(&wide, None);
+        let mut lines = flight_time_block(&wide);
         lines.extend(second_lobe_line(&wide));
         lines.extend(broadband_delta_lines(&wide));
         lines.extend(arrival_snr_lines(&wide));
@@ -4497,7 +4210,7 @@ mod tests {
             band_top_hz: 3_999.0,
             required_hz: 4_000.0,
         };
-        lines.extend(flight_time_block(&unavailable, Some(&stored_tau())));
+        lines.extend(flight_time_block(&unavailable));
         lines.extend(broadband_delta_lines(&unavailable));
         lines.extend(arrival_snr_lines(&unavailable));
         let mut earlier = wide.clone();
@@ -4506,13 +4219,13 @@ mod tests {
             level_db: -19.9,
         };
         lines.extend(earlier_peak_line(&earlier));
-        lines.extend(flight_time_block(&earlier, None));
+        lines.extend(flight_time_block(&earlier));
         for (distance, flight) in [(10.0, 2_798.0 + 166.0), (10.0, 5_000.0), (0.5, 100.0)] {
             let mut d = wide.clone();
             d.distance_check = distance_scored(distance, flight);
             d.flight_time_s = None;
             lines.extend(distance_lines(&d));
-            lines.extend(flight_time_block(&d, Some(&stored_tau())));
+            lines.extend(flight_time_block(&d));
         }
         for line in lines {
             assert!(
