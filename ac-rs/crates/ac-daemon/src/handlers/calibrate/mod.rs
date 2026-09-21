@@ -23,7 +23,8 @@ use ac_core::shared::calibration::LoopGainBaseline;
 
 use super::{
     busy_guard, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms, resolve_input,
-    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, wire, CalReply,
+    resolve_output_by_channel, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
+    spawn_worker, wait_cal_reply, wire, CalReply,
 };
 
 mod mic_curve;
@@ -35,7 +36,7 @@ pub use mic_curve::{calibrate_mic_curve, set_mic_correction_enabled};
 pub use session_check::{session_check, SessionChecks};
 pub use spl::calibrate_spl;
 
-use tau::{measure_tau_twice, tau_result, TAU_METHOD};
+use tau::{measure_tau_twice, tau_result, TauReferenceRequest, TAU_METHOD};
 // #460: `plot_ir`'s same-capture reference leg is judged by the same
 // single-reading gates as `calibrate`'s τ.
 pub(crate) use tau::{
@@ -301,6 +302,19 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    // #544: the reference loopback, resolved exactly as `plot_ir` resolves
+    // it, so the offset stored here is keyed by the ports `plot_ir` looks it
+    // up under. Configured but unresolvable is refused before any audio, as
+    // there (#225): running without it would store τ with no offset while
+    // the operator believes the loopback was read.
+    let reference_ports = match resolve_ref_input(&cfg, state) {
+        Ok(None) => None,
+        Ok(Some(ref_in)) => match resolve_ref_output(&cfg, state) {
+            Ok(ref_out) => Some((ref_out, ref_in)),
+            Err(e) => return json!({"ok": false, "error": e}),
+        },
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let cal_reply_tx = state.cal_reply_tx.clone();
     // #461: which daemon session measured a stored τ. Opaque, JSON only.
     let session = format!("{}@{}", std::process::id(), state.started_at);
@@ -446,7 +460,22 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         // independent client lifecycles (`measure_tau_twice`), decoupled
         // from the voltage-cal `eng` above (already stopped) — see that
         // function's doc for why the lifecycle boundary matters.
+        //
+        // #544: with a reference loopback configured, both lifecycles also
+        // read it in the same capture, so the stored entry can carry the
+        // inter-pair offset `plot_ir` compensates with. The calibrated pair
+        // being the loopback itself needs no second leg.
         let ref_amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
+        let reference = match &reference_ports {
+            None => TauReferenceRequest::NotConfigured,
+            Some((ref_out, ref_in)) if *ref_out == out_port && *ref_in == in_port => {
+                TauReferenceRequest::SamePair
+            }
+            Some((ref_out, ref_in)) => TauReferenceRequest::Loopback {
+                output_port: ref_out,
+                input_port: ref_in,
+            },
+        };
         let tau_outcome = tau_result(|| {
             measure_tau_twice(
                 fake,
@@ -455,6 +484,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
                 &out_port,
                 &in_port,
                 ref_amp,
+                reference,
             )
         });
 

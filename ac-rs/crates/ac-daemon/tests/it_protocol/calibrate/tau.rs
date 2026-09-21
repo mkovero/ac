@@ -683,3 +683,97 @@ fn calibrate_cheap_refresh_still_measures_tau() {
         "session is <pid>@<started_at>: {session}"
     );
 }
+
+/// Run `calibrate` on `out_ch`/`in_ch` with both prompts skipped.
+fn calibrate_pair(c: &Client, out_ch: u32, in_ch: u32) -> serde_json::Value {
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                          "output_channel": out_ch, "input_channel": in_ch}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    for step in 1..=2 {
+        expect_prompt(c, step);
+        reply_vrms(c, None);
+    }
+    expect_cal_done(c)
+}
+
+/// #544 AC5: with a reference loopback configured, `calibrate` reads its
+/// leg in the same two captures as the pair's τ and stores it with the
+/// entry, ports and all. On the fake the pair leg is 32 samples and the
+/// reference leg 20 (`audio/fake/hooks.rs`), so the offset is +12.
+#[test]
+fn calibrate_stores_the_reference_leg_of_the_same_captures() {
+    let d = Daemon::spawn_with_config(Some(
+        json!({ "reference_channel": 1, "reference_output_channel": 1 }),
+    ));
+    let c = Client::new(&d);
+    let done = calibrate_pair(&c, 0, 0);
+    assert_eq!(done["tau_state"], json!("measured"), "{done}");
+    assert_eq!(done["tau_reference_state"], json!("measured"), "{done}");
+    assert_eq!(done["tau_offset_samples"], json!(12), "{done}");
+    assert_eq!(
+        done["tau_reference_output_port"],
+        json!("fake:playback_1"),
+        "{done}"
+    );
+    assert_eq!(
+        done["tau_reference_input_port"],
+        json!("fake:capture_1"),
+        "{done}"
+    );
+    let ref_tau_s = done["tau_reference_s"].as_f64().expect("tau_reference_s");
+    assert!((ref_tau_s * 48_000.0 - 20.0).abs() < 1e-6, "{done}");
+    assert!(
+        done["tau_reference_pre_impulse_snr_db"].as_f64().is_some(),
+        "{done}"
+    );
+
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let entry = read_cal_entry(&cal_path);
+    let stored = &entry["tau_history"][0]["reference"];
+    assert_eq!(stored["output_port"], json!("fake:playback_1"), "{entry}");
+    assert_eq!(stored["input_port"], json!("fake:capture_1"), "{entry}");
+    assert_eq!(stored["tau_s"], done["tau_reference_s"], "{entry}");
+}
+
+/// #544: calibrating the reference loopback itself reads no second leg,
+/// and a run with no reference configured says so; neither stores one.
+#[test]
+fn calibrate_names_why_no_reference_leg_was_read() {
+    let d = Daemon::spawn_with_config(Some(
+        json!({ "reference_channel": 0, "reference_output_channel": 0 }),
+    ));
+    let done = calibrate_pair(&Client::new(&d), 0, 0);
+    assert_eq!(done["tau_reference_state"], json!("same_pair"), "{done}");
+    assert!(done.get("tau_offset_samples").is_none(), "{done}");
+
+    let d = Daemon::spawn();
+    let done = calibrate_pair(&Client::new(&d), 0, 0);
+    assert_eq!(done["tau_state"], json!("measured"), "{done}");
+    assert_eq!(done["tau_reference_state"], json!("not_configured"), "{done}");
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let entry = read_cal_entry(&cal_path);
+    assert_eq!(entry["tau_history"][0]["reference"], json!(null), "{entry}");
+}
+
+/// #544: a refused reference leg never blocks τ. With the reference cable
+/// muted (`AC_FAKE_REF_GAIN=0`, dither only) τ is still measured and stored,
+/// and the reference state is `refused` with its reason and SNR.
+#[test]
+fn calibrate_stores_tau_when_the_reference_leg_is_refused() {
+    let d = Daemon::spawn_with(
+        Some(json!({ "reference_channel": 1, "reference_output_channel": 1 })),
+        &[
+            ("AC_FAKE_REF_GAIN", "0"),
+            ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.00001"),
+        ],
+    );
+    let done = calibrate_pair(&Client::new(&d), 0, 0);
+    assert_eq!(done["tau_state"], json!("measured"), "{done}");
+    assert_eq!(done["tau_reference_state"], json!("refused"), "{done}");
+    assert!(done["tau_reference_reason"].is_string(), "{done}");
+    assert!(done.get("tau_offset_samples").is_none(), "{done}");
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let entry = read_cal_entry(&cal_path);
+    assert_eq!(entry["tau_history"].as_array().map(Vec::len), Some(1));
+    assert_eq!(entry["tau_history"][0]["reference"], json!(null), "{entry}");
+}

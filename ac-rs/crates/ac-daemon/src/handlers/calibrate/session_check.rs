@@ -48,7 +48,7 @@ use crate::server::ServerState;
 use super::super::{
     busy_guard, cfg_guard, resolve_ref_input, resolve_ref_output, send_pub, spawn_worker,
 };
-use super::tau::{measure_tau_twice, tau_result, TauOutcome};
+use super::tau::{measure_tau_twice, tau_result, TauOutcome, TauReferenceRequest};
 
 /// How many records this process keeps. Only the latest decisive record per
 /// loopback and layer decides anything; the rest are history.
@@ -1015,6 +1015,9 @@ pub fn session_check(state: &ServerState, cmd: &Value) -> Value {
                     &lb.output_port,
                     &lb.input_port,
                     amp,
+                    // #544: the check judges the loopback's own τ; it stores
+                    // nothing, so it reads no second leg.
+                    TauReferenceRequest::NotConfigured,
                 )
             });
             let ctx = CheckCtx {

@@ -12,7 +12,7 @@ mod measure;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::{
-    compare_tau_readings, DeviceEpoch, TauComparison, TauConditions, TauEntry,
+    compare_tau_readings, DeviceEpoch, TauComparison, TauConditions, TauEntry, TauReferenceLeg,
 };
 
 use crate::audio::epoch::current_epoch;
@@ -25,7 +25,7 @@ pub(crate) use measure::{
 // #494: only tests build an `EdgeRefusal` with its SNR observation by hand.
 #[cfg(test)]
 pub(crate) use measure::EdgeSnr;
-use measure::{measure_tau, tau_snr_threshold_db};
+use measure::{measure_tau, measure_tau_with_reference, tau_snr_threshold_db, ReferenceLegReading};
 
 /// Method tag stored on every [`TauEntry`] this handler produces. Bumped
 /// to `_v2` by #340: the window-sizing change below means a τ captured
@@ -76,6 +76,9 @@ pub(super) enum TauAttempt {
         /// Boxed: an epoch carries a node list; the other variants are small.
         epoch_before: Box<DeviceEpoch>,
         epoch_after: Box<DeviceEpoch>,
+        /// #544: the reference loopback's reading in each lifecycle's own
+        /// capture, or why none was taken.
+        reference: ReferenceAttempt,
     },
     /// A lifecycle's peak sits below the SNR threshold (#368). Short-
     /// circuits the same way [`TauAttempt::Error`] does: the second
@@ -102,6 +105,122 @@ pub(super) enum TauAttempt {
     },
 }
 
+/// Which reference loopback, if any, `measure_tau_twice` also captures
+/// (#544). Resolved by the caller from the same config keys `plot_ir` uses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum TauReferenceRequest<'a> {
+    /// No reference loopback configured.
+    NotConfigured,
+    /// The calibrated pair is the reference loopback: its offset is zero by
+    /// definition, and there is no second leg to read.
+    SamePair,
+    /// Drive `output_port` with the same stimulus and record `input_port`
+    /// in the same capture as the pair.
+    Loopback {
+        output_port: &'a str,
+        input_port: &'a str,
+    },
+}
+
+/// The reference readings a `Compared` attempt carries (#544).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ReferenceAttempt {
+    NotConfigured,
+    SamePair,
+    /// A reference is configured but this backend cannot capture one.
+    NotSupported,
+    /// Both lifecycles captured the reference leg.
+    Captured {
+        output_port: String,
+        input_port: String,
+        reading1: ReferenceLegReading,
+        reading2: ReferenceLegReading,
+    },
+}
+
+/// What a `measured` τ run established about the reference leg (#544), and
+/// so whether its [`TauEntry`] carries an inter-pair offset.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ReferenceOutcome {
+    NotConfigured,
+    SamePair,
+    NotSupported,
+    /// Both lifecycles' reference readings passed calibrate's gates and
+    /// agreed to the whole sample. `pre_impulse_snr_db` is the worse one.
+    Measured {
+        output_port: String,
+        input_port: String,
+        tau_s: f64,
+        pre_impulse_snr_db: f64,
+    },
+    /// A reference reading was refused, or the two disagreed. τ itself is
+    /// still stored; its entry carries no reference leg.
+    Refused {
+        reason: String,
+        pre_impulse_snr_db: Option<f64>,
+    },
+}
+
+impl ReferenceOutcome {
+    /// The `tau_reference_state` wire value. See ZMQ.md's `cal_done` table.
+    pub(super) fn state(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::SamePair => "same_pair",
+            Self::NotSupported => "not_supported",
+            Self::Measured { .. } => "measured",
+            Self::Refused { .. } => "refused",
+        }
+    }
+
+    /// Judge two lifecycles' reference readings the way τ's own pair is
+    /// judged: both accepted and equal to the whole sample.
+    fn from_attempt(attempt: ReferenceAttempt, sample_rate: u32, period: Option<u32>) -> Self {
+        let (output_port, input_port, reading1, reading2) = match attempt {
+            ReferenceAttempt::NotConfigured => return Self::NotConfigured,
+            ReferenceAttempt::SamePair => return Self::SamePair,
+            ReferenceAttempt::NotSupported => return Self::NotSupported,
+            ReferenceAttempt::Captured {
+                output_port,
+                input_port,
+                reading1,
+                reading2,
+            } => (output_port, input_port, reading1, reading2),
+        };
+        match (reading1, reading2) {
+            (
+                ReferenceLegReading::Accepted {
+                    tau_s: t1,
+                    snr_db: s1,
+                },
+                ReferenceLegReading::Accepted {
+                    tau_s: t2,
+                    snr_db: s2,
+                },
+            ) => match compare_tau_readings(t1, t2, sample_rate, period) {
+                TauComparison::Agree => Self::Measured {
+                    output_port,
+                    input_port,
+                    tau_s: (t1 + t2) / 2.0,
+                    pre_impulse_snr_db: s1.min(s2),
+                },
+                TauComparison::Disagree(d) => Self::Refused {
+                    reason: format!("reference leg: {}", d.message()),
+                    pre_impulse_snr_db: Some(s1.min(s2)),
+                },
+            },
+            (ReferenceLegReading::Refused { reason, snr_db }, _) => Self::Refused {
+                reason: format!("reference leg, reading 1 of 2: {reason}"),
+                pre_impulse_snr_db: snr_db,
+            },
+            (_, ReferenceLegReading::Refused { reason, snr_db }) => Self::Refused {
+                reason: format!("reference leg, reading 2 of 2: {reason}"),
+                pre_impulse_snr_db: snr_db,
+            },
+        }
+    }
+}
+
 /// One lifecycle's τ result and the evidence about the lifecycle it came
 /// from (#363). Replaces a bare tuple: four parallel values threaded through
 /// two closures is where a mix-up between reading 1 and reading 2 hides.
@@ -116,6 +235,9 @@ struct LifecycleReading {
     /// separation — the quantity that says whether the agreement is worth
     /// anything against a state that persists over seconds.
     captured_at: std::time::Instant,
+    /// #544: the reference leg of this same capture; `None` when none was
+    /// captured (not configured, same pair, or unsupported backend).
+    reference: Option<ReferenceLegReading>,
 }
 
 /// Run `measure_tau` twice, each inside its own fresh engine lifecycle —
@@ -126,6 +248,12 @@ struct LifecycleReading {
 /// both a real `jack_iodelay` client and `ac-daemon`'s own workers are
 /// stable to 0.001 frames, so nothing short of a second, separately
 /// re-registered client can catch a shift that only shows up between them.
+///
+/// #544: with a [`TauReferenceRequest::Loopback`], each lifecycle also
+/// drives the reference output (equal ports driven once, as `plot_ir` does)
+/// and records the reference input in the same capture, so the pair's τ and
+/// the reference's τ share that capture's transport state. The reference
+/// reading never changes how the pair's own τ is judged.
 pub(super) fn measure_tau_twice(
     fake: bool,
     required: Option<&str>,
@@ -133,6 +261,7 @@ pub(super) fn measure_tau_twice(
     out_port: &str,
     in_port: &str,
     amp: f64,
+    reference: TauReferenceRequest<'_>,
 ) -> TauAttempt {
     // Each lifecycle yields a `LifecycleReading` — `measure_tau` scopes the xrun
     // count to its own `play_and_capture` I/O call (#369 architect note:
@@ -154,7 +283,13 @@ pub(super) fn measure_tau_twice(
         DeviceEpoch,
     )> {
         let mut eng = make_engine(fake, required)?;
-        eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
+        let mut output_ports = vec![out_port.to_string()];
+        if let TauReferenceRequest::Loopback { output_port, .. } = reference {
+            if output_port != out_port {
+                output_ports.push(output_port.to_string());
+            }
+        }
+        eng.start(&output_ports, Some(in_port))?;
         let conditions = TauConditions {
             device,
             backend: eng.backend_name().to_string(),
@@ -164,7 +299,13 @@ pub(super) fn measure_tau_twice(
             input_port: in_port.to_string(),
         };
         let epoch_early = epoch_before_sweep.then(|| current_epoch(&conditions.backend));
-        let reading = measure_tau(&mut *eng, amp);
+        let reading = match reference {
+            TauReferenceRequest::Loopback { input_port, .. } if eng.supports_reference_capture() => {
+                measure_tau_with_reference(&mut *eng, amp, input_port)
+                    .map(|(pair, reference)| (pair, Some(reference)))
+            }
+            _ => measure_tau(&mut *eng, amp).map(|pair| (pair, None)),
+        };
         // #363: the clock is read here, not around the whole closure —
         // engine construction is not what the persistence question is about,
         // and the separation must describe the gap between the two captures.
@@ -177,7 +318,7 @@ pub(super) fn measure_tau_twice(
         let epoch = epoch_early.unwrap_or_else(|| current_epoch(&conditions.backend));
         eng.set_silence();
         eng.stop();
-        reading.map(|(tau_s, snr_db, xruns)| {
+        reading.map(|((tau_s, snr_db, xruns), reference)| {
             (
                 LifecycleReading {
                     tau_s,
@@ -185,6 +326,7 @@ pub(super) fn measure_tau_twice(
                     xruns,
                     declared_frames,
                     captured_at,
+                    reference,
                 },
                 conditions,
                 epoch,
@@ -215,13 +357,37 @@ pub(super) fn measure_tau_twice(
             }
         }
     };
-    let (reading1, conditions, epoch_before) = match run_once(true) {
+    let (mut reading1, conditions, epoch_before) = match run_once(true) {
         Ok(r) => r,
         Err(e) => return refused(e, None, 1),
     };
-    let (reading2, conditions2, epoch_after) = match run_once(false) {
+    let (mut reading2, conditions2, epoch_after) = match run_once(false) {
         Ok(r) => r,
         Err(e) => return refused(e, Some(conditions), 2),
+    };
+    let reference = match (
+        reference,
+        reading1.reference.take(),
+        reading2.reference.take(),
+    ) {
+        (TauReferenceRequest::NotConfigured, ..) => ReferenceAttempt::NotConfigured,
+        (TauReferenceRequest::SamePair, ..) => ReferenceAttempt::SamePair,
+        (
+            TauReferenceRequest::Loopback {
+                output_port,
+                input_port,
+            },
+            Some(r1),
+            Some(r2),
+        ) => ReferenceAttempt::Captured {
+            output_port: output_port.to_string(),
+            input_port: input_port.to_string(),
+            reading1: r1,
+            reading2: r2,
+        },
+        // A backend that cannot capture a reference returns no leg from
+        // either lifecycle.
+        (TauReferenceRequest::Loopback { .. }, ..) => ReferenceAttempt::NotSupported,
     };
     let comparison = compare_tau_readings(
         reading1.tau_s,
@@ -245,6 +411,7 @@ pub(super) fn measure_tau_twice(
         pre_impulse_snr_db: reading1.snr_db.min(reading2.snr_db),
         epoch_before: Box::new(epoch_before),
         epoch_after: Box::new(epoch_after),
+        reference,
     }
 }
 
@@ -318,6 +485,8 @@ pub(super) enum TauOutcome {
         /// before and after, since a change diverts to
         /// [`TauOutcome::RefusedEnumerationChanged`]. Stored with the entry.
         enumeration: DeviceEpoch,
+        /// #544: what the reference leg of the same captures established.
+        reference: ReferenceOutcome,
     },
     /// #369: a lifecycle crossed an xrun, so the reading is refused before
     /// its comparison is even consulted — a contaminated pair agreeing or
@@ -473,6 +642,7 @@ impl TauOutcome {
                 reading1_declared_frames,
                 separation_s,
                 enumeration,
+                reference,
                 ..
             } => Some(TauEntry {
                 conditions: conditions.clone(),
@@ -487,6 +657,20 @@ impl TauOutcome {
                 reading_separation_s: Some(*separation_s),
                 enumeration: Some(enumeration.clone()),
                 session: Some(session.to_string()),
+                // #544: only a reference leg both lifecycles agreed on.
+                reference: match reference {
+                    ReferenceOutcome::Measured {
+                        output_port,
+                        input_port,
+                        tau_s,
+                        ..
+                    } => Some(TauReferenceLeg {
+                        output_port: output_port.clone(),
+                        input_port: input_port.clone(),
+                        tau_s: *tau_s,
+                    }),
+                    _ => None,
+                },
             }),
             _ => None,
         }
@@ -508,6 +692,42 @@ impl TauOutcome {
         // #461: the epoch the stored entry belongs to, on `measured` only.
         if let Self::Measured { enumeration, .. } = self {
             frame["tau_enumeration"] = json!(enumeration);
+        }
+        // #544: the reference leg, on `measured` only — no other state
+        // stores an entry that could carry an offset.
+        if let Self::Measured {
+            tau_s, reference, ..
+        } = self
+        {
+            let sample_rate = self.conditions().map(|c| c.sample_rate).unwrap_or(0);
+            frame["tau_reference_state"] = json!(reference.state());
+            match reference {
+                ReferenceOutcome::Measured {
+                    output_port,
+                    input_port,
+                    tau_s: reference_tau_s,
+                    pre_impulse_snr_db,
+                } => {
+                    frame["tau_reference_s"] = json!(reference_tau_s);
+                    frame["tau_reference_output_port"] = json!(output_port);
+                    frame["tau_reference_input_port"] = json!(input_port);
+                    frame["tau_offset_samples"] =
+                        json!(((tau_s - reference_tau_s) * sample_rate as f64).round() as i64);
+                    frame["tau_reference_pre_impulse_snr_db"] = json!(pre_impulse_snr_db);
+                }
+                ReferenceOutcome::Refused {
+                    reason,
+                    pre_impulse_snr_db,
+                } => {
+                    frame["tau_reference_reason"] = json!(reason);
+                    if let Some(snr) = pre_impulse_snr_db {
+                        frame["tau_reference_pre_impulse_snr_db"] = json!(snr);
+                    }
+                }
+                ReferenceOutcome::NotConfigured
+                | ReferenceOutcome::SamePair
+                | ReferenceOutcome::NotSupported => {}
+            }
         }
         frame["tau_agreement_count"] = match self {
             Self::Measured {
@@ -845,8 +1065,14 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_declared_frames,
             separation_s,
             epoch_after,
+            reference,
             ..
         } => TauOutcome::Measured {
+            reference: ReferenceOutcome::from_attempt(
+                reference,
+                conditions.sample_rate,
+                conditions.period_size,
+            ),
             conditions,
             tau_s: (reading1_s + reading2_s) / 2.0,
             agreement_count: 2,
@@ -1041,6 +1267,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "measured");
         assert!(outcome.conditions().is_some());
@@ -1092,6 +1319,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         let tau_s = outcome
             .stored_entry("m", TEST_SESSION)
@@ -1121,6 +1349,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "disagree_period_shift");
         assert!(
@@ -1157,6 +1386,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "disagree_other");
         assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
@@ -1218,6 +1448,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         // Refused, never stored — the corroboration hole this closes is
@@ -1254,6 +1485,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1277,6 +1509,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1302,6 +1535,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1327,6 +1561,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "refused_xrun");
     }
@@ -1351,6 +1586,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
         assert!(
@@ -1396,6 +1632,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
 
@@ -1432,6 +1669,7 @@ mod tests {
             separation_s: 0.987,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "measured");
 
@@ -1467,6 +1705,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "measured");
     }
@@ -1492,6 +1731,7 @@ mod tests {
             separation_s: 1.1,
             epoch_before: test_epoch(),
             epoch_after: moved.clone(),
+            reference: ReferenceAttempt::NotConfigured,
         };
         let outcome = tau_result(|| attempt(0));
         assert_eq!(outcome.state(), "refused_enumeration_changed");
@@ -1537,6 +1777,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: before,
             epoch_after: after,
+            reference: ReferenceAttempt::NotConfigured,
         }
     }
 
@@ -1587,6 +1828,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
+            reference: ReferenceAttempt::NotConfigured,
         });
         assert_eq!(outcome.state(), "measured");
         let entry = outcome.stored_entry("m", TEST_SESSION).unwrap();
