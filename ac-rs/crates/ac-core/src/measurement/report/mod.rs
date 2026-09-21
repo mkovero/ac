@@ -41,6 +41,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod arrival_suite;
 mod csv;
 #[cfg(test)]
 mod fixtures;
@@ -48,9 +50,15 @@ mod ir_stats;
 mod payload;
 mod provenance;
 
+#[cfg(test)]
+pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
-    ArrivalCheck, ArrivalSource, IrStats, IrVerdict, OnsetStanding, PRE_IMPULSE_SNR_BASIS,
-    PRE_IMPULSE_SNR_MIN_DB,
+    arrival_cross_check_tolerance_samples, ArrivalCheck, ArrivalCrossCheck, ArrivalSource,
+    DistanceCheck, DistanceWindow, IrStats, IrVerdict, OnsetStanding,
+    ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS, ARRIVAL_CROSS_CHECK_TOLERANCE_S,
+    ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_EXCESS_DELAY_ALLOWANCE_S, ARRIVAL_LOBE_MARGIN_MIN_DB,
+    ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, DISTANCE_SPEED_OF_SOUND_REL_TOL,
+    DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
 };
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,
