@@ -4,7 +4,8 @@ Facts about this machine only. **How to test on it** is
 `docs/runbooks/rig-testing.md`; the machine-readable form of this page is
 `scripts/rig/hosts/pupu.env` — change both together.
 
-Last verified: 2026-09-14.
+Last verified: 2026-09-21 (physical setup and arrival behaviour; the audio
+system and JACK sections below still carry their own 2026-09-14 dates).
 
 ## Access
 
@@ -25,11 +26,20 @@ Last verified: 2026-09-14.
 JACK port names and `ac` indices here assume the analog-first order — see
 "JACK port order"; it moves.
 
-- Mic static at **1 m** on the speaker axis; tape marks on the floor at
-  **2 m** and **3 m** for manual moves. Put it back at 1 m after a move and
-  state the position in the run record.
+- Mic on the speaker axis; tape marks on the floor at **1 m**, **2 m** and
+  **3 m** for manual moves. The mic does **not** sit at a taped mark by
+  default: on 2026-09-21 it stood at ≈0.5 m, untaped, left there by an
+  earlier session, while this page still claimed 1 m. Measure the position
+  every session rather than assuming it, and state it in the run record.
+  Measured flight times with τ removed, 96 kHz: ≈+199 samples at ≈0.5 m,
+  +596…+597 at 2 m.
 - The 1083 has intermittent distortion, obvious by ear when present. A run
   nobody listened to needs a THD check before it is trusted.
+- τ is **1711 samples at 96 kHz for both analog pairs**, AN1 → IN1 and
+  AN2 → IN2 alike, measured by cable on 2026-09-18 after an FF400 power
+  cycle. τ stays per channel pair as a rule — these two simply agree here,
+  and neither applies to an acoustic path.
+- The FF400 reports `fw2.0` since the 2026-09-18 power cycle.
 - Never plug a line output into IN1 while its phantom is on.
 - Verified by emission 2026-09-14 (1 kHz, −60 dBFS, 3 s per output): AN1 →
   mic −64.7 dBFS, IN2 −139.0 dBFS; AN2 → IN2 −58.3 dBFS, mic −101.6 dBFS
@@ -160,6 +170,33 @@ Varies a lot between sessions — snapshot at the start of each
 - Broadband low-frequency (peak 63–250 Hz), not mains hum; the FF400's own
   analog floor is ~−108 dBFS, so the mic floor is acoustic. Below ~250 Hz a
   −40 dBFS sweep has little margin.
+
+## What the low-frequency floor does to arrival estimates (2026-09-21)
+
+Measured while running the #537 rig check at ≈0.5 m, mic on IN1, speaker on
+AN1, default band. Both facts are properties of this room's floor, not of
+one build:
+
+- **`BandLimitedSnrLow` is unreachable from the CLI here.** The arrival
+  gate refuses below 35 dB of arrival SNR, but the older pre-impulse SNR
+  gate (18 dB, #501) refuses the whole deconvolution first — about 50 dB of
+  arrival SNR earlier. `ac plot ir` prints `DECONVOLUTION FAILED` and
+  `ac-view` shows a low-SNR fault, so no arrival row is ever reached. Drive
+  level cannot separate the two: at −85…−98 dBFS typed, arrival SNR landed
+  at 32–45 dB while the CLI still refused every capture. Scoring the
+  band-limited gate on this rig means reading the saved report, not the
+  terminal.
+- **The broadband cross-check disagrees on captures the CLI has already
+  refused.** With the unfiltered IR only 5.5–12.6 dB above the pre-impulse
+  floor, its peak lands on low-frequency noise: of 13 captures at ≥35 dB
+  arrival SNR, 2 read `Agrees`, 6 `BroadbandLater` and 5 `BroadbandEarlier`,
+  while every band-limited flight time produced was +199 exactly. Treat a
+  broadband standing as meaningless below the 18 dB pre-impulse gate.
+
+Unmeasured, and the reason this is not a defect report: the cross-check's
+behaviour between 18 and ~22 dB of broadband pre-impulse SNR, the band a
+user does see. There it could withhold a correct number, but it cannot
+change a printed one.
 
 ## JACK stability (2026-09-14)
 
