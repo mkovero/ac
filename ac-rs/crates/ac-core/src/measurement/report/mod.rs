@@ -41,6 +41,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::shared::calibration::EnumerationCheck;
+
 #[cfg(test)]
 mod arrival_suite;
 mod csv;
@@ -54,7 +56,8 @@ mod provenance;
 pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
     arrival_cross_check_tolerance_samples, ArrivalCheck, ArrivalCrossCheck, ArrivalSource,
-    DistanceCheck, DistanceWindow, IrStats, IrVerdict, OnsetStanding,
+    DistanceCheck, DistanceWindow, IrStats, IrVerdict, LatencyBasis, LiveOffset, OnsetStanding,
+    WithheldBasis,
     ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS, ARRIVAL_CROSS_CHECK_TOLERANCE_S,
     ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_EXCESS_DELAY_ALLOWANCE_S, ARRIVAL_LOBE_MARGIN_MIN_DB,
     ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, DISTANCE_SPEED_OF_SOUND_REL_TOL,
@@ -147,7 +150,16 @@ pub use provenance::{
 ///   gains optional `session_check` / `session_check_loopback`, set on
 ///   `interface_latency` by every v11 `plot_ir` run that resolves a τ; a
 ///   refused verdict withholds `IrStats::flight_time_s`.
-pub const SCHEMA_VERSION: u32 = 11;
+/// - v12: optional top-level `inter_pair_offset: InterPairOffset` on
+///   `plot_ir` reports (#544) — the capture pair's τ minus the reference
+///   pair's τ, both read in one `calibrate` capture. From v12 the flight
+///   time is `arrival − (reference_latency + offset)`: the stored absolute
+///   τ in `interface_latency` is kept as provenance but no longer
+///   subtracted, `arrival_check` is a drift readout that withholds nothing,
+///   and a refused `interface_latency.session_check` no longer withholds
+///   the flight time. Absent on v1-v11 reports, whose re-derived flight
+///   time is withheld as predating v12.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /
 /// [`MeasurementReport::from_value`] still read (#429). Everything from
@@ -217,13 +229,19 @@ pub struct MeasurementReport {
     /// later has an arrival that can never be converted to a distance.
     /// `None` on reports written before v5 and on captures where τ was
     /// never looked up at all.
+    ///
+    /// From v12 (#544) this is provenance only: [`IrStats::flight_time_s`]
+    /// no longer subtracts it, because a τ stored days earlier does not
+    /// share this capture's transport state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_latency: Option<InterfaceLatency>,
     /// Round-trip latency of the reference loopback pair, measured from a
     /// reference leg captured in the same run as this report's IR (#460) —
     /// or why no valid reading exists. τ of a *different* pair than
-    /// `interface_latency`: never subtract it from the arrival. Consumed
-    /// only by [`IrStats`]' causal bound. `plot_ir` always records it —
+    /// `interface_latency`: never subtract it from the arrival on its own.
+    /// From v12 (#544) [`IrStats::flight_time_s`] subtracts it together
+    /// with `inter_pair_offset`, and the causal bound reads it as before.
+    /// `plot_ir` always records it —
     /// `unavailable` with a reason when no reference is configured — so
     /// `None` means a report written before v7, or a producer that captures
     /// no reference leg.
@@ -242,6 +260,13 @@ pub struct MeasurementReport {
     /// configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_stored_latency: Option<InterfaceLatency>,
+    /// The inter-pair offset between the capture pair and the reference
+    /// pair, resolved from calibration by exact topology match (#544,
+    /// schema v12). With `reference_latency` it is the latency
+    /// [`IrStats::flight_time_s`] subtracts. `None` on reports written
+    /// before v12 and on producers that are not `plot_ir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_pair_offset: Option<InterPairOffset>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -253,6 +278,59 @@ pub struct MeasurementReport {
     /// decode without the field present.
     #[serde(default)]
     pub processing_chain: ProcessingChain,
+}
+
+/// The inter-pair offset a `plot_ir` capture resolved (#544, schema v12):
+/// how much longer the capture pair's path is than the reference pair's,
+/// read from a `calibrate` capture that had both legs. Stored instead of
+/// either absolute τ, because only a difference taken inside one capture is
+/// common-mode to the converter, transport and graph state of that capture.
+///
+/// What it does not cover: a pair whose offset was never measured (refused
+/// as [`InterPairOffset::Unavailable`], never assumed zero), and a topology
+/// other than the one it was measured on — the lookup key is every
+/// `TauConditions` field plus both reference ports.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InterPairOffset {
+    Measured(MeasuredInterPairOffset),
+    /// The capture pair is the reference pair: the offset is zero by
+    /// definition, not by measurement.
+    Identity,
+    /// No reference loopback is configured, so there is no pair to take an
+    /// offset against.
+    NotConfigured,
+    /// No offset on file for this topology. `reason` is
+    /// `<pair> against ref <reference>; <observation>[; <observation>…];
+    /// check: <places>` — the pair named, then one observation per
+    /// differing field, as [`crate::shared::calibration::PairOffsetRefusal`]
+    /// renders them.
+    Unavailable { reason: String },
+}
+
+/// An offset that matched this capture's topology exactly. Flattened like
+/// [`MeasuredLatency`], so the report reads without `cal.json`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MeasuredInterPairOffset {
+    /// `tau_s − reference_tau_s`, seconds. Positive when the capture pair's
+    /// path is the longer one.
+    pub offset_s: f64,
+    /// The capture pair's τ in the calibrate capture the offset came from.
+    pub tau_s: f64,
+    /// The reference pair's τ in that same capture.
+    pub reference_tau_s: f64,
+    /// RFC3339 timestamp of that calibrate capture.
+    pub measured_at: String,
+    pub output_port: String,
+    pub input_port: String,
+    pub reference_output_port: String,
+    pub reference_input_port: String,
+    pub sample_rate_hz: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_size: Option<u32>,
+    /// How the offset's device-enumeration epoch relates to this capture's,
+    /// frozen at capture. A flag, never a gate (#461's rule).
+    pub enumeration: EnumerationCheck,
 }
 
 /// Accepts either the v4 shape (`data` is a JSON array of
@@ -347,7 +425,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 11"));
+        assert!(json.contains("\"schema_version\": 12"));
     }
 
     #[test]
@@ -371,7 +449,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 11"));
+            assert!(json.contains("\"schema_version\": 12"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
@@ -459,6 +537,44 @@ mod tests {
             "vrms_at_0dbfs_in": 0.5, "ref_freq_hz": 1000.0, "ref_level_dbfs": -10.0}"#;
         let snap: CalibrationSnapshot = serde_json::from_str(v10).unwrap();
         assert_eq!(snap.voltage_check, None);
+    }
+
+    /// #544: v12's `inter_pair_offset` round-trips in every state, and a v11
+    /// report decodes without it.
+    #[test]
+    fn v12_inter_pair_offset_round_trips_and_v11_decodes_without_it() {
+        let states = [
+            InterPairOffset::Measured(MeasuredInterPairOffset {
+                offset_s: 46.0 / 96_000.0,
+                tau_s: 1757.0 / 96_000.0,
+                reference_tau_s: 1711.0 / 96_000.0,
+                measured_at: "2026-09-21T16:05:40Z".into(),
+                output_port: "system:playback_1".into(),
+                input_port: "system:capture_1".into(),
+                reference_output_port: "system:playback_2".into(),
+                reference_input_port: "system:capture_2".into(),
+                sample_rate_hz: 96_000,
+                period_size: Some(256),
+                enumeration: EnumerationCheck::Same,
+            }),
+            InterPairOffset::Identity,
+            InterPairOffset::NotConfigured,
+            InterPairOffset::Unavailable {
+                reason: "[out0_in0] against ref [out1_in1]; no \u{3c4} on file for this pair"
+                    .into(),
+            },
+        ];
+        for state in states {
+            let mut r = sample_impulse_response_report();
+            r.inter_pair_offset = Some(state);
+            let json = r.to_json().unwrap();
+            assert!(json.contains("\"inter_pair_offset\""), "{json}");
+            assert_eq!(MeasurementReport::from_json(&json).unwrap(), r);
+        }
+        let mut v11 = serde_json::to_value(sample_impulse_response_report()).unwrap();
+        v11["schema_version"] = serde_json::json!(11);
+        let r = MeasurementReport::from_value(v11).unwrap();
+        assert_eq!(r.inter_pair_offset, None);
     }
 
     #[test]

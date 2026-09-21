@@ -3,14 +3,17 @@
 //! (#376). Computed once here so `ac-cli`'s text read-out and
 //! `ac-scene`'s sweep-IR panel cannot disagree about a capture.
 
-use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
+use super::{
+    GateParams, InterPairOffset, InterfaceLatency, MeasurementData, MeasurementReport,
+    ReferenceLatency,
+};
 use crate::measurement::sweep::{
     band_limit_available, band_limit_top_hz, ir_peak, lobe_window_samples, pre_impulse_snr_db,
     second_lobe, zero_phase_high_pass, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput,
     OnsetEstimate, OnsetPick, WindowLimit, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
 };
 use crate::shared::calibration::{
-    compare_tau_readings, EnumerationCheck, LayerVerdict, TauComparison, TauDisagreement,
+    compare_tau_readings, EnumerationCheck, TauComparison, TauDisagreement,
 };
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
@@ -462,11 +465,10 @@ impl MeasurementReport {
         // rather than measured with this IR.
         let causal_bound = causal_bound(self, centre, *sample_rate_hz);
 
-        // #359: corroborate this capture's same-capture reference τ against
-        // what `calibrate` has on file for that pair, before any flight
-        // time is derived from it. A single `plot_ir` capture is one
-        // client lifetime; the check gates the only arrival subtraction
-        // this report performs.
+        // #359: compare this capture's same-capture reference τ against
+        // what `calibrate` has on file for that pair. Since #544 this is the
+        // drift readout — how far the reference moved since it was stored —
+        // and it withholds nothing: the live reading is what is subtracted.
         let arrival_check = arrival_check(self, *sample_rate_hz);
 
         let onset = crate::measurement::sweep::estimate_onset(
@@ -490,54 +492,27 @@ impl MeasurementReport {
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
 
-        // #359: the τ subtraction this report can offer — gated by
-        // `arrival_check`. `interface_latency` must be a measured τ for
-        // *this* capture pair, and the reference-pair check must not have
-        // found a disagreement: on `PeriodShift`/`Mismatch` the stored τ is
-        // shown to be from a different lifetime state than this capture, so
-        // subtracting it would reproduce the exact silently-wrong number
-        // this issue exists to stop. Under `Unchecked` the flight time is
-        // still produced — the check simply could not run — never withheld
-        // for a reason it does not have.
-        //
-        // #466: a stored τ the session check refused is never subtracted,
-        // whatever `arrival_check` says — the value stays in the report,
-        // the flight time derived from it does not.
+        // #544: the latency the flight time subtracts is this capture's own
+        // reference leg plus the stored inter-pair offset — never the stored
+        // absolute τ in `interface_latency`, in any branch. `arrival_check`
+        // (live vs stored reference) is the drift readout and gates nothing,
+        // and a refused `interface_latency.session_check` no longer withholds
+        // anything, since the value it judged is not subtracted.
         //
         // #537: an arrival its cross-check disputes is never subtracted
-        // from either — the pick may not be the first path's delay.
+        // from — the pick may not be the first path's delay.
         //
         // #537 architect revision 3: nor is one that falls outside the
-        // window a typed distance allows. The check scores the stored-τ
+        // window a typed distance allows. The check scores the live-basis
         // subtraction whether or not another layer withholds it, so a
         // read-out can name every reason a flight time is missing.
-        let distance_check = distance_check(self, arrival_s);
-        let flight_time_s = match (&self.interface_latency, &arrival_check) {
+        let latency_basis = latency_basis(self);
+        let distance_check = distance_check(self, arrival_s, &latency_basis);
+        let flight_time_s = match &latency_basis {
             _ if arrival_cross_check.withholds_flight_time() => None,
             _ if distance_check.withholds_flight_time() => None,
-            (Some(InterfaceLatency::Measured(m)), _)
-                if m.session_check
-                    .as_ref()
-                    .is_some_and(LayerVerdict::is_refused) =>
-            {
-                None
-            }
-            (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Agree)
-            | (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Unchecked { .. }) => {
-                Some(arrival_s - m.tau_s)
-            }
-            _ => None,
-        };
-        // #461: the capture pair's stored-τ enumeration check, carried beside
-        // the flight time it qualifies. Read as frozen; never recomputed.
-        let interface_latency_enumeration = match &self.interface_latency {
-            Some(InterfaceLatency::Measured(m)) => m.enumeration.clone(),
-            _ => None,
-        };
-        // #466: the session check's verdict on that same stored τ, frozen.
-        let interface_latency_check = match &self.interface_latency {
-            Some(InterfaceLatency::Measured(m)) => m.session_check.clone(),
-            _ => None,
+            LatencyBasis::Live { .. } => latency_basis.latency_s().map(|l| arrival_s - l),
+            LatencyBasis::Withheld(_) => None,
         };
 
         Some(IrStats {
@@ -559,10 +534,9 @@ impl MeasurementReport {
             delay_samples,
             arrival_s,
             arrival_check,
+            latency_basis,
             flight_time_s,
             distance_check,
-            interface_latency_enumeration,
-            interface_latency_check,
             pre_impulse_snr_db,
             gate_window_s,
             gate_f_low_hz,
@@ -675,6 +649,46 @@ pub(super) fn arrival_check(report: &MeasurementReport, sample_rate_hz: u32) -> 
     }
 }
 
+/// The latency [`IrStats::flight_time_s`] subtracts, or why there is none
+/// (#544). Checked in this order, first miss wins: the report predates
+/// v12; no reference loopback is configured; this capture's reference leg
+/// has no valid reading; no inter-pair offset is on file for this pair.
+/// The stored absolute τ (`interface_latency`) is never read.
+pub(super) fn latency_basis(report: &MeasurementReport) -> LatencyBasis {
+    let offset = match &report.inter_pair_offset {
+        None => return LatencyBasis::Withheld(WithheldBasis::PredatesV12),
+        Some(InterPairOffset::NotConfigured) => {
+            return LatencyBasis::Withheld(WithheldBasis::NoReference)
+        }
+        Some(InterPairOffset::Identity) => Ok(LiveOffset::Identity),
+        Some(InterPairOffset::Measured(m)) => Ok(LiveOffset::Measured {
+            offset_s: m.offset_s,
+            enumeration: m.enumeration.clone(),
+        }),
+        Some(InterPairOffset::Unavailable { reason }) => Err(reason.clone()),
+    };
+    let reference_tau_s = match &report.reference_latency {
+        Some(ReferenceLatency::Measured(r)) => r.tau_s,
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            return LatencyBasis::Withheld(WithheldBasis::ReferenceUnavailable {
+                reason: reason.clone(),
+            })
+        }
+        None => {
+            return LatencyBasis::Withheld(WithheldBasis::ReferenceUnavailable {
+                reason: "no same-capture reference in this report".to_string(),
+            })
+        }
+    };
+    match offset {
+        Ok(offset) => LatencyBasis::Live {
+            reference_tau_s,
+            offset,
+        },
+        Err(reason) => LatencyBasis::Withheld(WithheldBasis::OffsetNotMeasured { reason }),
+    }
+}
+
 /// Build the onset search's causal bound for `report` (#460).
 ///
 /// Enforced only when the report carries a measured same-capture
@@ -683,6 +697,11 @@ pub(super) fn arrival_check(report: &MeasurementReport, sample_rate_hz: u32) -> 
 /// report without the field (written before schema v7, or by a producer
 /// with no reference) counts as the reference missing. The stored
 /// `interface_latency` is deliberately not read: see #461.
+///
+/// #544: a measured inter-pair offset is added, so the bound sits where the
+/// capture pair's own flight would start. Any other offset state adds
+/// nothing — zero was the bound's implicit assumption before #544, and the
+/// bound stays a diagnostic.
 pub(super) fn causal_bound(
     report: &MeasurementReport,
     centre: usize,
@@ -702,7 +721,12 @@ pub(super) fn causal_bound(
         (Ok(reference_tau_s), Some(distance_m)) => {
             let temperature_c = report.position.as_ref().and_then(|p| p.temperature_c);
             let c = crate::shared::conversions::speed_of_sound_from_config(temperature_c);
-            let offset = (reference_tau_s + distance_m / c) * sample_rate_hz as f64;
+            let pair_offset_s = match &report.inter_pair_offset {
+                Some(InterPairOffset::Measured(m)) => m.offset_s,
+                _ => 0.0,
+            };
+            let offset =
+                (reference_tau_s + pair_offset_s + distance_m / c) * sample_rate_hz as f64;
             CausalBound::Enforced {
                 index: (centre as f64 + offset).round().max(0.0) as usize,
                 inputs: BoundInputs {
@@ -723,12 +747,17 @@ pub(super) fn causal_bound(
     }
 }
 
-/// Score `arrival_s − τ` against the typed distance (#537 architect
-/// revision 3, operator ruling 3). τ is the capture pair's stored
-/// `interface_latency` — the one [`IrStats::flight_time_s`] subtracts — not
-/// the same-capture reference: this checks the flight time, not the onset
-/// bound. Runs whether or not another layer withholds the flight time.
-pub(super) fn distance_check(report: &MeasurementReport, arrival_s: f64) -> DistanceCheck {
+/// Score `arrival_s − latency` against the typed distance (#537 architect
+/// revision 3, operator ruling 3). The latency is `basis`'s — the same-
+/// capture reference plus the inter-pair offset (#544), the one
+/// [`IrStats::flight_time_s`] subtracts. Runs whether or not another layer
+/// withholds the flight time; [`DistanceCheck::NoLatency`] when the basis
+/// has no latency.
+pub(super) fn distance_check(
+    report: &MeasurementReport,
+    arrival_s: f64,
+    basis: &LatencyBasis,
+) -> DistanceCheck {
     let position = report.position.as_ref();
     let Some(distance_m) = position.and_then(|p| p.distance_m) else {
         return DistanceCheck::NotGiven;
@@ -736,12 +765,12 @@ pub(super) fn distance_check(report: &MeasurementReport, arrival_s: f64) -> Dist
     if !(distance_m.is_finite() && distance_m > 0.0) {
         return DistanceCheck::NotPositive { distance_m };
     }
-    let Some(InterfaceLatency::Measured(m)) = &report.interface_latency else {
+    let Some(latency_s) = basis.latency_s() else {
         return DistanceCheck::NoLatency { distance_m };
     };
     let temperature_c = position.and_then(|p| p.temperature_c);
     let window = DistanceWindow::new(distance_m, temperature_c);
-    let excess_s = arrival_s - m.tau_s - window.expected_s;
+    let excess_s = arrival_s - latency_s - window.expected_s;
     if excess_s < window.low_s {
         DistanceCheck::TooEarly { window, excess_s }
     } else if excess_s > window.high_s {
@@ -941,51 +970,36 @@ pub struct IrStats {
     /// it still contains any uncorrected interface latency, which is why
     /// it must not be converted to a distance without a calibrated τ.
     pub arrival_s: f64,
-    /// Corroboration of this capture's same-capture reference τ against the
-    /// stored τ `calibrate` has on file for that pair (#359). Gates
-    /// [`Self::flight_time_s`]: a disagreement means the stored value is
-    /// from a lifetime whose graph state does not match this capture's, and
-    /// subtracting it would silently reproduce the fault this check exists
-    /// to catch.
+    /// This capture's same-capture reference τ against the stored τ
+    /// `calibrate` has on file for that pair (#359). Since #544 the **drift
+    /// readout**: how far the reference moved since it was stored. It gates
+    /// nothing — [`Self::flight_time_s`] subtracts the live reading, so a
+    /// moved reference is the case compensation handles, not a fault.
     pub arrival_check: ArrivalCheck,
-    /// `arrival_s − interface_latency.tau_s` — the one τ subtraction this
-    /// report can offer: a peak arrival minus a peak-picked τ. With the
+    /// What [`Self::flight_time_s`] subtracts, or why it cannot (#544): this
+    /// capture's reference latency plus the stored inter-pair offset, never
+    /// the stored absolute τ of the capture pair.
+    pub latency_basis: LatencyBasis,
+    /// `arrival_s − (reference latency + inter-pair offset)` (#544): a peak
+    /// arrival minus this capture's own peak-picked reference τ and the
+    /// offset between the two pairs, measured once in one capture. With the
     /// arrival band-limited (#537) it is a **band-limited delay estimate at
     /// the corner** of [`Self::arrival_source`]: the same IR reads
     /// differently at another corner, and nothing here identifies the
     /// direct path. [`Self::distance_check`] is the only evidence about the
     /// path, and it says only whether the number fits the typed distance.
+    ///
     /// `None` whenever [`Self::arrival_cross_check`] or
-    /// [`Self::distance_check`] withholds it.
-    /// `Some` only when `interface_latency` is a measured
-    /// τ for *this* capture pair **and** `arrival_check` is not a
-    /// disagreement; `None` on `PeriodShift`/`Mismatch` even though
-    /// `interface_latency` is measured, and `None` whenever no τ was
-    /// resolved for this capture pair at all. Still `Some` under
-    /// `ArrivalCheck::Unchecked` — the check did not run, which is not a
-    /// reason to withhold a value it never disputed. `None` whenever
-    /// [`Self::interface_latency_check`] is refused (#466), whatever
-    /// `arrival_check` says.
+    /// [`Self::distance_check`] withholds it, and whenever
+    /// [`Self::latency_basis`] is [`LatencyBasis::Withheld`] — no reference
+    /// configured, no valid reference reading, no offset on file, or a
+    /// report predating v12. There is no fallback to the stored τ.
     pub flight_time_s: Option<f64>,
     /// The flight time scored against the typed `position.distance_m`
     /// (#537 architect revision 3). [`DistanceCheck::TooEarly`] and
     /// [`DistanceCheck::TooLate`] withhold [`Self::flight_time_s`]. Scored
     /// even when another layer withholds it, so every reason can be named.
     pub distance_check: DistanceCheck,
-    /// How the capture pair's stored τ — the one [`Self::flight_time_s`]
-    /// subtracts — related to this capture's device-enumeration epoch
-    /// (#461), copied from `interface_latency`. `None` when that is not a
-    /// measured τ, or when the report predates schema v10. A flag, not a
-    /// gate: the flight time is produced either way, and
-    /// [`Self::interface_latency_unverified`] says whether it must be
-    /// qualified.
-    pub interface_latency_enumeration: Option<EnumerationCheck>,
-    /// The session check's verdict on the capture pair's stored τ (#466),
-    /// copied from `interface_latency.session_check`. Read as frozen, never
-    /// recomputed. `None` when that is not a measured τ, or when the report
-    /// predates schema v11. A refused verdict withholds
-    /// [`Self::flight_time_s`].
-    pub interface_latency_check: Option<LayerVerdict>,
     /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
     /// no pre-impulse energy was measurable at all (silent floor).
     pub pre_impulse_snr_db: f64,
@@ -1017,18 +1031,72 @@ impl IrStats {
     pub fn broadband_delta_samples(&self) -> Option<i64> {
         self.arrival_cross_check.gap()
     }
+}
 
-    /// Whether [`Self::flight_time_s`] rests on a stored τ that was not
-    /// shown to belong to this capture's device enumeration (#461): any
-    /// check other than `Same`, including a missing one. `false` when no
-    /// flight time was produced — there is nothing to qualify.
-    pub fn interface_latency_unverified(&self) -> bool {
-        self.flight_time_s.is_some()
-            && !matches!(
-                self.interface_latency_enumeration,
-                Some(EnumerationCheck::Same)
-            )
+/// What an [`IrStats::flight_time_s`] is measured against (#544).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LatencyBasis {
+    /// This capture's reference leg, plus the inter-pair offset. The live
+    /// reading carries whatever converter, transport and graph delay the
+    /// capture had; the offset carries what the two pairs do not share.
+    Live {
+        reference_tau_s: f64,
+        offset: LiveOffset,
+    },
+    /// No latency to subtract; the flight time is withheld.
+    Withheld(WithheldBasis),
+}
+
+impl LatencyBasis {
+    /// `reference_tau_s + offset_s` when live.
+    pub fn latency_s(&self) -> Option<f64> {
+        match self {
+            LatencyBasis::Live {
+                reference_tau_s,
+                offset,
+            } => Some(reference_tau_s + offset.offset_s()),
+            LatencyBasis::Withheld(_) => None,
+        }
     }
+}
+
+/// The offset half of a [`LatencyBasis::Live`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveOffset {
+    /// The capture pair is the reference pair: zero by definition.
+    Identity,
+    /// A stored offset for this exact topology. `enumeration` is its
+    /// epoch against this capture's, a flag and never a gate.
+    Measured {
+        offset_s: f64,
+        enumeration: EnumerationCheck,
+    },
+}
+
+impl LiveOffset {
+    pub fn offset_s(&self) -> f64 {
+        match self {
+            LiveOffset::Identity => 0.0,
+            LiveOffset::Measured { offset_s, .. } => *offset_s,
+        }
+    }
+}
+
+/// Why [`LatencyBasis`] has no latency, in the order
+/// `latency_basis` checks them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WithheldBasis {
+    /// The report predates schema v12: no offset was recorded.
+    PredatesV12,
+    /// No reference loopback was configured for the capture.
+    NoReference,
+    /// The reference leg gave no valid reading in this capture (#471's
+    /// derived floor, the edge or xrun gates, or no leg captured).
+    /// `reason` is the reference's own, `<observation>[; check: …]`.
+    ReferenceUnavailable { reason: String },
+    /// No inter-pair offset on file for this topology. `reason` is
+    /// [`super::InterPairOffset::Unavailable`]'s, naming the pair.
+    OffsetNotMeasured { reason: String },
 }
 
 /// Verdict on whether an [`IrStats`] peak is a trustworthy deconvolution
@@ -1061,9 +1129,9 @@ pub enum ArrivalSource {
 /// The band-limited arrival's guards and its cross-check against the
 /// broadband IR (#537, operator option 4, architect revision 2). The
 /// standings are checked in declaration order and the first that fires is
-/// the result. They only add to the existing gates (#376 `verdict`, #359
-/// `arrival_check`, #466 session check): a flight time is produced only
-/// when every layer allows one. Every standing that doubts the pick
+/// the result. They only add to the existing gates (#376 `verdict`, #544
+/// `latency_basis`): a flight time is produced only when every layer
+/// allows one. Every standing that doubts the pick
 /// withholds; only `BroadbandLater` marks a produced value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrivalCrossCheck {
@@ -1179,8 +1247,8 @@ pub enum DistanceCheck {
     /// A distance was typed but is not a finite positive length (a `0m`
     /// cable, say): nothing to check against. Not a verdict.
     NotPositive { distance_m: f64 },
-    /// A distance was typed but no stored τ exists, so there is no flight
-    /// time to check. Not a verdict.
+    /// A distance was typed but [`IrStats::latency_basis`] has no latency
+    /// (#544), so there is no flight time to check. Not a verdict.
     NoLatency { distance_m: f64 },
     /// Inside the window.
     Consistent {
@@ -1259,6 +1327,8 @@ pub enum OnsetStanding {
 /// exact multiple of the period — the same distinction #347 draws for
 /// `calibrate`'s own τ readings, via the same comparator
 /// ([`compare_tau_readings`]).
+///
+/// Since #544 a drift readout only: no variant withholds the flight time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrivalCheck {
     /// The two readings match to the whole sample.
@@ -1280,6 +1350,7 @@ mod tests {
     use super::super::fixtures::*;
     use super::super::*;
     use super::*;
+    use crate::shared::calibration::LayerVerdict;
 
     /// The arrival source every band-limited fixture here expects (#537).
     const BAND_LIMITED: ArrivalSource = ArrivalSource::BandLimitedPeak {
@@ -1658,8 +1729,9 @@ mod tests {
         assert!((stats.arrival_s - stats.delay_samples as f64 / sr as f64).abs() < 1e-15);
     }
 
-    /// #346: flight time is the peak arrival minus the stored peak-picked
-    /// τ, as on main, even when every onset condition holds. The
+    /// #346: flight time is the peak arrival minus the peak-picked latency
+    /// (#544: the live reference, here with the capture pair as the
+    /// reference pair), even when every onset condition holds. The
     /// onset-derived value is computed inline and must differ.
     #[test]
     fn ir_stats_flight_time_subtracts_tau_from_the_peak_over_an_unscored_onset() {
@@ -1676,14 +1748,15 @@ mod tests {
         ir[peak_true] = 1.0;
         let mut r = ir_report_with_custom_ir(ir, sr);
         let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        // The bound sits at `centre + τ + d/c`, so d is shortened by τ to
+        // keep it at `bound_index`.
         r.position = Some(PositionSnapshot {
             temperature_c: Some(20.0),
-            distance_m: Some((bound_index - centre) as f64 / sr as f64 * c),
+            distance_m: Some((bound_index - centre - 30) as f64 / sr as f64 * c),
             ..Default::default()
         });
-        r.reference_latency = Some(measured_reference(0.0));
         let tau_s = 30.0 / sr as f64;
-        r.interface_latency = Some(measured_tau(tau_s));
+        with_live_latency(&mut r, tau_s);
 
         let stats = r.ir_stats().unwrap();
         assert_eq!(stats.onset_standing, OnsetStanding::Unscored, "test setup");
@@ -2247,14 +2320,13 @@ mod tests {
 
     // ─── #359: arrival_check / flight_time_s ─────────────────────────────
 
-    /// Moved down from `ac-scene::sweep_ir` (#359): the τ subtraction
-    /// itself now lives here, gated by `arrival_check`, so `ac-cli` and
-    /// `ac-scene` both read one already-checked number rather than each
-    /// re-deriving it. No same-capture reference at all reads `Unchecked`
-    /// (nothing to check against, not a dispute) — the flight time is
-    /// still produced from the capture's own `interface_latency`.
+    /// #544 AC9 (4), inverting the #359 test that asserted the rejected
+    /// behaviour: with no reference loopback configured, a measured stored
+    /// τ for the capture pair no longer produces a flight time. The rejected
+    /// rule (`arrival − stored τ`, 0.25 ms − 0.1 ms) is computed and shown to
+    /// give one, so this test can fail.
     #[test]
-    fn ir_stats_flight_time_is_tau_corrected_when_interface_latency_is_measured() {
+    fn no_reference_configured_withholds_the_flight_time_despite_a_stored_tau() {
         // #537: 20 kHz, so Nyquist leaves the band an octave above the
         // arrival's 2 kHz corner (at 4 kHz the flight time is withheld).
         let sr = 20_000u32;
@@ -2263,20 +2335,165 @@ mod tests {
         // delay_samples = 5 -> arrival_s = 0.25 ms at 20 kHz.
         let mut r = ir_report_with_peak(window_len, centre + 5, 1.0, 0.0, sr);
         r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
+        r.reference_latency = Some(ReferenceLatency::Unavailable {
+            reason: "no reference configured (ac setup reference)".into(),
+        });
+        r.inter_pair_offset = Some(InterPairOffset::NotConfigured);
         let stats = r.ir_stats().unwrap();
         assert!(
             matches!(stats.arrival_check, ArrivalCheck::Unchecked { .. }),
-            "no reference at all must read Unchecked, not a disagreement: {:?}",
+            "{:?}",
             stats.arrival_check
         );
-        let flight_ms = stats
-            .flight_time_s
-            .expect("Unchecked must still produce a flight time")
-            * 1000.0;
-        assert!(
-            (flight_ms - 0.15).abs() < 1e-9,
-            "expected 0.25ms - 0.1ms = 0.15ms, got {flight_ms}"
+        assert_eq!(
+            stats.latency_basis,
+            LatencyBasis::Withheld(WithheldBasis::NoReference)
         );
+        assert_eq!(stats.flight_time_s, None);
+
+        let rejected = match &r.interface_latency {
+            Some(InterfaceLatency::Measured(m)) => Some(stats.arrival_s - m.tau_s),
+            _ => None,
+        };
+        let rejected_ms = rejected.expect("the stored-τ rule gives a value") * 1000.0;
+        assert!((rejected_ms - 0.15).abs() < 1e-9, "{rejected_ms}");
+    }
+
+    /// A 96 kHz IR with a single spike at `centre + arrival_samples`.
+    fn spike_at(arrival_samples: usize) -> MeasurementReport {
+        let window_len = 8192;
+        ir_report_with_peak(window_len, window_len / 2 + arrival_samples, 1.0, 0.0, 96_000)
+    }
+
+    /// #544 AC9 (1), tested against the rejected rule. The transport moves
+    /// the reference leg 1711 → 1535 (the 2026-09-21 values) and the
+    /// arrival with it, since both pairs share it. The offset is 0 and the
+    /// stored τ of both pairs stays 1711. The live flight time equals the
+    /// one from an unmoved reference; the rejected `arrival − stored τ` is
+    /// 176 samples off it.
+    #[test]
+    fn a_moved_reference_leaves_the_flight_time_unchanged() {
+        let sr = 96_000.0;
+        let flight = 335usize;
+        let stored = 1711usize;
+        let capture = |live: usize| {
+            let mut r = spike_at(live + flight);
+            r.interface_latency = Some(measured_tau(stored as f64 / sr));
+            r.reference_latency = Some(measured_reference(live as f64 / sr));
+            r.reference_stored_latency = Some(stored_reference_tau(stored as f64 / sr, Some(256)));
+            r.inter_pair_offset = Some(measured_offset(0.0));
+            r
+        };
+        let unmoved = capture(1711).ir_stats().unwrap();
+        let moved_report = capture(1535);
+        let moved = moved_report.ir_stats().unwrap();
+        assert_eq!(unmoved.arrival_check, ArrivalCheck::Agree);
+        assert!(
+            matches!(moved.arrival_check, ArrivalCheck::Mismatch(ref d) if d.delta_samples == -176),
+            "the drift readout names the move: {:?}",
+            moved.arrival_check
+        );
+        let ft_unmoved = unmoved.flight_time_s.expect("unmoved: produced");
+        let ft_moved = moved.flight_time_s.expect("a moved reference withholds nothing");
+        assert_eq!((ft_unmoved * sr).round(), flight as f64);
+        assert_eq!((ft_moved * sr).round(), flight as f64);
+
+        let Some(InterfaceLatency::Measured(m)) = &moved_report.interface_latency else {
+            unreachable!()
+        };
+        let rejected = moved.arrival_s - m.tau_s;
+        assert_eq!(((ft_moved - rejected) * sr).round(), 176.0);
+    }
+
+    /// #544: a non-zero offset keeps its sign. The measurement pair's path
+    /// is 46 samples longer than the reference's (README's measured
+    /// converter-channel asymmetry), so the arrival is 46 samples later and
+    /// the flight time does not move. Subtracting the offset with the wrong
+    /// sign would put it 92 samples off.
+    #[test]
+    fn a_positive_offset_is_subtracted_with_the_reference() {
+        let sr = 96_000.0;
+        let (live, offset, flight) = (1711usize, 46usize, 335usize);
+        let mut r = spike_at(live + offset + flight);
+        r.reference_latency = Some(measured_reference(live as f64 / sr));
+        r.inter_pair_offset = Some(measured_offset(offset as f64 / sr));
+        let stats = r.ir_stats().unwrap();
+        let ft = stats.flight_time_s.expect("produced");
+        assert_eq!((ft * sr).round(), flight as f64);
+        let wrong_sign = stats.arrival_s - (live as f64 - offset as f64) / sr;
+        assert_eq!(((wrong_sign - ft) * sr).round(), 92.0);
+        match stats.latency_basis {
+            LatencyBasis::Live {
+                offset: LiveOffset::Measured { offset_s, .. },
+                ..
+            } => assert_eq!((offset_s * sr).round(), 46.0),
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    /// #544 AC9 (2): a reference leg without a valid reading withholds the
+    /// flight time — even with a measured offset and a stored τ in the
+    /// report — and the basis carries the reference's reason.
+    #[test]
+    fn an_unavailable_reference_withholds_the_flight_time_and_names_why() {
+        let mut r = spike_at(2046);
+        r.interface_latency = Some(measured_tau(1711.0 / 96_000.0));
+        let reason = "pre-impulse SNR 15.7 dB below the 25.5 dB derived floor";
+        r.reference_latency = Some(ReferenceLatency::Unavailable {
+            reason: reason.into(),
+        });
+        r.inter_pair_offset = Some(measured_offset(0.0));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, None);
+        assert_eq!(
+            stats.latency_basis,
+            LatencyBasis::Withheld(WithheldBasis::ReferenceUnavailable {
+                reason: reason.into()
+            })
+        );
+    }
+
+    /// #544 AC9 (3), the no-silent-fallback case: no offset on file, with a
+    /// measured stored τ for the capture pair *and* a valid live reference
+    /// in the report. Withheld, the pair named; the stored τ is not used.
+    #[test]
+    fn an_unmeasured_offset_withholds_the_flight_time_with_the_pair_named() {
+        let sr = 96_000.0;
+        let mut r = spike_at(2046);
+        r.interface_latency = Some(measured_tau(1711.0 / sr));
+        r.reference_latency = Some(measured_reference(1711.0 / sr));
+        let reason = "[out0_in0] against ref [out1_in1]; \u{3c4} on file, reference leg not \
+                      measured with it; check: `ac calibrate` on this pair, loopback in place";
+        r.inter_pair_offset = Some(InterPairOffset::Unavailable {
+            reason: reason.into(),
+        });
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, None);
+        match &stats.latency_basis {
+            LatencyBasis::Withheld(WithheldBasis::OffsetNotMeasured { reason }) => {
+                assert!(reason.starts_with("[out0_in0] against ref [out1_in1]"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// #544: a measured offset moves the causal bound by the offset; an
+    /// identity offset leaves it where it was.
+    #[test]
+    fn a_measured_offset_moves_the_causal_bound() {
+        let sr = 96_000.0;
+        let mut r = spike_at(2046);
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some(1.0),
+            ..Default::default()
+        });
+        r.reference_latency = Some(measured_reference(1711.0 / sr));
+        r.inter_pair_offset = Some(InterPairOffset::Identity);
+        let identity = r.ir_stats().unwrap().causal_bound.min_admissible_index();
+        r.inter_pair_offset = Some(measured_offset(46.0 / sr));
+        let measured = r.ir_stats().unwrap().causal_bound.min_admissible_index();
+        assert_eq!(measured.unwrap() - identity.unwrap(), 46);
     }
 
     /// #359 AC4: a same-capture reference reading exactly one period ahead
@@ -2357,52 +2574,56 @@ mod tests {
         }
     }
 
-    /// The test that fails if the gate is removed (#359): a detected period
-    /// shift must withhold the flight time even though `interface_latency`
-    /// is measured for this capture pair — the stored reference τ is shown
-    /// to be from a different lifetime state, and subtracting it would
-    /// reproduce this issue's own failure shape.
+    /// Inverting the #359 gate (#544): a detected period shift is now a
+    /// drift readout and no longer withholds the flight time, which is
+    /// taken from the shifted live reading itself. The #359 rule withheld
+    /// it; that rule is computed here and gives `None`.
     #[test]
-    fn arrival_check_period_shift_withholds_the_flight_time() {
+    fn arrival_check_period_shift_no_longer_withholds_the_flight_time() {
         let sr = 48_000u32;
         let period = 1024u32;
         let stored_tau_s = 0.0119;
         let same_capture_tau_s = stored_tau_s + period as f64 / sr as f64;
-        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        let mut r = ir_report_with_peak(4096, 3000, 1.0, 0.0, sr);
         r.interface_latency = Some(measured_tau(0.001));
         r.reference_latency = Some(measured_reference(same_capture_tau_s));
         r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(period)));
+        r.inter_pair_offset = Some(measured_offset(0.0));
         let stats = r.ir_stats().unwrap();
         assert!(matches!(stats.arrival_check, ArrivalCheck::PeriodShift(_)));
-        assert_eq!(
-            stats.flight_time_s, None,
-            "a period shift must withhold the flight time even though \
-             interface_latency is measured"
-        );
+        let ft = stats.flight_time_s.expect("a period shift withholds nothing");
+        assert!((ft - (stats.arrival_s - same_capture_tau_s)).abs() < 1e-15);
+
+        let rejected = match &stats.arrival_check {
+            ArrivalCheck::Agree | ArrivalCheck::Unchecked { .. } => Some(ft),
+            _ => None,
+        };
+        assert_eq!(rejected, None, "the #359 rule withheld it");
     }
 
-    /// A v8 report (written before this field existed) reads `Unchecked` —
-    /// not a fault, just nothing to compare — and the flight time still
-    /// follows `interface_latency` alone, unaffected by a check that never
-    /// ran.
+    /// A report written before v12 records no offset: its re-derived flight
+    /// time is withheld as predating v12, whatever stored τ and live
+    /// reference it carries. Before #544 this report produced
+    /// `arrival − stored τ`.
     #[test]
-    fn arrival_check_a_pre_v9_report_is_unchecked_but_flight_time_still_follows_interface_latency()
-    {
+    fn a_pre_v12_report_withholds_the_flight_time() {
         let sr = 48_000u32;
         let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.schema_version = 11;
         r.interface_latency = Some(measured_tau(0.001));
         r.reference_latency = Some(measured_reference(0.002));
         r.reference_stored_latency = None; // v8 shape: field absent
+        r.inter_pair_offset = None;
         let stats = r.ir_stats().unwrap();
         assert!(matches!(
             stats.arrival_check,
             ArrivalCheck::Unchecked { .. }
         ));
         assert_eq!(
-            stats.flight_time_s,
-            Some(stats.arrival_s - 0.001),
-            "Unchecked must not withhold a flight time it never disputed"
+            stats.latency_basis,
+            LatencyBasis::Withheld(WithheldBasis::PredatesV12)
         );
+        assert_eq!(stats.flight_time_s, None);
     }
 
     // ─── #466: interface_latency.session_check ───────────────────────────
@@ -2435,125 +2656,85 @@ mod tests {
         }
     }
 
-    /// R6-3 (i): a refused τ with no reference check withholds the flight
-    /// time. The rejected implementation — the #359 rule without the
-    /// verdict — is computed on the same report and gives a value, so the
-    /// test sees the difference.
+    /// Inverting R6-3 (i)–(iii) (#544): a refused session check on the
+    /// capture pair's stored τ no longer withholds the flight time, with or
+    /// without a propagated `via`, because that stored τ is no longer
+    /// subtracted. The #466 rule withheld it on the same report.
     #[test]
-    fn a_refused_session_check_withholds_the_flight_time_under_unchecked() {
-        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
-        r.interface_latency = Some(with_session_check(0.001, Some(refused_tau(None))));
-        let stats = r.ir_stats().unwrap();
-        assert!(matches!(
-            stats.arrival_check,
-            ArrivalCheck::Unchecked { .. }
-        ));
-        assert_eq!(stats.flight_time_s, None);
-        assert_eq!(stats.interface_latency_check, Some(refused_tau(None)));
-        assert!(!stats.interface_latency_unverified());
-
-        let rejected = match (&r.interface_latency, &stats.arrival_check) {
-            (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Unchecked { .. }) => {
-                Some(stats.arrival_s - m.tau_s)
-            }
-            _ => None,
-        };
-        assert!(rejected.is_some(), "the rule without the verdict applies τ");
-    }
-
-    /// R6-3 (ii): an unverified verdict is not a refusal; the flight time is
-    /// produced as before.
-    #[test]
-    fn an_unverified_session_check_keeps_the_flight_time() {
-        use crate::shared::calibration::session::UnverifiedCause;
-        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
-        let verdict = LayerVerdict::unverified(
-            UnverifiedCause::NoLoopback,
-            "no reference loopback configured",
-        );
-        r.interface_latency = Some(with_session_check(0.001, Some(verdict.clone())));
-        let stats = r.ir_stats().unwrap();
-        assert_eq!(stats.flight_time_s, Some(stats.arrival_s - 0.001));
-        assert_eq!(stats.interface_latency_check, Some(verdict));
-    }
-
-    /// R6-3 (iii): a propagated refusal withholds the flight time even when
-    /// the reference check agrees.
-    #[test]
-    fn a_refusal_via_the_loopback_withholds_the_flight_time_under_agree() {
+    fn a_refused_session_check_no_longer_withholds_the_flight_time() {
         let sr = 48_000u32;
-        let stored_tau_s = 0.0119;
-        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
-        r.interface_latency = Some(with_session_check(
-            0.001,
-            Some(refused_tau(Some("out1_in1"))),
-        ));
-        r.reference_latency = Some(measured_reference(stored_tau_s));
-        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(1024)));
-        let stats = r.ir_stats().unwrap();
-        assert_eq!(stats.arrival_check, ArrivalCheck::Agree);
-        assert_eq!(stats.flight_time_s, None);
-    }
-
-    /// R6-3 (iv): a report from before v11 carries no verdict and reads as
-    /// it did.
-    #[test]
-    fn a_report_without_a_session_check_keeps_the_flight_time() {
-        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
-        r.interface_latency = Some(with_session_check(0.001, None));
-        let stats = r.ir_stats().unwrap();
-        assert_eq!(stats.flight_time_s, Some(stats.arrival_s - 0.001));
-        assert_eq!(stats.interface_latency_check, None);
-    }
-
-    // ─── #461: interface_latency_enumeration ─────────────────────────────
-
-    /// A crossed epoch flags the flight time and never withholds it — the
-    /// architect's "flag, not refuse" ruling. Every non-`Same` state flags,
-    /// including a v9 report that carries no check at all.
-    #[test]
-    fn a_non_same_enumeration_flags_the_flight_time_without_withholding_it() {
-        use crate::shared::calibration::EnumerationCheck;
-        let sr = 48_000u32;
-        let cases = [
-            (Some(EnumerationCheck::Same), false),
-            (
-                Some(EnumerationCheck::Crossed {
-                    boundary: "host rebooted".into(),
-                    since: None,
-                }),
-                true,
-            ),
-            (
-                Some(EnumerationCheck::NotObservable {
-                    reason: "cpal backend has no enumeration probe".into(),
-                }),
-                true,
-            ),
-            (Some(EnumerationCheck::NotRecorded), true),
-            (None, true),
-        ];
-        for (check, flagged) in cases {
+        let ref_tau_s = 0.0119;
+        for via in [None, Some("out1_in1")] {
             let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
-            r.interface_latency = Some(measured_tau_with_check(0.001, check.clone()));
+            r.interface_latency = Some(with_session_check(0.001, Some(refused_tau(via))));
+            r.reference_latency = Some(measured_reference(ref_tau_s));
+            r.reference_stored_latency = Some(stored_reference_tau(ref_tau_s, Some(1024)));
+            r.inter_pair_offset = Some(measured_offset(0.0));
             let stats = r.ir_stats().unwrap();
-            assert_eq!(stats.interface_latency_enumeration, check);
+            assert_eq!(stats.arrival_check, ArrivalCheck::Agree);
             assert_eq!(
                 stats.flight_time_s,
-                Some(stats.arrival_s - 0.001),
-                "{check:?} must not withhold the flight time"
+                Some(stats.arrival_s - ref_tau_s),
+                "{via:?}"
             );
-            assert_eq!(stats.interface_latency_unverified(), flagged, "{check:?}");
+            let rejected = match &r.interface_latency {
+                Some(InterfaceLatency::Measured(m))
+                    if m.session_check.as_ref().is_some_and(LayerVerdict::is_refused) =>
+                {
+                    None
+                }
+                _ => stats.flight_time_s,
+            };
+            assert_eq!(rejected, None, "the #466 rule withheld it ({via:?})");
         }
     }
 
-    /// Nothing to qualify when no flight time exists.
+    // ─── #544: enumeration flags ─────────────────────────────────────────
+
+    /// The capture pair's stored-τ enumeration no longer qualifies the
+    /// flight time (the value is not subtracted); the offset's own
+    /// enumeration is carried in the basis as a flag and never withholds.
     #[test]
-    fn no_flight_time_is_never_flagged() {
-        let r = ir_report_with_peak(1024, 600, 1.0, 0.0, 48_000);
-        let stats = r.ir_stats().unwrap();
-        assert_eq!(stats.flight_time_s, None);
-        assert!(!stats.interface_latency_unverified());
+    fn a_non_same_enumeration_never_withholds_the_flight_time() {
+        use crate::shared::calibration::EnumerationCheck;
+        let sr = 48_000u32;
+        let cases = [
+            EnumerationCheck::Same,
+            EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: None,
+            },
+            EnumerationCheck::NotObservable {
+                reason: "cpal backend has no enumeration probe".into(),
+            },
+            EnumerationCheck::NotRecorded,
+        ];
+        for check in cases {
+            let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+            r.interface_latency = Some(measured_tau_with_check(0.001, Some(check.clone())));
+            r.reference_latency = Some(measured_reference(0.002));
+            let InterPairOffset::Measured(mut m) = measured_offset(0.0) else {
+                unreachable!()
+            };
+            m.enumeration = check.clone();
+            r.inter_pair_offset = Some(InterPairOffset::Measured(m));
+            let stats = r.ir_stats().unwrap();
+            assert_eq!(
+                stats.flight_time_s,
+                Some(stats.arrival_s - 0.002),
+                "{check:?} must not withhold the flight time"
+            );
+            assert_eq!(
+                stats.latency_basis,
+                LatencyBasis::Live {
+                    reference_tau_s: 0.002,
+                    offset: LiveOffset::Measured {
+                        offset_s: 0.0,
+                        enumeration: check.clone()
+                    },
+                },
+            );
+        }
     }
 
     // ─── #537: band-limited arrival and its cross-check ──────────────────
@@ -2582,7 +2763,8 @@ mod tests {
         assert_eq!(mode_peak - t0, 1_440, "test setup: 15 ms at 96 kHz");
 
         let tau_s = 1_711.0 / sr as f64;
-        report.interface_latency = Some(measured_tau(tau_s));
+        report.reference_latency = Some(measured_reference(tau_s));
+        report.inter_pair_offset = Some(InterPairOffset::Identity);
         let stats = report.ir_stats().unwrap();
         assert_eq!(stats.verdict, IrVerdict::Ok, "test setup");
         assert_eq!(stats.peak_index, mode_peak);
@@ -2620,12 +2802,12 @@ mod tests {
         );
     }
 
-    /// 96 kHz, 0.4 s window, a ±1e-7 floor, and the stored τ every
+    /// 96 kHz, 0.4 s window, a ±1e-7 floor, and the live latency every
     /// cross-check firing case below subtracts (so a `None` flight time is
-    /// the standing's doing, not a missing τ).
+    /// the standing's doing, not a missing latency).
     fn cross_check_report(ir: Vec<f64>, f2_hz: f64) -> MeasurementReport {
         let mut r = ir_report_with_custom_ir_band(ir, 96_000, f2_hz);
-        r.interface_latency = Some(measured_tau(0.001));
+        with_live_latency(&mut r, 0.001);
         r
     }
 
@@ -3118,7 +3300,9 @@ mod tests {
     }
 
     /// No distance: `NotGiven`, flight time produced. A typed `0m`: not a
-    /// verdict, never read as "not given". No stored τ: nothing to check.
+    /// verdict, never read as "not given". No live latency (#544: an
+    /// unmeasured offset, whatever stored τ the report carries): nothing to
+    /// check.
     #[test]
     fn distance_check_names_why_it_did_not_score() {
         let stats = distance_report(None).ir_stats().unwrap();
@@ -3139,7 +3323,10 @@ mod tests {
         assert!(stats.flight_time_s.is_some());
 
         let mut r = distance_report(Some(2.0));
-        r.interface_latency = None;
+        r.interface_latency = Some(measured_tau(0.001));
+        r.inter_pair_offset = Some(InterPairOffset::Unavailable {
+            reason: "[out0_in0] against ref [out1_in1]; no \u{3c4} on file for this pair".into(),
+        });
         let stats = r.ir_stats().unwrap();
         assert_eq!(
             stats.distance_check,

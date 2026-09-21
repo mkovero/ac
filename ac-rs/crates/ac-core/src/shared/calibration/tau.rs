@@ -96,6 +96,105 @@ pub struct TauEntry {
     /// `None` on entries written before this field existed.
     #[serde(default)]
     pub session: Option<String>,
+    /// The reference loopback's τ, read from the reference leg of the same
+    /// captures this entry's τ was read from (#544). `Some` only when both
+    /// lifecycles' reference readings passed calibrate's own gates and
+    /// agreed to the whole sample; `None` on an entry written before this
+    /// field existed, on a run with no reference configured, and whenever
+    /// the reference reading was refused. `None` means "no inter-pair offset
+    /// from this entry" — never an offset of zero.
+    ///
+    /// The inter-pair offset is `tau_s − reference.tau_s`
+    /// ([`ResolvedPairOffset::offset_s`]). Both terms come from one capture,
+    /// so any converter, transport or graph state is common to them by
+    /// construction; an offset built from two entries measured at different
+    /// times would not have that property.
+    #[serde(default)]
+    pub reference: Option<TauReferenceLeg>,
+}
+
+/// The reference loopback's reading taken in the same captures as a
+/// [`TauEntry`]'s own τ (#544). The ports are part of the offset's topology
+/// key: an offset measured against one loopback never applies against
+/// another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TauReferenceLeg {
+    pub output_port: String,
+    pub input_port: String,
+    pub tau_s: f64,
+}
+
+/// An inter-pair offset resolved for a capture pair against a reference
+/// loopback (#544): the τ entry that carries it, and how that entry's
+/// device-enumeration epoch relates to the current one. A non-`Same` check
+/// is a flag, never a refusal — the premise that the offset survives
+/// re-enumeration is what #544's rig check tests.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPairOffset<'a> {
+    pub entry: &'a TauEntry,
+    pub reference: &'a TauReferenceLeg,
+    pub check: EnumerationCheck,
+}
+
+impl ResolvedPairOffset<'_> {
+    /// `τ(this pair) − τ(reference pair)`, both from one capture. Positive
+    /// when this pair's path is longer than the reference's.
+    pub fn offset_s(&self) -> f64 {
+        self.entry.tau_s - self.reference.tau_s
+    }
+}
+
+/// Why [`Calibration::pair_offset_for`] found no inter-pair offset (#544).
+/// Refuses rather than falling back to the stored absolute τ — that is the
+/// model #544 removes — and names what differs, the way [`TauRefusal`]
+/// does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairOffsetRefusal {
+    pub requested: TauConditions,
+    pub reference_output_port: String,
+    pub reference_input_port: String,
+    pub miss: PairOffsetMiss,
+}
+
+/// The three ways an offset lookup misses.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PairOffsetMiss {
+    /// No τ entry, with or without a reference leg, is close enough to
+    /// name: nothing on file matches these conditions and no entry carries
+    /// a reference leg.
+    NoTau {
+        /// Whether any entry exists for this pair's own ports (under other
+        /// conditions).
+        pair_on_file: bool,
+    },
+    /// τ entries exist for these exact conditions, but none was measured
+    /// with a reference leg — the common case on first upgrade.
+    TauWithoutReference,
+    /// The nearest entry that carries a reference leg, by fewest differing
+    /// fields (conditions plus reference ports), ties broken by newest.
+    Differs {
+        nearest: TauEntry,
+        /// One rendered line per differing field, in tuple order.
+        lines: Vec<String>,
+    },
+}
+
+impl PairOffsetRefusal {
+    /// One observation per line: what is on file, never a cause.
+    pub fn lines(&self) -> Vec<String> {
+        match &self.miss {
+            PairOffsetMiss::NoTau {
+                pair_on_file: false,
+            } => vec!["no \u{3c4} on file for this pair".to_string()],
+            PairOffsetMiss::NoTau { pair_on_file: true } => {
+                vec!["no \u{3c4} on file for this pair at these conditions".to_string()]
+            }
+            PairOffsetMiss::TauWithoutReference => {
+                vec!["\u{3c4} on file, reference leg not measured with it".to_string()]
+            }
+            PairOffsetMiss::Differs { lines, .. } => lines.clone(),
+        }
+    }
 }
 
 /// A τ entry that matched the requested conditions exactly, and how its
@@ -160,6 +259,8 @@ impl TauRefusal {
 /// [`TauConditions`], with both sides already rendered for a message.
 struct TauFieldDelta {
     field: &'static str,
+    /// Short operator-facing name, as in "entry measured at period 512".
+    label: &'static str,
     requested: String,
     stored: String,
 }
@@ -185,7 +286,7 @@ fn tau_deltas(a: &TauConditions, b: &TauConditions) -> Vec<TauFieldDelta> {
         input_port: _,
     } = a;
     macro_rules! deltas {
-        ($( $field:ident => $render:expr ),* $(,)?) => {{
+        ($( $field:ident, $label:literal => $render:expr ),* $(,)?) => {{
             let mut out: Vec<TauFieldDelta> = Vec::new();
             $(
                 if a.$field != b.$field {
@@ -196,6 +297,7 @@ fn tau_deltas(a: &TauConditions, b: &TauConditions) -> Vec<TauFieldDelta> {
                     };
                     out.push(TauFieldDelta {
                         field: stringify!($field),
+                        label: $label,
                         requested: render(a),
                         stored: render(b),
                     });
@@ -205,14 +307,14 @@ fn tau_deltas(a: &TauConditions, b: &TauConditions) -> Vec<TauFieldDelta> {
         }};
     }
     deltas! {
-        device => device.to_string(),
-        backend => backend.clone(),
-        sample_rate => format!("{sample_rate} Hz"),
-        period_size => period_size
+        device, "device" => device.to_string(),
+        backend, "backend" => backend.clone(),
+        sample_rate, "rate" => format!("{sample_rate} Hz"),
+        period_size, "period" => period_size
             .map(|p| p.to_string())
             .unwrap_or_else(|| "n/a".to_string()),
-        output_port => output_port.clone(),
-        input_port => input_port.clone(),
+        output_port, "output" => output_port.clone(),
+        input_port, "input" => input_port.clone(),
     }
 }
 
@@ -380,6 +482,122 @@ impl Calibration {
             differing_fields,
         }))
     }
+
+    /// Exact-match inter-pair offset lookup (#544): the τ entry for `cond`
+    /// whose reference leg was read on `reference_output_port` →
+    /// `reference_input_port` in the same captures.
+    ///
+    /// The topology key is every [`TauConditions`] field **plus** both
+    /// reference ports, all exact. Among several matches the same rule as
+    /// [`Self::tau_for`]: newest same-epoch entry, then newest entry, with
+    /// its non-`Same` check carried as a flag. An entry without a reference
+    /// leg never matches, and nothing falls back to the absolute τ.
+    pub fn pair_offset_for(
+        &self,
+        cond: &TauConditions,
+        reference_output_port: &str,
+        reference_input_port: &str,
+        current: &DeviceEpoch,
+    ) -> Result<ResolvedPairOffset<'_>, Box<PairOffsetRefusal>> {
+        let same_ports = |r: &TauReferenceLeg| {
+            r.output_port == reference_output_port && r.input_port == reference_input_port
+        };
+        let matches: Vec<ResolvedPairOffset<'_>> = self
+            .tau_history
+            .iter()
+            .filter(|e| &e.conditions == cond)
+            .filter_map(|entry| {
+                let reference = entry.reference.as_ref().filter(|r| same_ports(r))?;
+                Some(ResolvedPairOffset {
+                    entry,
+                    reference,
+                    check: EnumerationCheck::of(entry.enumeration.as_ref(), current),
+                })
+            })
+            .collect();
+        fn newest(candidates: Vec<ResolvedPairOffset<'_>>) -> Option<ResolvedPairOffset<'_>> {
+            candidates
+                .into_iter()
+                .max_by(|a, b| a.entry.measured_at.cmp(&b.entry.measured_at))
+        }
+        let (same, other): (Vec<_>, Vec<_>) = matches.into_iter().partition(|r| r.check.is_same());
+        if let Some(hit) = newest(same).or_else(|| newest(other)) {
+            return Ok(hit);
+        }
+
+        let exact_without_reference = self
+            .tau_history
+            .iter()
+            .any(|e| &e.conditions == cond && e.reference.is_none());
+        let with_reference_exact = self
+            .tau_history
+            .iter()
+            .any(|e| &e.conditions == cond && e.reference.is_some());
+        let miss = if exact_without_reference && !with_reference_exact {
+            PairOffsetMiss::TauWithoutReference
+        } else {
+            let mut nearest: Option<&TauEntry> = None;
+            let mut best_diff = usize::MAX;
+            for e in &self.tau_history {
+                let Some(r) = e.reference.as_ref() else {
+                    continue;
+                };
+                let n_diff = tau_diff_fields(cond, &e.conditions).len() + usize::from(!same_ports(r));
+                let better = n_diff < best_diff
+                    || (n_diff == best_diff
+                        && nearest
+                            .map(|n| e.measured_at > n.measured_at)
+                            .unwrap_or(true));
+                if better {
+                    best_diff = n_diff;
+                    nearest = Some(e);
+                }
+            }
+            match nearest {
+                Some(n) => {
+                    let r = n
+                        .reference
+                        .as_ref()
+                        .expect("nearest is drawn from entries with a reference leg");
+                    let mut lines: Vec<String> = tau_deltas(cond, &n.conditions)
+                        .into_iter()
+                        .map(|d| {
+                            format!(
+                                "entry measured at {} {}, this capture {} {}",
+                                d.label, d.stored, d.label, d.requested
+                            )
+                        })
+                        .collect();
+                    if !same_ports(r) {
+                        lines.push(format!(
+                            "entry measured against ref {} \u{2192} {}, this capture ref {} \
+                             \u{2192} {}",
+                            r.output_port,
+                            r.input_port,
+                            reference_output_port,
+                            reference_input_port
+                        ));
+                    }
+                    PairOffsetMiss::Differs {
+                        nearest: n.clone(),
+                        lines,
+                    }
+                }
+                None => PairOffsetMiss::NoTau {
+                    pair_on_file: self.tau_history.iter().any(|e| {
+                        e.conditions.output_port == cond.output_port
+                            && e.conditions.input_port == cond.input_port
+                    }),
+                },
+            }
+        };
+        Err(Box::new(PairOffsetRefusal {
+            requested: cond.clone(),
+            reference_output_port: reference_output_port.to_string(),
+            reference_input_port: reference_input_port.to_string(),
+            miss,
+        }))
+    }
 }
 
 /// Fixtures shared with the persistence tests in [`super::store`], which
@@ -410,6 +628,7 @@ pub(super) mod fixtures {
             reading_separation_s: None,
             enumeration: None,
             session: None,
+            reference: None,
         }
     }
 }
@@ -765,5 +984,131 @@ mod tests {
             msg.contains("period_size (requested 64, stored 1024)"),
             "message did not render both sides: {msg}"
         );
+    }
+
+    // ─── #544: inter-pair offset ─────────────────────────────────────────
+
+    const REF_OUT: &str = "fake:playback_1";
+    const REF_IN: &str = "fake:capture_1";
+
+    fn with_reference(mut e: TauEntry, ref_tau_s: f64) -> TauEntry {
+        e.reference = Some(TauReferenceLeg {
+            output_port: REF_OUT.to_string(),
+            input_port: REF_IN.to_string(),
+            tau_s: ref_tau_s,
+        });
+        e
+    }
+
+    /// The offset is this pair's τ minus the reference's, both from one
+    /// entry, and a non-zero one keeps its sign: 1757 − 1711 = +46.
+    #[test]
+    fn pair_offset_for_takes_the_entry_carrying_the_reference_leg() {
+        let sr = 96_000.0;
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        cal.tau_history.push(with_reference(
+            dummy_tau_entry(cond.clone(), 1757.0 / sr),
+            1711.0 / sr,
+        ));
+        let hit = cal
+            .pair_offset_for(&cond, REF_OUT, REF_IN, &any_epoch())
+            .unwrap();
+        assert_eq!(((hit.offset_s()) * sr).round(), 46.0);
+        assert_eq!(hit.check, EnumerationCheck::NotRecorded);
+    }
+
+    /// An entry with no reference leg never yields an offset — not zero,
+    /// and not the absolute τ — and the refusal says τ is on file.
+    #[test]
+    fn pair_offset_for_refuses_a_tau_without_a_reference_leg() {
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        cal.tau_history.push(dummy_tau_entry(cond.clone(), 0.0178));
+        assert!(cal.tau_for(&cond, &any_epoch()).is_ok(), "test setup");
+        let refusal = cal
+            .pair_offset_for(&cond, REF_OUT, REF_IN, &any_epoch())
+            .unwrap_err();
+        assert_eq!(refusal.miss, PairOffsetMiss::TauWithoutReference);
+        assert_eq!(
+            refusal.lines(),
+            vec!["\u{3c4} on file, reference leg not measured with it"]
+        );
+    }
+
+    /// A reference leg against another loopback, or at another period, is a
+    /// different topology: refused, each differing field on its own line.
+    #[test]
+    fn pair_offset_for_refuses_another_topology_and_names_the_fields() {
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        cal.tau_history
+            .push(with_reference(dummy_tau_entry(cond.clone(), 0.02), 0.02));
+
+        let refusal = cal
+            .pair_offset_for(&cond, "fake:playback_7", REF_IN, &any_epoch())
+            .unwrap_err();
+        assert_eq!(
+            refusal.lines(),
+            vec![format!(
+                "entry measured against ref {REF_OUT} \u{2192} {REF_IN}, this capture ref \
+                 fake:playback_7 \u{2192} {REF_IN}"
+            )]
+        );
+
+        let mut other = cond.clone();
+        other.period_size = Some(256);
+        let refusal = cal
+            .pair_offset_for(&other, REF_OUT, REF_IN, &any_epoch())
+            .unwrap_err();
+        assert_eq!(
+            refusal.lines(),
+            vec!["entry measured at period 1024, this capture period 256"]
+        );
+    }
+
+    /// Nothing on file at all names the pair as having no τ.
+    #[test]
+    fn pair_offset_for_with_no_history_says_no_tau() {
+        let cal = Calibration::new(0, 0);
+        let refusal = cal
+            .pair_offset_for(&dummy_conditions(), REF_OUT, REF_IN, &any_epoch())
+            .unwrap_err();
+        assert_eq!(refusal.lines(), vec!["no \u{3c4} on file for this pair"]);
+    }
+
+    /// Same epoch first, then newest — [`Calibration::tau_for`]'s rule.
+    #[test]
+    fn pair_offset_for_prefers_the_current_epoch() {
+        let e1 = observed("boot-1", &[("/dev/fw2", "2026-09-15T08:00:05Z")]);
+        let e2 = observed("boot-2", &[("/dev/fw1", "2026-09-15T13:41:50Z")]);
+        let cond = dummy_conditions();
+        let mut cal = Calibration::new(0, 0);
+        let mut older = with_reference(dummy_tau_entry(cond.clone(), 0.010), 0.010);
+        older.measured_at = "2026-09-15T09:00:00Z".to_string();
+        older.enumeration = Some(e1.clone());
+        let mut newer = with_reference(dummy_tau_entry(cond.clone(), 0.011), 0.010);
+        newer.measured_at = "2026-09-15T14:00:00Z".to_string();
+        newer.enumeration = Some(e2.clone());
+        cal.tau_history.push(older);
+        cal.tau_history.push(newer);
+        let hit = cal.pair_offset_for(&cond, REF_OUT, REF_IN, &e1).unwrap();
+        assert_eq!(hit.check, EnumerationCheck::Same);
+        assert_eq!(hit.entry.tau_s, 0.010);
+        let hit = cal.pair_offset_for(&cond, REF_OUT, REF_IN, &e2).unwrap();
+        assert_eq!(hit.entry.tau_s, 0.011);
+    }
+
+    /// An entry written before #544 decodes with no reference leg.
+    #[test]
+    fn a_pre_544_entry_deserializes_with_no_reference_leg() {
+        let raw = r#"{
+            "conditions": {"device": 0, "backend": "jack", "sample_rate": 96000,
+                           "period_size": 256, "output_port": "a", "input_port": "b"},
+            "tau_s": 0.0178229, "measured_at": "2026-09-15T23:43:04Z",
+            "method": "farina_short_ess_v2", "agreement_count": 2
+        }"#;
+        let e: TauEntry = serde_json::from_str(raw).unwrap();
+        assert_eq!(e.reference, None);
     }
 }

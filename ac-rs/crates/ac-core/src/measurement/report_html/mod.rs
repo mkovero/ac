@@ -221,6 +221,7 @@ mod tests {
             interface_latency: None,
             reference_latency: None,
             reference_stored_latency: None,
+            inter_pair_offset: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse {
                     points: vec![
