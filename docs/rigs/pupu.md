@@ -52,11 +52,19 @@ JACK port names and `ac` indices here assume the analog-first order — see
   reference-leg compensation defensible on this rig (ac #544).
 - **τ is not reliably stable.** On 2026-09-21 the AN2 → IN2 reference read
   1711, then 1679, then 1535, then 1727 — all inside one daemon lifetime,
-  with no xruns, reboot or power cycle, and nobody touching the rig. It has
-  been 1727 since. Unexplained; see ac #542. Treat a stored τ as a claim to
-  re-check, not a constant, and read the reference SNR before trusting a
-  reference pick: the low readings came with 15.7 dB, where `ac calibrate`
-  holds itself to 24 dB.
+  with no reboot or power cycle, and nobody touching the rig. It has been
+  1727 since. Every step is a multiple of 16 samples, one FireWire SYT
+  interval at 96 kHz. The picks themselves were clean (ac #542): the
+  15.7 dB readings were the steady 1711 ones, taken with a 20–20000 Hz 4 s
+  sweep whose noiseless figure is 15.6 dB, and every moved value (1679,
+  1535, 1727) sat 0.07 dB from its own noiseless figure. The reference
+  latency really moved; the pick did not slip. One observation beside the
+  shift, not established as its cause: `d1p0-onaxis-ref-04`, the only
+  capture between the last 1535 and the first 1727, recorded an xrun. Why
+  the transport moved inside one lifetime is unexplained. Treat a stored τ
+  as a claim to re-check, not a constant. To judge a reference pick, compare
+  its SNR with its printed noiseless figure, not with `ac calibrate`'s
+  24 dB: that threshold belongs to a different stimulus.
 - The FF400 reports `fw2.0` since the 2026-09-18 power cycle.
 - Never plug a line output into IN1 while its phantom is on.
 - Verified by emission 2026-09-14 (1 kHz, −60 dBFS, 3 s per output): AN1 →

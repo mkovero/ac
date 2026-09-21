@@ -1238,15 +1238,26 @@ fn reference_latency_lines(
     match reference {
         Some(ReferenceLatency::Measured(m)) => {
             let samples = m.tau_s * sample_rate_hz as f64;
+            // #542 UX: the SNR is printed beside the reading's own noiseless
+            // figure (`pre_impulse_snr_floor_db`), two decimals each, so a
+            // band-bound SNR is not read as a weak one. No threshold is
+            // printed: the report does not record which gate applied.
             let snr = m
                 .pre_impulse_snr_db
-                .map(|v| format!("{v:.1} dB"))
+                .map(|v| format!("{v:.2} dB"))
                 .unwrap_or_else(|| "\u{221e} dB".to_string());
-            vec![format!(
-                "  ref latency   {} ms  ({} samples, SNR {snr}, same capture)",
-                format_ms_aligned(m.tau_s * 1000.0),
-                format_samples(samples),
-            )]
+            let noiseless = m
+                .pre_impulse_snr_floor_db
+                .map(|v| format!("{v:.2} dB"))
+                .unwrap_or_else(|| "not recorded".to_string());
+            vec![
+                format!(
+                    "  ref latency   {} ms  ({} samples, same capture)",
+                    format_ms_aligned(m.tau_s * 1000.0),
+                    format_samples(samples),
+                ),
+                format!("{CONT_INDENT}SNR {snr}, noiseless {noiseless}"),
+            ]
         }
         Some(ReferenceLatency::Unavailable { reason }) => unavailable(reason),
         None => unavailable("not recorded (report predates schema v7)"),
@@ -2687,7 +2698,45 @@ mod tests {
         });
         assert_eq!(
             reference_latency_lines(Some(&measured), 96_000),
-            vec!["  ref latency   17.8229 ms  (1711 samples, SNR 61.8 dB, same capture)"]
+            vec![
+                "  ref latency   17.8229 ms  (1711 samples, same capture)",
+                "                SNR 61.80 dB, noiseless 64.50 dB",
+            ]
+        );
+
+        // #542 UX: a reading with no noiseless figure (v7 report, or the
+        // fixed-gate fallback) says so and prints no threshold.
+        let no_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 1727.0 / 96_000.0,
+            pre_impulse_snr_db: Some(28.6),
+            pre_impulse_snr_floor_db: None,
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "system:playback_2".into(),
+            input_port: "system:capture_2".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&no_floor), 96_000),
+            vec![
+                "  ref latency   17.9896 ms  (1727 samples, same capture)",
+                "                SNR 28.60 dB, noiseless not recorded",
+            ]
+        );
+
+        // #542 UX: a silent pre-impulse region with a noiseless figure.
+        let silent_with_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 20.0 / 48_000.0,
+            pre_impulse_snr_db: None,
+            pre_impulse_snr_floor_db: Some(64.5),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "fake:playback_1".into(),
+            input_port: "fake:capture_1".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&silent_with_floor), 48_000),
+            vec![
+                "  ref latency    0.4167 ms  (20 samples, same capture)",
+                "                SNR ∞ dB, noiseless 64.50 dB",
+            ]
         );
 
         let silent_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
@@ -2700,7 +2749,10 @@ mod tests {
         });
         assert_eq!(
             reference_latency_lines(Some(&silent_floor), 48_000),
-            vec!["  ref latency    0.4167 ms  (20 samples, SNR ∞ dB, same capture)"]
+            vec![
+                "  ref latency    0.4167 ms  (20 samples, same capture)",
+                "                SNR ∞ dB, noiseless not recorded",
+            ]
         );
 
         let refused = ReferenceLatency::Unavailable {
