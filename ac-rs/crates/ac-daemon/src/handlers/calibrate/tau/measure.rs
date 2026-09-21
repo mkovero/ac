@@ -1329,4 +1329,137 @@ mod tests {
         assert_eq!(refusal.snr_db, -3.45);
         assert_eq!(refusal.threshold_db, TAU_SNR_THRESHOLD_DB);
     }
+
+    /// A `plot ir` reference-leg sweep at 96 kHz, `f1_hz`–20000 Hz.
+    fn reference_sweep_params(f1_hz: f64, duration_s: f64) -> SweepParams {
+        SweepParams {
+            f1_hz,
+            f2_hz: 20_000.0,
+            duration_s,
+            sample_rate: 96_000,
+        }
+    }
+
+    /// The gate `plot_ir` applies to its same-capture reference leg (#471).
+    fn reference_gate() -> SnrGate {
+        SnrGate::DerivedFloor {
+            margin_db: ref_snr_margin_db(),
+        }
+    }
+
+    /// #542: the four reference latencies pupu read inside one daemon
+    /// lifetime (1711, 1679, 1535, 1727 samples at 96 kHz), under both sweeps
+    /// the captures carried (20–20000 Hz for 4 s, 200–20000 Hz for 12 s),
+    /// through the reference-leg path `plot_ir` uses. Each is picked exactly,
+    /// and its SNR sits on its own noiseless floor (noiseless here, so the
+    /// gap is ≈0; the archived reports show 0.07–0.12 dB for every one of
+    /// those captures). The recorded durations are used as-is: each capture
+    /// deconvolves in well under a second in a debug build. So a
+    /// clean capture of any of these delays is read as that delay; the pick
+    /// has no reason to prefer one of them. Fails if the pick lands off the
+    /// delay, or if a clean capture reads more than 0.2 dB under its floor
+    /// (the corpus gap, with margin), which would make the corpus's floor
+    /// gap stop separating a clean pick from a degraded one.
+    #[test]
+    fn reference_pick_is_exact_at_the_issue_542_delays() {
+        for (f1_hz, duration_s) in [(20.0, 4.0), (200.0, 12.0)] {
+            let params = reference_sweep_params(f1_hz, duration_s);
+            for delay in [1711usize, 1679, 1535, 1727] {
+                let cap = synthetic_tau_capture(&params, delay);
+                let reading = analyse_tau_leg(&cap, &params, TAU_TAIL_S, 0, reference_gate())
+                    .unwrap_or_else(|e| {
+                        panic!("{f1_hz} Hz sweep, delay {delay}: clean reference refused: {e}")
+                    });
+                let picked = reading.tau_s * 96_000.0;
+                assert_eq!(
+                    picked.round() as i64,
+                    delay as i64,
+                    "{f1_hz} Hz sweep: picked {picked} samples, delay is {delay}"
+                );
+                assert!(
+                    (picked - delay as f64).abs() < 1e-6,
+                    "{f1_hz} Hz sweep: picked {picked} samples, delay is {delay}"
+                );
+                let floor = reading
+                    .snr_floor_db
+                    .expect("the derived gate must establish a floor for a clean reference");
+                let gap = floor - reading.snr_db;
+                assert!(
+                    gap.abs() <= 0.2,
+                    "{f1_hz} Hz sweep, delay {delay}: SNR {:.2} dB is {gap:.2} dB from its \
+                     noiseless {floor:.2} dB",
+                    reading.snr_db
+                );
+            }
+        }
+    }
+
+    /// #542, the rejected hypothesis computed: "the reference pick slides
+    /// between adjacent cycles of a ringing pulse as its quality falls". A
+    /// picker that did that would, somewhere in this sweep, return an
+    /// *accepted* reading at truth ± 16 samples — one FireWire SYT interval
+    /// at 96 kHz, the step the pupu excursion moved in. That is the failing
+    /// case. White noise steps up from −120 dBFS RMS (against the 0.03
+    /// stimulus) in 5 dB steps until the gate first refuses, for both
+    /// recorded bands and three seeds. Every accepted reading must be within
+    /// ±1 sample of the true delay; near the refusal point the pick does move
+    /// by one sample while the gate still accepts, and that is the bound
+    /// this pins.
+    ///
+    /// The sweeps are 1 s rather than the recorded 4 s / 12 s: duration moves
+    /// the noiseless floor, not where the pick lands, and 1 s keeps the loop
+    /// short in a debug build. The loop must see at least one accepted and
+    /// one refused reading per band and seed, so it cannot pass vacuously.
+    #[test]
+    fn reference_pick_never_slips_a_whole_step_while_the_gate_accepts() {
+        const DELAY: usize = 1727;
+        const STEP: i64 = 16;
+        for f1_hz in [20.0, 200.0] {
+            let params = reference_sweep_params(f1_hz, 1.0);
+            let clean = synthetic_tau_capture(&params, DELAY);
+            for seed in 1..=3u64 {
+                let mut accepted = 0usize;
+                let mut refused_at = None;
+                for dbfs in (-120..=20).step_by(5) {
+                    let mut cap = clean.clone();
+                    add_white_noise(&mut cap, dbfs as f64, seed);
+                    let what = format!("{f1_hz} Hz sweep, noise {dbfs} dBFS, seed {seed}");
+                    match analyse_tau_leg(&cap, &params, TAU_TAIL_S, 0, reference_gate()) {
+                        Ok(reading) => {
+                            let picked = (reading.tau_s * 96_000.0).round() as i64;
+                            let off = picked - DELAY as i64;
+                            assert!(
+                                off.abs() < STEP,
+                                "{what}: accepted {picked} samples, a whole {STEP}-sample \
+                                 step from {DELAY}"
+                            );
+                            assert!(
+                                off.abs() <= 1,
+                                "{what}: accepted {picked} samples, {off} from {DELAY}"
+                            );
+                            accepted += 1;
+                        }
+                        Err(e) => {
+                            assert!(
+                                e.downcast_ref::<LowSnrRefusal>().is_some()
+                                    || e.downcast_ref::<EdgeRefusal>().is_some(),
+                                "{what}: expected a gate refusal, got: {e}"
+                            );
+                            refused_at = Some(dbfs);
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    accepted > 0,
+                    "{f1_hz} Hz sweep, seed {seed}: no noise level was accepted"
+                );
+                assert!(
+                    refused_at.is_some(),
+                    "{f1_hz} Hz sweep, seed {seed}: the gate never refused up to +20 dBFS, \
+                     so the sweep never reached the region where a slip could happen"
+                );
+            }
+        }
+    }
 }

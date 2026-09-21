@@ -1136,7 +1136,10 @@ no header. `RecordSummary` is `{ "id", "ran_at", "loopback", "persisted"?,
 **Device-enumeration epoch (#461).** A stored τ belongs to the device
 enumeration it was measured in, not only to its `conditions`: on the FF400
 rig τ read 1711, 1727 and 1743 samples across reboots and interface power
-cycles with every condition field matching. The epoch is a **flag, not part
+cycles with every condition field matching. It was also observed to re-pick
+within one enumeration and one daemon lifetime (1711 → 1679 → 1535 → 1727,
+#542), so a `same` epoch does not prove the stored value is still current.
+The epoch is a **flag, not part
 of the exact-match key** — a crossed boundary marks a stored τ unverified and
 never refuses it.
 
@@ -1609,7 +1612,8 @@ it from the arrival as though it were the capture pair's own τ — τ is per
 channel pair. Its only consumer is the onset search's causal bound
 (`IrStats::causal_bound`), which needs a τ from the same client lifetime and
 stream epoch as the IR, because a stored τ re-picks by a multiple of the
-FireWire SYT interval on every device enumeration (#461). Tagged union on
+FireWire SYT interval on every device enumeration (#461), and was observed to
+re-pick within one enumeration and one daemon lifetime (#542). Tagged union on
 `state`:
 
 ```json
@@ -1626,7 +1630,10 @@ silence (an infinite SNR, which JSON cannot carry). `pre_impulse_snr_floor_db`
 (v8) is the derived floor the reading was judged against, so an archived
 reading stays re-judgeable once the threshold is no longer a constant; it is
 absent on v7 reports and on a reading that fell back to the fixed 24 dB gate
-because no floor could be established. The `unavailable` reason keeps its exact
+because no floor could be established. `ac plot ir` prints the two figures
+together on the line under `ref latency` and labels this one `noiseless`
+(`SNR 15.71 dB, noiseless 15.60 dB`), or `noiseless not recorded` when the
+field is absent (#542). The `unavailable` reason keeps its exact
 shape — only the `need` figure now varies per run. #494: SNR figures in it
 carry two decimals, and a reference peak that sits at the window edge *and*
 fails the SNR gate names both: `peak at reference window edge, SNR 21.34 dB,
