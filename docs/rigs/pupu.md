@@ -4,8 +4,9 @@ Facts about this machine only. **How to test on it** is
 `docs/runbooks/rig-testing.md`; the machine-readable form of this page is
 `scripts/rig/hosts/pupu.env` — change both together.
 
-Last verified: 2026-09-21 (physical setup and arrival behaviour; the audio
-system and JACK sections below still carry their own 2026-09-14 dates).
+Last verified: 2026-09-21, second visit (physical setup, arrival behaviour
+and τ stability; the audio system and JACK sections below still carry their
+own 2026-09-14 dates).
 
 ## Access
 
@@ -27,18 +28,35 @@ JACK port names and `ac` indices here assume the analog-first order — see
 "JACK port order"; it moves.
 
 - Mic on the speaker axis; tape marks on the floor at **1 m**, **2 m** and
-  **3 m** for manual moves. The mic does **not** sit at a taped mark by
-  default: on 2026-09-21 it stood at ≈0.5 m, untaped, left there by an
-  earlier session, while this page still claimed 1 m. Measure the position
-  every session rather than assuming it, and state it in the run record.
-  Measured flight times with τ removed, 96 kHz: ≈+199 samples at ≈0.5 m,
-  +596…+597 at 2 m.
+  **3 m** for manual moves. **As left on 2026-09-21: taped 1.00 m on axis,
+  102 cm high, measured from the centre of the speaker.** Measure the
+  position every session anyway rather than trusting this line — earlier
+  the same day the mic stood at ≈0.5 m untaped, left by an earlier session,
+  while this page claimed 1 m. State the position in the run record.
+- Measured flight times with τ removed, 96 kHz, `ac plot ir`'s band-limited
+  arrival: **+198 at 0.50 m**, **+335 at 1.00 m**, **+347 at 1.00 m 60° off
+  axis**, +596…+597 at 2 m. Excess over d/c is **+58, +55 and +67** samples
+  respectively — a property of the speaker, not of the distance. Scatter
+  within one placement is **zero**; re-placing the stand on its mark moves
+  the figure by about 6 samples (2.1 cm).
+- Do **not** compare the IR peak with a band-limited arrival: on this
+  three-way speaker the broadband peak sits ~141 samples (1.47 ms) behind
+  the arrival at the default band. That difference is the speaker, not the
+  geometry.
 - The 1083 has intermittent distortion, obvious by ear when present. A run
   nobody listened to needs a THD check before it is trusted.
 - τ is **1711 samples at 96 kHz for both analog pairs**, AN1 → IN1 and
   AN2 → IN2 alike, measured by cable on 2026-09-18 after an FF400 power
   cycle. τ stays per channel pair as a rule — these two simply agree here,
-  and neither applies to an acoustic path.
+  and neither applies to an acoustic path. That equality is what makes
+  reference-leg compensation defensible on this rig (ac #544).
+- **τ is not reliably stable.** On 2026-09-21 the AN2 → IN2 reference read
+  1711, then 1679, then 1535, then 1727 — all inside one daemon lifetime,
+  with no xruns, reboot or power cycle, and nobody touching the rig. It has
+  been 1727 since. Unexplained; see ac #542. Treat a stored τ as a claim to
+  re-check, not a constant, and read the reference SNR before trusting a
+  reference pick: the low readings came with 15.7 dB, where `ac calibrate`
+  holds itself to 24 dB.
 - The FF400 reports `fw2.0` since the 2026-09-18 power cycle.
 - Never plug a line output into IN1 while its phantom is on.
 - Verified by emission 2026-09-14 (1 kHz, −60 dBFS, 3 s per output): AN1 →
