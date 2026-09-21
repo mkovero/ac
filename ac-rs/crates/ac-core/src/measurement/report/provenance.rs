@@ -127,8 +127,9 @@ pub struct MeasuredLatency {
     /// (#466, schema v11). Set only on `interface_latency`, on every v11
     /// `plot_ir` run that resolves a τ; `None` on `reference_stored_latency`
     /// and on a report written before v11. A `refused` verdict keeps this
-    /// value in the report but withholds the flight time derived from it
-    /// ([`super::IrStats::flight_time_s`]).
+    /// value in the report. Since v12 (#544) it withholds nothing: the
+    /// flight time ([`super::IrStats::flight_time_s`]) no longer subtracts
+    /// this stored τ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_check: Option<LayerVerdict>,
     /// Cal key of the reference loopback configured when `session_check`
@@ -142,12 +143,14 @@ pub struct MeasuredLatency {
 /// reference leg captured in the same `plot_ir` run as the IR it sits
 /// beside (#460).
 ///
-/// Not [`InterfaceLatency`]. That field is τ for the capture's *own* port
-/// pair, resolved from calibration by exact match (#281), and a reader
-/// subtracts it from the arrival. This one is τ of a *different* pair, the
-/// reference loopback, and must not be subtracted from the arrival as though
-/// it were the capture pair's own: τ is per channel pair. Its only consumer
-/// is the onset search's causal bound, which needs τ from the same client
+/// Not [`InterfaceLatency`]. That field is the stored τ for the capture's
+/// *own* port pair, resolved from calibration by exact match (#281); since
+/// v12 (#544) it is provenance and no reader subtracts it. This one is τ of
+/// a *different* pair, the reference loopback, and must not be subtracted
+/// from the arrival on its own as though it were the capture pair's: τ is
+/// per channel pair. From v12 the flight time subtracts it together with
+/// the stored inter-pair offset ([`super::InterPairOffset`]), and the onset
+/// search's causal bound reads it too. Both need τ from the same client
 /// lifetime and stream epoch as the IR, because a stored τ re-picks by a
 /// multiple of the FireWire SYT interval on every device enumeration (#461).
 /// There is no `measured_at`: the value belongs to this capture.

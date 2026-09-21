@@ -87,6 +87,12 @@
 //! epoch is compared at lookup and reported as a flag; it is not part of the
 //! exact-match key and never refuses a value.
 //!
+//! A τ entry may also carry the reference loopback's τ read in the same
+//! captures (#544, [`TauReferenceLeg`]). Their difference is the inter-pair
+//! offset ([`Calibration::pair_offset_for`]) that a `plot_ir` flight time
+//! adds to its own capture's reference latency; the stored absolute τ is no
+//! longer subtracted from any arrival.
+//!
 //! # Stored layers are checked per session (#466)
 //!
 //! A stored τ and a stored voltage scale can both go stale through events
@@ -124,8 +130,8 @@ pub use store::{
     write_session_refusals, RefusalsReadError, SESSION_REFUSALS_FILE,
 };
 pub use tau::{
-    compare_tau_readings, ResolvedTau, TauComparison, TauConditions, TauDisagreement, TauEntry,
-    TauRefusal,
+    compare_tau_readings, PairOffsetMiss, PairOffsetRefusal, ResolvedPairOffset, ResolvedTau,
+    TauComparison, TauConditions, TauDisagreement, TauEntry, TauReferenceLeg, TauRefusal,
 };
 
 use serde::{Deserialize, Serialize};

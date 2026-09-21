@@ -70,7 +70,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(11));
+                assert_eq!(v["report"]["schema_version"], json!(12));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -365,11 +365,16 @@ fn calibrate_tau(c: &Client) -> f64 {
 /// Daemon 1 (`AC_FAKE_DEVICE_EPOCH=T1`) calibrates. Daemon 2 (`T2`) reads the
 /// same `cal.json` and runs `plot_ir`: the report's `interface_latency` is
 /// still measured — the epoch flags, it never refuses — but its frozen
-/// `enumeration` is `crossed`, and `ir_stats()` flags the flight time. A
-/// third daemon back in `T1` reads `same` with no flag, so the flag is
-/// caused by the epoch and not by the daemon being a different process.
+/// `enumeration` is `crossed`. A third daemon back in `T1` reads `same`, so
+/// the flag is caused by the epoch and not by the daemon being a different
+/// process.
+///
+/// #544 inverts the rest of this test: the stored τ is no longer subtracted,
+/// so with no reference configured neither daemon produces a flight time,
+/// crossed or not. Before #544 both did, from `arrival − stored τ`.
 #[test]
 fn plot_ir_flags_a_stored_tau_from_another_device_enumeration() {
+    use ac_core::measurement::report::{LatencyBasis, WithheldBasis};
     const T1: &str = "2026-09-15T23:40:11Z";
     const T2: &str = "2026-09-16T00:08:31Z";
 
@@ -400,12 +405,6 @@ fn plot_ir_flags_a_stored_tau_from_another_device_enumeration() {
         }),
         "a stored τ from another epoch must not resolve as same"
     );
-    let stats = crossed.ir_stats().expect("ir_stats");
-    assert!(stats.flight_time_s.is_some(), "flagged, not withheld");
-    assert!(
-        stats.interface_latency_unverified(),
-        "a flight time over a crossed epoch must be flagged"
-    );
 
     let same = resolve_in(T1);
     match &same.interface_latency {
@@ -414,8 +413,143 @@ fn plot_ir_flags_a_stored_tau_from_another_device_enumeration() {
         }
         other => panic!("expected a measured τ, got {other:?}"),
     }
-    assert!(!same.ir_stats().unwrap().interface_latency_unverified());
+    for report in [&crossed, &same] {
+        let stats = report.ir_stats().expect("ir_stats");
+        assert_eq!(
+            stats.latency_basis,
+            LatencyBasis::Withheld(WithheldBasis::NoReference)
+        );
+        assert_eq!(stats.flight_time_s, None, "the stored τ is not subtracted");
+    }
     drop(d1);
+}
+
+/// Run `calibrate` on out0/in0 with both prompts skipped and return its
+/// `cal_done` frame.
+fn calibrate_done(c: &Client) -> Value {
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    c.wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame")
+}
+
+/// #544 end to end, tested against the rejected rule. Daemon 1 calibrates
+/// out0/in0 with the reference loopback configured, storing the pair's τ
+/// (32) and the reference's (20) from one capture: offset +12. Daemon 2
+/// reads that `cal.json` in another device epoch, with the transport moved
+/// by +16 samples on *both* legs — the common-mode shift a re-enumeration
+/// produces. Its flight time is still 0 (arrival 48 − ref 36 − offset 12),
+/// the offset's crossed epoch flags it without withholding it, and the
+/// rejected `arrival − stored τ` is 16 samples off.
+#[test]
+fn plot_ir_compensates_a_moved_transport_from_the_live_reference() {
+    use ac_core::measurement::report::{InterPairOffset, LatencyBasis, LiveOffset};
+    const T1: &str = "2026-09-15T23:40:11Z";
+    const T2: &str = "2026-09-16T00:08:31Z";
+    const SHIFT: usize = 16;
+
+    let d1 = Daemon::spawn_with(Some(reference_config()), &[("AC_FAKE_DEVICE_EPOCH", T1)]);
+    let done = calibrate_done(&Client::new(&d1));
+    assert_eq!(done["tau_state"], json!("measured"), "{done}");
+    assert_eq!(done["tau_reference_state"], json!("measured"), "{done}");
+    let offset = (FAKE_MEAS_DELAY_SAMPLES - FAKE_REF_DELAY_SAMPLES) as i64;
+    assert_eq!(done["tau_offset_samples"], json!(offset), "{done}");
+    let cal_rel = std::path::Path::new(".config").join("ac").join("cal.json");
+    let cal = std::fs::read(d1.home.join(&cal_rel)).expect("read cal.json");
+
+    let meas = (FAKE_MEAS_DELAY_SAMPLES + SHIFT).to_string();
+    let reference = (FAKE_REF_DELAY_SAMPLES + SHIFT).to_string();
+    let d2 = Daemon::spawn_with(
+        Some(reference_config()),
+        &[
+            ("AC_FAKE_DEVICE_EPOCH", T2),
+            ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", &meas),
+            ("AC_FAKE_REF_DELAY_SAMPLES", &reference),
+        ],
+    );
+    std::fs::write(d2.home.join(&cal_rel), &cal).expect("share cal.json");
+    let (_, report) = report_for(&Client::new(&d2), plot_ir_request(json!({})));
+
+    match &report.inter_pair_offset {
+        Some(InterPairOffset::Measured(m)) => {
+            assert_eq!((m.offset_s * FAKE_SR).round() as i64, offset);
+            assert!(
+                matches!(m.enumeration, EnumerationCheck::Crossed { .. }),
+                "{:?}",
+                m.enumeration
+            );
+        }
+        other => panic!("expected a measured offset, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(
+        matches!(
+            stats.latency_basis,
+            LatencyBasis::Live {
+                offset: LiveOffset::Measured { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        stats.latency_basis
+    );
+    let flight = stats
+        .flight_time_s
+        .expect("a crossed offset flags, never withholds");
+    assert_eq!((flight * FAKE_SR).round() as i64, 0);
+
+    let Some(ac_core::measurement::report::InterfaceLatency::Measured(stored)) =
+        &report.interface_latency
+    else {
+        panic!("stored τ recorded: {:?}", report.interface_latency)
+    };
+    let rejected = stats.arrival_s - stored.tau_s;
+    assert_eq!((rejected * FAKE_SR).round() as i64, SHIFT as i64);
+}
+
+/// #544 AC4 end to end: a τ stored with no reference configured carries no
+/// reference leg, so once a loopback is configured `plot_ir` refuses the
+/// offset, naming the pair — the stored τ is on file and is not used.
+#[test]
+fn plot_ir_refuses_an_offset_calibrate_never_measured() {
+    use ac_core::measurement::report::{InterPairOffset, LatencyBasis, WithheldBasis};
+    let d1 = Daemon::spawn();
+    let done = calibrate_done(&Client::new(&d1));
+    assert_eq!(
+        done["tau_reference_state"],
+        json!("not_configured"),
+        "{done}"
+    );
+    let cal_rel = std::path::Path::new(".config").join("ac").join("cal.json");
+    let cal = std::fs::read(d1.home.join(&cal_rel)).expect("read cal.json");
+
+    let d2 = Daemon::spawn_with_config(Some(reference_config()));
+    std::fs::write(d2.home.join(&cal_rel), &cal).expect("share cal.json");
+    let (_, report) = report_for(&Client::new(&d2), plot_ir_request(json!({})));
+    assert!(matches!(
+        report.interface_latency,
+        Some(ac_core::measurement::report::InterfaceLatency::Measured(_))
+    ));
+    let Some(InterPairOffset::Unavailable { reason }) = &report.inter_pair_offset else {
+        panic!("{:?}", report.inter_pair_offset)
+    };
+    assert_eq!(
+        reason,
+        "[out0_in0] against ref [out1_in1]; \u{3c4} on file, reference leg not measured \
+         with it; check: `ac calibrate` on this pair, loopback in place"
+    );
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(matches!(
+        stats.latency_basis,
+        LatencyBasis::Withheld(WithheldBasis::OffsetNotMeasured { .. })
+    ));
+    assert_eq!(stats.flight_time_s, None);
 }
 
 /// #501: a bare request runs the `ac-core` default stimulus, the ack echoes

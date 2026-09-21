@@ -139,6 +139,52 @@ and *this* mic position, and it moves the moment either does. No cable
 change removes it, and describing it as "interface latency" would be wrong
 in the same way the wiring residual was.
 
+**`plot ir` measures its flight time against the live reference (#544).**
+The same reasoning applies to the impulse-response path: `ac plot ir`
+captures the reference leg in the same run as the sweep and prints
+
+```
+flight time   +335 samples  (+3.490 ms, arrival − ref latency − offset)
+```
+
+`ref latency` is this capture's own reference pick; `offset` is the
+**inter-pair offset** — this pair's τ minus the reference pair's τ, both
+read in one `ac calibrate` capture and stored with the τ entry. The stored
+absolute τ is no longer subtracted: a value stored days ago does not share
+this capture's transport state, and it is shown only as the drift readout
+(`ref stored`, `ref Δ`).
+
+What live compensation cancels: every delay the two pairs share in this
+capture — converter block, clock domain, transport (FireWire/USB/ADAT/MADI)
+and audio graph, including a shift of any of them between runs at the same
+buffer size. A buffer-size change is not compensated: the period is part of
+the offset's key, so a capture at another period refuses the offset (see
+below) until `ac calibrate` has measured it at that period.
+
+What it does not cancel, and why the offset exists: a fixed difference
+between the two paths — converter channel, converter group (mic-pre versus
+line inputs, analog versus ADAT), or the interface's internal mixer/DSP
+routing. The 46.0-sample converter-channel asymmetry above is exactly such
+an offset under another name. The offset is stored per pair and keyed to
+device, backend, sample rate, period, the pair's ports and the reference
+ports; `plot ir` refuses to compensate — and withholds the flight time,
+naming the pair — when:
+
+- no offset has been measured for this pair under that key (`offset not
+  measured`, or the differing fields named); run `ac calibrate` on that pair
+  with a cable patched and the reference loopback in place;
+- no reference loopback is configured — there is no live reference, and
+  `plot ir` does not fall back to the stored τ;
+- this capture's reference pick is itself unusable (below the in-capture
+  floor, at the window edge, or across an xrun).
+
+**A routing change inside the interface is not detected.** Changing the
+mixer/DSP routing, or which converter feeds a port, while the port names
+stay the same leaves the key unchanged: the stored offset still matches and
+is applied, and the flight time is off by whatever delay difference the
+routing change introduced, in either direction. Re-run `ac calibrate` on
+every pair whose internal routing has changed.
+
 **ac does not convert the delay readout into a distance.** #391 removed
 that conversion — and the per-pair calibration layer built to correct it —
 because every input it needed (a taped ground truth, a temperature-derived
@@ -153,9 +199,12 @@ behalf.
 Interface round-trip latency (τ) is a different, narrower quantity — a
 property of *(device, backend, sample rate, period size, port pair)*,
 measured by `ac calibrate` on a loopback and archived with a report's
-`interface_latency` field. It has no wiring residual and no room in it,
-and it is the one correction `ac plot ir`'s printed flight-time figure
-still applies, when a matching τ was measured for that run.
+`interface_latency` field. It has no wiring residual and no room in it.
+The archived absolute τ is provenance and drift evidence only: `ac plot
+ir` does not subtract it. The printed flight-time figure subtracts this
+capture's live reference latency plus the stored inter-pair offset for the
+matching topology, as described above, and refreshing the stored absolute
+τ does not change it.
 That flight-time figure is a band-limited delay estimate at 2 kHz, not an
 identified direct path: when an earlier path sits more than about 20 dB
 below a later one, or two paths are less than 0.5 ms apart, it can read

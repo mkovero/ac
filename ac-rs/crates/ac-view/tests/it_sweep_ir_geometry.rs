@@ -42,6 +42,7 @@ fn base_report() -> MeasurementReport {
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![],
         notes: None,
         processing_chain: ProcessingChain::default(),

@@ -545,6 +545,64 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
     Ok((tau_s, snr_db, xruns))
 }
 
+/// The reference leg's reading from a two-leg τ capture (#544): accepted by
+/// calibrate's own gates, or refused with the reason and, when one was
+/// evaluated, the refused peak's pre-impulse SNR.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ReferenceLegReading {
+    Accepted { tau_s: f64, snr_db: f64 },
+    Refused { reason: String, snr_db: Option<f64> },
+}
+
+/// [`measure_tau`] with the reference loopback captured in the same run
+/// (#544): one stimulus, driven out of every started output, both inputs
+/// recorded together. The pair leg is judged exactly as [`measure_tau`]
+/// judges it, with its errors and their precedence unchanged. The reference
+/// leg goes through [`analyse_tau_leg`] with the same fixed gate
+/// ([`SnrGate::Constant`], calibrate's own) and its refusal never fails the
+/// pair's reading — a refused reference leaves τ storable, with no offset.
+pub(super) fn measure_tau_with_reference(
+    eng: &mut dyn AudioEngine,
+    amp: f64,
+    reference_port: &str,
+) -> anyhow::Result<((f64, f64, u32), ReferenceLegReading)> {
+    let sr = eng.sample_rate();
+    let params = tau_sweep_params(sr);
+    let sweep = log_sweep(&params)?;
+    let amp = amp as f32;
+    let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
+    let xruns_before = eng.xruns();
+    let (captured, reference) = eng.play_and_capture_with_reference(
+        &scaled,
+        TAU_TAIL_S,
+        reference_port,
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    let xruns = eng.xruns().saturating_sub(xruns_before);
+    let TauLegReading { tau_s, snr_db, .. } =
+        analyse_tau_leg(&captured, &params, TAU_TAIL_S, xruns, SnrGate::Constant)?;
+    let reference = match analyse_tau_leg(&reference, &params, TAU_TAIL_S, xruns, SnrGate::Constant)
+    {
+        Ok(r) => ReferenceLegReading::Accepted {
+            tau_s: r.tau_s,
+            snr_db: r.snr_db,
+        },
+        Err(e) => {
+            let snr_db = if let Some(low) = e.downcast_ref::<LowSnrRefusal>() {
+                Some(low.snr_db)
+            } else {
+                e.downcast_ref::<EdgeRefusal>()
+                    .and_then(|edge| edge.snr.map(|s| s.snr_db))
+            };
+            ReferenceLegReading::Refused {
+                reason: e.to_string(),
+                snr_db,
+            }
+        }
+    };
+    Ok(((tau_s, snr_db, xruns), reference))
+}
+
 /// Analyse one captured τ leg: deconvolve with `params`' inverse sweep, find
 /// the linear-IR peak inside a `2 × TAU_MIN_HALF_WINDOW_S` window, and apply
 /// the single-reading gates — capture tail long enough to hold the window,

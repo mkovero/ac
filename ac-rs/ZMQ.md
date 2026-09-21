@@ -121,11 +121,14 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 11`); the
+configured. Schema is versioned (currently `schema_version: 12`); the
 capture backend is archived at report top level. v11 (#466) adds
 `calibration.voltage_check` — the session check's verdict on the voltage
 scale, frozen at capture (a `LayerVerdict`, see [`session_check`](#session_check));
-when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`.
+when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`. v12
+(#544) adds `inter_pair_offset` on `plot_ir` reports and changes what the
+flight time is measured against — see [`plot_ir`](#plot_ir). A reader built
+before v12 refuses v12 reports.
 
 Consumers accept `schema_version` 1 through the current version and refuse
 anything else — including 0, a missing field, or a non-integer — before
@@ -142,7 +145,7 @@ and test decoding only. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 11,
+    "schema_version": 12,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -1418,21 +1421,39 @@ is an exact multiple of the period (a graph-buffering shift — the same fault
 `calibrate`'s own two-reading τ guard exists for, #347 — now caught on the
 one path that had no equivalent corroboration at all), a disagreement that
 isn't (a different fault), or not checked (no reference, no stored τ for the
-reference pair, or a reference reading that failed its own gates). Gates the
-one τ subtraction the report can offer: `IrStats::flight_time_s` is withheld
-on either disagreement, even though `interface_latency` is measured, and
-produced normally when the check is `agree` or `unchecked` — unless the
-arrival's own cross-check or its distance check (#537, below) withholds it.
+reference pair, or a reference reading that failed its own gates). From v12
+(#544) it is the **drift readout** and gates nothing: the flight time
+subtracts this capture's own `reference_latency` (below), so a moved
+reference is the case compensation handles, and `ac plot ir` prints the Δ
+next to the flight time (`ref Δ -32 samples, live reference used`) instead
+of withholding it. Before v12 it withheld the flight time on either
+disagreement.
 
-What this cannot catch: it proves this capture's lifetime matches the
-lifetime the **reference** pair was last calibrated in, not the lifetime the
-**capture** pair's own stored τ came from — if those two pairs were
-calibrated in different lifetimes, a shift between those two is invisible to
-this check. It also cannot see a shift that was already present when the
-reference pair itself was calibrated: `calibrate` would have stored the
-shifted value, this run's same-capture reading agrees with it, and the check
-reports `agree`. Absent on reports written before v9, and whenever `plot_ir`
+As a readout it says only how far the reference moved since it was stored;
+it cannot see a shift that was already present when the reference pair itself
+was calibrated. Absent on reports written before v9, and whenever `plot_ir`
 has no reference configured.
+
+**Flight time from the live reference (#544, schema v12).**
+`IrStats::flight_time_s = arrival_s − (reference_latency.tau_s + offset_s)`,
+where `offset_s` comes from `report.inter_pair_offset`. It is produced only
+when (1) the arrival's cross-check and distance check (#537, below) do not
+withhold it, (2) `reference_latency` is `measured` — it passed the #471
+derived floor and the edge and xrun gates — and (3) the offset is `measured`
+or `identity`. `IrStats::latency_basis` names the basis: `Live` with the
+reference τ and offset, or `Withheld` with the first reason in this order —
+report predates v12, no reference configured, reference unavailable, offset
+not measured. **There is no fallback to the stored τ** of the capture pair in
+any branch, including no reference configured.
+
+What the live reference cancels: delay the two pairs have in common in this
+capture — converter block, clock domain, transport (FireWire/USB), audio
+graph. What it does not cancel: a fixed offset between the two analog paths
+(that is what `inter_pair_offset` stores), pairs on different converter
+groups (mic-pre versus line, analog versus ADAT), and routing differences
+inside the interface mixer (one leg through the DSP mixer, the other direct).
+Those are carried by the offset only for the exact topology it was measured
+on, and refused everywhere else.
 
 **Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
 read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
@@ -1461,7 +1482,8 @@ peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
 than 2.0 ms later — produced and marked); `Agrees`. The onset diagnostic
 searches before the arrival, not the broadband peak.
 
-`IrStats::distance_check` scores `arrival − stored τ` against
+`IrStats::distance_check` scores `arrival − (reference latency + offset)`
+(#544; `NoLatency` when the basis is withheld) against
 `position.distance_m` when one is recorded: it must lie in
 `[d/c − ε, d/c + ε + 1.0 ms]`, `ε = (5 cm + 2 %·d)/c`, with c from
 `position.temperature_c` (343 m/s assumed without one). Outside it,
@@ -1507,7 +1529,7 @@ assumed, not measured.
   "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 11, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 12, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, "inter_pair_offset": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir", "backend": "jack",
@@ -1549,10 +1571,12 @@ counterpart to pair it with) and
 `ac-core::measurement::sweep::gated_response_citation()` (AES17-2020
 Annex A.4.5, the gating method itself).
 
-`interface_latency` is the τ (interface round-trip latency) resolved for
-this capture — the field that lets an arrival be converted to a
-τ-corrected flight time (milliseconds; #391 removed the further ms → m
-conversion this used to also unlock). It is a tagged union on `state`:
+`interface_latency` is the stored τ (interface round-trip latency) of this
+capture's own pair, resolved from `cal.json`. **From v12 (#544) it is
+provenance only**: its meaning on the wire is unchanged, but
+`IrStats::flight_time_s` no longer subtracts it — a τ stored days earlier
+does not share this capture's transport state. Before v12 it was the value
+subtracted from the arrival. It is a tagged union on `state`:
 
 ```json
 // τ measured under exactly these conditions (device, backend, sample
@@ -1568,16 +1592,15 @@ conversion this used to also unlock). It is a tagged union on `state`:
 { "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
 ```
 
-A reader must not subtract τ from the arrival when `state` is
-`unavailable`: the arrival still contains the uncorrected interface
-latency, which at 48 kHz is routinely tens of samples of phantom path.
+A v12 reader must not subtract it from the arrival in any state; the flight
+time is `arrival − (reference_latency + inter_pair_offset)`.
 
 `enumeration` (schema v10, #461) is how the stored τ's device-enumeration
 epoch related to this capture's, sampled once after the engine started and
 used for both `interface_latency` and `reference_stored_latency`. It is
-frozen at capture and never recomputed. Anything but `same` flags the value —
-it is still `measured`, and `IrStats::flight_time_s` is still produced, but
-every surface that prints the flight time says the latency is unverified. An
+frozen at capture and never recomputed. Anything but `same` flags the value;
+since v12 neither value it is recorded on feeds the flight time, so no surface
+qualifies the flight time by it. An
 absent field (a report before v10) reads as `not_recorded`, never as `same`.
 A `same` is not proof τ is unchanged: a FireWire bus reset that keeps its
 device node is invisible to the check.
@@ -1591,9 +1614,11 @@ loopback whose refusal propagated), or `unverified` with its cause
 (`no_loopback`, `not_covered`, `not_checked`, `refusals_unreadable`). When
 the measurement pair is the reference loopback, a verified or refused
 same-capture reading replaces a recorded verdict; a non-decisive one does not
-replace a standing refusal. A **refused** τ stays `measured` with its value,
-but `IrStats::flight_time_s` is withheld and the value must not be subtracted
-from the arrival. `session_check_loopback` is the cal key of the reference
+replace a standing refusal. A **refused** τ stays `measured` with its value.
+Before v12 a refused verdict withheld `IrStats::flight_time_s`; from v12 it
+withholds nothing there, because the stored τ it judges is not subtracted
+(the record, the refusals file and the `session_check` frame are unchanged).
+`session_check_loopback` is the cal key of the reference
 loopback configured when the verdict was made, absent when none was. Both
 fields are only ever set on `interface_latency`, never on
 `reference_stored_latency`. On a v11 `plot_ir` report a `measured` τ always
@@ -1609,12 +1634,14 @@ move with capture noise — so a fixed threshold refused a correct loopback at
 `plot ir`'s own default sweep. It describes
 a *different* port pair from `interface_latency`: a reader must never subtract
 it from the arrival as though it were the capture pair's own τ — τ is per
-channel pair. Its only consumer is the onset search's causal bound
-(`IrStats::causal_bound`), which needs a τ from the same client lifetime and
-stream epoch as the IR, because a stored τ re-picks by a multiple of the
-FireWire SYT interval on every device enumeration (#461), and was observed to
-re-pick within one enumeration and one daemon lifetime (#542). Tagged union on
-`state`:
+channel pair; only together with `inter_pair_offset` does it give the
+capture pair's latency. It has two consumers: the flight time (from v12,
+#544, above) and the onset search's causal bound (`IrStats::causal_bound`,
+which adds a `measured` offset from v12). Both need a τ from the same client
+lifetime and stream epoch as the IR, because a stored τ re-picks by a
+multiple of the FireWire SYT interval on every device enumeration (#461), and
+was observed to re-pick within one enumeration and one daemon lifetime
+(#542). Tagged union on `state`:
 
 ```json
 { "state": "measured", "tau_s": 0.017822917, "pre_impulse_snr_db": 61.8,
@@ -1643,6 +1670,49 @@ observed and, after `; check: `, where to look — never a cause. `plot_ir`
 always records the field, so `unavailable` with `no reference configured (ac
 setup reference)` is what no reference looks like; reports written before v7
 lack it, which readers treat as no reference.
+
+`inter_pair_offset` (schema v12, #544) is the offset between the capture
+pair and the reference pair: `τ(capture pair) − τ(reference pair)`, both read
+in **one** `calibrate` capture (the reference leg recorded with the τ entry,
+see [`calibrate`](#calibrate)), so any transport state is common to both
+terms. It is looked up by exact match on every `TauConditions` field (device,
+backend, sample rate, period size, the pair's ports) **plus** both reference
+ports, preferring the newest entry in the current device enumeration, then
+the newest. Never derived from two τ entries measured at different times,
+never assumed zero, and never replaced by the stored absolute τ. Tagged union
+on `state`, precedence in this order:
+
+```json
+// no reference loopback configured for this run
+{ "state": "not_configured" }
+
+// the capture pair is the reference pair: offset 0 by definition
+{ "state": "identity" }
+
+// an entry for this exact topology carries a reference leg
+{ "state": "measured", "offset_s": 0.0004791667, "tau_s": 0.0183020833,
+  "reference_tau_s": 0.0178229167, "measured_at": "<RFC3339>",
+  "output_port": "system:playback_1", "input_port": "system:capture_1",
+  "reference_output_port": "system:playback_2", "reference_input_port": "system:capture_2",
+  "sample_rate_hz": 96000, "period_size": 256,
+  "enumeration": { "state": "same" } }
+
+// nothing on file for this topology
+{ "state": "unavailable", "reason": "[out0_in0] against ref [out1_in1]; τ on file, reference leg not measured with it; check: `ac calibrate` on this pair, loopback in place" }
+```
+
+`offset_s` is positive when the capture pair's path is the longer one.
+`enumeration` is the entry's epoch against this capture's, a flag and never a
+gate (#461's rule): the premise that the offset survives re-enumeration is
+what #544's rig check tests. The `unavailable` reason is
+`<pair> against ref <reference>; <observation>[; <observation>…]; check:
+<places>` — the pair named, then one observation per differing field. `τ on
+file, reference leg not measured with it` is every rig's state after
+upgrading until `calibrate` is re-run on the pair with the loopback in place.
+Absent on reports written before v12: a re-derived `IrStats` for those
+withholds the flight time (`report predates schema v12`), and the drift
+readout is still shown. A v12 report without the field is a producer other
+than `plot_ir`.
 
 `report.position.distance_m` is the request's `distance_m`, recorded when
 supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
@@ -2118,6 +2188,13 @@ error, xrun, tone SNR below `S_min`) stores none: `not_recorded`.
   "tau_window_first_offset_samples": <int>, // #494: the window's first sample as an offset (−half) — present only on not_measured_window_edge
   "tau_window_last_offset_samples": <int>, // #494: the window's last sample as an offset (half − 1; the window is asymmetric by one sample) — present only on not_measured_window_edge
   "tau_edge_margin_samples": <int>,        // #494: the edge margin the peak fell inside — present only on not_measured_window_edge
+  "tau_reference_state":  "measured" | "not_configured" | "same_pair" | "not_supported" | "refused", // #544: the reference leg read in the same captures as τ — present only when tau_state == "measured"
+  "tau_reference_s":      <float>,         // #544: the reference pair's τ in those captures — present only on tau_reference_state == "measured"
+  "tau_reference_output_port": "<port>",   // #544: ditto
+  "tau_reference_input_port":  "<port>",   // #544: ditto
+  "tau_offset_samples":   <int>,           // #544: round((tau_s − tau_reference_s) · tau_sample_rate), this pair − ref pair — ditto
+  "tau_reference_pre_impulse_snr_db": <float>, // #544: the reference pick's (worse-of-two) pre-impulse SNR, judged against tau_snr_threshold_db — present on "measured", and on "refused" when a reference peak was scored
+  "tau_reference_reason": "<observation>", // #544: why no reference leg was stored — present only on tau_reference_state == "refused"
   "loop_gain_state":      "measured" | "unchanged" | "removed" | "not_recorded", // #466: what this run did with the loop-gain baseline
   "loop_gain_db":         <float> | null,  // #466: the baseline stored now (the kept one on "unchanged"); null when none
   "loop_gain_drive_dbfs": <float> | null,  // #466: ditto
@@ -2236,6 +2313,29 @@ the two readings' comparison would otherwise have said (dispatch checks
 the xrun counts before consulting `compare_tau_readings`'s result), so
 `tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured`,
 `refused_enumeration_changed`, or one of the `disagree_*` states.
+
+**Reference leg (#544).** When a reference loopback is configured and the
+calibrated pair is not the loopback itself, each of τ's two lifecycles also
+drives the reference output (once, when the ports are equal) and records the
+reference input in the **same capture**. The reference pick runs
+`calibrate`'s own gates (edge, xrun, the fixed `tau_snr_threshold_db`). The
+stored `tau_history` entry carries `reference: { output_port, input_port,
+tau_s }` only when both lifecycles' reference readings were accepted and
+agree to the whole sample — the rule τ itself uses. The offset `tau_s −
+reference.tau_s` then comes from one capture, so any transport state is
+common to both terms by construction; `plot_ir` reads it as
+`inter_pair_offset`. A refused or disagreeing reference **never** blocks
+storing τ: τ is stored without a reference and `tau_reference_reason` says
+why. Entries written before #544 carry no `reference`; no offset is derived
+from them.
+
+| `tau_reference_state` | meaning |
+|-----------------------|---------|
+| `measured` | both reference readings accepted and equal; the entry carries the reference leg |
+| `not_configured` | no reference loopback configured; the entry carries none |
+| `same_pair` | the calibrated pair is the reference loopback; `plot_ir` uses offset 0 by definition |
+| `not_supported` | the backend cannot capture a reference leg; the entry carries none |
+| `refused` | a reference reading was refused or the two disagreed; τ is stored, without a reference leg |
 
 ---
 

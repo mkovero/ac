@@ -60,6 +60,7 @@ pub(super) fn sample_report() -> MeasurementReport {
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::FrequencyResponse {
                 points: vec![
@@ -127,6 +128,7 @@ pub(super) fn sample_spectrum_bands_report() -> MeasurementReport {
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: 3,
@@ -171,6 +173,7 @@ pub(super) fn sample_impulse_response_report() -> MeasurementReport {
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::ImpulseResponse {
                 sample_rate_hz: 48_000,
@@ -351,6 +354,34 @@ pub(super) fn measured_tau_with_check(
     })
 }
 
+/// Give `r` a live latency basis of `tau_s` (#544): a same-capture
+/// reference reading of `tau_s` and the capture pair being the reference
+/// pair, so the flight time is `arrival − tau_s`. What the pre-#544
+/// fixtures got from a stored `interface_latency`.
+pub(super) fn with_live_latency(r: &mut MeasurementReport, tau_s: f64) {
+    r.reference_latency = Some(measured_reference(tau_s));
+    r.inter_pair_offset = Some(InterPairOffset::Identity);
+}
+
+/// A measured inter-pair offset of `offset_s` (#544) for [`measured_tau`]'s
+/// capture pair against [`measured_reference`]'s ports, measured in the
+/// capture's own enumeration epoch.
+pub(super) fn measured_offset(offset_s: f64) -> InterPairOffset {
+    InterPairOffset::Measured(MeasuredInterPairOffset {
+        offset_s,
+        tau_s: 0.0178 + offset_s,
+        reference_tau_s: 0.0178,
+        measured_at: "2026-09-21T16:05:40Z".into(),
+        output_port: "out1".into(),
+        input_port: "in1".into(),
+        reference_output_port: "ref_out".into(),
+        reference_input_port: "ref_in".into(),
+        sample_rate_hz: 48_000,
+        period_size: Some(1024),
+        enumeration: crate::shared::calibration::EnumerationCheck::Same,
+    })
+}
+
 /// Same-capture reference latency (#460) at `tau_s`, on nominal reference
 /// ports distinct from [`measured_tau`]'s capture pair.
 pub(super) fn measured_reference(tau_s: f64) -> ReferenceLatency {
@@ -409,6 +440,7 @@ pub(super) fn sample_noise_report() -> MeasurementReport {
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::NoiseResult {
                 sample_rate_hz: 48_000,

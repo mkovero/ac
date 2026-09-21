@@ -26,8 +26,9 @@
 use std::ops::RangeInclusive;
 
 use ac_core::measurement::report::{
-    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, IrVerdict, MeasurementData,
-    MeasurementReport, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, IrVerdict, LatencyBasis,
+    LiveOffset, MeasurementData, MeasurementReport, WithheldBasis, PRE_IMPULSE_SNR_BASIS,
+    PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -39,17 +40,13 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// τ-corrected flight time reads `"flight"`, an uncorrected round trip
 /// reads `"round trip"` — a withheld correction can no longer pass for an
 /// applied one just because both used to print the same bare `"X.XX ms"`.
-/// A detected disagreement is named on the round-trip figure, since that is
-/// the only figure available once the correction is withheld.
 ///
-/// `stats.flight_time_s` is `Some` only when [`IrStats::arrival_check`] is
-/// not a disagreement; on `PeriodShift`/`Mismatch` it is `None` even with a
-/// measured `interface_latency`, and the round trip prints instead, with
-/// the disagreement named in the suffix.
-///
-/// A flight time whose stored τ was not shown to belong to this capture's
-/// device enumeration (#461) — crossed, not observable, not recorded, or a
-/// pre-v10 report with no check at all — carries `latency unverified`.
+/// Since #544 the flight time is `arrival − ref latency − offset`, read from
+/// [`IrStats::latency_basis`]; `stats.flight_time_s` is `None` whenever that
+/// basis is withheld, and the round trip prints with the reason named
+/// ([`basis_suffix`]). A reference that moved from its stored value is the
+/// case compensation handles: the flight time stays, and the drift is named
+/// after it as `ref Δ`.
 ///
 /// Prefixed with the rule that produced the arrival (#346 UX revision 4,
 /// #537 UX): `peak above 2 kHz:` for the band-limited peak, with the corner
@@ -63,7 +60,8 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 ///
 /// Suffix order (#537 UX revision 3): the cross-check suffix
 /// ([`ArrivalCrossCheck`]) straight after the value's word, then the
-/// #359/#461 suffixes in their order, then the distance suffix
+/// #544 basis suffix (offset, then drift, or the withheld reason), then the
+/// distance suffix
 /// ([`DistanceCheck`]) last — it qualifies the whole figure against an
 /// external input.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
@@ -137,42 +135,46 @@ fn cross_check_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
     }
 }
 
+/// The latency basis's part of the marker (#544 UX). On a produced flight
+/// time: `, offset +46 samples` when the stored inter-pair offset is not
+/// zero (it is part of the number), then `, ref Δ -32 samples` when the live
+/// reference moved from its stored value (evidence about the number, never
+/// a verdict). On a withheld basis: why there is no flight time. Empty when
+/// the basis is live but another layer withheld the flight time — the
+/// cross-check or distance suffix says why.
+fn basis_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
+    match (&stats.latency_basis, stats.flight_time_s) {
+        (LatencyBasis::Live { offset, .. }, Some(_)) => {
+            let mut tail = String::new();
+            if let LiveOffset::Measured { offset_s, .. } = offset {
+                let samples = (offset_s * stats.sample_rate_hz as f64).round() as i64;
+                if samples != 0 {
+                    tail.push_str(&format!(", offset {samples:+} samples"));
+                }
+            }
+            if let ArrivalCheck::PeriodShift(d) | ArrivalCheck::Mismatch(d) = &stats.arrival_check {
+                tail.push_str(&format!(", ref \u{394} {:+} samples", d.delta_samples));
+            }
+            tail
+        }
+        (LatencyBasis::Live { .. }, None) => String::new(),
+        (LatencyBasis::Withheld(why), _) => match why {
+            WithheldBasis::PredatesV12 => ", report predates v12",
+            WithheldBasis::NoReference => ", no reference loopback",
+            WithheldBasis::ReferenceUnavailable { .. } => ", ref latency unavailable",
+            WithheldBasis::OffsetNotMeasured { .. } => ", offset not measured",
+        }
+        .to_string(),
+    }
+}
+
 /// [`arrival_marker_text`] without the rule prefix.
 fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String {
-    let arrival_ms = stats.arrival_s * 1000.0;
-    // #461: `latency unverified` qualifies the number, so it comes before
-    // `ref unchecked`, which qualifies a check.
-    let latency_unverified = stats.interface_latency_unverified();
-    let (value_ms, word, tail) = match (stats.flight_time_s, &stats.arrival_check) {
-        (Some(ft), ArrivalCheck::Unchecked { .. }) if latency_unverified => (
-            ft * 1000.0,
-            "flight",
-            ", latency unverified, ref unchecked".to_string(),
-        ),
-        (Some(ft), ArrivalCheck::Unchecked { .. }) => {
-            (ft * 1000.0, "flight", ", ref unchecked".to_string())
-        }
-        (Some(ft), _) if latency_unverified => {
-            (ft * 1000.0, "flight", ", latency unverified".to_string())
-        }
-        (Some(ft), _) => (ft * 1000.0, "flight", String::new()),
-        (None, ArrivalCheck::PeriodShift(d)) => {
-            let n = d
-                .periods
-                .expect("PeriodShift always carries a period count");
-            (
-                arrival_ms,
-                "round trip",
-                format!(", {}-period shift", n.unsigned_abs()),
-            )
-        }
-        (None, ArrivalCheck::Mismatch(d)) => (
-            arrival_ms,
-            "round trip",
-            format!(", ref \u{394} {:+} samples", d.delta_samples),
-        ),
-        (None, _) => (arrival_ms, "round trip", String::new()),
+    let (value_ms, word) = match stats.flight_time_s {
+        Some(ft) => (ft * 1000.0, "flight"),
+        None => (stats.arrival_s * 1000.0, "round trip"),
     };
+    let tail = basis_suffix(stats);
     format!(
         "{value_ms:.2} ms {word}{}{tail}{}",
         cross_check_suffix(stats),
@@ -427,8 +429,9 @@ impl SweepIrScene {
         let arrival_ms = stats.arrival_s * 1000.0;
         // `stats.arrival_s` is a round-trip figure and still contains any
         // uncorrected interface latency (`IrStats::arrival_s`'s own doc).
-        // `stats.flight_time_s` is the one already-checked τ subtraction
-        // (#359): `Some` is the τ-corrected flight time, `None` prints the
+        // `stats.flight_time_s` is the one already-checked latency
+        // subtraction (#359, #544: live reference plus inter-pair offset):
+        // `Some` is the corrected flight time, `None` prints the
         // raw round trip — named as such, so a withheld correction cannot
         // read as an applied one.
         let arrival = ArrivalMarker {
@@ -464,9 +467,11 @@ impl SweepIrScene {
 mod tests {
     use super::*;
     use ac_core::measurement::report::{
-        GateParams, IntegrationParams, InterfaceLatency, MeasuredLatency, MeasurementMethod,
-        MeasurementPayload, ProcessingChain, StimulusParams, MIN_SCHEMA_VERSION, SCHEMA_VERSION,
+        GateParams, IntegrationParams, InterPairOffset, InterfaceLatency, MeasuredInterPairOffset,
+        MeasuredLatency, MeasuredReferenceLatency, MeasurementMethod, MeasurementPayload,
+        ProcessingChain, ReferenceLatency, StimulusParams, MIN_SCHEMA_VERSION, SCHEMA_VERSION,
     };
+    use ac_core::shared::calibration::EnumerationCheck;
 
     fn base_report() -> MeasurementReport {
         MeasurementReport {
@@ -496,6 +501,7 @@ mod tests {
             interface_latency: None,
             reference_latency: None,
             reference_stored_latency: None,
+            inter_pair_offset: Some(InterPairOffset::NotConfigured),
             data: vec![],
             notes: None,
             processing_chain: ProcessingChain::default(),
@@ -688,143 +694,125 @@ mod tests {
 
     #[test]
     fn arrival_marker_prints_ms_only() {
-        // `base_report()` sets `interface_latency: None` and no reference
-        // at all, so this is the round-trip path (#359): named as such,
-        // not the bare `"X.XX ms"` this used to print before the marker
-        // could tell a withheld correction apart from an applied one. At
-        // 4 kHz the band cannot reach an octave above #537's 2 kHz corner,
-        // so the arrival is the broadband peak and the marker says so.
+        // `base_report()` has no reference loopback configured, so this is
+        // the round-trip path (#359, #544): named as such, with the reason
+        // the flight time is withheld. At 4 kHz the band cannot reach an
+        // octave above #537's 2 kHz corner, so the arrival is the broadband
+        // peak and the marker says so.
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
         let want = format!(
-            "broadband peak: {:.2} ms round trip, not band-limited",
+            "broadband peak: {:.2} ms round trip, not band-limited, no reference loopback",
             stats.arrival_s * 1000.0
         );
         assert_eq!(scene.arrival.text, want);
     }
 
-    /// #359: the existing #283 test, now asserting the `round trip` wording
-    /// — the marker names what it shows rather than reading identically to
-    /// a τ-corrected flight time.
-    #[test]
-    fn arrival_distance_is_not_shown_without_a_measured_interface_latency() {
-        // Nonzero delay (see `gated_report_with_delayed_peak`'s doc) so a
-        // τ-corrected figure derived from the uncorrected round trip would
-        // be visibly different too, not masked by a delay of exactly 0.
-        let r = gated_report_with_delayed_peak(); // interface_latency: None
-        let scene = SweepIrScene::from_report(&r).unwrap();
-        let stats = r.ir_stats().unwrap();
-        assert_eq!(
-            scene.arrival.text,
-            format!(
-                "peak above 2 kHz: {:.2} ms round trip",
-                stats.arrival_s * 1000.0
-            ),
-            "no measured \u{3c4} on this report — arrival text must be the raw round trip: {}",
-            scene.arrival.text
-        );
-    }
-
-    // `arrival_distance_is_tau_corrected_when_interface_latency_is_measured`
-    // moved down into `ac_core::measurement::report::ir_stats` (#359): the
-    // τ subtraction it tested now lives there, gated by `arrival_check`, so
-    // this module has nothing left to prove about the number itself — only
-    // that the marker names it correctly (below).
-
-    /// #359: a detected period shift must withhold the τ-corrected figure
-    /// and name the shift on the round trip instead — never silently fall
-    /// back to printing the number as though it were still `"flight"`.
-    #[test]
-    fn arrival_marker_names_a_detected_period_shift_not_flight() {
-        use ac_core::measurement::report::{
-            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
-        };
-
-        let mut r = gated_report_with_delayed_peak();
-        r.interface_latency = Some(measured_tau(0.0001));
-        let sr = DELAYED_SR;
-        let period = 64u32;
-        let stored_tau_s = 0.002;
-        let same_capture_tau_s = stored_tau_s + period as f64 / sr as f64;
-        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
-            tau_s: same_capture_tau_s,
-            pre_impulse_snr_db: Some(60.0),
-            pre_impulse_snr_floor_db: Some(63.0),
-            method: "farina_same_capture_reference_v1".into(),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-        }));
-        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-            tau_s: stored_tau_s,
-            measured_at: "2026-08-15T00:00:00Z".into(),
-            method: "farina_short_ess".into(),
-            backend: "fake".into(),
-            sample_rate_hz: sr,
-            period_size: Some(period),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
-            session_check: None,
-            session_check_loopback: None,
-        }));
-        let scene = SweepIrScene::from_report(&r).unwrap();
-        let stats = r.ir_stats().unwrap();
-        assert!(matches!(
-            stats.arrival_check,
-            ac_core::measurement::report::ArrivalCheck::PeriodShift(_)
-        ));
-        assert_eq!(
-            scene.arrival.text,
-            format!(
-                "peak above 2 kHz: {:.2} ms round trip, 1-period shift",
-                stats.arrival_s * 1000.0
-            ),
-            "a period shift must name itself on the round trip, not read as flight: {}",
-            scene.arrival.text
-        );
-        assert!(!scene.arrival.text.contains("flight"));
-    }
-
-    /// #359: the ordinary agree case must read plain "flight", not silently
-    /// pick up a suffix meant for a different state.
-    #[test]
-    fn arrival_marker_names_flight_when_the_check_agrees() {
-        use ac_core::measurement::report::{
-            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
-        };
-
-        let mut r = gated_report_with_delayed_peak();
-        r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
-        let sr = DELAYED_SR;
-        let tau_s = 0.002;
-        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
+    /// A same-capture reference reading of `tau_s` on `ref_out`/`ref_in`.
+    fn live_reference(tau_s: f64) -> ReferenceLatency {
+        ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s,
             pre_impulse_snr_db: Some(60.0),
             pre_impulse_snr_floor_db: Some(63.0),
             method: "farina_same_capture_reference_v1".into(),
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
-        }));
-        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-            tau_s, // identical -> Agree
+        })
+    }
+
+    /// The stored τ of the reference pair, for the drift readout.
+    fn stored_reference(tau_s: f64, sample_rate_hz: u32, period: u32) -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s,
             measured_at: "2026-08-15T00:00:00Z".into(),
             method: "farina_short_ess".into(),
             backend: "fake".into(),
-            sample_rate_hz: sr,
-            period_size: Some(64),
+            sample_rate_hz,
+            period_size: Some(period),
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
-            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
+            enumeration: Some(EnumerationCheck::Same),
             session_check: None,
             session_check_loopback: None,
-        }));
+        })
+    }
+
+    /// A measured inter-pair offset of `offset_s`, epoch `enumeration`.
+    fn measured_offset(offset_s: f64, enumeration: EnumerationCheck) -> InterPairOffset {
+        InterPairOffset::Measured(MeasuredInterPairOffset {
+            offset_s,
+            tau_s: 0.002 + offset_s,
+            reference_tau_s: 0.002,
+            measured_at: "2026-08-15T00:00:00Z".into(),
+            output_port: "out1".into(),
+            input_port: "in1".into(),
+            reference_output_port: "ref_out".into(),
+            reference_input_port: "ref_in".into(),
+            sample_rate_hz: DELAYED_SR,
+            period_size: Some(64),
+            enumeration,
+        })
+    }
+
+    /// #544 AC4, inverting #359's test: a measured stored τ for the capture
+    /// pair with no reference loopback no longer yields `flight` — the
+    /// marker prints the round trip and names the missing reference.
+    #[test]
+    fn a_stored_tau_without_a_reference_prints_the_round_trip() {
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.flight_time_s, None);
         assert_eq!(
-            stats.arrival_check,
-            ac_core::measurement::report::ArrivalCheck::Agree
+            scene.arrival.text,
+            format!(
+                "peak above 2 kHz: {:.2} ms round trip, no reference loopback",
+                stats.arrival_s * 1000.0
+            ),
         );
+        assert!(!scene.arrival.text.contains("ref unchecked"));
+    }
+
+    /// #544, inverting #359: a period shift of the live reference is now the
+    /// drift readout. The flight time is produced from the shifted live
+    /// reading and the shift is named after it, never as a withheld round
+    /// trip.
+    #[test]
+    fn arrival_marker_names_a_period_shift_as_drift_on_the_flight_time() {
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001));
+        let period = 64u32;
+        let stored_tau_s = 0.002;
+        let live_tau_s = stored_tau_s + period as f64 / DELAYED_SR as f64;
+        r.reference_latency = Some(live_reference(live_tau_s));
+        r.reference_stored_latency = Some(stored_reference(stored_tau_s, DELAYED_SR, period));
+        r.inter_pair_offset = Some(InterPairOffset::Identity);
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(stats.arrival_check, ArrivalCheck::PeriodShift(_)));
+        let flight_ms = stats.flight_time_s.expect("drift no longer withholds") * 1000.0;
+        assert_eq!(
+            scene.arrival.text,
+            format!("peak above 2 kHz: {flight_ms:.2} ms flight, ref \u{394} +64 samples, distance not given"),
+        );
+        assert!(!scene.arrival.text.contains("period shift"));
+    }
+
+    /// #359: the ordinary agree case must read plain "flight", not silently
+    /// pick up a suffix meant for a different state.
+    #[test]
+    fn arrival_marker_names_flight_when_the_check_agrees() {
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
+        let tau_s = 0.002;
+        r.reference_latency = Some(live_reference(tau_s));
+        r.reference_stored_latency = Some(stored_reference(tau_s, DELAYED_SR, 64));
+        r.inter_pair_offset = Some(InterPairOffset::Identity);
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.arrival_check, ArrivalCheck::Agree);
         let flight_ms = stats
             .flight_time_s
             .expect("Agree must produce a flight time")
@@ -835,93 +823,42 @@ mod tests {
         );
     }
 
-    /// #359: a flight time computed alongside `Unchecked` must say so — the
-    /// same operator-misreading risk Codex's round-2 finding fixed for the
-    /// CLI, unaddressed here.
+    /// #544 UX, inverting #461: an offset whose enumeration is not `same`
+    /// is a fact printed by the CLI, never a flag on the marker —
+    /// `latency unverified` and `ref unchecked` no longer exist.
     #[test]
-    fn arrival_marker_names_flight_ref_unchecked_when_the_check_never_ran() {
-        let mut r = gated_report_with_delayed_peak();
-        r.interface_latency = Some(measured_tau(0.0001));
-        // No reference at all configured -> Unchecked, flight_time_s still Some.
-        let scene = SweepIrScene::from_report(&r).unwrap();
-        let stats = r.ir_stats().unwrap();
-        assert!(matches!(
-            stats.arrival_check,
-            ac_core::measurement::report::ArrivalCheck::Unchecked { .. }
-        ));
-        let flight_ms = stats
-            .flight_time_s
-            .expect("Unchecked must still produce a flight time")
-            * 1000.0;
-        assert_eq!(
-            scene.arrival.text,
-            format!(
-                "peak above 2 kHz: {flight_ms:.2} ms flight, ref unchecked, distance not given"
-            )
-        );
-    }
-
-    /// #461: a flight time over a stored τ that is not `same` enumeration
-    /// carries `latency unverified`, before `ref unchecked`. A v9 report (no
-    /// check at all) is flagged too: nobody checked it (UX revision 2).
-    #[test]
-    fn arrival_marker_flags_a_flight_time_over_an_unverified_latency() {
-        use ac_core::measurement::report::{InterfaceLatency, MeasuredLatency};
-        use ac_core::shared::calibration::EnumerationCheck;
-
-        let with_check = |check: Option<EnumerationCheck>| {
-            let mut r = gated_report_with_delayed_peak();
-            let InterfaceLatency::Measured(m) = measured_tau(0.0001) else {
-                unreachable!("measured_tau builds a measured latency")
-            };
-            r.interface_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-                enumeration: check,
-                ..m
-            }));
-            let stats = r.ir_stats().unwrap();
-            let flight_ms = stats.flight_time_s.expect("flagged, not withheld") * 1000.0;
-            (
-                SweepIrScene::from_report(&r).unwrap().arrival.text,
-                flight_ms,
-            )
-        };
-
-        let (text, ms) = with_check(Some(EnumerationCheck::Same));
-        assert_eq!(
-            text,
-            format!("peak above 2 kHz: {ms:.2} ms flight, ref unchecked, distance not given")
-        );
-
+    fn arrival_marker_never_flags_an_offset_enumeration() {
         for check in [
-            Some(EnumerationCheck::Crossed {
+            EnumerationCheck::Same,
+            EnumerationCheck::Crossed {
                 boundary: "host rebooted".into(),
                 since: Some("2026-09-16T13:41:52Z".into()),
-            }),
-            Some(EnumerationCheck::NotRecorded),
-            Some(EnumerationCheck::NotObservable {
+            },
+            EnumerationCheck::NotRecorded,
+            EnumerationCheck::NotObservable {
                 reason: "cpal backend has no enumeration probe".into(),
-            }),
-            None,
+            },
         ] {
-            let (text, ms) = with_check(check.clone());
+            let mut r = gated_report_with_delayed_peak();
+            r.reference_latency = Some(live_reference(0.002));
+            r.inter_pair_offset = Some(measured_offset(0.0, check.clone()));
+            let stats = r.ir_stats().unwrap();
+            let ms = stats.flight_time_s.expect("not withheld") * 1000.0;
+            let text = SweepIrScene::from_report(&r).unwrap().arrival.text;
             assert_eq!(
                 text,
-                format!(
-                    "peak above 2 kHz: {ms:.2} ms flight, latency unverified, ref unchecked, \
-                     distance not given"
-                ),
+                format!("peak above 2 kHz: {ms:.2} ms flight, distance not given"),
                 "{check:?}"
             );
+            assert!(!text.contains("unverified"), "{text}");
             assert!(!text.contains("rebooted"), "the boundary stays in the CLI");
         }
     }
 
-    /// #466 (R6-4): a stored τ the session check refused never reaches the
-    /// marker. `ir_stats` withholds the flight time, so the marker falls to
-    /// the round trip.
+    /// #544: a stored τ the session check refused is no longer subtracted,
+    /// so its refusal no longer withholds the flight time either.
     #[test]
-    fn arrival_marker_never_uses_a_refused_latency() {
-        use ac_core::measurement::report::{InterfaceLatency, MeasuredLatency};
+    fn a_refused_session_check_no_longer_withholds_the_marker_flight() {
         use ac_core::shared::calibration::session::{CheckSource, Evidence, VerdictUnit};
         use ac_core::shared::calibration::LayerVerdict;
 
@@ -946,118 +883,97 @@ mod tests {
             }),
             ..m
         }));
+        r.reference_latency = Some(live_reference(0.002));
+        r.inter_pair_offset = Some(InterPairOffset::Identity);
         let text = SweepIrScene::from_report(&r).unwrap().arrival.text;
-        assert!(text.contains("round trip"), "{text}");
-        assert!(!text.contains("flight"), "{text}");
+        assert!(text.contains(" ms flight"), "{text}");
     }
 
-    /// #461: with the reference check agreeing, the flag is the only suffix.
+    /// #544 UX: a non-zero offset is part of the number, so it is named on
+    /// it; a zero one is not.
     #[test]
-    fn arrival_marker_flags_an_unverified_latency_when_the_check_agrees() {
-        use ac_core::measurement::report::{
-            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
-        };
-        use ac_core::shared::calibration::EnumerationCheck;
-
+    fn arrival_marker_names_a_non_zero_offset() {
         let mut r = gated_report_with_delayed_peak();
-        r.interface_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-            tau_s: 0.0001,
-            measured_at: "2026-08-16T00:00:00Z".into(),
-            method: "farina_short_ess".into(),
-            backend: "jack".into(),
-            sample_rate_hz: 4_000,
-            period_size: None,
-            output_port: "out1".into(),
-            input_port: "in1".into(),
-            enumeration: Some(EnumerationCheck::NotRecorded),
-            session_check: None,
-            session_check_loopback: None,
-        }));
-        let tau_s = 0.002;
-        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
-            tau_s,
-            pre_impulse_snr_db: Some(60.0),
-            pre_impulse_snr_floor_db: Some(63.0),
-            method: "farina_same_capture_reference_v1".into(),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-        }));
-        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-            tau_s,
-            measured_at: "2026-08-15T00:00:00Z".into(),
-            method: "farina_short_ess".into(),
-            backend: "fake".into(),
-            sample_rate_hz: 4_000,
-            period_size: Some(64),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-            enumeration: Some(EnumerationCheck::Same),
-            session_check: None,
-            session_check_loopback: None,
-        }));
+        r.reference_latency = Some(live_reference(0.002));
+        r.inter_pair_offset = Some(measured_offset(
+            -46.0 / DELAYED_SR as f64,
+            EnumerationCheck::Same,
+        ));
         let stats = r.ir_stats().unwrap();
-        assert_eq!(
-            stats.arrival_check,
-            ac_core::measurement::report::ArrivalCheck::Agree
-        );
-        let flight_ms = stats.flight_time_s.unwrap() * 1000.0;
+        let ms = stats.flight_time_s.expect("not withheld") * 1000.0;
         assert_eq!(
             SweepIrScene::from_report(&r).unwrap().arrival.text,
-            format!("peak above 2 kHz: {flight_ms:.2} ms flight, latency unverified, distance not given")
+            format!("peak above 2 kHz: {ms:.2} ms flight, offset -46 samples, distance not given")
         );
     }
 
-    /// #359: a non-period-multiple disagreement must name itself on the
-    /// round trip as `ref Δ`, distinctly from a period shift.
+    /// #544: a non-period-multiple drift is named with its signed delta on
+    /// the flight time, the same way as a period shift.
     #[test]
-    fn arrival_marker_names_a_mismatch_not_a_period_shift() {
-        use ac_core::measurement::report::{
-            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
-        };
-
+    fn arrival_marker_names_a_mismatch_as_drift_on_the_flight_time() {
         let mut r = gated_report_with_delayed_peak();
-        let sr = DELAYED_SR;
         let period = 64u32;
         let stored_tau_s = 0.002;
         // one sample off an exact period -> Mismatch, not PeriodShift
-        let same_capture_tau_s = stored_tau_s + (period as f64 + 1.0) / sr as f64;
-        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
-            tau_s: same_capture_tau_s,
-            pre_impulse_snr_db: Some(60.0),
-            pre_impulse_snr_floor_db: Some(63.0),
-            method: "farina_same_capture_reference_v1".into(),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-        }));
-        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
-            tau_s: stored_tau_s,
-            measured_at: "2026-08-15T00:00:00Z".into(),
-            method: "farina_short_ess".into(),
-            backend: "fake".into(),
-            sample_rate_hz: sr,
-            period_size: Some(period),
-            output_port: "ref_out".into(),
-            input_port: "ref_in".into(),
-            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
-            session_check: None,
-            session_check_loopback: None,
-        }));
+        let live_tau_s = stored_tau_s + (period as f64 + 1.0) / DELAYED_SR as f64;
+        r.reference_latency = Some(live_reference(live_tau_s));
+        r.reference_stored_latency = Some(stored_reference(stored_tau_s, DELAYED_SR, period));
+        r.inter_pair_offset = Some(InterPairOffset::Identity);
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        use ac_core::measurement::report::ArrivalCheck;
         let d = match &stats.arrival_check {
             ArrivalCheck::Mismatch(d) => d,
             other => panic!("expected Mismatch, got {other:?}"),
         };
+        let ms = stats.flight_time_s.expect("drift no longer withholds") * 1000.0;
         assert_eq!(
             scene.arrival.text,
             format!(
-                "peak above 2 kHz: {:.2} ms round trip, ref \u{394} {:+} samples",
-                stats.arrival_s * 1000.0,
+                "peak above 2 kHz: {ms:.2} ms flight, ref \u{394} {:+} samples, distance not given",
                 d.delta_samples,
             )
         );
-        assert!(!scene.arrival.text.contains("flight"));
+    }
+
+    /// #544 UX: every withheld basis names itself on the round trip, and a
+    /// live basis withheld by another layer adds nothing of its own.
+    #[test]
+    fn arrival_marker_names_each_withheld_basis() {
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001));
+        let arrival_ms = r.ir_stats().unwrap().arrival_s * 1000.0;
+        let cases: [(Option<InterPairOffset>, Option<ReferenceLatency>, &str); 4] = [
+            (None, Some(live_reference(0.002)), "report predates v12"),
+            (
+                Some(InterPairOffset::NotConfigured),
+                None,
+                "no reference loopback",
+            ),
+            (
+                Some(InterPairOffset::Identity),
+                Some(ReferenceLatency::Unavailable {
+                    reason: "reference leg below its floor".into(),
+                }),
+                "ref latency unavailable",
+            ),
+            (
+                Some(InterPairOffset::Unavailable {
+                    reason: "[out0_in0] against ref [out1_in1]; no \u{3c4} on file".into(),
+                }),
+                Some(live_reference(0.002)),
+                "offset not measured",
+            ),
+        ];
+        for (offset, reference, why) in cases {
+            r.inter_pair_offset = offset;
+            r.reference_latency = reference;
+            let stats = r.ir_stats().unwrap();
+            assert_eq!(stats.flight_time_s, None, "{why}");
+            assert_eq!(
+                SweepIrScene::from_report(&r).unwrap().arrival.text,
+                format!("peak above 2 kHz: {arrival_ms:.2} ms round trip, {why}"),
+            );
+        }
     }
 
     /// #346 UX revision 4, #537 UX: the marker names the rule that produced
@@ -1116,8 +1032,10 @@ mod tests {
             s.flight_time_s = flight_ms.map(|ms| ms / 1000.0);
             s.arrival_s = arrival_ms / 1000.0;
             s.arrival_check = ArrivalCheck::Agree;
-            s.interface_latency_enumeration =
-                Some(ac_core::shared::calibration::EnumerationCheck::Same);
+            s.latency_basis = LatencyBasis::Live {
+                reference_tau_s: 0.017823,
+                offset: LiveOffset::Identity,
+            };
             s
         };
         let agrees = ArrivalCrossCheck::Agrees { gap: 128 };
@@ -1242,20 +1160,34 @@ mod tests {
             arrival_marker_text(&zero),
             "peak above 2 kHz: 0.00 ms flight, distance not checked"
         );
-        // Order: cross-check, then #359/#461, then distance.
-        let mut unchecked = with(
+        // Order: cross-check, then the #544 basis (offset before drift),
+        // then distance.
+        let mut drifted = with(
             ArrivalCrossCheck::BroadbandLater { gap: 1_440 },
             DistanceCheck::NotGiven,
             Some(6.208),
             24.031,
         );
-        unchecked.arrival_check = ArrivalCheck::Unchecked {
-            reason: String::new(),
+        drifted.latency_basis = LatencyBasis::Live {
+            reference_tau_s: 0.017490,
+            offset: LiveOffset::Measured {
+                offset_s: 46.0 / 96_000.0,
+                enumeration: ac_core::shared::calibration::EnumerationCheck::Same,
+            },
         };
+        drifted.arrival_check =
+            ArrivalCheck::Mismatch(ac_core::shared::calibration::TauDisagreement {
+                reading1_s: 1711.0 / 96_000.0,
+                reading2_s: 1679.0 / 96_000.0,
+                delta_samples: -32,
+                sample_rate: 96_000,
+                period_size: Some(256),
+                periods: None,
+            });
         assert_eq!(
-            arrival_marker_text(&unchecked),
-            "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms, ref unchecked, \
-             distance not given"
+            arrival_marker_text(&drifted),
+            "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms, offset +46 samples, \
+             ref \u{394} -32 samples, distance not given"
         );
     }
 

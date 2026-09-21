@@ -11,9 +11,10 @@ use serde_json::{json, Value};
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
-    InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, MeasurementData,
-    MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain,
-    ReferenceLatency, StimulusParams, SCHEMA_VERSION,
+    InterPairOffset, InterfaceLatency, MeasuredInterPairOffset, MeasuredLatency,
+    MeasuredReferenceLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
+    MeasurementReport, PositionSnapshot, ProcessingChain, ReferenceLatency, StimulusParams,
+    SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
@@ -492,6 +493,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             interface_latency: None,
             reference_latency: None,
             reference_stored_latency: None,
+            inter_pair_offset: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -833,6 +835,7 @@ fn emit_spectrum_bands(
         interface_latency: None,
         reference_latency: None,
         reference_stored_latency: None,
+        inter_pair_offset: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -913,6 +916,56 @@ fn resolve_tau(
         Err(refusal) => InterfaceLatency::Unavailable {
             reason: refusal.message(),
         },
+    }
+}
+
+/// The inter-pair offset for the capture pair `cond` against the reference
+/// loopback `reference` = `(output_port, input_port)` (#544), flattened into
+/// the archival form. Looked up in `cal`, the capture pair's own entry,
+/// against the same `epoch` as both τ lookups; never measured here and never
+/// replaced by the stored absolute τ.
+///
+/// `pair_key` / `reference_key` are the two cal keys, named in a refusal so
+/// a reader sees which pair has no offset against which loopback.
+fn resolve_pair_offset(
+    cal: Option<&Calibration>,
+    cond: &TauConditions,
+    reference: Option<(&str, &str)>,
+    pair_key: &str,
+    reference_key: &str,
+    epoch: &DeviceEpoch,
+) -> InterPairOffset {
+    let Some((ref_out, ref_in)) = reference else {
+        return InterPairOffset::NotConfigured;
+    };
+    if ref_out == cond.output_port && ref_in == cond.input_port {
+        return InterPairOffset::Identity;
+    }
+    let refused = |lines: Vec<String>| InterPairOffset::Unavailable {
+        reason: format!(
+            "[{pair_key}] against ref [{reference_key}]; {}; check: `ac calibrate` on this \
+             pair, loopback in place",
+            lines.join("; ")
+        ),
+    };
+    let Some(cal) = cal else {
+        return refused(vec!["no \u{3c4} on file for this pair".to_string()]);
+    };
+    match cal.pair_offset_for(cond, ref_out, ref_in, epoch) {
+        Ok(hit) => InterPairOffset::Measured(MeasuredInterPairOffset {
+            offset_s: hit.offset_s(),
+            tau_s: hit.entry.tau_s,
+            reference_tau_s: hit.reference.tau_s,
+            measured_at: hit.entry.measured_at.clone(),
+            output_port: hit.entry.conditions.output_port.clone(),
+            input_port: hit.entry.conditions.input_port.clone(),
+            reference_output_port: hit.reference.output_port.clone(),
+            reference_input_port: hit.reference.input_port.clone(),
+            sample_rate_hz: hit.entry.conditions.sample_rate,
+            period_size: hit.entry.conditions.period_size,
+            enumeration: hit.check,
+        }),
+        Err(refusal) => refused(refusal.lines()),
     }
 }
 
@@ -1080,6 +1133,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
     let device = cfg.device;
+    // #544: the reference pair's cal key, named in an offset refusal.
+    let cfg_reference_output_channel = cfg.reference_output_channel;
+    let cfg_reference_channel = cfg.reference_channel;
     let tau_out_port = out_port.clone();
     let tau_in_port = in_port.clone();
     // One mic-correction state per measurement (#436) — see `plot`. Read
@@ -1143,16 +1199,33 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // rather than measured — `plot_ir` must not silently re-run a
         // calibration step. Both outcomes are recorded; "no τ" is the
         // provenance that stops a distance being derived downstream (#283).
-        let mut interface_latency = Some(resolve_tau(
+        let pair_conditions = TauConditions {
+            device,
+            backend: eng.backend_name().to_string(),
+            sample_rate: sr,
+            period_size: eng.period_size(),
+            output_port: tau_out_port,
+            input_port: tau_in_port,
+        };
+        let mut interface_latency =
+            Some(resolve_tau(cal_stored.as_ref(), &pair_conditions, &epoch));
+
+        // #544: the offset between this pair and the reference loopback,
+        // from the capture pair's own entry, against the same epoch. With
+        // this capture's reference latency it is what the flight time
+        // subtracts; the stored τ above is provenance only.
+        let reference_out_port = ref_out_port.clone().unwrap_or_else(|| out_port.clone());
+        let inter_pair_offset = Some(resolve_pair_offset(
             cal_stored.as_ref(),
-            &TauConditions {
-                device,
-                backend: eng.backend_name().to_string(),
-                sample_rate: sr,
-                period_size: eng.period_size(),
-                output_port: tau_out_port,
-                input_port: tau_in_port,
-            },
+            &pair_conditions,
+            ref_in_port
+                .as_deref()
+                .map(|ref_in| (reference_out_port.as_str(), ref_in)),
+            &ac_core::shared::calibration::cal_key(out_ch, in_ch),
+            &ac_core::shared::calibration::cal_key(
+                cfg_reference_output_channel.unwrap_or(out_ch),
+                cfg_reference_channel.unwrap_or(in_ch),
+            ),
             &epoch,
         ));
 
@@ -1310,7 +1383,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         };
         // #460: τ of the reference pair, read from the reference leg of this
         // same capture with `calibrate`'s single-reading gates (SNR, window
-        // edge, xrun). It feeds only the onset search's causal bound.
+        // edge, xrun). It feeds the onset search's causal bound and, with
+        // `inter_pair_offset`, the flight time (#544).
         let reference_latency = Some(match reference_leg {
             ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
             ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {
@@ -1333,8 +1407,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // The measurement pair's own verdict is frozen into
         // `interface_latency.session_check` on every run, pending or not
         // (R6-2): a persisted refusal stands with no reference configured.
-        // The τ value stays in the report; `IrStats` withholds the flight
-        // time a refused verdict would feed.
+        // The τ value stays in the report. Since #544 `IrStats` no longer
+        // subtracts it, so a refused verdict withholds nothing there.
         let latency = if gate.pending() {
             ref_in_port.as_ref().map(|_| {
                 same_capture_latency(
@@ -1503,6 +1577,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             interface_latency,
             reference_latency,
             reference_stored_latency,
+            inter_pair_offset,
             data: vec![
                 MeasurementPayload {
                     data,

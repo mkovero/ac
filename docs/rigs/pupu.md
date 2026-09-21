@@ -147,6 +147,26 @@ by the helper script itself.
   `drive_max_dbfs` key — #459 retired it, and while it is present every
   emitting command refuses (`preflight.sh` FAILs on it). No calibration;
   levels are dBFS only.
+- **Flight time uses the live reference (#544).** `plot ir` prints
+  `arrival − ref latency − offset`: this capture's own AN2 → IN2 pick plus the
+  stored **inter-pair offset** of AN1 → IN1 against AN2 → IN2. The live
+  reference cancels what the two analog pairs share — the FF400's converter
+  block and clock, the FireWire transport, the JACK graph, including a re-pick
+  across a JACK restart or re-enumeration. It does not cancel a fixed
+  difference between the two analog paths; that is the offset. To store it:
+  patch a cable AN1 → IN1 (loopback AN2 → IN2 stays in place) and run
+  `ac calibrate` for out AN1 / in IN1, skipping both DMM prompts. The
+  `Offset:` row must read `measured`; `calibrate show` prints it under
+  `Delay:`. Until then every `plot ir` withholds the flight time with
+  `offset not measured`. The offset's key is ports, rate and period, not the
+  FF400's mixer routing: after `snd-fireface-ctl` routing changes (or a
+  power cycle drops it and it is rewritten), the old offset still applies
+  unchecked — re-run the calibrate above.
+- **Inter-pair offset AN1 → IN1 vs AN2 → IN2: 0 samples** — provenance:
+  measured 2026-09-18, as two separate cable-patched `calibrate` runs that
+  both read 1711 samples. That is consistent with 0 but was not taken in one
+  capture, so it is not in the stored form `plot ir` reads; the step above
+  re-establishes it (#544 rig check step 1).
 - **Ceilings (nominal dBFS): −40 standing, −50 on anything that drives the
   speaker** (operator, 2026-09-14). The daemon has no configurable ceiling:
   since #459 it refuses only above full scale and never clamps. Both limits
@@ -175,9 +195,10 @@ lifetime — a restarted client can land a period away.
 | `acoustic-ir.sh` | AN1 → 1083 → mic at 1 m | −40 dBFS (before the −50 speaker ceiling) | +2200 smp = +22.92 ms | 25.6 dB |
 
 Acoustic onset at 50 / 25 / 10 / 5 % of peak: +21.98 / +21.69 / +19.66 /
-+18.79 ms. Do not subtract the loopback's 17.99 ms from these: τ is per
-channel pair, and the loopback (AN2 → IN2) is not the acoustic pair
-(AN1 → IN1). The 5–10 % onsets sit earlier than 1 m of flight allows, so
++18.79 ms. Do not subtract the loopback's 17.99 ms from these on its own: τ
+is per channel pair, and the loopback (AN2 → IN2) is not the acoustic pair
+(AN1 → IN1) — only together with the inter-pair offset (#544, above) does it
+give the acoustic pair's latency, and only within one capture. The 5–10 % onsets sit earlier than 1 m of flight allows, so
 they are reading pre-ringing or noise, not the arrival.
 
 Wiring probe the same session (1 kHz, −60 dBFS): AN1 → mic −65.7 dBFS, IN2

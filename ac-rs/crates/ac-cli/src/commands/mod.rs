@@ -551,7 +551,17 @@ fn latency_rows(
                     e.delta
                 )),
             }
-            if kind == BlockKind::Consumer {
+            // #544 (architect rev. 2): `plot_ir`'s flight time subtracts this
+            // capture's own reference latency, never the stored τ this
+            // verdict judges — a property of the command, not of the
+            // evidence source (a voltage layer makes the frame `probe`).
+            let flight_time_consumer = kind == BlockKind::Consumer
+                && rec.get("cmd").and_then(|v| v.as_str()) == Some("plot_ir");
+            if flight_time_consumer {
+                lines.push(format!(
+                    "{BLOCK_INDENT}not applied \u{2014} flight time uses this capture's ref latency"
+                ));
+            } else if kind == BlockKind::Consumer {
                 lines.push(format!(
                     "{BLOCK_INDENT}stored \u{3c4} for [{loopback}] not applied"
                 ));
@@ -582,9 +592,13 @@ fn latency_rows(
                     BLOCK_INDENT,
                 ));
             }
-            lines.push(format!(
-                "{BLOCK_INDENT}check: re-run `ac calibrate` with loopback patched"
-            ));
+            // #544 UX: no instruction to re-calibrate above a flight time that
+            // does not use the stored τ.
+            if !flight_time_consumer {
+                lines.push(format!(
+                    "{BLOCK_INDENT}check: re-run `ac calibrate` with loopback patched"
+                ));
+            }
         }
         LayerVerdict::Unverified { cause, reason } => {
             lines.extend(unverified_rows(&label, *cause, reason));
@@ -1345,6 +1359,73 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == "  latency       REFUSED \u{2014} 1743 samples this capture, 1711 stored (\u{394} +32)"));
+    }
+
+    /// #544 (architect rev. 2, UX): under `plot_ir` a refused latency is
+    /// scoped — `plot_ir`'s flight time does not subtract the stored τ — and
+    /// carries no re-calibrate `check:`, in the direct and the `via` form,
+    /// and whether the frame's evidence is `same_capture` or `probe`. Tested
+    /// against a leak: every other consumer and `ac calibrate check` keep
+    /// today's `not applied` and `check:` lines.
+    #[test]
+    fn plot_ir_refused_latency_is_scoped_to_the_stored_tau() {
+        let recalibrate = "                check: re-run `ac calibrate` with loopback patched";
+        let scoped =
+            "                not applied \u{2014} flight time uses this capture's ref latency";
+        let stored = "                stored \u{3c4} for [out1_in1] not applied";
+        let plot_ir = |mut f: Value, source: &str| {
+            f["cmd"] = json!("plot_ir");
+            f["source"] = json!(source);
+            f
+        };
+        let mut via = tau("refused", 1743.0);
+        via["via"] = json!("out1_in1");
+        let mut direct = frame(None, Some(tau("refused", 1679.0)));
+        direct["stimulus"] = Value::Null;
+        direct["reach"]["latency"] =
+            json!([{"key": "out0_in0", "sample_rate": 96000, "period_size": 256}]);
+        for f in [
+            plot_ir(direct.clone(), "same_capture"),
+            plot_ir(
+                frame(Some(gain("verified", 0.01)), Some(via.clone())),
+                "probe",
+            ),
+        ] {
+            let lines = session_block_lines(&f, BlockKind::Consumer);
+            assert!(lines.iter().any(|l| l == scoped), "{lines:#?}");
+            assert!(!lines.iter().any(|l| l == recalibrate), "{lines:#?}");
+            assert!(!lines.iter().any(|l| l == stored), "{lines:#?}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("  latency       REFUSED")),
+                "{lines:#?}"
+            );
+        }
+        let lines = session_block_lines(
+            &plot_ir(direct.clone(), "same_capture"),
+            BlockKind::Consumer,
+        );
+        assert_eq!(
+            lines[3..6].to_vec(),
+            vec![
+                "  latency       REFUSED \u{2014} 1679 samples this capture, 1711 stored (\u{394} -32)",
+                scoped,
+                "                also refused: stored \u{3c4} of [out0_in0] at 96000 Hz, period 256",
+            ]
+        );
+        assert_eq!(lines.len(), 6, "{lines:#?}");
+
+        let other = frame(None, Some(tau("refused", 1679.0)));
+        let lines = session_block_lines(&other, BlockKind::Consumer);
+        assert!(lines.iter().any(|l| l == stored), "{lines:#?}");
+        assert!(lines.iter().any(|l| l == recalibrate), "{lines:#?}");
+        assert!(!lines.iter().any(|l| l == scoped), "{lines:#?}");
+        for f in [other, plot_ir(direct, "same_capture")] {
+            let lines = session_block_lines(&f, BlockKind::Explicit);
+            assert!(lines.iter().any(|l| l == recalibrate), "{lines:#?}");
+            assert!(!lines.iter().any(|l| l == scoped), "{lines:#?}");
+        }
     }
 
     /// UX R4-4: every new form fits 80 columns, a 70-character detail too.

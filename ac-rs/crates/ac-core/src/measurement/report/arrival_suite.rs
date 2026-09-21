@@ -355,7 +355,7 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
         score(!a.cross_check.withholds_flight_time(), a.arrival_index)
     };
     let mut report = ir_report_with_custom_ir_band(h, SR, k.f2_hz);
-    report.interface_latency = Some(measured_tau(TAU_S));
+    with_live_latency(&mut report, TAU_S);
     let stats = report.ir_stats().expect("an impulse response");
     report.position = Some(PositionSnapshot {
         distance_m: Some(true_distance_m()),
@@ -550,7 +550,7 @@ fn at_measured_snr(kernel: &[f64], draw: &[f64], snr_db: f64) -> MeasurementRepo
             .map(|(k, n)| k + scale * n)
             .collect();
         let mut r = ir_report_with_custom_ir_band(h, SR, IR_DEFAULT_F2_HZ);
-        r.interface_latency = Some(measured_tau(TAU_S));
+        with_live_latency(&mut r, TAU_S);
         r
     };
     let snr = |r: &MeasurementReport| r.ir_stats().unwrap().band_limited_snr_db.unwrap();
@@ -593,7 +593,7 @@ fn distance_residual_reaches_the_full_window_width() {
     ir[T0] = 0.05; // −26 dB: below EarlierComparable's 20 dB, residual case 1
     ir[T0 + d_samples] = 1.0;
     let mut report = ir_report_with_custom_ir_band(ir, SR, 20_000.0);
-    report.interface_latency = Some(measured_tau(TAU_S));
+    with_live_latency(&mut report, TAU_S);
     report.position = Some(PositionSnapshot {
         distance_m: Some(d_typed),
         ..Default::default()
