@@ -78,7 +78,7 @@ pub(super) enum TauAttempt {
         epoch_after: Box<DeviceEpoch>,
         /// #544: the reference loopback's reading in each lifecycle's own
         /// capture, or why none was taken.
-        reference: ReferenceAttempt,
+        reference: Box<ReferenceAttempt>,
     },
     /// A lifecycle's peak sits below the SNR threshold (#368). Short-
     /// circuits the same way [`TauAttempt::Error`] does: the second
@@ -411,7 +411,7 @@ pub(super) fn measure_tau_twice(
         pre_impulse_snr_db: reading1.snr_db.min(reading2.snr_db),
         epoch_before: Box::new(epoch_before),
         epoch_after: Box::new(epoch_after),
-        reference,
+        reference: Box::new(reference),
     }
 }
 
@@ -1069,7 +1069,7 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             ..
         } => TauOutcome::Measured {
             reference: ReferenceOutcome::from_attempt(
-                reference,
+                *reference,
                 conditions.sample_rate,
                 conditions.period_size,
             ),
@@ -1267,7 +1267,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "measured");
         assert!(outcome.conditions().is_some());
@@ -1319,7 +1319,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         let tau_s = outcome
             .stored_entry("m", TEST_SESSION)
@@ -1349,7 +1349,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "disagree_period_shift");
         assert!(
@@ -1386,7 +1386,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "disagree_other");
         assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
@@ -1448,7 +1448,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         // Refused, never stored — the corroboration hole this closes is
@@ -1485,7 +1485,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1509,7 +1509,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1535,7 +1535,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1561,7 +1561,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "refused_xrun");
     }
@@ -1586,7 +1586,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
         assert!(
@@ -1632,7 +1632,7 @@ mod tests {
             separation_s: 1.204,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
 
@@ -1669,7 +1669,7 @@ mod tests {
             separation_s: 0.987,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "measured");
 
@@ -1705,7 +1705,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "measured");
     }
@@ -1731,7 +1731,7 @@ mod tests {
             separation_s: 1.1,
             epoch_before: test_epoch(),
             epoch_after: moved.clone(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         };
         let outcome = tau_result(|| attempt(0));
         assert_eq!(outcome.state(), "refused_enumeration_changed");
@@ -1777,7 +1777,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: before,
             epoch_after: after,
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         }
     }
 
@@ -1828,7 +1828,7 @@ mod tests {
             separation_s: 1.0,
             epoch_before: test_epoch(),
             epoch_after: test_epoch(),
-            reference: ReferenceAttempt::NotConfigured,
+            reference: Box::new(ReferenceAttempt::NotConfigured),
         });
         assert_eq!(outcome.state(), "measured");
         let entry = outcome.stored_entry("m", TEST_SESSION).unwrap();
