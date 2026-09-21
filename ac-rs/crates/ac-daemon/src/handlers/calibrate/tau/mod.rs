@@ -1304,6 +1304,66 @@ mod tests {
         assert_eq!(f["tau_reading2_xruns"], json!(0), "{f}");
     }
 
+    /// #544: two accepted reference readings that disagree across the
+    /// lifecycles never produce an offset. τ is still stored, and the entry
+    /// carries no reference leg. The rejected behaviour (average them
+    /// anyway) is computed here: it would have stored a leg 1.5 samples off
+    /// each reading, and every offset read against it would inherit that.
+    #[test]
+    fn disagreeing_reference_readings_store_tau_without_a_reference_leg() {
+        let cond = dummy_conditions();
+        let sr = cond.sample_rate as f64;
+        // 3 samples apart: not a period multiple, so the comparison is a
+        // plain disagreement rather than a period shift.
+        let (r1, r2) = (0.0100, 0.0100 + 3.0 / sr);
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: cond.clone(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.2,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
+            reference: Box::new(ReferenceAttempt::Captured {
+                output_port: "fake:playback_1".into(),
+                input_port: "fake:capture_1".into(),
+                reading1: ReferenceLegReading::Accepted {
+                    tau_s: r1,
+                    snr_db: 30.0,
+                },
+                reading2: ReferenceLegReading::Accepted {
+                    tau_s: r2,
+                    snr_db: 31.0,
+                },
+            }),
+        });
+        assert_eq!(outcome.state(), "measured");
+        let entry = outcome
+            .stored_entry("m", TEST_SESSION)
+            .expect("τ still stored");
+        assert_eq!(entry.reference, None);
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_reference_state"], json!("refused"), "{f}");
+        assert!(
+            f["tau_reference_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("reference leg: "),
+            "{f}"
+        );
+        assert_eq!(f["tau_reference_pre_impulse_snr_db"].as_f64(), Some(30.0));
+        assert!(f.get("tau_offset_samples").is_none(), "{f}");
+        // Rejected rule: averaging would have stored a leg 1.5 samples off
+        // each reading — not a whole sample, so no offset read from it
+        // could be exact.
+        assert!((((r1 + r2) / 2.0 - r1) * sr - 1.5).abs() < 1e-9);
+    }
+
     #[test]
     fn tau_result_averages_two_agreeing_readings() {
         let outcome = tau_result(|| TauAttempt::Compared {

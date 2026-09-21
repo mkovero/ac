@@ -155,23 +155,35 @@ this capture's transport state, and it is shown only as the drift readout
 (`ref stored`, `ref Δ`).
 
 What live compensation cancels: every delay the two pairs share in this
-capture — converter block, clock domain, transport (FireWire/USB/ADAT/MADI),
-audio graph and buffer size, including a shift of any of them between runs.
-What it does not cancel, and why the offset exists: a fixed difference
-between the two analog paths. The 46.0-sample converter-channel asymmetry
-above is exactly such an offset under another name. The offset is only
-valid for the topology it was measured on, so `plot ir` refuses to
-compensate — and withholds the flight time, naming the pair — when:
+capture — converter block, clock domain, transport (FireWire/USB/ADAT/MADI)
+and audio graph, including a shift of any of them between runs at the same
+buffer size. A buffer-size change is not compensated: the period is part of
+the offset's key, so a capture at another period refuses the offset (see
+below) until `ac calibrate` has measured it at that period.
 
-- the pair's offset has never been measured (`offset not measured`); run
-  `ac calibrate` on that pair with a cable patched and the reference loopback
-  in place;
-- the pairs sit on different converter groups (mic-pre versus line inputs,
-  analog versus ADAT), or one leg runs through the interface's DSP mixer and
-  the other direct — a different topology is a different offset, measured
-  separately;
+What it does not cancel, and why the offset exists: a fixed difference
+between the two paths — converter channel, converter group (mic-pre versus
+line inputs, analog versus ADAT), or the interface's internal mixer/DSP
+routing. The 46.0-sample converter-channel asymmetry above is exactly such
+an offset under another name. The offset is stored per pair and keyed to
+device, backend, sample rate, period, the pair's ports and the reference
+ports; `plot ir` refuses to compensate — and withholds the flight time,
+naming the pair — when:
+
+- no offset has been measured for this pair under that key (`offset not
+  measured`, or the differing fields named); run `ac calibrate` on that pair
+  with a cable patched and the reference loopback in place;
 - no reference loopback is configured — there is no live reference, and
-  `plot ir` does not fall back to the stored τ.
+  `plot ir` does not fall back to the stored τ;
+- this capture's reference pick is itself unusable (below the in-capture
+  floor, at the window edge, or across an xrun).
+
+**A routing change inside the interface is not detected.** Changing the
+mixer/DSP routing, or which converter feeds a port, while the port names
+stay the same leaves the key unchanged: the stored offset still matches and
+is applied, and the flight time is off by whatever delay difference the
+routing change introduced, in either direction. Re-run `ac calibrate` on
+every pair whose internal routing has changed.
 
 **ac does not convert the delay readout into a distance.** #391 removed
 that conversion — and the per-pair calibration layer built to correct it —

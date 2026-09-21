@@ -158,7 +158,10 @@ by the helper script itself.
   `ac calibrate` for out AN1 / in IN1, skipping both DMM prompts. The
   `Offset:` row must read `measured`; `calibrate show` prints it under
   `Delay:`. Until then every `plot ir` withholds the flight time with
-  `offset not measured`.
+  `offset not measured`. The offset's key is ports, rate and period, not the
+  FF400's mixer routing: after `snd-fireface-ctl` routing changes (or a
+  power cycle drops it and it is rewritten), the old offset still applies
+  unchecked — re-run the calibrate above.
 - **Inter-pair offset AN1 → IN1 vs AN2 → IN2: 0 samples** — provenance:
   measured 2026-09-18, as two separate cable-patched `calibrate` runs that
   both read 1711 samples. That is consistent with 0 but was not taken in one
