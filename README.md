@@ -199,9 +199,12 @@ behalf.
 Interface round-trip latency (τ) is a different, narrower quantity — a
 property of *(device, backend, sample rate, period size, port pair)*,
 measured by `ac calibrate` on a loopback and archived with a report's
-`interface_latency` field. It has no wiring residual and no room in it,
-and it is the one correction `ac plot ir`'s printed flight-time figure
-still applies, when a matching τ was measured for that run.
+`interface_latency` field. It has no wiring residual and no room in it.
+The archived absolute τ is provenance and drift evidence only: `ac plot
+ir` does not subtract it. The printed flight-time figure subtracts this
+capture's live reference latency plus the stored inter-pair offset for the
+matching topology, as described above, and refreshing the stored absolute
+τ does not change it.
 That flight-time figure is a band-limited delay estimate at 2 kHz, not an
 identified direct path: when an earlier path sits more than about 20 dB
 below a later one, or two paths are less than 0.5 ms apart, it can read
