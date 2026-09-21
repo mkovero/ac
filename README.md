@@ -139,6 +139,40 @@ and *this* mic position, and it moves the moment either does. No cable
 change removes it, and describing it as "interface latency" would be wrong
 in the same way the wiring residual was.
 
+**`plot ir` measures its flight time against the live reference (#544).**
+The same reasoning applies to the impulse-response path: `ac plot ir`
+captures the reference leg in the same run as the sweep and prints
+
+```
+flight time   +335 samples  (+3.490 ms, arrival − ref latency − offset)
+```
+
+`ref latency` is this capture's own reference pick; `offset` is the
+**inter-pair offset** — this pair's τ minus the reference pair's τ, both
+read in one `ac calibrate` capture and stored with the τ entry. The stored
+absolute τ is no longer subtracted: a value stored days ago does not share
+this capture's transport state, and it is shown only as the drift readout
+(`ref stored`, `ref Δ`).
+
+What live compensation cancels: every delay the two pairs share in this
+capture — converter block, clock domain, transport (FireWire/USB/ADAT/MADI),
+audio graph and buffer size, including a shift of any of them between runs.
+What it does not cancel, and why the offset exists: a fixed difference
+between the two analog paths. The 46.0-sample converter-channel asymmetry
+above is exactly such an offset under another name. The offset is only
+valid for the topology it was measured on, so `plot ir` refuses to
+compensate — and withholds the flight time, naming the pair — when:
+
+- the pair's offset has never been measured (`offset not measured`); run
+  `ac calibrate` on that pair with a cable patched and the reference loopback
+  in place;
+- the pairs sit on different converter groups (mic-pre versus line inputs,
+  analog versus ADAT), or one leg runs through the interface's DSP mixer and
+  the other direct — a different topology is a different offset, measured
+  separately;
+- no reference loopback is configured — there is no live reference, and
+  `plot ir` does not fall back to the stored τ.
+
 **ac does not convert the delay readout into a distance.** #391 removed
 that conversion — and the per-pair calibration layer built to correct it —
 because every input it needed (a taped ground truth, a temperature-derived
