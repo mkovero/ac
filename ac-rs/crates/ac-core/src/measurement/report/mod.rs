@@ -57,11 +57,11 @@ pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
     arrival_cross_check_tolerance_samples, ArrivalCheck, ArrivalCrossCheck, ArrivalSource,
     DistanceCheck, DistanceWindow, IrStats, IrVerdict, LatencyBasis, LiveOffset, OnsetStanding,
-    WithheldBasis,
-    ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS, ARRIVAL_CROSS_CHECK_TOLERANCE_S,
-    ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_EXCESS_DELAY_ALLOWANCE_S, ARRIVAL_LOBE_MARGIN_MIN_DB,
-    ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, DISTANCE_SPEED_OF_SOUND_REL_TOL,
-    DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
+    WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
+    ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB,
+    ARRIVAL_EXCESS_DELAY_ALLOWANCE_S, ARRIVAL_LOBE_MARGIN_MIN_DB, ARRIVAL_SNR_BASIS,
+    ARRIVAL_SNR_MIN_DB, DISTANCE_SPEED_OF_SOUND_REL_TOL, DISTANCE_TAPE_TOLERANCE_M,
+    PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
 };
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,
@@ -305,7 +305,9 @@ pub enum InterPairOffset {
     /// check: <places>` — the pair named, then one observation per
     /// differing field, as [`crate::shared::calibration::PairOffsetRefusal`]
     /// renders them.
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// An offset that matched this capture's topology exactly. Flattened like

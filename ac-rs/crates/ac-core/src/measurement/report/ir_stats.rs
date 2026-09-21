@@ -725,8 +725,7 @@ pub(super) fn causal_bound(
                 Some(InterPairOffset::Measured(m)) => m.offset_s,
                 _ => 0.0,
             };
-            let offset =
-                (reference_tau_s + pair_offset_s + distance_m / c) * sample_rate_hz as f64;
+            let offset = (reference_tau_s + pair_offset_s + distance_m / c) * sample_rate_hz as f64;
             CausalBound::Enforced {
                 index: (centre as f64 + offset).round().max(0.0) as usize,
                 inputs: BoundInputs {
@@ -2362,7 +2361,13 @@ mod tests {
     /// A 96 kHz IR with a single spike at `centre + arrival_samples`.
     fn spike_at(arrival_samples: usize) -> MeasurementReport {
         let window_len = 8192;
-        ir_report_with_peak(window_len, window_len / 2 + arrival_samples, 1.0, 0.0, 96_000)
+        ir_report_with_peak(
+            window_len,
+            window_len / 2 + arrival_samples,
+            1.0,
+            0.0,
+            96_000,
+        )
     }
 
     /// #544 AC9 (1), tested against the rejected rule. The transport moves
@@ -2394,7 +2399,9 @@ mod tests {
             moved.arrival_check
         );
         let ft_unmoved = unmoved.flight_time_s.expect("unmoved: produced");
-        let ft_moved = moved.flight_time_s.expect("a moved reference withholds nothing");
+        let ft_moved = moved
+            .flight_time_s
+            .expect("a moved reference withholds nothing");
         assert_eq!((ft_unmoved * sr).round(), flight as f64);
         assert_eq!((ft_moved * sr).round(), flight as f64);
 
@@ -2591,7 +2598,9 @@ mod tests {
         r.inter_pair_offset = Some(measured_offset(0.0));
         let stats = r.ir_stats().unwrap();
         assert!(matches!(stats.arrival_check, ArrivalCheck::PeriodShift(_)));
-        let ft = stats.flight_time_s.expect("a period shift withholds nothing");
+        let ft = stats
+            .flight_time_s
+            .expect("a period shift withholds nothing");
         assert!((ft - (stats.arrival_s - same_capture_tau_s)).abs() < 1e-15);
 
         let rejected = match &stats.arrival_check {
@@ -2679,7 +2688,9 @@ mod tests {
             );
             let rejected = match &r.interface_latency {
                 Some(InterfaceLatency::Measured(m))
-                    if m.session_check.as_ref().is_some_and(LayerVerdict::is_refused) =>
+                    if m.session_check
+                        .as_ref()
+                        .is_some_and(LayerVerdict::is_refused) =>
                 {
                     None
                 }

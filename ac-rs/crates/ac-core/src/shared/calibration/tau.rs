@@ -542,7 +542,8 @@ impl Calibration {
                 let Some(r) = e.reference.as_ref() else {
                     continue;
                 };
-                let n_diff = tau_diff_fields(cond, &e.conditions).len() + usize::from(!same_ports(r));
+                let n_diff =
+                    tau_diff_fields(cond, &e.conditions).len() + usize::from(!same_ports(r));
                 let better = n_diff < best_diff
                     || (n_diff == best_diff
                         && nearest
