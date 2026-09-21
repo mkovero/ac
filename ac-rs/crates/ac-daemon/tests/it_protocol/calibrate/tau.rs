@@ -749,7 +749,11 @@ fn calibrate_names_why_no_reference_leg_was_read() {
     let d = Daemon::spawn();
     let done = calibrate_pair(&Client::new(&d), 0, 0);
     assert_eq!(done["tau_state"], json!("measured"), "{done}");
-    assert_eq!(done["tau_reference_state"], json!("not_configured"), "{done}");
+    assert_eq!(
+        done["tau_reference_state"],
+        json!("not_configured"),
+        "{done}"
+    );
     let cal_path = d.home.join(".config").join("ac").join("cal.json");
     let entry = read_cal_entry(&cal_path);
     assert_eq!(entry["tau_history"][0]["reference"], json!(null), "{entry}");

@@ -12,9 +12,9 @@ use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
     InterPairOffset, InterfaceLatency, MeasuredInterPairOffset, MeasuredLatency,
-    MeasuredReferenceLatency, MeasurementData,
-    MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain,
-    ReferenceLatency, StimulusParams, SCHEMA_VERSION,
+    MeasuredReferenceLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
+    MeasurementReport, PositionSnapshot, ProcessingChain, ReferenceLatency, StimulusParams,
+    SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
@@ -1207,11 +1207,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             output_port: tau_out_port,
             input_port: tau_in_port,
         };
-        let mut interface_latency = Some(resolve_tau(
-            cal_stored.as_ref(),
-            &pair_conditions,
-            &epoch,
-        ));
+        let mut interface_latency =
+            Some(resolve_tau(cal_stored.as_ref(), &pair_conditions, &epoch));
 
         // #544: the offset between this pair and the reference loopback,
         // from the capture pair's own entry, against the same epoch. With

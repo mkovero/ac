@@ -70,7 +70,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(11));
+                assert_eq!(v["report"]["schema_version"], json!(12));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -499,7 +499,9 @@ fn plot_ir_compensates_a_moved_transport_from_the_live_reference() {
         "{:?}",
         stats.latency_basis
     );
-    let flight = stats.flight_time_s.expect("a crossed offset flags, never withholds");
+    let flight = stats
+        .flight_time_s
+        .expect("a crossed offset flags, never withholds");
     assert_eq!((flight * FAKE_SR).round() as i64, 0);
 
     let Some(ac_core::measurement::report::InterfaceLatency::Measured(stored)) =
@@ -519,7 +521,11 @@ fn plot_ir_refuses_an_offset_calibrate_never_measured() {
     use ac_core::measurement::report::{InterPairOffset, LatencyBasis, WithheldBasis};
     let d1 = Daemon::spawn();
     let done = calibrate_done(&Client::new(&d1));
-    assert_eq!(done["tau_reference_state"], json!("not_configured"), "{done}");
+    assert_eq!(
+        done["tau_reference_state"],
+        json!("not_configured"),
+        "{done}"
+    );
     let cal_rel = std::path::Path::new(".config").join("ac").join("cal.json");
     let cal = std::fs::read(d1.home.join(&cal_rel)).expect("read cal.json");
 

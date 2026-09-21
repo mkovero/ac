@@ -10,6 +10,7 @@
 //! The reference loopback is `out1_in1` (reference input 1, reference
 //! output 1) in every configuration that has one.
 
+use ac_core::measurement::report::{LatencyBasis, WithheldBasis};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -441,7 +442,9 @@ fn a_persisted_latency_refusal_withholds_the_pair_tau_in_plot_ir() {
         "{check}"
     );
 
-    // Rejected behaviour: no refusal on disk, no reference → τ applied.
+    // No refusal on disk, no reference. Before #544 the stored τ was applied
+    // here; from v12 it never is — with no live reference there is no flight
+    // time, and no fallback to the stored value (#544 AC1/AC4).
     let bypass = Daemon::spawn_with_config(Some(json!({})));
     share_state(&d1, &bypass);
     let (r, report) = plot_ir_report(&bypass);
@@ -450,11 +453,16 @@ fn a_persisted_latency_refusal_withholds_the_pair_tau_in_plot_ir() {
     assert_eq!(state(&latency["session_check"]), "unverified", "{latency}");
     assert_eq!(cause(&latency["session_check"]), "no_loopback", "{latency}");
     let stats = report.ir_stats().expect("ir stats");
-    assert!(stats.flight_time_s.is_some(), "stale τ consumed: {latency}");
+    assert_eq!(stats.flight_time_s, None, "stored τ consumed: {latency}");
+    assert_eq!(
+        stats.latency_basis,
+        LatencyBasis::Withheld(WithheldBasis::NoReference),
+        "{latency}"
+    );
     drop(bypass);
 
     // The refusal on disk, reference removed → the stored τ is kept in the
-    // report but not applied.
+    // report with its refused verdict, and not applied.
     let d3 = Daemon::spawn_with_config(Some(json!({})));
     share_state(&d2, &d3);
     let (r, report) = plot_ir_report(&d3);
@@ -472,6 +480,11 @@ fn a_persisted_latency_refusal_withholds_the_pair_tau_in_plot_ir() {
     assert_eq!(
         stats.flight_time_s, None,
         "a refused τ was applied: {latency}"
+    );
+    assert_eq!(
+        stats.latency_basis,
+        LatencyBasis::Withheld(WithheldBasis::NoReference),
+        "{latency}"
     );
 }
 

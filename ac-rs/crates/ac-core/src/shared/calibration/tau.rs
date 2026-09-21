@@ -173,7 +173,7 @@ pub enum PairOffsetMiss {
     /// The nearest entry that carries a reference leg, by fewest differing
     /// fields (conditions plus reference ports), ties broken by newest.
     Differs {
-        nearest: TauEntry,
+        nearest: Box<TauEntry>,
         /// One rendered line per differing field, in tuple order.
         lines: Vec<String>,
     },
@@ -580,7 +580,7 @@ impl Calibration {
                         ));
                     }
                     PairOffsetMiss::Differs {
-                        nearest: n.clone(),
+                        nearest: Box::new(n.clone()),
                         lines,
                     }
                 }
