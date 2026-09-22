@@ -594,6 +594,31 @@ issue_of_pr() {
     --jq '.closingIssuesReferences[0].number // empty'
 }
 
+# decision_issue <pr> — the issue whose design comments decision_rev digests
+# for <pr>. master.sh (qa_loop) and review.sh both call this, never their own
+# idea of the issue: the record a review writes and the comparison the runner
+# makes must digest the same comments, or no record can ever match and the
+# runner re-reviews without end (#560). Resolved in master.sh pr_for's order:
+# the head branch `issue-N[-slug]` (developer.md step 2), then GitHub's first
+# closing reference, then a `closes #N` in the body — closingIssuesReferences
+# is empty for a PR whose base is not the default branch. Empty when none
+# applies; decision_rev then reads `none`. Fails on a failed read.
+decision_issue() {
+  gh_retry gh pr view "$1" -R "$AC_REPO" --json headRefName,closingIssuesReferences,body --jq '
+    ((.headRefName // "") | capture("^issue-(?<n>[0-9]+)(-|$)").n)
+    // (.closingIssuesReferences[0].number // empty | tostring)
+    // ((.body // "") | capture("[Cc]loses +#(?<n>[0-9]+)\\b").n)
+    // empty'
+}
+
+# decision_of_pr <pr> — decision_rev over decision_issue's issue and <pr>. The
+# one digest both the review roles' records and the runner's comparison use.
+decision_of_pr() {
+  local i
+  i="$(decision_issue "$1")" || return 1
+  decision_rev "$i" "$1"
+}
+
 # names_inputs <issue> — export bin/stale_names.sh's inputs for everything this
 # runner starts afterwards (its own $AC_GATE calls and the session's):
 #   AC_ISSUE              the issue; a mention whose paragraph cites it is exempt

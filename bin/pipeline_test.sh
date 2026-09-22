@@ -34,7 +34,9 @@
 #  22. approvals do not survive a design revision (#560): decision_rev; a
 #      needs-design pending at startup, an in-loop handback, a revision made
 #      outside the runner, a control with a matching digest, and a design pass
-#      that edits nothing.
+#      that edits nothing; a record that can never match stops the loop; the
+#      runner and review.sh digest the same issue; needs-ux at startup; the
+#      Codex-recheck decision check; review.sh --independent's refusal.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -606,6 +608,7 @@ w22_issue() {  # $1 = issue labels (space-separated), $2 = architect comment bod
 }
 w22_pr() {  # $1 = PR labels, $2 = decision both records name
   jq -n --arg ls "$1" --arg d "$2" --arg h "$H22" '{headRefOid: $h,
+    headRefName: "issue-22-x", body: "closes #22", closingIssuesReferences: [{number: 22}],
     labels: ($ls | split(" ") | map(select(. != "") | {name: .})), comments: [],
     reviews: [{submittedAt: "2026-09-22T12:00:00Z", body: "<!-- agent: qa -->\n\n## qa — PR #7 at \($h)\ndecision: \($d)\n\n### verdict\napprove"},
               {submittedAt: "2026-09-22T12:10:00Z", body: "<!-- agent: codex-qa -->\n\n## codex qa — PR #7 at \($h)\ndecision: \($d)\n\n**verdict:** pass"}]}' > "$GH22/pr.json"
@@ -626,14 +629,17 @@ EOF
 echo "review $*" >> "$GH22/calls"
 echo "REVIEW-RAN $*"   # an ordering marker in master.sh's own output
 source "$(dirname "$0")/common.sh"; set +e
-h=$(jq -r .headRefOid "$GH22/pr.json"); rev=$(decision_rev 22 7)
+# The digest the real review.sh states: decision_of_pr. W22_REV / W22_CREV
+# stand in for a Claude / Codex session that writes another line (22f, 22g).
+h=$(jq -r .headRefOid "$GH22/pr.json"); rev=$(decision_of_pr 7)
+crev="${W22_CREV:-$rev}"; rev="${W22_REV:-$rev}"
 at="2026-09-23T00:00:$(printf '%02d' "$(wc -l < "$GH22/calls")")Z"
 rec() { jq --arg at "$at" --arg b "$1" '.reviews += [{submittedAt: $at, body: $b}]' "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"; }
 if [[ $1 == --independent ]]; then
   rec "<!-- agent: codex-qa -->
 
 ## codex qa — PR #7 at $h
-decision: $rev
+decision: $crev
 
 **verdict:** pass"
   gh pr edit 7 --add-label codex-approved
@@ -739,6 +745,92 @@ w22_issue "needs-design" "$A22_OLD"; w22_pr "claude-approved codex-approved" "$D
 printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
 A22_NEW="$A22_OLD" run22 e
 check 'grep -qx "remove claude-approved" $GH22/edits && grep -qx "remove codex-approved" $GH22/edits && ! passed_before_review $T/m22e.out' "22e startup-pending, unedited design: approvals still cleared before any pass"
+# 22f: the Claude QA session records a decision the runner never accepts (an
+# omitted line, a mistyped digest). The design does not move, so a second
+# removal under the same decision stops the loop instead of re-reviewing
+# without bound (216 review calls in 60 s before the stop existed).
+reset22; mk22 "$T/m22f"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "" x
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" W22_REV=none timeout 30 bash "$T/m22f/master.sh" 22 > "$T/m22f.out" 2>&1 ); r22f=$?
+check '[[ $r22f != 124 ]] && (( $(grep -c "^review 7" $GH22/calls) <= 2 )) && ! grep -q "both QA gates passed" $T/m22f.out' \
+  "22f a Claude record that can never name the current decision stops the loop instead of re-reviewing without bound"
+check 'grep -q "removed again under the same decision $D1: claude-approved" $T/m22f.out && ! jq -r ".labels[].name" $GH22/pr.json | grep -qx claude-approved' \
+  "22f the stop names the label and the decision, and leaves the stale approval removed"
+
+# 22g: the same for the Codex record: codex_gate must not re-run without bound.
+reset22; mk22 "$T/m22g"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "" x
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" W22_CREV=none timeout 30 bash "$T/m22g/master.sh" 22 > "$T/m22g.out" 2>&1 ); r22g=$?
+check '[[ $r22g != 124 ]] && (( $(grep -c "^review --independent 7" $GH22/calls) <= 2 )) && ! grep -q "both QA gates passed" $T/m22g.out && grep -q "removed again under the same decision $D1: codex-approved" $T/m22g.out' \
+  "22g a Codex record that can never name the current decision stops the loop too"
+
+# decision_issue: the runner and review.sh digest the same issue whatever the
+# PR's closing reference says. Branch first, then GitHub's reference, then the
+# body — closingIssuesReferences is empty on a non-default base.
+di22() { jq "$1" "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"; ( cd "$REPO" && source "$BIN/common.sh" && decision_issue 7 ); }
+reset22; w22_issue "" "$A22_NEW"; w22_pr "" x
+i22a=$(di22 '.closingIssuesReferences = [{number: 9}]')
+i22b=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = []')
+i22c=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = [{number: 9}]')
+i22d=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = [] | .body = "no reference"')
+check '[[ $i22a == 22 && $i22b == 22 && $i22c == 9 && -z $i22d ]]' "decision_issue: branch, then closing reference, then body, else empty"
+# 22h: the QA finding's shape. A branch that is not issue-N-* and no closing
+# reference (non-default base): the digest still covers #22, so approvals
+# under D0 are cleared and one re-review under D1 converges.
+reset22; mk22 "$T/m22h"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "claude-approved codex-approved" "$D0"
+jq '.headRefName = "feat-x" | .closingIssuesReferences = []' "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m22h/master.sh" 22 > "$T/m22h.out" 2>&1 ); r22h=$?
+check '[[ $r22h != 124 ]] && grep -qx "remove claude-approved" $GH22/edits && grep -q "both QA gates passed" $T/m22h.out && [[ $(grep -c "^review 7" $GH22/calls) == 1 ]]' \
+  "22h no closing reference: runner and review agree on the digest, one re-review, then passed"
+
+# 22i: needs-ux pending at startup (acceptance 2), and a ux pass that edits
+# nothing: only R1 can clear the approvals.
+reset22; mk22 "$T/m22i"
+cat > "$T/m22i/ux.sh" <<'UXEOF'
+#!/usr/bin/env bash
+echo "ux $*" >> "$GH22/calls"
+jq '.labels |= (map(select(.name != "needs-ux")) + [{name: "ready-to-implement"}] | unique_by(.name))' \
+  "$GH22/issue.json" > "$GH22/t" && mv "$GH22/t" "$GH22/issue.json"
+UXEOF
+chmod +x "$T/m22i/ux.sh"
+w22_issue "needs-ux" "$A22_OLD"; w22_pr "claude-approved codex-approved" "$D0"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+run22 i
+check '[[ $(head -1 $GH22/calls) == "ux 22" ]] && grep -qx "remove claude-approved" $GH22/edits && grep -qx "remove codex-approved" $GH22/edits && ! passed_before_review $T/m22i.out && grep -qx "review 7 --full" $GH22/calls' \
+  "22i startup-pending needs-ux: approvals cleared after the ux pass, full review before any pass"
+
+# 22j: Codex recheck. Codex failed at base B and claude-approved is off. If the
+# qa record at B names a superseded decision, nothing is carried forward: full
+# Claude QA. The control (the record names the current decision) rechecks.
+B22=2222222222222222222222222222222222222222
+w22_recheck() {  # $1 = decision the records at B name
+  jq --arg b "$B22" --arg d "$1" '.reviews = [
+    {submittedAt: "2026-09-22T12:00:00Z", body: "<!-- agent: qa -->\n\n## qa — PR #7 at \($b)\ndecision: \($d)\n\n### verdict\napprove"},
+    {submittedAt: "2026-09-22T12:10:00Z", body: "<!-- agent: codex-qa -->\n\n## codex qa — PR #7 at \($b)\ndecision: \($d)\n\n**verdict:** fail"}]' \
+    "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"
+  printf '%s\n' "$B22" > "$GH22/log/codex-base-pr-7.sha"
+}
+reset22; mk22 "$T/m22j"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "in-review" x; w22_recheck "$D0"
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m22j/master.sh" 22 > "$T/m22j.out" 2>&1 )
+check 'grep -q "predates decision $D1 — full Claude QA path" $T/m22j.out && ! grep -q -- "--recheck" $GH22/calls && grep -qx "review 7 --full" $GH22/calls' \
+  "22j recheck: a Claude approval under a superseded decision is not carried forward"
+reset22; mk22 "$T/m22k"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "in-review" x; w22_recheck "$D1"
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m22k/master.sh" 22 > "$T/m22k.out" 2>&1 )
+check 'grep -q -- "--recheck $B22 7" $GH22/calls && ! grep -q "predates decision" $T/m22k.out' \
+  "22j control: under the current decision the Codex recheck runs"
+
+# review.sh --independent refuses a Claude QA record under another decision
+# before it builds a worktree: the real review.sh over the case-22 fixtures.
+reset22; w22_issue "" "$A22_NEW"; w22_pr "claude-approved" "$D0"
+rm -f "$T"/launched-*
+rc=0; ( cd "$REPO" && unset AC_PROVIDER AC_CODEX_QA_PROVIDER && AC_LOG_DIR="$GH22/log" AC_WT_BASE="$T/wt22" \
+  bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err22r" || rc=$?
+check '[[ $rc == 1 && ! -e $T/wt22/codex-pr-7 && ! -e $T/launched-codex ]] && grep -q "names decision $D0, not the current $D1" $T/err22r' \
+  "review.sh --independent refuses a Claude QA record naming a superseded decision, before any worktree"
 rm -f "$T/stub/gh"; unset GH22 A22_NEW
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------

@@ -81,10 +81,11 @@ independent_review() {
         return 1
       fi
     fi
-    # The design revision this pass is judged against (#560).
+    # The design revision this pass is judged against (#560): decision_of_pr,
+    # the digest master.sh compares against. issue_of_pr feeds names_inputs.
     issue="$(issue_of_pr "$pr")" \
       || { echo "<codex/qa> PR #$pr: cannot read the issue it closes" >&2; return 1; }
-    decision="$(decision_rev "$issue" "$pr")" \
+    decision="$(decision_of_pr "$pr")" \
       || { echo "<codex/qa> PR #$pr: cannot read the design decision" >&2; return 1; }
     # Claude QA's record must cover the design as it stands now, in both modes:
     # a recheck carries that approval forward, a first pass pairs with it.
@@ -209,8 +210,10 @@ mkdir -p "$AC_LOG_DIR"
 head_sha="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
 # The design revision this pass is judged against (#560), captured as the
 # review starts: an edit made while it runs must not read as covered.
+# decision_of_pr, not issue_of_pr: master.sh compares against the same digest.
+# issue_of_pr feeds names_inputs below.
 issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
-decision="$(decision_rev "$issue" "$n")" || { echo "cannot read the design decision for PR #$n" >&2; exit 1; }
+decision="$(decision_of_pr "$n")" || { echo "cannot read the design decision for PR #$n" >&2; exit 1; }
 decision_ask="On the line directly under that head-SHA header line, write exactly
 \`decision: $decision\` (qa.md → step 4). The runner computed it from the
 architect/ux design comments as this pass started; copy it verbatim, do not

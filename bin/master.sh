@@ -81,10 +81,14 @@ has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 # Match on head branch first — developer.md step 2 specifies issue-{N}-{slug}.
 # Fall back to the PR body's closing reference, because not every branch in
 # this repo follows that convention. Never match on title: titles get edited.
+# A failed read fails the function: a failed branch lookup followed by an
+# empty body lookup would otherwise read as "no PR", and design_pass_voids
+# would skip clearing approvals on a PR it never saw (#560).
 pr_for() {
   local n="$1" pr
   pr=$(gh_retry gh pr list -R "$AC_REPO" --state open --json number,headRefName --jq \
-    "[.[] | select((.headRefName | startswith(\"issue-$n-\")) or (.headRefName == \"issue-$n\"))] | .[0].number // empty")
+    "[.[] | select((.headRefName | startswith(\"issue-$n-\")) or (.headRefName == \"issue-$n\"))] | .[0].number // empty") \
+    || return 1
   [[ -n $pr ]] && { printf '%s\n' "$pr"; return; }
   gh_retry gh pr list -R "$AC_REPO" --state open --json number,body --jq \
     "[.[] | select(.body // \"\" | test(\"[Cc]loses +#$n\\\\b\"))] | .[0].number // empty"
@@ -216,9 +220,13 @@ qa_loop() {
   #   0 every present approval covers the current decision
   #   2 at least one label was removed — take the review path again
   #   1 could not read or could not clear — the caller stops
+  #   3 a label was removed a second time under the same decision: the review
+  #     that ran in between saw that decision and still recorded another (or
+  #     none). Another review cannot converge, so stop, STATE=needs-human. A
+  #     design that moved in between is a new decision and re-reviews again.
   decision_check() {
-    local rev l role rec rc=0
-    rev="$(decision_rev "$n" "$pr")" \
+    local rev l role rec was rc=0 stuck=""
+    rev="$(decision_of_pr "$pr")" \
       || { echo "  #$n PR #$pr: cannot read the design decision — stopping rather than guessing"; return 1; }
     for l in claude-approved codex-approved; do
       has "$l" "$ls" || continue
@@ -226,11 +234,23 @@ qa_loop() {
       rec="$(newest_record "$pr" "$role")" \
         || { echo "  #$n PR #$pr: cannot read the $role record — stopping"; return 1; }
       record_names_decision "$rec" "$rev" && continue
-      echo "  #$n PR #$pr: $l was given under decision $(decision_of_record "$rec"); current is $rev — removing it"
-      invalidate_approvals "$pr" "the newest \`$role\` record names decision \`$(decision_of_record "$rec")\`; the design comments now digest to \`$rev\` (decision_rev). The approval covers a design that no longer stands, so that gate runs again." "$l" \
+      was="$(decision_of_record "$rec")"
+      echo "  #$n PR #$pr: $l was given under decision $was; current is $rev — removing it"
+      invalidate_approvals "$pr" "the newest \`$role\` record names decision \`$was\`; the design comments now digest to \`$rev\` (decision_rev). The approval covers a design that no longer stands, so that gate runs again." "$l" \
         || { echo "  #$n PR #$pr: cannot clear $l — do it by hand"; return 1; }
       rc=2
+      if [[ " $dc_seen " == *" $l@$rev "* ]]; then
+        stuck+="${stuck:+ }$l ($role record names $was)"
+      fi
+      dc_seen+=" $l@$rev"
     done
+    if [[ -n $stuck ]]; then
+      echo "  #$n PR #$pr: removed again under the same decision $rev: $stuck — stopping"
+      echo "     a review ran under $rev and its record names another decision, so"
+      echo "     reviewing again cannot converge. the record's decision: line must be"
+      echo "     exactly $rev (qa.md step 4, codex-qa.md step 5). read that record."
+      STATE=needs-human; return 3
+    fi
     if (( rc == 2 )); then
       ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     fi
@@ -241,6 +261,8 @@ qa_loop() {
   # handback and loop until the step limit — which looks like cycling labels
   # and is not.
   STATE=""
+  # label@decision pairs decision_check has already removed in this entry.
+  local dc_seen=""
   while (( qa_round <= ROUNDS )); do
     ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
@@ -386,7 +408,7 @@ qa_loop() {
       # design changed since, that approval covers a superseded design (#560).
       rev=""
       if [[ -n $codex_base ]]; then
-        rev="$(decision_rev "$n" "$pr")" \
+        rev="$(decision_of_pr "$pr")" \
           || { echo "  #$n PR #$pr: cannot read the design decision — stopping rather than guessing"; return 1; }
         if ! record_names_decision "$(newest_record "$pr" qa)" "$rev"; then
           echo "  #$n PR #$pr: Claude QA at ${codex_base:0:8} predates decision $rev — full Claude QA path"
@@ -425,6 +447,7 @@ decision: $rev" >/dev/null || true
           ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
           dc=0; decision_check || dc=$?
           (( dc == 1 )) && return 1
+          (( dc == 3 )) && return 0
           (( dc == 2 )) && { codex_base=""; continue; }
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge; return 0
@@ -447,6 +470,7 @@ decision: $rev" >/dev/null || true
     # removed codex-approved to codex_gate.
     dc=0; decision_check || dc=$?
     (( dc == 1 )) && return 1
+    (( dc == 3 )) && return 0
     if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
       if has requires-rig "$ls" || has requires-rig "$ils"; then
         echo "  #$n PR #$pr: tree QA complete — requires-rig"
@@ -461,6 +485,7 @@ decision: $rev" >/dev/null || true
         if has codex-approved "$ls" && ! has needs-work "$ls"; then
           dc=0; decision_check || dc=$?
           (( dc == 1 )) && return 1
+          (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge; return 0
@@ -509,6 +534,7 @@ decision: $rev" >/dev/null || true
         # and the design may have moved while Claude QA ran.
         dc=0; decision_check || dc=$?
         (( dc == 1 )) && return 1
+        (( dc == 3 )) && return 0
         (( dc == 2 )) && continue
         if ! has codex-approved "$ls"; then
           codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
@@ -517,6 +543,7 @@ decision: $rev" >/dev/null || true
         if has codex-approved "$ls" && ! has needs-work "$ls"; then
           dc=0; decision_check || dc=$?
           (( dc == 1 )) && return 1
+          (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge
@@ -650,7 +677,7 @@ drive() {
       continue
     fi
 
-    pr="$(pr_for "$n")"
+    pr="$(pr_for "$n")" || { echo "  #$n: cannot look up the PR — stopping rather than guessing"; return 1; }
     if [[ -n $pr ]]; then
       echo "  #$n: PR #$pr"
       st=0; qa_loop "$n" "$pr" "$force" || st=$?
@@ -712,7 +739,7 @@ drive() {
 
     echo "  #$n: implementing${continue_arg:+ (continuation)}"
     "$BIN/implement.sh" "$n" $continue_arg $fg || { echo "  #$n: implement failed"; return 1; }
-    pr="$(pr_for "$n")"
+    pr="$(pr_for "$n")" || { echo "  #$n: cannot look up the PR implement opened — check GitHub"; return 1; }
     if [[ -z $pr ]]; then
       # A developer may discover an out-of-manifest dependency and correctly
       # hand the issue back to design without committing or opening a PR. Read
