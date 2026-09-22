@@ -392,34 +392,77 @@ newest_record() {
 # note stopped master.sh with "still no file manifest" beside a full one.
 ARCH_MANIFEST_JQ='[.comments[] | select((.body | test("<!-- agent: architect -->")) and (.body | test("(^|\n)\\*\\*file manifest\\*\\*")))] | last | .body // ""'
 
+#
+# stdout is the whole manifest or nothing (#548). Exit 0 with empty output
+# means no manifest field, or one declared `none`. Any line that is neither a
+# path nor that declaration refuses the manifest: non-zero, the issue and the
+# lines on stderr. The old section parser kept only lines containing a `/`, so
+# a root-level README.md vanished without a word, three times on #537/#544.
+#
+# Candidate lines come from a ```files fence if the comment has one (its end
+# marker is unambiguous), else from the `**file manifest**` section up to the
+# next bold field. Both are classified by the same rule:
+#   blank                  skipped
+#   path                   repo-relative, [A-Za-z0-9_.-] components joined
+#                          by `/`, no `.` or `..` component; emitted once each
+#   none (first line only) same regex as architect_declared_no_change in
+#                          master.sh — the two are coupled; the rest of the
+#                          field is explanation and is not parsed
+#   anything else          refused
+# A leading `- `/`* ` bullet and backticks are stripped before the path test.
+# awk reads all input before deciding (END), so a closed pipe cannot cut it
+# short — the same SIGPIPE concern as worktree_of_branch.
 manifest_of() {
-  local body out
-  body=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
+  local n="$1" body out
+  body=$(gh_retry gh issue view "$n" -R "$AC_REPO" --json comments \
     --jq "$ARCH_MANIFEST_JQ") || return 1
+  [[ -n $body ]] || return 0
 
-  # Newer comments may use an explicit files fence. Prefer it because its end
-  # marker is unambiguous.
-  out=$(printf '%s\n' "$body" \
-    | sed -n '/^```files[[:space:]]*$/,/^```[[:space:]]*$/p' \
-    | sed '1d;$d; s/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -v '^$' || true)
-  if [[ -n $out ]]; then printf '%s\n' "$out"; return 0; fi
-
-  # The architect template in existing issues uses a Markdown section with
-  # one bare path per line. Stop at the next bold field and emit paths only;
-  # prose such as "(none — coordination-only epic)" is not a manifest.
-  # No early exit, for the same SIGPIPE reason as worktree_of_branch.
-  printf '%s\n' "$body" | awk '
-    done { next }
-    /^\*\*file manifest\*\*[[:space:]]*$/ { in_manifest=1; next }
-    in_manifest && /^\*\*/ { in_manifest=0; done=1; next }
-    in_manifest {
-      line=$0
-      sub(/^[[:space:]]*[-*][[:space:]]*/, "", line)
-      gsub(/`/, "", line)
-      sub(/[[:space:]]*$/, "", line)
-      if (line ~ /^[[:alnum:]_.-]+\//) print line
-    }'
+  out=$(printf '%s\n' "$body" | LC_ALL=C awk -v n="$n" '
+    { L[NR] = $0 }
+    function refuse(i) {
+      print "manifest on #" n ": cannot interpret line(s):" > "/dev/stderr"
+      for (i = 1; i <= nbad; i++) print "  \"" bad[i] "\"" > "/dev/stderr"
+      exit 3
+    }
+    function ispath(p,   c, k, m) {
+      if (p !~ /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)*$/) return 0
+      m = split(p, c, "/")
+      for (k = 1; k <= m; k++) if (c[k] == "." || c[k] == "..") return 0
+      return 1
+    }
+    END {
+      from = 0; to = -1
+      for (i = 1; i <= NR; i++) if (L[i] ~ /^```files[[:space:]]*$/) { from = i + 1; break }
+      if (from) {
+        for (i = from; i <= NR; i++) if (L[i] ~ /^```[[:space:]]*$/) { to = i - 1; break }
+        if (to < 0) { bad[++nbad] = L[from - 1] " (fence never closed)"; refuse() }
+      } else {
+        for (i = 1; i <= NR; i++) if (L[i] ~ /^\*\*file manifest\*\*[[:space:]]*$/) { from = i + 1; break }
+        if (!from) {
+          for (i = 1; i <= NR; i++) if (L[i] ~ /^\*\*file manifest\*\*/) bad[++nbad] = L[i]
+          if (!nbad) bad[++nbad] = "(no **file manifest** heading on a line of its own)"
+          refuse()
+        }
+        to = NR
+        for (i = from; i <= NR; i++) if (L[i] ~ /^\*\*/) { to = i - 1; break }
+      }
+      first = 1; npath = 0
+      for (i = from; i <= to; i++) {
+        line = L[i]
+        sub(/^[[:space:]]*[-*][[:space:]]+/, "", line)
+        gsub(/`/, "", line)
+        sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+        if (line == "") continue
+        if (first) { first = 0; if (tolower(line) ~ /^[[:space:]`(]*none/) exit 0 }
+        if (!ispath(line)) { bad[++nbad] = L[i]; continue }
+        if (!(line in seen)) { seen[line] = 1; P[++npath] = line }
+      }
+      if (!npath && !nbad) bad[++nbad] = "(the field has no entries)"
+      if (nbad) refuse()
+      for (i = 1; i <= npath; i++) print P[i]
+    }') || return 1
+  [[ -z $out ]] || printf '%s\n' "$out"
 }
 # Extract the session's final message from a finished transcript.
 # Prefer the result event; fall back to the last assistant text block, because
