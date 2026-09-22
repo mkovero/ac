@@ -13,6 +13,12 @@
 #   7. nothing reads FETCH_HEAD, which concurrent fetches in the shared
 #      checkout overwrite.
 #  10. the architect manifest survives a newer architect note without one.
+#  11. a section manifest keeps its repo-root entries (README.md, #548).
+#  12. an in-place edit adding a root-level entry reaches the next dispatch.
+#  13. a prose line inside the manifest section refuses the whole manifest.
+#  14. a manifest heading with no entries refuses instead of reading as absent.
+#  15. the files fence keeps root entries and refuses a bad line too.
+#  16. a `none` manifest is still empty, by master.sh's none regex.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -233,6 +239,61 @@ jq -n '{comments: [
 check '[[ $(cat $T/r_10) == "ac-rs/a.rs ac-rs/b.rs " ]]' "manifest_of reads the newest architect manifest past a later label note"
 check '[[ $(cat $T/r_10_old) == 0 ]]' "the newest-architect-comment selection finds no manifest on the same thread"
 check 'sed -n "/^architect_declared_no_change()/,/^}/p" "$BIN/master.sh" | grep -q ARCH_MANIFEST_JQ' "architect_declared_no_change uses the same selection"
+
+# --- 11-15: every manifest line is a path, the none declaration, or refused ----
+# #548, 2026-09-21: the section parser kept only lines containing a `/`, so
+# README.md was dropped from #544's dispatch three times, silently.
+m_run() {  # $1 = case; comments JSON in $T/comments$1 → r_$1 (stdout), rc_$1, err_$1
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub10:$PATH" GH_COMMENTS="$T/comments$1"
+    rc=0; manifest_of "$1" > "$T/r_$1" 2> "$T/err_$1" || rc=$?; echo "$rc" > "$T/rc_$1"
+  )
+}
+m_body() {  # $1 = case, $2... = architect comment lines
+  local c="$1"; shift
+  printf '%s\n' '<!-- agent: architect -->' '### design decision' "$@" \
+    | jq -Rs '{comments: [{body: .}]}' > "$T/comments$c"
+}
+m_set() { LC_ALL=C sort "$1" | tr '\n' ' '; }
+
+# 11: root-level and nested entries, section form
+m_body 11 '**file manifest**' 'README.md' 'ac-rs/a.rs' '- `ARCHITECTURE.md`' 'ac-rs/a.rs' '' '**interface changes**' 'none'
+m_run 11
+check '[[ $(cat $T/rc_11) == 0 && $(m_set $T/r_11) == "ARCHITECTURE.md README.md ac-rs/a.rs " && $(wc -l < $T/r_11) == 3 ]]' "a section manifest keeps its root-level entries, once each"
+
+# 12: v1 then v2 of the same comment, v2 adds a root-level entry. manifest_of
+# caches nothing, so on main this failed only through the root-level drop;
+# the added entry is root-level so the case can still go red.
+m_body 12 '**file manifest**' 'ac-rs/a.rs' '' '**risks**'
+m_run 12; cp "$T/r_12" "$T/r_12_v1"
+m_body 12 '**file manifest**' 'ac-rs/a.rs' 'TESTING.md' '' '**risks**'
+m_run 12
+check '[[ $(m_set $T/r_12_v1) == "ac-rs/a.rs " && $(m_set $T/r_12) == "TESTING.md ac-rs/a.rs " ]]' "an in-place edit adding a root-level entry reaches the next read"
+
+# 13: prose between entries
+m_body 13 '**file manifest**' 'ac-rs/a.rs' 'ac-rs/x.rs — changes Y' 'CLAUDE.md' '' '**risks**'
+m_run 13
+check '[[ $(cat $T/rc_13) != 0 && ! -s $T/r_13 ]] && grep -q "#13" $T/err_13 && grep -qF "ac-rs/x.rs — changes Y" $T/err_13' "a prose line in the manifest refuses it, naming the issue and the line"
+
+# 14: heading present, nothing under it
+m_body 14 '**file manifest**' '' '**interface changes**' 'none'
+m_run 14
+check '[[ $(cat $T/rc_14) != 0 && ! -s $T/r_14 ]] && grep -q "#14" $T/err_14' "a manifest heading with no entries refuses"
+
+# 15: files fence, root-level entry, then a bad line
+m_body 15 '**file manifest**' '```files' 'README.md' 'ac-rs/a.rs' '```'
+m_run 15; cp "$T/r_15" "$T/r_15_ok"; cp "$T/rc_15" "$T/rc_15_ok"
+m_body 15 '**file manifest**' '```files' 'README.md' 'ac-rs/*.rs' '../escape.rs' '```'
+m_run 15
+check '[[ $(cat $T/rc_15_ok) == 0 && $(m_set $T/r_15_ok) == "README.md ac-rs/a.rs " ]]' "the files fence keeps a root-level entry"
+check '[[ $(cat $T/rc_15) != 0 && ! -s $T/r_15 ]] && grep -qF "ac-rs/*.rs" $T/err_15 && grep -qF "../escape.rs" $T/err_15' "the files fence refuses a glob and a .. path"
+
+# The none declaration still reads as empty, with the same regex master.sh uses.
+m_body 16 '**file manifest**' '(none — coordination-only epic)' '' '**risks**'
+m_run 16
+check '[[ $(cat $T/rc_16) == 0 && ! -s $T/r_16 ]]' "a none manifest is empty with status 0"
+check 'grep -qF "~ /^[[:space:]\`(]*none/" "$BIN/master.sh" && grep -qF "~ /^[[:space:]\`(]*none/" "$BIN/common.sh"' "manifest_of and architect_declared_no_change share the none regex"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
