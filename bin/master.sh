@@ -38,8 +38,10 @@
 #                        bin/rig.sh. Default 1: when requires-rig is on the PR
 #                        or its issue, run the rig session at the reviewed
 #                        commit, then a full same-commit QA pass with the record.
-#   AC_WAIT_MERGE=1      wait at an epic child until its human merge, then
-#                        continue with the next child (default: stop and return)
+#   AC_WAIT_MERGE=1      wait at an epic child until its PR's merge commit is
+#                        on main, then continue with the next child; stop the
+#                        epic if the child or its PR closes without that
+#                        (default: stop and return)
 #   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
 #
 # Verify label names first — a wrong one makes this do nothing while looking
@@ -88,6 +90,36 @@ pr_for() {
   [[ -n $pr ]] && { printf '%s\n' "$pr"; return; }
   gh_retry gh pr list -R "$AC_REPO" --state open --json number,body --jq \
     "[.[] | select(.body // \"\" | test(\"[Cc]loses +#$n\\\\b\"))] | .[0].number // empty"
+}
+
+# Whether PR <pr>'s change is on main, by ancestry of its merge commit — not by
+# issue state, and not by mergedAt alone: a stacked PR reads merged once it
+# lands on its base branch, while main still lacks its commits. GitHub's
+# compare API answers, not the local origin/main, which in the shared checkout
+# can be stale and would read a fresh merge as missing. Prints one of:
+#   landed <oid>            merge commit is main or an ancestor of it
+#   elsewhere <base> <oid>  the PR has a merge commit, and main does not
+#   unmerged                the PR has no merge
+#   unknown                 a call failed or answered nothing usable
+# A failure is never `landed`.
+pr_landed() {
+  local pr="$1" info merged_at oid base status
+  info="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json mergedAt,mergeCommit,baseRefName \
+    --jq '[.mergedAt // "-", .mergeCommit.oid // "-", .baseRefName // "-"] | join("|")')" \
+    || { echo unknown; return 0; }
+  IFS='|' read -r merged_at oid base <<< "$info"
+  [[ -n $merged_at ]] || { echo unknown; return 0; }
+  [[ $merged_at == - ]] && { echo unmerged; return 0; }
+  [[ $oid =~ ^[0-9a-f]{40}$ ]] || { echo unknown; return 0; }
+  # compare/main...<oid>: base main, head oid. `behind` = oid is behind main,
+  # i.e. an ancestor of it. The order matters: reversed, `ahead` would be it.
+  status="$(gh_retry gh api "repos/$AC_REPO/compare/main...$oid" --jq .status)" \
+    || { echo unknown; return 0; }
+  case "$status" in
+    behind|identical) echo "landed $oid" ;;
+    ahead|diverged)   echo "elsewhere $base $oid" ;;
+    *)                echo unknown ;;
+  esac
 }
 
 # A branch with no open PR is a failed earlier run, not a fresh start.
@@ -704,22 +736,55 @@ is_epic() {
   [[ -n "$(children "$1")" ]]
 }
 
+# Returns 0 only once pr_landed verifies the PR's merge commit is on main.
+# 5 = the child will not land through this PR (stop the epic); 4 = integration
+# pushed; 1-3 = could not wait. The issue's state is never evidence of a merge:
+# it closes for duplicates, supersession and by hand too. It is read only to
+# report why the child closed. The word "merged" is printed on the verified
+# path only.
 wait_for_merge() {
-  local child="$1" pr="$2" state pr_state merged_at mergeable merge_status
+  local child="$1" pr="$2" pr_state state merged_at mergeable merge_status
+  local verdict issue state_reason base oid
   local poll="${AC_MERGE_POLL_SECONDS:-60}"
   [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "  invalid AC_MERGE_POLL_SECONDS: $poll" >&2; return 2; }
   [[ -n $pr ]] || { echo "  cannot identify the open PR for #$child" >&2; return 1; }
   while true; do
-    state="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
-    [[ $state == CLOSED ]] && { echo "  #$child merged; continuing epic"; return 0; }
     pr_state="$(gh_retry gh pr view "$pr" -R "$AC_REPO" \
-      --json mergedAt,mergeable,mergeStateStatus \
-      --jq '[.mergedAt // "-", .mergeable // "UNKNOWN", .mergeStateStatus // "UNKNOWN"] | join("|")' \
+      --json state,mergedAt,mergeable,mergeStateStatus \
+      --jq '[.state // "UNKNOWN", .mergedAt // "-", .mergeable // "UNKNOWN", .mergeStateStatus // "UNKNOWN"] | join("|")' \
       2>/dev/null || true)"
-    IFS='|' read -r merged_at mergeable merge_status <<< "$pr_state"
+    IFS='|' read -r state merged_at mergeable merge_status <<< "$pr_state"
+    if [[ -z $state ]]; then
+      echo "  #$child: could not read PR #$pr — checking again in ${poll}s"
+      sleep "$poll"; continue
+    fi
     if [[ -n $merged_at && $merged_at != - ]]; then
-      echo "  #$child PR merged; continuing epic"
-      return 0
+      verdict="$(pr_landed "$pr")"
+      case "$verdict" in
+        landed\ *)
+          oid="${verdict#landed }"
+          echo "  #$child: PR #$pr landed on main (${oid:0:7}); continuing epic"
+          return 0 ;;
+        elsewhere\ *)
+          read -r _ base oid <<< "$verdict"
+          echo "  #$child: PR #$pr's base is $base; merge commit ${oid:0:7} is not on main"
+          return 5 ;;
+        *)
+          echo "  #$child: PR #$pr shows a merge, but whether its commit is on main could not be checked — checking again in ${poll}s"
+          sleep "$poll"; continue ;;
+      esac
+    fi
+    if [[ $state == CLOSED ]]; then
+      echo "  #$child: PR #$pr closed without landing on main"
+      return 5
+    fi
+    issue="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state,stateReason \
+      --jq '[.state // "UNKNOWN", .stateReason // "-"] | join("|")' 2>/dev/null || echo 'UNKNOWN|-')"
+    IFS='|' read -r state state_reason <<< "$issue"
+    if [[ $state == CLOSED ]]; then
+      [[ -n $state_reason && $state_reason != - ]] || state_reason="none recorded"
+      echo "  #$child: issue closed (reason: $state_reason) while PR #$pr is still open — no landed change found on main"
+      return 5
     fi
     if [[ $mergeable == CONFLICTING || $merge_status == DIRTY ]]; then
       echo "  #$child PR #$pr has merge conflicts with main — integrating"
@@ -732,7 +797,7 @@ wait_for_merge() {
 }
 
 drive_epic() {
-  local e="$1" kids c st wait_rc
+  local e="$1" kids c st wait_rc wait_pr
   mapfile -t kids < <(children "$e")
   (( ${#kids[@]} )) || { echo "  #$e: no sub-issues or task-list refs found"; return 0; }
   echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
@@ -765,7 +830,8 @@ drive_epic() {
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
           while true; do
             wait_rc=0
-            wait_for_merge "$c" "$(pr_for "$c" || true)" || wait_rc=$?
+            wait_pr="$(pr_for "$c" || true)"
+            wait_for_merge "$c" "$wait_pr" || wait_rc=$?
             if (( wait_rc == 4 )); then
               echo "  #$c: integration pushed — rerunning both QA gates"
               STATE=""
@@ -775,6 +841,15 @@ drive_epic() {
                 return 0
               }
               continue
+            fi
+            if (( wait_rc == 5 )); then
+              # Not KEEP_GOING-able: every later child would build on a main
+              # without #$c's change.
+              echo "  #$c: no change landed on main — stopping epic #$e."
+              echo "  A rerun of master.sh $e skips closed children and counts a closed blocker"
+              echo "  as done: check #$c's state and PR #$wait_pr before rerunning,"
+              echo "  and reopen #$c or remove it from #$e's child list."
+              return 0
             fi
             (( wait_rc == 0 )) || return 0
             break
