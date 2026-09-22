@@ -774,9 +774,11 @@ i22b=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = []')
 i22c=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = [{number: 9}]')
 i22d=$(di22 '.headRefName = "feat-x" | .closingIssuesReferences = [] | .body = "no reference"')
 check '[[ $i22a == 22 && $i22b == 22 && $i22c == 9 && -z $i22d ]]' "decision_issue: branch, then closing reference, then body, else empty"
-# 22h: the QA finding's shape. A branch that is not issue-N-* and no closing
-# reference (non-default base): the digest still covers #22, so approvals
-# under D0 are cleared and one re-review under D1 converges.
+# 22h: the runner's side of the QA finding. A branch that is not issue-N-* and
+# no closing reference (non-default base): master.sh's digest still covers #22,
+# so approvals under D0 are cleared and one re-review under D1 converges. The
+# review side here is the stub, which calls decision_of_pr itself; the real
+# review.sh's digest source is tested after the 22j cases.
 reset22; mk22 "$T/m22h"
 w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "claude-approved codex-approved" "$D0"
 jq '.headRefName = "feat-x" | .closingIssuesReferences = []' "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"
@@ -835,6 +837,20 @@ rc=0; ( cd "$REPO" && unset AC_PROVIDER AC_CODEX_QA_PROVIDER && AC_LOG_DIR="$GH2
   bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err22r" || rc=$?
 check '[[ $rc == 1 && ! -e $T/wt22/codex-pr-7 && ! -e $T/launched-codex ]] && grep -q "names decision $D0, not the current $D1" $T/err22r' \
   "review.sh --independent refuses a Claude QA record naming a superseded decision, before any worktree"
+# review.sh states decision_of_pr's digest, not issue_of_pr's: with no closing
+# reference (non-default base) the refusal must still compare against #22's D1.
+reset22; w22_issue "" "$A22_NEW"; w22_pr "claude-approved" "$D0"
+jq '.closingIssuesReferences = []' "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"
+rm -f "$T"/launched-*
+rc=0; ( cd "$REPO" && unset AC_PROVIDER AC_CODEX_QA_PROVIDER && AC_LOG_DIR="$GH22/log" AC_WT_BASE="$T/wt22" \
+  bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err22s" || rc=$?
+check '[[ $rc == 1 ]] && grep -q "names decision $D0, not the current $D1" $T/err22s' \
+  "review.sh digests decision_issue's issue, not the empty closing reference"
+# The main-path site sits behind a git fetch, a worktree and the gate, so it is
+# pinned structurally: review.sh takes every digest from decision_of_pr and
+# never calls decision_rev with an issue of its own choosing.
+check '! grep -qE "decision_rev \"" "$BIN/review.sh" && [[ $(grep -c "decision=\"\$(decision_of_pr " "$BIN/review.sh") == 2 ]]' \
+  "review.sh computes both digests (independent and main path) through decision_of_pr"
 rm -f "$T/stub/gh"; unset GH22 A22_NEW
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------

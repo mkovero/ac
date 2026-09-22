@@ -603,6 +603,10 @@ issue_of_pr() {
 # closing reference, then a `closes #N` in the body — closingIssuesReferences
 # is empty for a PR whose base is not the default branch. Empty when none
 # applies; decision_rev then reads `none`. Fails on a failed read.
+# Known gap: a PR on a non-issue-N branch that closes two issues digests the
+# first closing reference, which need not be the issue the runner drives. Both
+# sides still agree, so the loop ends, but a revision of the driven issue's
+# design made outside the runner goes unseen (a stale approval survives).
 decision_issue() {
   gh_retry gh pr view "$1" -R "$AC_REPO" --json headRefName,closingIssuesReferences,body --jq '
     ((.headRefName // "") | capture("^issue-(?<n>[0-9]+)(-|$)").n)
