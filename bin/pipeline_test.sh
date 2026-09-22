@@ -333,6 +333,37 @@ cp "$T/rec18a" "$o18"; cp "$T/rec18b" "$o18"
 check '[[ $(ls "$T/old18" | wc -l) == 1 ]] && ! cmp -s "$o18" "$T/rec18a"' "control: the old name let a second pass replace the first record"
 check '! grep -qE "rig-pr-\\\$pr-\\\$rev\.md" "$BIN/rig.sh" && grep -q "file_rig_record" "$BIN/rig.sh"' "rig.sh files through file_rig_record, not a bare -\$rev.md path"
 
+# --- 20: replays of the stale-doc rounds (#554) ------------------------------------
+# Declared lists written from each design comment before the first replay ran
+# (#552's for PR #553 round 1, #544's for PR #547 round 2), and not edited after.
+# They need the historical commits; a checkout without them skips, loudly.
+NAMES_552='ARRIVAL_EXCESS_DELAY_ALLOWANCE_S
+DistanceWindow::high_s
+DistanceCheck::TooLate
+A + 2ε
+1.52 ms at 2 m
+speaker allowance'
+NAMES_544='stored absolute τ
+stored-absolute-τ
+subtracts the stored τ
+a reader subtracts
+Its only consumer is the onset search'"'"'s causal bound
+τ is the capture pair'"'"'s stored `interface_latency`
+interface_latency_unverified'
+if git -C "$REPO" cat-file -e 752960a0de^{commit} 2>/dev/null \
+    && git -C "$REPO" cat-file -e d58a04ebac^{commit} 2>/dev/null; then
+  printf '%s\n' "$NAMES_552" > "$T/names552"; printf '%s\n' "$NAMES_544" > "$T/names544"
+  ( cd "$REPO" && AC_ISSUE=552 AC_SUPERSEDED_NAMES="$T/names552" \
+      bash "$BIN/stale_names.sh" --base 752960a0de^ --head 752960a0de > "$T/r_20a"; echo $? > "$T/rc_20a" )
+  ( cd "$REPO" && AC_ISSUE=544 AC_SUPERSEDED_NAMES="$T/names544" \
+      bash "$BIN/stale_names.sh" --base d58a04ebac^ --head d58a04ebac > "$T/r_20b"; echo $? > "$T/rc_20b" )
+  check '[[ $(cat $T/rc_20a) == 1 ]] && grep -qE "report/ir_stats.rs:140  A \+ 2ε  \(declared\)$" $T/r_20a' "replay PR #553 r1: ir_stats.rs:140 reported from the declared list"
+  check 'grep -qE "ir_stats.rs:3393  TooLate  \(symbol, cited #552\)" $T/r_20a && grep -qE "arrival_suite.rs:576 .*cited #552" $T/r_20a' "replay PR #553 r1: the past-tense #552 mentions are cited, not reported"
+  check '[[ $(cat $T/rc_20b) == 1 ]] && grep -qE "^  README.md:[0-9]+  .*\(declared\)$" $T/r_20b' "replay PR #547 r2: a README passage is reported from the declared list"
+else
+  echo "skip replay PR #553/#547: historical commits not in this clone"
+fi
+
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
 
