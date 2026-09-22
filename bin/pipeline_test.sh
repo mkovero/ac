@@ -19,6 +19,7 @@
 #  14. a manifest heading with no entries refuses instead of reading as absent.
 #  15. the files fence keeps root entries and refuses a bad line too.
 #  16. a `none` manifest is still empty, by master.sh's none regex.
+#  17. a bulleted none is the none declaration, not a file named `none`.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -294,6 +295,13 @@ m_body 16 '**file manifest**' '(none — coordination-only epic)' '' '**risks**'
 m_run 16
 check '[[ $(cat $T/rc_16) == 0 && ! -s $T/r_16 ]]' "a none manifest is empty with status 0"
 check 'grep -qF "~ /^[[:space:]\`(]*none/" "$BIN/master.sh" && grep -qF "~ /^[[:space:]\`(]*none/" "$BIN/common.sh"' "manifest_of and architect_declared_no_change share the none regex"
+
+# A bulleted none is the none declaration, not a path named `none`. Red at
+# 268b83fb: the none regex ran on the raw line, so `- \`none\`` fell through to
+# the path test and came out as a one-entry manifest.
+m_body 17 '**file manifest**' '- `none`' '' '**risks**'
+m_run 17
+check '[[ $(cat $T/rc_17) == 0 && ! -s $T/r_17 ]]' "a bulleted none declaration is empty, not a path named none"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"

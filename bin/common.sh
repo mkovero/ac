@@ -454,7 +454,7 @@ manifest_of() {
         gsub(/`/, "", line)
         sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
         if (line == "") continue
-        if (first) { first = 0; if (tolower(L[i]) ~ /^[[:space:]`(]*none/) exit 0 }
+        if (first) { first = 0; if (tolower(line) ~ /^[[:space:]`(]*none/) exit 0 }
         if (!ispath(line)) { bad[++nbad] = L[i]; continue }
         if (!(line in seen)) { seen[line] = 1; P[++npath] = line }
       }
