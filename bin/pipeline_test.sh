@@ -361,6 +361,7 @@ R19="$T/repo19"
   drop_const; printf '%s\n' '/// Moved.' 'pub const OLD_BOUND: f64 = 1.0;' > src/other.rs; mk c
   drop_const; printf '%s\n' '# x' > README.md; printf '%s\n' 'Capped at `OLD_BOUND`.' > docs/superseded/old.md; mk d
   drop_const; printf '%s\n' '# x' '' 'The rule capped at `OLD_BOUND`,' 'before #77 removed it.' > README.md; mk e
+  drop_const; printf '%s\n' '# x' '' '`OLD_BOUND` still caps this today; compare marker #77suffix.' > README.md; mk e2
   printf '%s\n' '/// Error is bounded by the old' '/// speaker allowance plus tape.' 'pub fn keep() {}' > src/lib.rs
   printf '%s\n' '# x' > README.md; mk f
   printf '%s\n' '# x' '' 'The cap * speaker bound holds.' > README.md; mk i
@@ -378,7 +379,7 @@ sn19() {  # $1 = case, $2 = head tag, rest = env; → r_19$1, rc_19$1
 }
 printf '%s\n' 'old speaker allowance' > "$T/names19f"
 sn19 a a; sn19 b b; sn19 c c; sn19 d d
-sn19 e e AC_ISSUE=77; sn19 e0 e AC_ISSUE=
+sn19 e e AC_ISSUE=77; sn19 e0 e AC_ISSUE=; sn19 e2 e2 AC_ISSUE=77
 sn19 f f AC_SUPERSEDED_NAMES="$T/names19f"
 check '[[ $(cat $T/rc_19a) == 1 ]] && grep -q "names   FAIL" $T/r_19a && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19a' "(a) a deleted const still named in README fails, at file:line"
 check '[[ $(cat $T/rc_19b) == 0 ]] && grep -q "names   PASS  *0 reported" $T/r_19b' "(b) the same deletion with the mention gone passes"
@@ -386,6 +387,8 @@ check '[[ $(cat $T/rc_19c) == 0 ]] && grep -q "0 removed symbol" $T/r_19c && ! g
 check '[[ $(cat $T/rc_19d) == 0 ]] && ! grep -q "superseded/" $T/r_19d' "(d) a mention under docs/superseded/ is not reported"
 check '[[ $(cat $T/rc_19e) == 0 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol, cited #77)" $T/r_19e' "(e) a paragraph citing the issue is exempt and still printed as cited"
 check '[[ $(cat $T/rc_19e0) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19e0' "(e) the same mention with AC_ISSUE unset is reported"
+check '[[ $(cat $T/rc_19e2) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19e2' "(e) #77suffix is not a citation of #77: the mention is reported"
+check 'awk -v issue=77 '"'"'{ exit !($0 ~ ("#" issue "([^0-9]|$)")) }'"'"' <<< "compare marker #77suffix."' "(e) control: the digit-only boundary of 819239fd accepts #77suffix"
 check '[[ $(cat $T/rc_19f) == 1 ]] && grep -qx "  src/lib.rs:1  old speaker allowance  (declared)" $T/r_19f' "(f) a declared phrase split across two /// lines is reported at its first line"
 check '! git -C "$R19" grep -q -F "old speaker allowance" f' "(f) control: a line-based grep for the phrase finds nothing"
 check '[[ $(git -C "$R19" diff base a | grep -E "^[-+][^-+]" | grep OLD_BOUND | grep -vc "pub const OLD_BOUND") == 0 ]]' "(g) control: the diff itself shows OLD_BOUND only at its definition"

@@ -297,7 +297,7 @@ END {
       off[j] = length(joined) + (joined == "" ? 1 : 2)
       joined = joined (joined == "" ? "" : " ") s
     }
-    cited = (issue != "" && joined ~ ("#" issue "([^0-9]|$)"))
+    cited = (issue != "" && joined ~ ("#" issue "([^A-Za-z0-9_]|$)"))
     for (k = 1; k <= nn; k++) {
       if (K[k] == "declared") {
         if (P[k] == "") continue
