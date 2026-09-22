@@ -82,24 +82,29 @@ fn format_distance(distance_m: f64) -> String {
 
 /// The distance check's part of the marker (#537 UX revision 3). On a
 /// produced flight time: `, distance not given` when no distance was typed —
-/// the narrowed claim, on every such capture — and `, distance not checked`
-/// when the typed one is not a positive length. When the distance is the
-/// first reason the flight time is withheld: `, later than 2 m allows` /
-/// `, earlier than 2 m allows`, the words of the CLI's `withheld` row. Empty
-/// otherwise: a flight time withheld upstream has no figure to qualify.
+/// the narrowed claim, on every such capture — `, distance not checked`
+/// when the typed one is not a positive length, and the excess over `d/c`
+/// when it was checked (`, +0.38 ms re d/c at 2 m`, #552 UX): `Consistent`
+/// means only *not earlier than* the distance allows, so the delta is the
+/// result, with no verdict beside it. When the distance is the first reason
+/// the flight time is withheld: `, earlier than 2 m allows`, the words of
+/// the CLI's `withheld` row — the only refusal left. Empty otherwise: a
+/// flight time withheld upstream has no figure to qualify.
 fn distance_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
     let produced = stats.flight_time_s.is_some();
     let first_reason = !stats.arrival_cross_check.withholds_flight_time();
     match &stats.distance_check {
         DistanceCheck::NotGiven if produced => ", distance not given".to_string(),
         DistanceCheck::NotPositive { .. } if produced => ", distance not checked".to_string(),
+        DistanceCheck::Consistent { window, excess_s } if produced => format!(
+            ", {:+.2} ms re d/c at {}",
+            excess_s * 1000.0,
+            format_distance(window.distance_m)
+        ),
         DistanceCheck::TooEarly { window, .. } if first_reason => format!(
             ", earlier than {} allows",
             format_distance(window.distance_m)
         ),
-        DistanceCheck::TooLate { window, .. } if first_reason => {
-            format!(", later than {} allows", format_distance(window.distance_m))
-        }
         _ => String::new(),
     }
 }
@@ -1042,7 +1047,7 @@ mod tests {
         let cases = [
             (
                 with(agrees.clone(), consistent.clone(), Some(6.208), 24.031),
-                "peak above 2 kHz: 6.21 ms flight",
+                "peak above 2 kHz: 6.21 ms flight, +0.38 ms re d/c at 2 m",
             ),
             (
                 with(agrees.clone(), DistanceCheck::NotGiven, Some(0.0), 17.823),
@@ -1051,14 +1056,14 @@ mod tests {
             (
                 with(
                     agrees.clone(),
-                    DistanceCheck::TooLate {
+                    DistanceCheck::Consistent {
                         window: window(2.0),
-                        excess_s: 0.005377,
+                        excess_s: 0.150,
                     },
-                    None,
-                    29.031,
+                    Some(155.831),
+                    173.654,
                 ),
-                "peak above 2 kHz: 29.03 ms round trip, later than 2 m allows",
+                "peak above 2 kHz: 155.83 ms flight, +150.00 ms re d/c at 2 m",
             ),
             (
                 with(
@@ -1079,7 +1084,7 @@ mod tests {
                     Some(6.208),
                     24.031,
                 ),
-                "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms",
+                "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms, +0.38 ms re d/c at 2 m",
             ),
             (
                 with(
@@ -1108,9 +1113,9 @@ mod tests {
                         index: 0,
                         level_db: -14.2,
                     },
-                    // Also too late: the cross-check is the first reason,
-                    // so the marker names it alone.
-                    DistanceCheck::TooLate {
+                    // 5 ms late is Consistent (#552); the cross-check alone
+                    // withholds, and no figure was produced to qualify.
+                    DistanceCheck::Consistent {
                         window: window(2.0),
                         excess_s: 0.005,
                     },
@@ -1137,7 +1142,7 @@ mod tests {
                 band_top_hz: 2_000.0,
                 required_hz: 4_000.0,
             },
-            DistanceCheck::TooLate {
+            DistanceCheck::Consistent {
                 window: window(2.0),
                 excess_s: 0.0164,
             },
