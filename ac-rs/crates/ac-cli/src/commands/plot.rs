@@ -695,16 +695,17 @@ fn signed_minus(value: f64, decimals: usize) -> String {
     }
 }
 
-/// The `distance` block (#537 UX revision 3): the flight time against the
-/// typed distance — the only row that says anything about the path, and all
-/// it says is whether the number fits the window. A verdict prints only when
+/// The `distance` block (#537 UX revision 3, #552 UX): the flight time
+/// against the typed distance — the only row that says anything about the
+/// path. It prints the excess over `d/c` with no verdict beside it; the one
+/// refusal left is an arrival earlier than the `earliest` row allows. A
+/// figure prints only when
 /// the flight time exists or the distance is a reason it does not;
 /// otherwise one row says why it is silent. Without a distance, one row
 /// says the flight time was not checked.
 fn distance_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{
-        DistanceCheck, ARRIVAL_EXCESS_DELAY_ALLOWANCE_S, DISTANCE_SPEED_OF_SOUND_REL_TOL,
-        DISTANCE_TAPE_TOLERANCE_M,
+        DistanceCheck, DISTANCE_SPEED_OF_SOUND_REL_TOL, DISTANCE_TAPE_TOLERANCE_M,
     };
     let label = label_prefix("distance");
     let typed = |d: f64| format!("{d} m");
@@ -744,11 +745,11 @@ fn distance_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> 
     };
     let mut lines = vec![
         format!(
-            "{label}{}: {} samples ({} ms) re d/c, {} window",
+            "{label}{}: {} samples ({} ms) re d/c{}",
             typed(window.distance_m),
             signed_minus(excess_s * fs, 0),
             signed_minus(excess_s * 1000.0, 3),
-            if reason { "outside" } else { "inside" }
+            if reason { ", earlier than allowed" } else { "" }
         ),
         format!(
             "{CONT_INDENT}d/c {} samples ({} ms), {c}",
@@ -756,32 +757,23 @@ fn distance_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> 
             signed_minus(window.expected_s * 1000.0, 3)
         ),
         format!(
-            "{CONT_INDENT}window {} \u{2026} {} samples re d/c",
+            "{CONT_INDENT}earliest {} samples re d/c, from tape \u{b1}{:.0} cm, c \u{b1}{:.0} %",
             signed_minus(window.low_s * fs, 0),
-            signed_minus(window.high_s * fs, 0)
-        ),
-        format!(
-            "{CONT_INDENT}from tape \u{b1}{:.0} cm, c \u{b1}{:.0} %, speaker allowance {} ms \
-             assumed",
             DISTANCE_TAPE_TOLERANCE_M * 100.0,
             DISTANCE_SPEED_OF_SOUND_REL_TOL * 100.0,
-            signed_minus(ARRIVAL_EXCESS_DELAY_ALLOWANCE_S * 1000.0, 1)
         ),
     ];
-    match stats.distance_check {
-        DistanceCheck::TooLate { .. } => lines.push(format!(
-            "{CONT_INDENT}check: typed distance, IR before arrival, speaker DSP latency"
-        )),
-        DistanceCheck::TooEarly { .. } => lines.push(format!(
+    if reason {
+        lines.push(format!(
             "{CONT_INDENT}check: typed distance, temperature, ref latency, offset"
-        )),
-        _ => {}
+        ));
     }
     lines
 }
 
 /// The `withheld` reason the distance check gives (#537 UX revision 3), in
 /// the #359 shape: a direction word and a pointer to the distance block.
+/// Only the early edge refuses (#552).
 fn distance_withheld_reason(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
     use ac_core::measurement::report::DistanceCheck;
     match &stats.distance_check {
@@ -789,9 +781,6 @@ fn distance_withheld_reason(stats: &ac_core::measurement::report::IrStats) -> Op
             "earlier than {} m allows (below)",
             window.distance_m
         )),
-        DistanceCheck::TooLate { window, .. } => {
-            Some(format!("later than {} m allows (below)", window.distance_m))
-        }
         _ => None,
     }
 }
@@ -3728,8 +3717,6 @@ mod tests {
         let excess_s = flight_samples / 96_000.0 - window.expected_s;
         if excess_s < window.low_s {
             DistanceCheck::TooEarly { window, excess_s }
-        } else if excess_s > window.high_s {
-            DistanceCheck::TooLate { window, excess_s }
         } else {
             DistanceCheck::Consistent { window, excess_s }
         }
@@ -3763,10 +3750,9 @@ mod tests {
             "                second lobe 40 samples after, 6.1 dB down (required \u{2265} 3.0 dB)",
             "  flight time   +596 samples  (+6.208 ms, arrival \u{2212} ref latency \u{2212} \
              offset)",
-            "  distance      2 m: +36 samples (+0.377 ms) re d/c, inside window",
+            "  distance      2 m: +36 samples (+0.377 ms) re d/c",
             "                d/c +560 samples (+5.831 ms), c 343.0 m/s assumed",
-            "                window \u{2212}25 \u{2026} +121 samples re d/c",
-            "                from tape \u{b1}5 cm, c \u{b1}2 %, speaker allowance +1.0 ms assumed",
+            "                earliest \u{2212}25 samples re d/c, from tape \u{b1}5 cm, c \u{b1}2 %",
             "  arrival SNR   53.8 dB  (above 2 kHz, required \u{2265} 35.0 dB)",
             "                ISO 3382-1:2009 \u{a7}A.3.4 trigger (\u{2212}20 dB) above noise peaks",
             "  broadband \u{394}   +128 samples  (+1.333 ms, broadband peak \u{2212} arrival)",
@@ -3776,8 +3762,8 @@ mod tests {
         assert_eq!(lines, want);
     }
 
-    /// UX revision 3's 0.5 m frame: only the distance block differs — the
-    /// excess moves and the window's lower edge tightens with d.
+    /// UX revision 3's 0.5 m frame (#552 wording): only the distance block
+    /// differs — the excess moves and the earliest edge tightens with d.
     #[test]
     fn the_half_metre_distance_block_matches_ux_revision_3() {
         let mut stats = headline_stats();
@@ -3786,37 +3772,40 @@ mod tests {
         assert_eq!(
             distance_lines(&stats),
             [
-                "  distance      0.5 m: +58 samples (+0.605 ms) re d/c, inside window",
+                "  distance      0.5 m: +58 samples (+0.605 ms) re d/c",
                 "                d/c +140 samples (+1.458 ms), c 343.0 m/s assumed",
-                "                window \u{2212}17 \u{2026} +113 samples re d/c",
-                "                from tape \u{b1}5 cm, c \u{b1}2 %, speaker allowance +1.0 ms assumed",
+                "                earliest \u{2212}17 samples re d/c, from tape \u{b1}5 cm, c \u{b1}2 %",
             ]
         );
     }
 
-    /// `TooLate` and `TooEarly` withhold on the flight time row, point at
-    /// the distance block, and add a `check:` row naming places, per side.
+    /// #552 UX: a flight past `d/c` by any amount is produced with the
+    /// same block shape as the headline — the excess, no verdict, no
+    /// `check:` row. Only `TooEarly` withholds on the flight time row,
+    /// points at the distance block, and adds a `check:` row naming places.
     #[test]
-    fn a_flight_outside_the_window_is_withheld_with_its_side() {
+    fn only_an_early_flight_is_withheld() {
         let mut late = headline_stats();
-        late.flight_time_s = None;
+        late.flight_time_s = Some(1_076.0 / 96_000.0);
         late.distance_check = distance_scored(2.0, 1_076.0);
+        let mut lines = flight_time_block(&late);
+        lines.extend(distance_lines(&late));
         assert_eq!(
-            flight_time_block(&late),
-            [format!(
-                "{}withheld \u{2014} later than 2 m allows (below)",
-                label_prefix("flight time")
-            )]
-        );
-        assert_eq!(
-            distance_lines(&late),
+            lines,
             [
-                "  distance      2 m: +516 samples (+5.377 ms) re d/c, outside window",
+                "  flight time   +1076 samples  (+11.208 ms, arrival \u{2212} ref latency \u{2212} \
+                 offset)",
+                "  distance      2 m: +516 samples (+5.377 ms) re d/c",
                 "                d/c +560 samples (+5.831 ms), c 343.0 m/s assumed",
-                "                window \u{2212}25 \u{2026} +121 samples re d/c",
-                "                from tape \u{b1}5 cm, c \u{b1}2 %, speaker allowance +1.0 ms assumed",
-                "                check: typed distance, IR before arrival, speaker DSP latency",
+                "                earliest \u{2212}25 samples re d/c, from tape \u{b1}5 cm, c \u{b1}2 %",
             ]
+        );
+        let mut tower = headline_stats();
+        tower.flight_time_s = Some(14_960.0 / 96_000.0);
+        tower.distance_check = distance_scored(2.0, 14_960.0);
+        assert_eq!(
+            distance_lines(&tower)[0],
+            "  distance      2 m: +14400 samples (+150.002 ms) re d/c"
         );
         let mut early = headline_stats();
         early.flight_time_s = None;
@@ -3831,10 +3820,11 @@ mod tests {
         let lines = distance_lines(&early);
         assert_eq!(
             lines[0],
-            "  distance      2 m: \u{2212}48 samples (\u{2212}0.498 ms) re d/c, outside window"
+            "  distance      2 m: \u{2212}48 samples (\u{2212}0.498 ms) re d/c, earlier than allowed"
         );
+        assert_eq!(lines.len(), 4);
         assert_eq!(
-            lines[4],
+            lines[3],
             "                check: typed distance, temperature, ref latency, offset"
         );
     }
@@ -3892,7 +3882,7 @@ mod tests {
             index: stats.arrival_index - 312,
             level_db: -14.2,
         };
-        stats.distance_check = distance_scored(2.0, 1_076.0);
+        stats.distance_check = distance_scored(2.0, 512.0);
         stats.arrival_check = ArrivalCheck::Mismatch(TauDisagreement {
             reading1_s: 0.0,
             reading2_s: 0.0,
@@ -3908,12 +3898,12 @@ mod tests {
                     "{}withheld \u{2014} earlier peak within 20.0 dB (above)",
                     label_prefix("flight time")
                 ),
-                format!("{CONT_INDENT}also: later than 2 m allows (below)"),
+                format!("{CONT_INDENT}also: earlier than 2 m allows (below)"),
                 format!("{CONT_INDENT}also: offset not measured for this pair (below)"),
             ]
         );
         // The distance is a reason, so its verdict prints.
-        assert!(distance_lines(&stats)[0].ends_with("outside window"));
+        assert!(distance_lines(&stats)[0].ends_with("earlier than allowed"));
         assert_eq!(
             earlier_peak_line(&stats),
             Some(format!(

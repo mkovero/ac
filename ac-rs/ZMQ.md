@@ -1484,14 +1484,18 @@ searches before the arrival, not the broadband peak.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
 (#544; `NoLatency` when the basis is withheld) against
-`position.distance_m` when one is recorded: it must lie in
-`[d/c − ε, d/c + ε + 1.0 ms]`, `ε = (5 cm + 2 %·d)/c`, with c from
-`position.temperature_c` (343 m/s assumed without one). Outside it,
-`TooEarly` or `TooLate` withholds the flight time; inside, `Consistent`
-carries the excess over `d/c`. The 1.0 ms loudspeaker allowance is assumed.
-Without a distance it is `NotGiven` and the flight time is produced
-unchecked. It is the only evidence about the path the report has, and it
-says only whether the number fits the distance. Nothing here is on the wire
+`position.distance_m` when one is recorded: it must not lie earlier than
+`d/c − ε`, `ε = (5 cm + 2 %·d)/c`, with c from `position.temperature_c`
+(343 m/s assumed without one). Earlier than that, `TooEarly` withholds the
+flight time: with correct inputs it cannot happen, so the typed distance,
+the temperature, the reference latency or the offset is wrong. Otherwise
+`Consistent` carries the excess over `d/c`. There is no late edge (#552):
+the excess over `d/c` is reported, not judged. How late sound leaves the
+system under test — crossover, DSP, a deliberate alignment delay of
+hundreds of ms — is the operator's to interpret, so `Consistent` means
+*not earlier than the distance allows*, never *matches d/c*. Without a
+distance it is `NotGiven` and the flight time is produced unchecked. It is
+the only evidence about the path the report has. Nothing here is on the wire
 or in the report JSON: `IrStats` is derived on read, so re-reading a report
 written before #537 re-derives its arrival under this rule, and its printed
 arrival and flight time can change.
@@ -1507,15 +1511,10 @@ rule borrows the clause's 20 dB level and does not implement the clause.
 bandwidth they are one pulse. In both cases the produced arrival is late,
 never early. Without a distance the error is bounded only by the separation
 D between the two paths (to within 2 samples): at most about 0.5 ms in case
-2, and in case 1 as large as D, which can be several ms. With a distance
-recorded, a produced flight time also lies inside the distance window
-`[d/c − ε(d), d/c + ε(d) + A]`, so the error is at most `min(D, A + 2ε(d))`
-with `A + 2ε(d) = 1.0 ms + 2·(0.05 m + 0.02·d)/c`: 1.29 ms as d → 0,
-1.35 ms at 0.5 m, 1.41 ms at 1 m and 1.52 ms at 2 m at 343 m/s, rising
-0.117 ms per metre. It is 2ε, not ε, because the typed distance is itself
-uncertain by ε: the true path can sit on the window's low edge and the
-picked one on its high edge. A (the 1.0 ms loudspeaker allowance) is
-assumed, not measured.
+2, and in case 1 as large as D, which can be several ms. A recorded
+distance does not tighten this (#552): with no late edge the error is
+bounded by D with or without one. With a distance it is visible, as a
+positive excess over `d/c` on the `distance` block.
 
 **DATA**
 ```json
@@ -1719,9 +1718,9 @@ supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
 read-out: no ms → m figure returns (#391). It feeds two things. The causal
 bound limits only the onset diagnostic's search, which since #537 runs before
 the band-limited arrival; it never moves the arrival itself. And since #537
-it bounds the flight time from both sides (`IrStats::distance_check`, above):
-from below by the flight time `d/c` allows, and from above by that plus the
-loudspeaker allowance, withholding the flight time outside the window. From v7,
+it bounds the flight time from below (`IrStats::distance_check`, above):
+earlier than `d/c − ε` withholds the flight time. There is no upper bound
+(#552): the excess over `d/c` is reported, not judged. From v7,
 `position` may be present carrying only `distance_m`.
 
 When `cfg.report_dir` is configured the daemon also writes the pair

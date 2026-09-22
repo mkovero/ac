@@ -332,13 +332,13 @@ fn true_distance_m() -> f64 {
     flight * crate::shared::conversions::speed_of_sound_from_config(None)
 }
 
-/// The window around `d / c` the true distance allows, in seconds re
-/// `d / c`, computed from the constants rather than read from the check.
-fn true_window_s() -> (f64, f64) {
+/// The earliest flight the true distance allows, in seconds re `d / c`,
+/// computed from the constants rather than read from the check. There is
+/// no late edge (#552).
+fn true_window_s() -> f64 {
     let d = true_distance_m();
     let c = crate::shared::conversions::speed_of_sound_from_config(None);
-    let eps = (DISTANCE_TAPE_TOLERANCE_M + DISTANCE_SPEED_OF_SOUND_REL_TOL * d) / c;
-    (-eps, eps + ARRIVAL_EXCESS_DELAY_ALLOWANCE_S)
+    -(DISTANCE_TAPE_TOLERANCE_M + DISTANCE_SPEED_OF_SOUND_REL_TOL * d) / c
 }
 
 /// Revision 2's thresholds: `EarlierComparable` at 6 dB, the SNR gate at
@@ -447,7 +447,7 @@ fn falsification_suite() {
 
     let expected_s =
         true_distance_m() / crate::shared::conversions::speed_of_sound_from_config(None);
-    let (low_s, high_s) = true_window_s();
+    let low_s = true_window_s();
     let mut rejected_wrong_in_s1 = 0;
     let mut violations = Vec::new();
     for s in &scored {
@@ -476,15 +476,15 @@ fn falsification_suite() {
                 }
             }
         }
-        // S2 (and S3's distance bound): with a distance, every produced
-        // flight time lies inside the window. That bound is ε + A about the
-        // exact typed distance; the operator-facing bound is the window
-        // width, see `distance_residual_reaches_the_full_window_width`.
+        // S2: with a distance, no produced flight time lies earlier than
+        // `d/c − ε`. There is no late edge (#552): with-distance outcomes
+        // are held to S3 the same way as no-distance ones, above, and the
+        // residual bound is D, see `distance_residual_is_bounded_by_d_not_the_old_window`.
         if let Some(flight_s) = s.flight_with_distance_s {
             let excess_s = flight_s - expected_s;
-            if !(low_s..=high_s).contains(&excess_s) {
+            if excess_s < low_s {
                 violations.push(format!(
-                    "S2: flight {:+.1} samples re d/c outside the window — {label}",
+                    "S2: flight {:+.1} samples re d/c below the early edge — {label}",
                     excess_s * SR as f64
                 ));
             }
@@ -571,24 +571,23 @@ fn at_measured_snr(kernel: &[f64], draw: &[f64], snr_db: f64) -> MeasurementRepo
     report
 }
 
-/// The with-distance residual is bounded by the window's width, A + 2ε(d),
-/// not A + ε(d) (#537 architect revision 5): a typed distance off by ε puts
-/// the true path on the window's low edge, and a later path more than 20 dB
-/// stronger, midway between A + ε and A + 2ε, is produced. The first assert
-/// measures the rejected bound: if it ever fails, the window has narrowed
-/// and the docs overstate the bound. The second holds the stated one, with
-/// S3's 2-sample pick allowance.
+/// The with-distance residual is bounded by D, the same as without a
+/// distance (#552). This is the #537 bound #552 gives up: revision 3's late
+/// edge capped a residual pick at A + 2ε(d) with a distance typed, A the
+/// deleted 1.0 ms loudspeaker allowance. Residual case 1 — the first path
+/// −26 dB, below EarlierComparable's 20 dB, a later path 5 ms on, the true
+/// distance typed — is now produced, its error within 2 samples of D, and
+/// that error exceeds the old A + 2ε(d), computed here from the literal
+/// 1.0 ms (the rejected implementation). The error is late, never early,
+/// and prints as a positive excess over `d/c`.
 #[test]
-fn distance_residual_reaches_the_full_window_width() {
+fn distance_residual_is_bounded_by_d_not_the_old_window() {
     let c = crate::shared::conversions::speed_of_sound_from_config(None);
     let flight_true = (T0 - LEN / 2) as f64 / SR as f64 - TAU_S;
-    let rel = DISTANCE_SPEED_OF_SOUND_REL_TOL;
-    let d_typed = (flight_true * c + DISTANCE_TAPE_TOLERANCE_M) / (1.0 - rel);
-    let eps = (DISTANCE_TAPE_TOLERANCE_M + rel * d_typed) / c;
-    let a_plus_eps = ARRIVAL_EXCESS_DELAY_ALLOWANCE_S + eps;
-    let width = ARRIVAL_EXCESS_DELAY_ALLOWANCE_S + 2.0 * eps;
-    // Midway between the rejected bound and the window's width.
-    let d_samples = ((a_plus_eps + width) / 2.0 * SR as f64).round() as usize;
+    let d_typed = true_distance_m();
+    let eps = (DISTANCE_TAPE_TOLERANCE_M + DISTANCE_SPEED_OF_SOUND_REL_TOL * d_typed) / c;
+    let old_width = 0.001 + 2.0 * eps;
+    let d_samples = (0.005 * SR as f64).round() as usize;
     let mut ir = vec![0.0; LEN];
     ir[T0] = 0.05; // −26 dB: below EarlierComparable's 20 dB, residual case 1
     ir[T0 + d_samples] = 1.0;
@@ -599,20 +598,25 @@ fn distance_residual_reaches_the_full_window_width() {
         ..Default::default()
     });
     let s = report.ir_stats().unwrap();
+    assert!(
+        matches!(s.distance_check, DistanceCheck::Consistent { .. }),
+        "{:?}",
+        s.distance_check
+    );
     let err = s.flight_time_s.expect("produced: Agrees and Consistent") - flight_true;
     println!(
-        "typed {d_typed:.4} m: error {:.3} ms, A + ε {:.3} ms, A + 2ε {:.3} ms",
+        "typed {d_typed:.4} m: error {:.3} ms, D {:.3} ms, old A + 2ε {:.3} ms",
         err * 1e3,
-        a_plus_eps * 1e3,
-        width * 1e3
+        d_samples as f64 / SR as f64 * 1e3,
+        old_width * 1e3
     );
     assert!(
-        err > a_plus_eps,
-        "the rejected bound A + ε is exceeded: {err}"
+        (err * SR as f64 - d_samples as f64).abs() <= 2.0,
+        "the residual is D: {err}"
     );
     assert!(
-        err <= width + 2.0 / SR as f64,
-        "but never past the window: {err}"
+        err > old_width,
+        "and exceeds the rejected bound A + 2ε: {err}"
     );
 }
 
