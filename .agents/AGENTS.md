@@ -211,7 +211,8 @@ The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
 - **The `names` line is not part of the record.** After the record, every call
   runs `bin/stale_names.sh` (#554): the Rust definitions the diff against
   `origin/main` removes, plus the design's **superseded names**, searched
-  for in the whole tree except `docs/superseded/`. It is recomputed on every
+  for in the prose of the whole tree except `docs/superseded/` (in `*.rs`
+  and `*.sh`, comment lines only). It is recomputed on every
   call and never cached, because its inputs (the base, `$AC_ISSUE`,
   `$AC_SUPERSEDED_NAMES`) are not the tree. The runners export both inputs.
   A mention whose paragraph cites `$AC_ISSUE` is printed as `cited #N` and

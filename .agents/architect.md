@@ -112,8 +112,9 @@ as moot on the PR, citing this section.}
 
 **superseded names — how to fill it.** `bin/gate.sh` runs
 `bin/stale_names.sh` on every PR: it extracts the Rust definitions the diff
-removes by itself, and searches the whole tree (except `docs/superseded/`) for
-them and for every literal in this field. A hit fails the gate unless its
+removes by itself, and searches the prose of the whole tree (except
+`docs/superseded/`; in `*.rs` and `*.sh`, comment lines only) for them and for
+every literal in this field. A hit fails the gate unless its
 paragraph cites the issue. Extraction cannot find prose, so the phrases are
 yours to supply. Before posting, grep the tree for each name you delete and
 copy the wording that describes the old behaviour, as it stands in rustdoc,
@@ -123,8 +124,11 @@ appears; a line break in the source does not matter, a different word does.
 Choose phrases that only the old contract uses: a phrase that a correct
 sentence also contains will fail the gate on the correct sentence (the #544
 replay: `stored absolute τ` hit "The stored absolute τ is no longer
-subtracted"). A name you leave out is not searched for. The list is what makes
-PR #547's round-2 finding catchable (#554).
+subtracted"). A name you leave out is not searched for. The list catches
+exactly the wording it contains and nothing else: on PR #547 round 2 a list
+written from the design missed the stale passage, because that passage used
+the tree's words, not the design's (#554). That is why the wording to copy is
+the tree's.
 
 When the design deletes a named thing, write its doc criterion as "no
 present-tense mention of `<name>` survives (`bin/stale_names.sh`)", not "the

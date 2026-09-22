@@ -24,7 +24,9 @@
 #      filing onto an existing name refuses instead of overwriting.
 #  19. a name the diff removed, still described in the tree, fails the
 #      names step and the gate (#554); moved names, docs/superseded/ and
-#      paragraphs citing the issue do not. superseded_names_of's fence.
+#      paragraphs citing the issue do not, nor do aliased re-exports, string
+#      literal keys or code lines; a citing bullet does not exempt its
+#      sibling. superseded_names_of's fence.
 #  20. replays of PR #553 round 1 and PR #547 round 2 (needs their commits).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
@@ -361,6 +363,14 @@ R19="$T/repo19"
   drop_const; printf '%s\n' '# x' '' 'The rule capped at `OLD_BOUND`,' 'before #77 removed it.' > README.md; mk e
   printf '%s\n' '/// Error is bounded by the old' '/// speaker allowance plus tape.' 'pub fn keep() {}' > src/lib.rs
   printf '%s\n' '# x' > README.md; mk f
+  printf '%s\n' '# x' '' 'The cap * speaker bound holds.' > README.md; mk i
+  printf '%s\n' 'pub mod m { pub const NEW_BOUND: f64 = 1.0; }' 'pub use m::NEW_BOUND as OLD_BOUND;' '/// Kept.' 'pub fn keep() {}' > src/lib.rs; mk j
+  drop_const; printf '%s\n' '# x' > README.md
+  printf '%s\n' '/// Reads OLD_BOUND once.' 'pub fn user(c: &C) -> f64 { c.OLD_BOUND }' > src/user.rs; mk k
+  drop_const; printf '%s\n' 'pub const KEY: &str = "OLD_BOUND"; // wire key' > src/wire.rs; mk l
+  drop_const
+  printf '%s\n' '# x' '' '- `OLD_BOUND` was removed by #77.' '- `OLD_BOUND` caps the window today.' \
+    '  and still bounds the search.' '' '| `OLD_BOUND` | gone, #77 |' '| `OLD_BOUND` | caps it |' > README.md; mk m
 ) > /dev/null 2>&1
 sn19() {  # $1 = case, $2 = head tag, rest = env; → r_19$1, rc_19$1
   local c="$1" h="$2"; shift 2
@@ -379,6 +389,24 @@ check '[[ $(cat $T/rc_19e0) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symb
 check '[[ $(cat $T/rc_19f) == 1 ]] && grep -qx "  src/lib.rs:1  old speaker allowance  (declared)" $T/r_19f' "(f) a declared phrase split across two /// lines is reported at its first line"
 check '! git -C "$R19" grep -q -F "old speaker allowance" f' "(f) control: a line-based grep for the phrase finds nothing"
 check '[[ $(git -C "$R19" diff base a | grep -E "^[-+][^-+]" | grep OLD_BOUND | grep -vc "pub const OLD_BOUND") == 0 ]]' "(g) control: the diff itself shows OLD_BOUND only at its definition"
+printf '%s\n' 'cap * speaker bound' > "$T/names19i"
+sn19 i i AC_SUPERSEDED_NAMES="$T/names19i"
+sn19 j j; sn19 k k; sn19 l l; sn19 m m AC_ISSUE=77
+check '[[ $(cat $T/rc_19i) == 1 ]] && grep -qx "  README.md:3  cap \* speaker bound  (declared)" $T/r_19i' "(i) a declared phrase with * is still searched, not glob-expanded"
+check '[[ $(cat $T/rc_19j) == 0 ]] && ! grep -q "OLD_BOUND  (symbol)" $T/r_19j' "(j) an aliased re-export keeps the name defined"
+check '[[ $(cat $T/rc_19k) == 1 ]] && grep -qx "  src/user.rs:1  OLD_BOUND  (symbol)" $T/r_19k && ! grep -q "src/user.rs:2" $T/r_19k' "(k) a removed name on a code line is not reported, its /// line is"
+check '[[ $(cat $T/rc_19l) == 0 ]] && grep -q "0 removed symbol" $T/r_19l' "(l) a string literal naming the symbol (a wire key) keeps it defined"
+check '[[ $(cat $T/rc_19m) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol, cited #77)" $T/r_19m && grep -qx "  README.md:4  OLD_BOUND  (symbol)" $T/r_19m' "(m) a citing bullet does not exempt its sibling"
+check 'grep -qx "  README.md:7  OLD_BOUND  (symbol, cited #77)" $T/r_19m && grep -qx "  README.md:8  OLD_BOUND  (symbol)" $T/r_19m' "(m) a citing table row does not exempt the next row"
+# Controls: the rev-1 step (b864a313) reported the code line in (k) and let
+# the citing bullet exempt its sibling in (m), which is what (k)/(m) catch.
+if git -C "$REPO" cat-file -e b864a313:bin/stale_names.sh 2>/dev/null; then
+  git -C "$REPO" show b864a313:bin/stale_names.sh > "$T/sn19old.sh"
+  ( cd "$R19" && bash "$T/sn19old.sh" --base base --head k > "$T/r_19kold" 2>&1
+    AC_ISSUE=77 bash "$T/sn19old.sh" --base base --head m > "$T/r_19mold" 2>&1 )
+  check 'grep -q "src/user.rs:2" $T/r_19kold' "(k) control: the rev-1 step reports the code line"
+  check 'grep -qx "  README.md:4  OLD_BOUND  (symbol, cited #77)" $T/r_19mold' "(m) control: the rev-1 step exempts the sibling bullet"
+fi
 
 # (h) the gate: a passing cargo record for the tree, a names failure → exit 1.
 cat > "$T/stub/rustc" <<'EOF'

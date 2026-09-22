@@ -146,7 +146,10 @@ did not open is not a citation. Shell readers and searchers denied by
   cannot see it (four review rounds on #538, #547 and #553). Three parts:
   - Read the gate's `names` line and every mention under it. A `reported`
     mention is a blocking finding unless you can show it is not about the
-    removed thing (a wire key that shares a deleted field's name, say so).
+    removed thing (a comment naming an unrelated method of the same name).
+    Every report is resolved before approval: fixed, or dismissed in your
+    review with the reason. Never approve past an unexamined one (operator
+    ruling on #554).
   - Each `cited #N` line was exempted only because its paragraph cites the
     issue. Open it and confirm it is past tense. A stale sentence with `#N`
     appended is still stale.

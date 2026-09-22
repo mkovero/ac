@@ -16,7 +16,11 @@
 #             defined in the <base> version of a *.rs file that base..head
 #             changes, deletes or renames away, minus every name still
 #             defined in any *.rs file of <head>. A name that moved or is
-#             defined elsewhere therefore drops out by construction.
+#             defined elsewhere therefore drops out by construction. On the
+#             head side "defined" also covers the alias of `use … as NAME`
+#             (a re-export under the old name) and any "NAME" string literal
+#             on a code line (a wire, JSON or config key that outlived its
+#             Rust field, #522's `frame_idx`).
 #   declared  One literal per line from the file $AC_SUPERSEDED_NAMES — the
 #             design's **superseded names** field (common.sh →
 #             superseded_names_of). Symbols or phrases; case-sensitive, not
@@ -29,12 +33,19 @@
 # too, not only fields: replayed over 150 merges, `fn stderr` (#405) alone
 # produced 60 prose hits and `fn error` (#416) most of another 23.
 #
-# A paragraph is a maximal run of non-blank lines. In *.rs and *.sh only
-# comment lines (// /// //! or #) form paragraphs: a code line ends the run and
-# belongs to none, so declared phrases are not searched in code (a test's
-# assertion message naming "the old" rule is not prose), and a symbol on a
-# code line is never exempt. Declared phrases in string literals — printed
-# text — are therefore not covered; symbols are.
+# Only prose is searched. In *.rs and *.sh that means comment lines (// ///
+# //! or #): a code line is skipped for symbols and phrases alike. A removed
+# symbol still used in code either fails cargo already or is a different
+# entity with the same name (`.stderr(`); a test's assertion message naming
+# "the old" rule is not prose. Every hit is therefore prose, and a false one
+# costs one edit: rewrite it, or cite the issue. Not covered: a removed name
+# inside a string literal shown to the operator (a miss, never a false red).
+#
+# A paragraph is a maximal run of adjacent non-blank lines (comment lines only,
+# in *.rs and *.sh). After the comment prefix is stripped, a list item
+# (`-`, `*`, `+`, `1.`, `1)`), a table row (`|…`) or a heading (`# …`) starts a
+# new one, and a table row is a paragraph of one line, so a citing bullet does
+# not exempt its siblings. An indented continuation line stays in its item.
 #
 # Exemption: a mention whose paragraph cites #$AC_ISSUE — the issue this change
 # implements — is printed as `cited #N` and not reported. Text citing the
@@ -55,7 +66,7 @@
 
 set -euo pipefail
 
-usage() { sed -n '2,49p' "$0"; }
+usage() { sed -n '2,/^$/p' "$0"; }
 line() { printf '  %-7s %-16s %s\n' names "$1" "$2"; }
 refuse() {
   echo "stale_names: refused — $*" >&2
@@ -106,8 +117,9 @@ if [[ $base_sha == "$head_sha" ]]; then
 fi
 
 # --- definitions ---------------------------------------------------------------
-# One Rust file on stdin → `name<TAB>item|member`, one per definition. A brace
-# tracker, not a parser: raw strings and braces in block comments can fool it.
+# One Rust file on stdin → `name<TAB>item|member|alias|literal`, one per
+# definition (alias and literal only with head=1). A brace tracker, not a
+# parser: raw strings and braces in block comments can fool it.
 # A missed head-side definition shows up as a false report (visible, red); a
 # spurious one hides a mention — the accepted residual.
 # shellcheck disable=SC2016
@@ -125,6 +137,16 @@ function noattr(t) {
   if ($0 ~ /^[ \t]*\/\//) next
   s = $0
   gsub(/\\\\/, "", s); gsub(/\\"/, "", s); gsub(/\\'"'"'/, "", s)
+  if (head) {  # "IDENT" literals on the code part of the line: wire/config keys
+    u = s
+    while (match(u, /"[^"]*"|\/\//)) {
+      tok = substr(u, RSTART, RLENGTH)
+      if (tok == "//") break
+      tok = substr(tok, 2, length(tok) - 2)
+      if (tok ~ /^[A-Za-z_][A-Za-z0-9_]*$/) out(tok, "literal")
+      u = substr(u, RSTART + RLENGTH)
+    }
+  }
   gsub(/"[^"]*"/, "\"\"", s)
   gsub(/'"'"'[^'"'"']'"'"'/, "'"''"'", s)
   sub(/\/\/.*/, "", s)
@@ -153,6 +175,11 @@ function noattr(t) {
     if (kind == "struct" || kind == "enum" || kind == "union") pending = (kind == "enum" ? "enum" : "struct")
   } else if (match(t, /^macro_rules![ \t]*/)) {
     out(ident(substr(t, RLENGTH + 1)), "item")
+  } else if (head && t ~ /^use[ \t]/) {  # `use p as NAME;`, `use p::{A as B, …};` on one line
+    u = t
+    while (match(u, /[^A-Za-z0-9_]as[ \t]+/)) {
+      u = substr(u, RSTART + RLENGTH); out(ident(u), "alias")
+    }
   }
 
   if (s !~ /[{};]/) next
@@ -165,7 +192,8 @@ function noattr(t) {
   }
 }'
 
-defs_of() { git show "$1:$2" 2>/dev/null | awk "$EXTRACT"; }
+# $3 = 1 on the head side: also emit use-aliases and "IDENT" literals.
+defs_of() { git show "$1:$2" 2>/dev/null | awk -v head="${3:-0}" "$EXTRACT"; }
 
 declare -A base_cls=() head_has=()
 declare -a head_files=()
@@ -181,7 +209,7 @@ done < <(git diff --name-status -M --diff-filter=DMR "$base_sha" "$head_sha" -- 
 
 # Still defined in the head version of the changed files …
 for f in "${head_files[@]+"${head_files[@]}"}"; do
-  while IFS=$'\t' read -r nm _; do head_has[$nm]=1; done < <(defs_of "$head_sha" "$f")
+  while IFS=$'\t' read -r nm _; do head_has[$nm]=1; done < <(defs_of "$head_sha" "$f" 1)
 done
 declare -a cand=()
 for nm in "${!base_cls[@]}"; do [[ -n ${head_has[$nm]:-} ]] || cand+=("$nm"); done
@@ -192,7 +220,7 @@ if ((${#cand[@]})); then
   for nm in "${cand[@]}"; do pats+=(-e "$nm"); done
   while IFS= read -r f; do
     f="${f#"$head_sha":}"
-    while IFS=$'\t' read -r nm _; do head_has[$nm]=1; done < <(defs_of "$head_sha" "$f")
+    while IFS=$'\t' read -r nm _; do head_has[$nm]=1; done < <(defs_of "$head_sha" "$f" 1)
   done < <(git grep -I -l -w -F "${pats[@]}" "$head_sha" -- '*.rs' || true)
 fi
 declare -a removed=()
@@ -251,12 +279,17 @@ END {
     else if (code == "sh" && match(t, /^[ \t]*#/))    { T[i] = substr(t, RLENGTH + 1); Y[i] = "c" }
     else { T[i] = t; Y[i] = (code == "" ? "c" : "x") }
     if (T[i] ~ /^[ \t]*$/) Y[i] = "b"
+    # Unit starts: list item, table row (a unit of its own), heading.
+    R[i] = (T[i] ~ /^[ \t]*\|/)
+    S[i] = R[i] || T[i] ~ /^[ \t]*([-*+]|[0-9]+[.)])[ \t]/ || T[i] ~ /^[ \t]*#+[ \t]/
   }
   i = 1
   while (i <= NR) {
     if (Y[i] == "b") { i++; continue }
+    # Code lines of *.rs/*.sh are not prose: nothing on them is searched.
+    if (Y[i] == "x") { i++; continue }
     a = i
-    if (Y[i] == "c") while (i + 1 <= NR && Y[i + 1] == "c") i++
+    while (i + 1 <= NR && Y[i + 1] == "c" && !S[i + 1] && !R[i]) i++
     b = i; i++
     joined = ""
     for (j = a; j <= b; j++) {
@@ -267,7 +300,7 @@ END {
     cited = (issue != "" && joined ~ ("#" issue "([^0-9]|$)"))
     for (k = 1; k <= nn; k++) {
       if (K[k] == "declared") {
-        if (P[k] == "" || Y[a] == "x") continue
+        if (P[k] == "") continue
         p = 0
         while ((j = index(substr(joined, p + 1), P[k])) > 0) {
           at = p + j; ln = a
@@ -292,8 +325,10 @@ done
 for d in "${declared[@]+"${declared[@]}"}"; do
   names+="declared"$'\t'"$d"$'\n'
   # The longest word of a phrase is on one line wherever the phrase breaks.
+  # Split without pathname expansion: `*` in a phrase is text, not a glob.
   longest=""
-  for w in $d; do (( ${#w} > ${#longest} )) && longest="$w"; done
+  read -ra ws <<< "$d"
+  for w in "${ws[@]}"; do (( ${#w} > ${#longest} )) && longest="$w"; done
   pats+=(-e "$longest")
 done
 
