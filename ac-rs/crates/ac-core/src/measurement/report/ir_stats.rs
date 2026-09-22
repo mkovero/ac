@@ -137,8 +137,9 @@ pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 /// guard stops at −20 dB: an earlier path further below the maximum passes,
 /// and the pick lands on the later one. That gap is the residual the
 /// operator accepted on 2026-09-19, late only and bounded by the separation
-/// (by A + 2ε(d) with a distance; see `ac-rs/ZMQ.md` §"Band-limited arrival
-/// (#537)"). The falsification suite shows 20 dB holds inside its stated
+/// D with or without a distance (#552: a distance has no late edge, so it
+/// shows the error as an excess over `d / c` but does not tighten it; see
+/// `ac-rs/ZMQ.md` §"Band-limited arrival (#537)"). The falsification suite shows 20 dB holds inside its stated
 /// region; no measurement makes it the right edge.
 ///
 /// Measured for headroom: on the 17 pupu captures of 2026-09-18 the
@@ -154,8 +155,9 @@ pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 /// `Agrees`; at 20 dB, 71.
 pub const ARRIVAL_EARLIER_COMPARABLE_DB: f64 = 20.0;
 
-/// Hand-tape tolerance on a typed `position.distance_m`, in metres: half of
-/// [`DistanceCheck`]'s window below and above `d / c` comes from it.
+/// Hand-tape tolerance on a typed `position.distance_m`, in metres: part of
+/// the ε that places [`DistanceCheck`]'s one edge, the earliest arrival
+/// `d / c − ε`. There is no edge above `d / c` (#552).
 ///
 /// Provenance: measured — hand-tape repeatability on the rig, ±5 cm
 /// (#537 architect revision 3).
@@ -490,8 +492,8 @@ impl MeasurementReport {
         // #537: an arrival its cross-check disputes is never subtracted
         // from — the pick may not be the first path's delay.
         //
-        // #537 architect revision 3: nor is one that falls outside the
-        // window a typed distance allows. The check scores the live-basis
+        // #537 architect revision 3: nor is one that falls below the
+        // earliest arrival a typed distance allows (#552: no late edge). The check scores the live-basis
         // subtraction whether or not another layer withholds it, so a
         // read-out can name every reason a flight time is missing.
         let latency_basis = latency_basis(self);
