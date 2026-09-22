@@ -784,6 +784,10 @@ printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
 ( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m22h/master.sh" 22 > "$T/m22h.out" 2>&1 ); r22h=$?
 check '[[ $r22h != 124 ]] && grep -qx "remove claude-approved" $GH22/edits && grep -q "both QA gates passed" $T/m22h.out && [[ $(grep -c "^review 7" $GH22/calls) == 1 ]]' \
   "22h no closing reference: runner and review agree on the digest, one re-review, then passed"
+# Agreement alone would also hold if both read `none`; then a later revision
+# of #22 would go unseen. The new records must name #22's digest.
+check '[[ $(jq -r "[.reviews[] | select(.submittedAt > \"2026-09-23\") | .body | test(\"decision: $D1\")] | all and length == 2" $GH22/pr.json) == true ]]' \
+  "22h no closing reference: the re-review's records name #22's decision, not none"
 
 # 22i: needs-ux pending at startup (acceptance 2), and a ux pass that edits
 # nothing: only R1 can clear the approvals.
