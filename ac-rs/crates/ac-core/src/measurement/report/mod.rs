@@ -49,6 +49,8 @@ mod csv;
 #[cfg(test)]
 mod fixtures;
 mod ir_stats;
+#[cfg(test)]
+mod late_edge_replay;
 mod payload;
 mod provenance;
 
