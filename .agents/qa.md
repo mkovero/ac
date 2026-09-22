@@ -141,6 +141,24 @@ did not open is not a citation. Shell readers and searchers denied by
   first three instances of this shape).
 - **scope discipline** — dev touch files outside spec? Yes → flag.
 - **no dead code** — no commented-out blocks, no unreachable branches
+- **removed names** — a diff that deletes or redefines a named thing leaves
+  prose elsewhere describing it, outside the diff, where a diff-only review
+  cannot see it (four review rounds on #538, #547 and #553). Three parts:
+  - Read the gate's `names` line and every mention under it. A `reported`
+    mention is a blocking finding unless you can show it is not about the
+    removed thing (a comment naming an unrelated method of the same name).
+    Every report is resolved before approval: fixed, or dismissed in your
+    review with the reason. Never approve past an unexamined one (operator
+    ruling on #554).
+  - Each `cited #N` line was exempted only because its paragraph cites the
+    issue. Open it and confirm it is past tense. A stale sentence with `#N`
+    appended is still stale.
+  - Search the tree yourself (`Grep`, whole repo, not the diff) for removed
+    names the step cannot extract: CLI flags, ZMQ/JSON fields, config keys,
+    `README` rule names, and any design wording missing from its
+    **superseded names** field.
+  A pass says nothing about false claims about things that still exist (#538's
+  citation, #547 round 1's observability claim). Those need reading.
 
 ### step 3 — check test quality
 Each new test:

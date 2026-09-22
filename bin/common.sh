@@ -490,6 +490,66 @@ manifest_of() {
     }') || return 1
   [[ -z $out ]] || printf '%s\n' "$out"
 }
+
+# The architect's **superseded names** for an issue (#554): the ```names fence
+# in the same comment manifest_of reads (ARCH_MANIFEST_JQ, so a later label
+# note does not hide it). One literal per line on stdout — symbols or phrases,
+# kept verbatim apart from surrounding whitespace. Empty with status 0 when
+# there is no such comment, no fence (a field written as prose, or `none`), or
+# the fence holds only `none`. A fence that never closes refuses, as the
+# manifest parser does: the list would be cut at an unknown point.
+superseded_names_of() {
+  local n="$1" body
+  body=$(gh_retry gh issue view "$n" -R "$AC_REPO" --json comments \
+    --jq "$ARCH_MANIFEST_JQ") || return 1
+  [[ -n $body ]] || return 0
+  printf '%s\n' "$body" | LC_ALL=C awk -v n="$n" '
+    { L[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) if (L[i] ~ /^```names[[:space:]]*$/) { from = i + 1; break }
+      if (!from) exit 0
+      for (i = from; i <= NR; i++) if (L[i] ~ /^```[[:space:]]*$/) { to = i - 1; break }
+      if (!to) {
+        print "superseded names on #" n ": ```names fence never closed" > "/dev/stderr"
+        exit 3
+      }
+      for (i = from; i <= to; i++) {
+        s = L[i]; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
+        if (s == "" || s == "none") continue
+        print s
+      }
+    }'
+}
+
+# The issue a PR closes: the first closingIssuesReferences number, or nothing.
+issue_of_pr() {
+  gh_retry gh pr view "$1" -R "$AC_REPO" --json closingIssuesReferences \
+    --jq '.closingIssuesReferences[0].number // empty'
+}
+
+# names_inputs <issue> — export bin/stale_names.sh's inputs for everything this
+# runner starts afterwards (its own $AC_GATE calls and the session's):
+#   AC_ISSUE              the issue; a mention whose paragraph cites it is exempt
+#   AC_SUPERSEDED_NAMES   the design's declared names, one per line, in a file
+#                         under $AC_LOG_DIR/names/ (outside the tree: the gate
+#                         refuses a dirty one)
+# An empty <issue> (a PR that closes none) leaves both unset and says so: the
+# step then exempts nothing, which errs red. Non-zero when the design comment
+# cannot be read or its fence is broken — the caller stops, as for a manifest.
+names_inputs() {
+  local n="$1" f names
+  unset AC_ISSUE AC_SUPERSEDED_NAMES
+  if [[ -z $n ]]; then
+    echo "note: no linked issue — the names step exempts nothing and checks symbols only" >&2
+    return 0
+  fi
+  names="$(superseded_names_of "$n")" \
+    || { echo "cannot read superseded names for #$n" >&2; return 1; }
+  mkdir -p "$AC_LOG_DIR/names"
+  f="$AC_LOG_DIR/names/issue-$n.txt"
+  printf '%s' "$names${names:+$'\n'}" > "$f"
+  export AC_ISSUE="$n" AC_SUPERSEDED_NAMES="$f"
+}
 # Extract the session's final message from a finished transcript.
 # Prefer the result event; fall back to the last assistant text block, because
 # not every version emits result into the stream — an interrupted run has none

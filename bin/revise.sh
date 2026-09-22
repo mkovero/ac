@@ -30,6 +30,11 @@ if [[ $(git rev-parse HEAD) != $(git rev-parse "origin/$branch") ]] \
 fi
 link_support "$wt"
 
+# The names step's inputs (gate.sh → stale_names.sh), for the developer's own
+# $AC_GATE calls.
+issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
+names_inputs "$issue" || exit 1
+
 if [[ ${AC_REVISE_MODE:-} == codex ]]; then
   # master.sh sets this when the finding came from Codex and the revision goes
   # straight back to a Codex recheck (AC_CODEX_RECHECK). developer.md names

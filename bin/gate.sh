@@ -29,17 +29,32 @@
 # `cargo test --doc --workspace` runs after it. Without nextest the step is
 # plain `cargo test --workspace`; the record names which ran.
 #
-# Exit: 0 all three pass, 1 any failed, 2 refused.
+# Every call, cached or not, then runs bin/stale_names.sh (#554): names the
+# diff against origin/main removed, still described somewhere in the tree. It
+# is not part of the record and never cached — its inputs are the base, the
+# design's declared names ($AC_SUPERSEDED_NAMES) and the issue ($AC_ISSUE),
+# none of which is the tree — and it takes about a second. The runners export
+# both inputs (common.sh → names_inputs); a hand run without them exempts
+# nothing and checks only extracted symbols.
+#
+# So the record and the exit can differ: the record's pass= is cargo only, and
+# a cached `pass=1` can print beside `names FAIL`, which exits 1.
+#
+# Exit: 0 all three pass and names passes, 1 any failed, 2 refused (either
+# the tree or the names step).
 # Output: one line per step, then the failing lines of any red step, then the
-# log paths. Read the logs by path — do not re-run to see more output.
+# log paths, then the names line and its mentions. Read the logs by path — do
+# not re-run to see more output.
 
 source "$(dirname "$0")/common.sh"
+# Resolved before the cd into ac-rs/ below: a relative $0 would not survive it.
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 force="" dir="."
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     *) dir="$a" ;;
   esac
 done
@@ -92,6 +107,15 @@ report() {
   [[ $(field pass "$r") == 1 ]]
 }
 
+# The record's status plus the names step, as the gate's exit. Called on both
+# paths, after report(); never written into the record.
+finish() {
+  local rc_rec="$1" rc_names=0
+  "$BIN_DIR/stale_names.sh" "$wt" || rc_names=$?
+  (( rc_names != 2 )) || exit 2
+  if (( rc_rec == 0 && rc_names == 0 )); then exit 0; else exit 1; fi
+}
+
 mkdir -p "$AC_GATE_DIR"
 exec 9>"$AC_GATE_DIR/$key.lock"
 if ! flock -n 9; then
@@ -100,7 +124,8 @@ if ! flock -n 9; then
 fi
 
 if [[ -f $rec/result && -z $force ]]; then
-  if report "$rec"; then exit 0; else exit 1; fi
+  rc_rec=0; report "$rec" || rc_rec=1
+  finish "$rc_rec"
 fi
 
 # One gate at a time on this machine. Two concurrent gates each take every
@@ -154,4 +179,5 @@ pass=0
 
 rm -rf "$rec"
 mv "$tmp" "$rec"
-if report "$rec"; then exit 0; else exit 1; fi
+rc_rec=0; report "$rec" || rc_rec=1
+finish "$rc_rec"

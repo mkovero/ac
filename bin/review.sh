@@ -78,6 +78,10 @@ independent_review() {
         return 1
       fi
     fi
+    # The names step's inputs (gate.sh → stale_names.sh), per PR.
+    local issue
+    issue="$(issue_of_pr "$pr")" && names_inputs "$issue" \
+      || { echo "<codex/qa> PR #$pr: cannot read its issue's superseded names" >&2; return 1; }
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
     require_space "$wt"; mkdir -p "$WT_BASE"
@@ -260,6 +264,10 @@ cd "$wt"
 echo "review worktree: $wt  [review-pr-$n @ $branch]" >&2
 
 link_support "$wt"
+
+# The names step's inputs (gate.sh → stale_names.sh).
+issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
+names_inputs "$issue" || exit 1
 
 # The gate runs here, outside the session: once per tree, cached, no tool
 # timeout. QA reads the record instead of re-running cargo (qa.md → build and

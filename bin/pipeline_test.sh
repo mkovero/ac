@@ -22,6 +22,12 @@
 #  17. a bulleted none is the none declaration, not a file named `none`.
 #  18. two rig passes at one head file two records, in pass order, and a
 #      filing onto an existing name refuses instead of overwriting.
+#  19. a name the diff removed, still described in the tree, fails the
+#      names step and the gate (#554); moved names, docs/superseded/ and
+#      paragraphs citing the issue do not, nor do aliased re-exports, string
+#      literal keys or code lines; a citing bullet does not exempt its
+#      sibling. superseded_names_of's fence.
+#  20. replays of PR #553 round 1 and PR #547 round 2 (needs their commits).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -332,6 +338,181 @@ mkdir -p "$T/old18"; o18="$T/old18/$(date +%F)-rig-pr-547-d58a04ebac41.md"
 cp "$T/rec18a" "$o18"; cp "$T/rec18b" "$o18"
 check '[[ $(ls "$T/old18" | wc -l) == 1 ]] && ! cmp -s "$o18" "$T/rec18a"' "control: the old name let a second pass replace the first record"
 check '! grep -qE "rig-pr-\\\$pr-\\\$rev\.md" "$BIN/rig.sh" && grep -q "file_rig_record" "$BIN/rig.sh"' "rig.sh files through file_rig_record, not a bare -\$rev.md path"
+
+# --- 19: a removed name still described in the tree (#554) ------------------------
+# Red on ffdfe248: gate.sh had no names step, so (h) exited 0 on a passing
+# cargo record while README.md still described a const the diff deleted.
+R19="$T/repo19"
+(
+  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  git init -q "$R19" && cd "$R19" || exit 1
+  mkdir -p src ac-rs docs/superseded
+  echo '[workspace]' > ac-rs/Cargo.toml
+  printf '%s\n' '/// The bound.' 'pub const OLD_BOUND: f64 = 1.0;' '' '/// Kept.' 'pub fn keep() {}' > src/lib.rs
+  printf '%s\n' '# x' '' 'The rule caps at `OLD_BOUND` today.' > README.md
+  git add -A && git commit -qm base && git update-ref refs/remotes/origin/main HEAD
+  git tag base
+  mk() {  # $1 = tag; the working tree as edited since base
+    git add -A && git commit -qm "$1" && git tag "$1" && git checkout -q base 2>/dev/null
+  }
+  drop_const() { printf '%s\n' '/// Kept.' 'pub fn keep() {}' > src/lib.rs; }
+  drop_const; mk a
+  drop_const; printf '%s\n' '# x' > README.md; mk b
+  drop_const; printf '%s\n' '/// Moved.' 'pub const OLD_BOUND: f64 = 1.0;' > src/other.rs; mk c
+  drop_const; printf '%s\n' '# x' > README.md; printf '%s\n' 'Capped at `OLD_BOUND`.' > docs/superseded/old.md; mk d
+  drop_const; printf '%s\n' '# x' '' 'The rule capped at `OLD_BOUND`,' 'before #77 removed it.' > README.md; mk e
+  drop_const; printf '%s\n' '# x' '' '`OLD_BOUND` still caps this today; compare marker #77suffix.' > README.md; mk e2
+  printf '%s\n' '/// Error is bounded by the old' '/// speaker allowance plus tape.' 'pub fn keep() {}' > src/lib.rs
+  printf '%s\n' '# x' > README.md; mk f
+  printf '%s\n' '# x' '' 'The cap * speaker bound holds.' > README.md; mk i
+  printf '%s\n' 'pub mod m { pub const NEW_BOUND: f64 = 1.0; }' 'pub use m::NEW_BOUND as OLD_BOUND;' '/// Kept.' 'pub fn keep() {}' > src/lib.rs; mk j
+  drop_const; printf '%s\n' '# x' > README.md
+  printf '%s\n' '/// Reads OLD_BOUND once.' 'pub fn user(c: &C) -> f64 { c.OLD_BOUND }' > src/user.rs; mk k
+  drop_const; printf '%s\n' 'pub const KEY: &str = "OLD_BOUND"; // wire key' > src/wire.rs; mk l
+  drop_const
+  printf '%s\n' '# x' '' '- `OLD_BOUND` was removed by #77.' '- `OLD_BOUND` caps the window today.' \
+    '  and still bounds the search.' '' '| `OLD_BOUND` | gone, #77 |' '| `OLD_BOUND` | caps it |' > README.md; mk m
+) > /dev/null 2>&1
+sn19() {  # $1 = case, $2 = head tag, rest = env; → r_19$1, rc_19$1
+  local c="$1" h="$2"; shift 2
+  ( cd "$R19" && env "$@" bash "$BIN/stale_names.sh" --base base --head "$h" > "$T/r_19$c" 2>&1; echo $? > "$T/rc_19$c" )
+}
+printf '%s\n' 'old speaker allowance' > "$T/names19f"
+sn19 a a; sn19 b b; sn19 c c; sn19 d d
+sn19 e e AC_ISSUE=77; sn19 e0 e AC_ISSUE=; sn19 e2 e2 AC_ISSUE=77
+sn19 f f AC_SUPERSEDED_NAMES="$T/names19f"
+check '[[ $(cat $T/rc_19a) == 1 ]] && grep -q "names   FAIL" $T/r_19a && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19a' "(a) a deleted const still named in README fails, at file:line"
+check '[[ $(cat $T/rc_19b) == 0 ]] && grep -q "names   PASS  *0 reported" $T/r_19b' "(b) the same deletion with the mention gone passes"
+check '[[ $(cat $T/rc_19c) == 0 ]] && grep -q "0 removed symbol" $T/r_19c && ! grep -q "README.md:" $T/r_19c' "(c) a const moved to another file is not a removed name"
+check '[[ $(cat $T/rc_19d) == 0 ]] && ! grep -q "superseded/" $T/r_19d' "(d) a mention under docs/superseded/ is not reported"
+check '[[ $(cat $T/rc_19e) == 0 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol, cited #77)" $T/r_19e' "(e) a paragraph citing the issue is exempt and still printed as cited"
+check '[[ $(cat $T/rc_19e0) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19e0' "(e) the same mention with AC_ISSUE unset is reported"
+check '[[ $(cat $T/rc_19e2) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19e2' "(e) #77suffix is not a citation of #77: the mention is reported"
+check 'awk -v issue=77 '"'"'{ exit !($0 ~ ("#" issue "([^0-9]|$)")) }'"'"' <<< "compare marker #77suffix."' "(e) control: the digit-only boundary of 819239fd accepts #77suffix"
+check '[[ $(cat $T/rc_19f) == 1 ]] && grep -qx "  src/lib.rs:1  old speaker allowance  (declared)" $T/r_19f' "(f) a declared phrase split across two /// lines is reported at its first line"
+check '! git -C "$R19" grep -q -F "old speaker allowance" f' "(f) control: a line-based grep for the phrase finds nothing"
+check '[[ $(git -C "$R19" diff base a | grep -E "^[-+][^-+]" | grep OLD_BOUND | grep -vc "pub const OLD_BOUND") == 0 ]]' "(g) control: the diff itself shows OLD_BOUND only at its definition"
+printf '%s\n' 'cap * speaker bound' > "$T/names19i"
+sn19 i i AC_SUPERSEDED_NAMES="$T/names19i"
+sn19 j j; sn19 k k; sn19 l l; sn19 m m AC_ISSUE=77
+check '[[ $(cat $T/rc_19i) == 1 ]] && grep -qx "  README.md:3  cap \* speaker bound  (declared)" $T/r_19i' "(i) a declared phrase with * is still searched, not glob-expanded"
+check '[[ $(cat $T/rc_19j) == 0 ]] && ! grep -q "OLD_BOUND  (symbol)" $T/r_19j' "(j) an aliased re-export keeps the name defined"
+check '[[ $(cat $T/rc_19k) == 1 ]] && grep -qx "  src/user.rs:1  OLD_BOUND  (symbol)" $T/r_19k && ! grep -q "src/user.rs:2" $T/r_19k' "(k) a removed name on a code line is not reported, its /// line is"
+check '[[ $(cat $T/rc_19l) == 0 ]] && grep -q "0 removed symbol" $T/r_19l' "(l) a string literal naming the symbol (a wire key) keeps it defined"
+check '[[ $(cat $T/rc_19m) == 1 ]] && grep -qx "  README.md:3  OLD_BOUND  (symbol, cited #77)" $T/r_19m && grep -qx "  README.md:4  OLD_BOUND  (symbol)" $T/r_19m' "(m) a citing bullet does not exempt its sibling"
+check 'grep -qx "  README.md:7  OLD_BOUND  (symbol, cited #77)" $T/r_19m && grep -qx "  README.md:8  OLD_BOUND  (symbol)" $T/r_19m' "(m) a citing table row does not exempt the next row"
+# Controls: the rev-1 step (b864a313) reported the code line in (k) and let
+# the citing bullet exempt its sibling in (m), which is what (k)/(m) catch.
+if git -C "$REPO" cat-file -e b864a313:bin/stale_names.sh 2>/dev/null; then
+  git -C "$REPO" show b864a313:bin/stale_names.sh > "$T/sn19old.sh"
+  ( cd "$R19" && bash "$T/sn19old.sh" --base base --head k > "$T/r_19kold" 2>&1
+    AC_ISSUE=77 bash "$T/sn19old.sh" --base base --head m > "$T/r_19mold" 2>&1 )
+  check 'grep -q "src/user.rs:2" $T/r_19kold' "(k) control: the rev-1 step reports the code line"
+  check 'grep -qx "  README.md:4  OLD_BOUND  (symbol, cited #77)" $T/r_19mold' "(m) control: the rev-1 step exempts the sibling bullet"
+fi
+
+# (h) the gate: a passing cargo record for the tree, a names failure → exit 1.
+cat > "$T/stub/rustc" <<'EOF'
+#!/usr/bin/env bash
+echo "rustc 0.0.0 (stub)"
+EOF
+cat > "$T/stub/cargo" <<'EOF'
+#!/usr/bin/env bash
+echo "cargo must not run: the record is seeded" >&2; exit 99
+EOF
+chmod +x "$T/stub/rustc" "$T/stub/cargo"
+seed19() {  # $1 = gate dir, $2 = tag → a pass=1 record for that tag's tree
+  local tree key rec
+  tree="$(git -C "$R19" rev-parse "$2^{tree}")"
+  key="$tree-$(printf '%s' "rustc 0.0.0 (stub)" | sha256sum | cut -c1-12)"
+  rec="$1/$key"; mkdir -p "$rec"
+  { echo "sha=$(git -C "$R19" rev-parse "$2")"; echo "tree=$tree"; echo "runner=stub"
+    for s in fmt clippy test; do echo "$s=0"; echo "${s}_s=0"; done; echo "pass=1"; } > "$rec/result"
+}
+gate19() {  # $1 = case, $2 = gate script dir, $3 = tag
+  seed19 "$T/gate19$1" "$3"
+  ( cd "$R19" && git checkout -q "$3" 2>/dev/null \
+      && AC_GATE_DIR="$T/gate19$1" AC_TARGETS="$T/targets19" AC_ISSUE="" AC_SUPERSEDED_NAMES="" \
+         bash "$2/gate.sh" > "$T/r_19$1" 2>&1; echo $? > "$T/rc_19$1" )
+}
+gate19 h "$BIN" a
+gate19 hb "$(realpath --relative-to="$R19" "$BIN")" b   # relative $0, as a hand run
+check '[[ $(cat $T/rc_19h) == 1 ]] && grep -q "^  fmt  *PASS" $T/r_19h && grep -q "names   FAIL" $T/r_19h && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19h' "(h) gate.sh exits 1 on a passing record when a removed name survives"
+check '[[ $(cat $T/rc_19hb) == 0 ]] && grep -q "names   PASS" $T/r_19hb' "(h) gate.sh exits 0 on the same record shape once the mention is gone"
+check '! grep -q "^names" $T/gate19h/*/result' "(h) the names result is not written into the cargo record"
+if git -C "$REPO" cat-file -e ffdfe248:bin/gate.sh 2>/dev/null; then
+  mkdir -p "$T/old19"
+  git -C "$REPO" show ffdfe248:bin/gate.sh > "$T/old19/gate.sh"
+  git -C "$REPO" show ffdfe248:bin/common.sh > "$T/old19/common.sh"
+  gate19 hold "$T/old19" a
+  check '[[ $(cat $T/rc_19hold) == 0 ]]' "(h) control: the gate at ffdfe248 passes case (a)"
+fi
+
+# superseded_names_of: the fence in the newest manifest-bearing architect comment
+m_names() {  # $1 = case → sn_$1 (stdout), snrc_$1
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub10:$PATH" GH_COMMENTS="$T/comments$1"
+    rc=0; superseded_names_of "$1" > "$T/sn_$1" 2> "$T/snerr_$1" || rc=$?; echo "$rc" > "$T/snrc_$1"
+  )
+}
+m_body 21 '**file manifest**' '```files' 'README.md' '```' '' '**superseded names**' '```names' 'OLD_BOUND' '  A + 2ε(d) ' 'the stored τ is subtracted' '```' '' '**interface changes**' 'none'
+jq '.comments += [{body: "<!-- agent: architect -->\n**Labels:** moved to scope-none.\n"}]' "$T/comments21" > "$T/c21" && mv "$T/c21" "$T/comments21"
+m_names 21
+m_run 21
+check '[[ $(cat $T/snrc_21) == 0 && $(tr "\n" "|" < $T/sn_21) == "OLD_BOUND|A + 2ε(d)|the stored τ is subtracted|" ]]' "superseded_names_of reads the names fence past a later label note, verbatim"
+check '[[ $(cat $T/rc_21) == 0 && $(m_set $T/r_21) == "README.md " ]]' "the superseded names field does not leak into the manifest"
+m_body 22 '**file manifest**' '```files' 'README.md' '```' '' '**superseded names**' '```names' 'none' '```'
+m_names 22
+m_body 23 '**file manifest**' '```files' 'README.md' '```' '' '**superseded names**' 'none — this design removes nothing'
+m_names 23
+check '[[ $(cat $T/snrc_22) == 0 && ! -s $T/sn_22 && $(cat $T/snrc_23) == 0 && ! -s $T/sn_23 ]]' "a none fence and a fenceless field are both empty with status 0"
+m_body 24 '**file manifest**' '```files' 'README.md' '```' '' '**superseded names**' '```names' 'OLD_BOUND'
+m_names 24
+check '[[ $(cat $T/snrc_24) != 0 && ! -s $T/sn_24 ]] && grep -q "#24" $T/snerr_24' "a names fence that never closes refuses, naming the issue"
+
+# --- 20: replays of the stale-doc rounds (#554) ------------------------------------
+# Declared lists written from each design comment before the first replay ran
+# (#552's for PR #553 round 1, #544's for PR #547 round 2), and not edited after.
+# They need the historical commits; a checkout without them skips, loudly.
+NAMES_552='ARRIVAL_EXCESS_DELAY_ALLOWANCE_S
+DistanceWindow::high_s
+DistanceCheck::TooLate
+A + 2ε
+1.52 ms at 2 m
+speaker allowance'
+NAMES_544='stored absolute τ
+stored-absolute-τ
+subtracts the stored τ
+a reader subtracts
+Its only consumer is the onset search'"'"'s causal bound
+τ is the capture pair'"'"'s stored `interface_latency`
+interface_latency_unverified'
+if git -C "$REPO" cat-file -e "752960a0de^{commit}" 2>/dev/null \
+    && git -C "$REPO" cat-file -e "d58a04ebac^{commit}" 2>/dev/null; then
+  printf '%s\n' "$NAMES_552" > "$T/names552"; printf '%s\n' "$NAMES_544" > "$T/names544"
+  ( cd "$REPO" && AC_ISSUE=552 AC_SUPERSEDED_NAMES="$T/names552" \
+      bash "$BIN/stale_names.sh" --base 752960a0de^ --head 752960a0de > "$T/r_20a"; echo $? > "$T/rc_20a" )
+  ( cd "$REPO" && AC_ISSUE=544 AC_SUPERSEDED_NAMES="$T/names544" \
+      bash "$BIN/stale_names.sh" --base d58a04ebac^ --head d58a04ebac > "$T/r_20b"; echo $? > "$T/rc_20b" )
+  check '[[ $(cat $T/rc_20a) == 1 ]] && grep -qE "report/ir_stats.rs:140  A \+ 2ε  \(declared\)$" $T/r_20a' "replay PR #553 r1: ir_stats.rs:140 reported from the declared list"
+  check 'grep -qE "ir_stats.rs:3393  TooLate  \(symbol, cited #552\)" $T/r_20a && grep -qE "arrival_suite.rs:576 .*cited #552" $T/r_20a' "replay PR #553 r1: the past-tense #552 mentions are cited, not reported"
+  # The #544 list MISSES the passage Codex flagged (README.md:199-204, "the one
+  # correction ... still applies") and reports README.md:152 instead, a
+  # sentence that is correct today ("The stored absolute τ is no longer
+  # subtracted") but cites no issue. Pinned as observed so a change shows; the
+  # miss is reported on #554, not tuned away.
+  check '[[ $(cat $T/rc_20b) == 1 && $(grep -c "(declared)$" $T/r_20b) == 1 ]] && grep -qx "  README.md:152  stored absolute τ  (declared)" $T/r_20b' "replay PR #547 r2, #544 list: one report, README.md:152 (not the flagged passage)"
+  check '! grep -qE "^  README.md:(199|20[0-4]) " $T/r_20b' "replay PR #547 r2, #544 list: the flagged passage is missed (recall gap, reported on #554)"
+  # Plumbing, not recall: the phrase from Codex's finding, which is split
+  # across README lines 203-204, is found at its first line.
+  printf '%s\n' 'the one correction `ac plot ir`'"'"'s printed flight-time figure still applies' > "$T/names547"
+  ( cd "$REPO" && AC_ISSUE=544 AC_SUPERSEDED_NAMES="$T/names547" \
+      bash "$BIN/stale_names.sh" --base d58a04ebac^ --head d58a04ebac > "$T/r_20c"; echo $? > "$T/rc_20c" )
+  check '[[ $(cat $T/rc_20c) == 1 ]] && grep -q "^  README.md:203  the one correction .*(declared)$" $T/r_20c' "replay PR #547 r2, Codex's phrase: split across a line break, reported at README.md:203"
+else
+  echo "skip replay PR #553/#547: historical commits not in this clone"
+fi
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"

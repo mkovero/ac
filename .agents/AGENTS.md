@@ -187,15 +187,17 @@ Concrete bad output, 2026-09-15, PR #437 — three rounds lost:
 ## workspace gate — every role that builds
 
 The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
---all-targets -- -D warnings` and `cargo test --workspace`. Run it only as
+--all-targets -- -D warnings` and `cargo test --workspace`, plus a names step
+(below). Run it only as
 `$AC_GATE` (`bin/gate.sh` in the main checkout), from inside your worktree:
 
 - It runs all three once per commit tree and records the result under
   `$AC_GATE_DIR`. Any later call for the same tree — yours, the runner's,
   another role's — prints the record without running cargo. Calling it again
   is free; running the three commands by hand is not.
-- Output: PASS/FAIL per step, the failing lines of a red step, and the path of
-  each full log. Exit 0 all pass, 1 any failed, 2 refused.
+- Output: PASS/FAIL per step, the failing lines of a red step, the path of
+  each full log, then the `names` line. Exit 0 all pass, 1 any failed, 2
+  refused.
 - It refuses an uncommitted tree (exit 2): the record names a commit. Commit
   locally first; push only after a pass.
 - Need more than it printed? Read the log at the printed path. Need one test?
@@ -206,6 +208,19 @@ The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
   runs per session, the second identical to the first.
 - The record is execution evidence, not a review. A reviewer still reads every
   new or changed test.
+- **The `names` line is not part of the record.** After the record, every call
+  runs `bin/stale_names.sh` (#554): the Rust definitions the diff against
+  `origin/main` removes, plus the design's **superseded names**, searched
+  for in the prose of the whole tree except `docs/superseded/` (in `*.rs`
+  and `*.sh`, comment lines only). It is recomputed on every
+  call and never cached, because its inputs (the base, `$AC_ISSUE`,
+  `$AC_SUPERSEDED_NAMES`) are not the tree. The runners export both inputs.
+  A mention whose paragraph cites `$AC_ISSUE` is printed as `cited #N` and
+  does not fail; any other mention fails the line. So a cached `PASS` on
+  fmt/clippy/test can print beside `names FAIL`, and the gate then exits 1:
+  the record's `pass=` covers cargo only. Fix a reported mention by rewriting
+  the text. Only cite the issue when the sentence is past tense, because QA
+  reads every `cited` line.
 
 **Target dirs.** The runner pins `CARGO_TARGET_DIR` to a per-worktree
 directory (`$AC_HOME/target/wt/<worktree>`), seeded warm. Never set
