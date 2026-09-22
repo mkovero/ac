@@ -31,6 +31,10 @@
 #  21. the two-review gate pins each reviewer to the model its label names:
 #      qa on codex and codex-qa on claude are refused before any provider CLI
 #      or target seeding; both default pairings launch (#563).
+#  22. approvals do not survive a design revision (#560): decision_rev; a
+#      needs-design pending at startup, an in-loop handback, a revision made
+#      outside the runner, a control with a matching digest, and a design pass
+#      that edits nothing.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -727,6 +731,14 @@ w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "claude-approved codex-approve
 printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
 run22 d
 check 'grep -q "both QA gates passed" $T/m22d.out && [[ ! -s $GH22/calls && ! -s $GH22/edits ]]' "22d control: matching decision passes from the cache, no review, nothing removed"
+# 22e: startup-pending, and the architect pass leaves its comment unchanged.
+# The digest cannot see that pass, so only R1 (clear on any design pass) can:
+# 22a alone would also go green through the digest comparison.
+reset22; mk22 "$T/m22e"
+w22_issue "needs-design" "$A22_OLD"; w22_pr "claude-approved codex-approved" "$D0"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+A22_NEW="$A22_OLD" run22 e
+check 'grep -qx "remove claude-approved" $GH22/edits && grep -qx "remove codex-approved" $GH22/edits && ! passed_before_review $T/m22e.out' "22e startup-pending, unedited design: approvals still cleared before any pass"
 rm -f "$T/stub/gh"; unset GH22 A22_NEW
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
