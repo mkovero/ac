@@ -26,7 +26,10 @@ source "$(dirname "$0")/common.sh"
 # and model gate.
 independent_review() {
   local -a prs=()
-  local recheck_base=""
+  local recheck_base="" provider
+  # Refuse a misconfigured reviewer before a worktree and a gate run are paid for.
+  provider="$(provider_for codex-qa)" || return
+  review_provider_guard codex-qa "$provider" || return
   if [[ ${1:-} == --recheck ]]; then
     recheck_base="${2:-}"; shift 2 || true
     [[ $recheck_base =~ ^[0-9a-f]{40}$ && $# -eq 1 ]] \

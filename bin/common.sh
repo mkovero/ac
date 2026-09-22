@@ -600,6 +600,28 @@ model_for() {
   printf '%s\n' "$value"
 }
 
+# review_provider_guard <role> <provider> — refuse a reviewer on the wrong model.
+# The current approval labels are reviewer identities, not generic slots:
+# qa owns claude-approved and codex-qa owns codex-approved. Until those specs
+# and labels are migrated together, letting Codex occupy qa, or Claude occupy
+# codex-qa, would make both supposedly independent gates one model's reviews
+# while the PR still carries two approvals. Every other role passes. Called
+# before anything costly (target seeding, a gate run), so a refusal has no
+# side effects.
+review_provider_guard() {
+  local role="$1" provider="$2" pinned
+  case "$role" in
+    qa)       pinned=claude ;;
+    codex-qa) pinned=codex ;;
+    *)        return 0 ;;
+  esac
+  [[ $provider == "$pinned" ]] && return 0
+  echo "$role provider is fixed to $pinned by the current two-review gate" >&2
+  echo "claude-approved/codex-approved name the reviewing model; one model behind both gates is not an independent second review" >&2
+  echo "migrate claude-approved/codex-approved to provider-neutral review slots first" >&2
+  return 2
+}
+
 # A codex run that fails before its first message (usage limit, auth) leaves
 # no agent_message, so the session file used to be header-only and master.sh
 # could only say the worker "exited before pushing". Fall back to the last
@@ -636,6 +658,7 @@ run() {
   local provider model
   provider="$(provider_for "$role")" || return
   model="$(model_for "$role" "$provider")"
+  review_provider_guard "$role" "$provider" || return
   local target
   target="$(prepare_target "$(git rev-parse --show-toplevel)")"
   mkdir -p "$AC_GATE_DIR"
@@ -664,15 +687,6 @@ run() {
                       GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
                       GIT_CONFIG_VALUE_0=git@github.com:)
 
-  # The current approval labels are reviewer identities, not generic slots:
-  # qa owns claude-approved and codex-qa owns codex-approved. Until those specs
-  # and labels are migrated together, letting Codex occupy qa would make both
-  # supposedly independent gates Codex reviews.
-  if [[ $role == qa && $provider != claude ]]; then
-    echo "qa provider is fixed to claude by the current two-review gate" >&2
-    echo "migrate claude-approved/codex-approved to provider-neutral review slots first" >&2
-    return 2
-  fi
   local fg="" tools="$TOOLS_WRITE" deny="$DENY_ASYNC" mode="acceptEdits" arg
   local -a extra=()
   for arg in "$@"; do
