@@ -23,12 +23,18 @@
 #             word-bounded, matched against whole paragraphs so a phrase
 #             split by a line break is still found.
 #
-# Symbols match as whole words. A variant or field that is one all-lowercase
-# word with no `_` (`window`) matches only inside backticks or after `::`/`.`,
-# so ordinary prose does not collide with it.
+# Symbols match as whole words. A name that is one all-lowercase word with no
+# `_` (`window`, `stderr`, `lease`) matches only inside backticks or after
+# `::`/`.`, so ordinary prose does not collide with it. That holds for items
+# too, not only fields: replayed over 150 merges, `fn stderr` (#405) alone
+# produced 60 prose hits and `fn error` (#416) most of another 23.
 #
 # A paragraph is a maximal run of non-blank lines. In *.rs and *.sh only
-# comment lines (// /// //! or #) join into paragraphs; a code line is its own.
+# comment lines (// /// //! or #) form paragraphs: a code line ends the run and
+# belongs to none, so declared phrases are not searched in code (a test's
+# assertion message naming "the old" rule is not prose), and a symbol on a
+# code line is never exempt. Declared phrases in string literals — printed
+# text — are therefore not covered; symbols are.
 #
 # Exemption: a mention whose paragraph cites #$AC_ISSUE — the issue this change
 # implements — is printed as `cited #N` and not reported. Text citing the
@@ -261,7 +267,7 @@ END {
     cited = (issue != "" && joined ~ ("#" issue "([^0-9]|$)"))
     for (k = 1; k <= nn; k++) {
       if (K[k] == "declared") {
-        if (P[k] == "") continue
+        if (P[k] == "" || Y[a] == "x") continue
         p = 0
         while ((j = index(substr(joined, p + 1), P[k])) > 0) {
           at = p + j; ln = a
@@ -279,7 +285,7 @@ END {
 names=""
 declare -a pats=()
 for nm in "${removed[@]+"${removed[@]}"}"; do
-  if [[ ${base_cls[$nm]} == member && $nm =~ ^[a-z][a-z0-9]*$ ]]; then kind=restricted; else kind=word; fi
+  if [[ $nm =~ ^[a-z][a-z0-9]*$ ]]; then kind=restricted; else kind=word; fi
   names+="$kind"$'\t'"$nm"$'\n'
   pats+=(-e "$nm")
 done

@@ -81,6 +81,10 @@ for f in "${files[@]}"; do
   [[ -e $f ]] || echo "note: manifest names $f — not in tree, assuming new file" >&2
 done
 
+# The names step's inputs (gate.sh → stale_names.sh), for the developer's own
+# $AC_GATE calls.
+names_inputs "$n" || exit 1
+
 if [[ -n $continue_mode ]]; then
   task="Continue the interrupted implementation of issue #$n in $AC_REPO.
 

@@ -12,6 +12,11 @@ branch="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRe
 old_head="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
 [[ -n $branch && -n $old_head ]] || { echo "cannot resolve PR #$n branch" >&2; exit 1; }
 
+# The names step's inputs (gate.sh → stale_names.sh), for the gate below and
+# the developer's own on a conflict.
+issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
+names_inputs "$issue" || exit 1
+
 wt="$WT_BASE/integrate-pr-$n"
 [[ ! -e $wt ]] || {
   echo "integration worktree already exists: $wt" >&2

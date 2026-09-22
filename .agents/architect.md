@@ -65,6 +65,12 @@ Post comment in this exact structure:
 **file manifest**
 {Repo-relative paths from the repo root, one per line, no globs, no trailing comments. Include files that do not exist yet. This list is the developer's scope boundary, not a hint — a file you omit is a file they must stop and come back to you about. If you cannot name the files, the decision is not finished: that is needs-discussion, not an empty block.}
 
+**superseded names**
+{A ```names fence, one literal per line: every symbol the design deletes or
+renames (constant, enum variant, struct field, function, CLI flag, wire field,
+config key, named rule), and the phrases the tree uses today to describe the
+old contract. Write `none` inside the fence when the design removes nothing.}
+
 **interface changes**
 {Describe any changes to: ZMQ session schema, CLI flags, public function signatures,
 Cargo feature flags. Write "none" if there are none.}
@@ -103,6 +109,27 @@ reason (for example: the error can only point toward refusal, or the design no
 longer depends on the unmeasured value) and **leave the label**. QA clears it
 as moot on the PR, citing this section.}
 ```
+
+**superseded names — how to fill it.** `bin/gate.sh` runs
+`bin/stale_names.sh` on every PR: it extracts the Rust definitions the diff
+removes by itself, and searches the whole tree (except `docs/superseded/`) for
+them and for every literal in this field. A hit fails the gate unless its
+paragraph cites the issue. Extraction cannot find prose, so the phrases are
+yours to supply. Before posting, grep the tree for each name you delete and
+copy the wording that describes the old behaviour, as it stands in rustdoc,
+`README.md`, `ac-rs/ZMQ.md` and `docs/` (for example `A + 2ε`, `speaker
+allowance`, not "the late edge" in general). Write each phrase exactly as it
+appears; a line break in the source does not matter, a different word does.
+Choose phrases that only the old contract uses: a phrase that a correct
+sentence also contains will fail the gate on the correct sentence (the #544
+replay: `stored absolute τ` hit "The stored absolute τ is no longer
+subtracted"). A name you leave out is not searched for. The list is what makes
+PR #547's round-2 finding catchable (#554).
+
+When the design deletes a named thing, write its doc criterion as "no
+present-tense mention of `<name>` survives (`bin/stale_names.sh`)", not "the
+docs are updated". Keep the field after **file manifest**, starting on a line of
+its own: the manifest's section ends at the next `**` line.
 
 A design decision that introduces or edits a numeric acceptance criterion
 (e.g. amending the issue's acceptance-criteria list, or setting a threshold

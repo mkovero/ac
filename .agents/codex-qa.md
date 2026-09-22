@@ -163,6 +163,13 @@ that hides an ambiguous or failed part is a blocking finding.
 - **error handling** — `Result`s propagated, not silently unwrapped.
 - **scope** — files touched that the spec does not justify.
 - **dead code** — commented-out blocks, unreachable branches.
+- **removed names** — `qa.md` step 2 has the full item. In short: read the
+  gate's `names` line and each mention under it; confirm every `cited #N`
+  sentence is past tense; and search the whole tree yourself, not the diff,
+  for removed names the step cannot extract (CLI flags, ZMQ fields, config
+  keys, `README` rule names). You caught three of the four stale-doc rounds
+  this step was built from (#554); the step does not replace that search.
+  Passing it says nothing about false claims about things that still exist.
 
 ### step 3 — tests
 For each new or changed test: can it execute against the defect it names, and
