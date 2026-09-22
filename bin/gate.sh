@@ -47,6 +47,8 @@
 # not re-run to see more output.
 
 source "$(dirname "$0")/common.sh"
+# Resolved before the cd into ac-rs/ below: a relative $0 would not survive it.
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 force="" dir="."
 for a in "$@"; do
@@ -109,7 +111,7 @@ report() {
 # paths, after report(); never written into the record.
 finish() {
   local rc_rec="$1" rc_names=0
-  "$(dirname "$0")/stale_names.sh" "$wt" || rc_names=$?
+  "$BIN_DIR/stale_names.sh" "$wt" || rc_names=$?
   (( rc_names != 2 )) || exit 2
   if (( rc_rec == 0 && rc_names == 0 )); then exit 0; else exit 1; fi
 }

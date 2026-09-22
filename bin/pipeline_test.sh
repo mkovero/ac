@@ -405,7 +405,7 @@ gate19() {  # $1 = case, $2 = gate script dir, $3 = tag
          bash "$2/gate.sh" > "$T/r_19$1" 2>&1; echo $? > "$T/rc_19$1" )
 }
 gate19 h "$BIN" a
-gate19 hb "$BIN" b
+gate19 hb "$(realpath --relative-to="$R19" "$BIN")" b   # relative $0, as a hand run
 check '[[ $(cat $T/rc_19h) == 1 ]] && grep -q "^  fmt  *PASS" $T/r_19h && grep -q "names   FAIL" $T/r_19h && grep -qx "  README.md:3  OLD_BOUND  (symbol)" $T/r_19h' "(h) gate.sh exits 1 on a passing record when a removed name survives"
 check '[[ $(cat $T/rc_19hb) == 0 ]] && grep -q "names   PASS" $T/r_19hb' "(h) gate.sh exits 0 on the same record shape once the mention is gone"
 check '! grep -q "^names" $T/gate19h/*/result' "(h) the names result is not written into the cargo record"
