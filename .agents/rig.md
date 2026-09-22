@@ -213,8 +213,10 @@ check** (architect or triage).
   run: setup, actions, the falsification test.
 - Write the full record to `rig-record.md` at the root of the worktree you
   were started in. The runner files it as
-  `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>.md` and commits it; do not
-  commit it yourself.
+  `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>-<HHMMSS>Z.md` (date and time
+  UTC, taken when it is filed) and commits it; do not commit it yourself. One
+  file per pass: a later pass at the same head never replaces an earlier one,
+  and `ls $AC_HOME/session/*-rig-pr-<N>-<rev12>-*` lists them in pass order.
 - Post one PR comment, first line `<!-- agent: rig -->`, that names the full
   head SHA, gives the result table, the confounds and what is not covered, and
   ends with exactly one line:

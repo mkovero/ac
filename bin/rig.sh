@@ -158,7 +158,6 @@ cd "$wt"
 # puts extra args right before the prompt, and --add-dir is variadic — it
 # swallowed the prompt and the session never started (#489, 2026-09-16).
 record_in="$wt/rig-record.md"
-record_out="$AC_SESSION_DIR/$(date +%F)-rig-pr-$pr-$rev.md"
 rm -f "$record_in"
 AC_TAG="rig-pr-$pr" run rig "Pipeline mode (rig.md → pipeline mode) for PR #$pr in $AC_REPO.
 
@@ -192,12 +191,14 @@ commits it; do not commit it here), and post the PR comment exactly as rig.md
 specifies, ending with the rig verdict line." "$@" || true
 
 if [[ -s $record_in ]]; then
-  mkdir -p "$AC_SESSION_DIR"
-  cp "$record_in" "$record_out"
+  # One file per pass, stamped at filing time from a single UTC clock read
+  # (#549): a second pass at the same head used to replace the first record.
+  stamp="$(date -u +%FT%H%M%SZ)"
+  record_out="$(file_rig_record "$pr" "$rev" "$stamp" "$record_in")" || exit 1
   if git -C "$AC_HOME" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$AC_HOME" add "$record_out" || true
     if ! git -C "$AC_HOME" diff --cached --quiet -- "$record_out"; then
-      git -C "$AC_HOME" commit -q -m "rig: PR #$pr at $rev (pipeline)" -- "$record_out" \
+      git -C "$AC_HOME" commit -q -m "rig: PR #$pr at $rev, pass $stamp (pipeline)" -- "$record_out" \
         || echo "rig: could not commit $record_out in \$AC_HOME" >&2
     fi
   fi
