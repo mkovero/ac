@@ -556,6 +556,179 @@ rc=0; ( cd "$REPO" && unset AC_PROVIDER && AC_CODEX_QA_PROVIDER=claude AC_GATE_D
 check '[[ $rc == 2 && ! -e $T/launched-gh ]] && grep -q "codex-qa provider is fixed to codex" $T/err21e' "review.sh --independent with codex-qa on claude is refused before any GitHub or gate work"
 rm -f "$T/stub/gh"
 
+# --- 22: approvals do not survive a design revision (#560) ---------------------
+# gh over two JSON files, $GH22/issue.json and $GH22/pr.json, applying --jq
+# with the real jq: decision_rev's digest is then computed over fixtures by the
+# code under test, not by a copy of it in here.
+cat > "$T/stub/gh" <<'EOF'
+#!/usr/bin/env bash
+kind="$1" verb="${2:-}"; shift 2 || shift
+jqx="" body=""; add=(); rmv=()
+while (($#)); do
+  case "$1" in
+    --jq) jqx="$2"; shift ;;
+    --add-label) add+=("$2"); shift ;;
+    --remove-label) rmv+=("$2"); shift ;;
+    --body) body="$2"; shift ;;
+    -R|--json|--state|--limit|--label) shift ;;
+  esac
+  shift
+done
+upd() { jq "$@" "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"; }
+case "$kind $verb" in
+  "api rate_limit") echo 5000 ;;
+  "api "*) ;;
+  "issue view") jq -r "${jqx:-.}" "$GH22/issue.json" ;;
+  "pr view")    jq -r "${jqx:-.}" "$GH22/pr.json" ;;
+  "pr list")    jq -r "${jqx:-.}" <<< '[{"number":7,"headRefName":"issue-22-x","body":"closes #22"}]' ;;
+  "pr edit")
+    for l in "${rmv[@]}"; do echo "remove $l" >> "$GH22/edits"; upd --arg l "$l" '.labels |= map(select(.name != $l))'; done
+    for l in "${add[@]}"; do echo "add $l" >> "$GH22/edits"; upd --arg l "$l" '.labels |= (. + [{name: $l}] | unique_by(.name))'; done ;;
+  "pr comment") printf '%s\n' "$body" >> "$GH22/runner" ;;
+  *) echo "gh stub: unhandled: $kind $verb" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$T/stub/gh"
+export GH22="$T/g22" H22=1111111111111111111111111111111111111111
+A22_OLD=$'<!-- agent: architect -->\n\n### design decision\nuse option A\n\n**file manifest**\nbin/master.sh'
+A22_NEW=$'<!-- agent: architect -->\n\n### design decision\nuse option B\n\n**file manifest**\nbin/master.sh'
+export A22_NEW
+w22_issue() {  # $1 = issue labels (space-separated), $2 = architect comment body
+  jq -n --arg ls "$1" --arg b "$2" '{body: "",
+    labels: ($ls | split(" ") | map(select(. != "") | {name: .})),
+    comments: [{id: "IC_triage", createdAt: "2026-09-22T10:00:00Z", body: "<!-- agent: triage -->\n\n### spec\nx"},
+               {id: "IC_arch",   createdAt: "2026-09-22T11:00:00Z", body: $b},
+               {id: "IC_other",  createdAt: "2026-09-22T11:30:00Z", body: "a human remark"}]}' > "$GH22/issue.json"
+}
+w22_pr() {  # $1 = PR labels, $2 = decision both records name
+  jq -n --arg ls "$1" --arg d "$2" --arg h "$H22" '{headRefOid: $h,
+    labels: ($ls | split(" ") | map(select(. != "") | {name: .})), comments: [],
+    reviews: [{submittedAt: "2026-09-22T12:00:00Z", body: "<!-- agent: qa -->\n\n## qa — PR #7 at \($h)\ndecision: \($d)\n\n### verdict\napprove"},
+              {submittedAt: "2026-09-22T12:10:00Z", body: "<!-- agent: codex-qa -->\n\n## codex qa — PR #7 at \($h)\ndecision: \($d)\n\n**verdict:** pass"}]}' > "$GH22/pr.json"
+}
+rev22() { ( cd "$REPO" && source "$BIN/common.sh" && decision_rev 22 7 ); }
+mk22() {  # $1 = dir. design/review stubs that act on the fixtures
+  mk_master "$1"
+  cat > "$1/design.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "design $*" >> "$GH22/calls"
+# The architect revises in place and hands back to implementation.
+jq --arg b "$A22_NEW" '.comments |= map(if .id == "IC_arch" then .body = $b else . end)
+  | .labels |= (map(select(.name != "needs-design")) + [{name: "ready-to-implement"}] | unique_by(.name))' \
+  "$GH22/issue.json" > "$GH22/t" && mv "$GH22/t" "$GH22/issue.json"
+EOF
+  cat > "$1/review.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "review $*" >> "$GH22/calls"
+echo "REVIEW-RAN $*"   # an ordering marker in master.sh's own output
+source "$(dirname "$0")/common.sh"; set +e
+h=$(jq -r .headRefOid "$GH22/pr.json"); rev=$(decision_rev 22 7)
+at="2026-09-23T00:00:$(printf '%02d' "$(wc -l < "$GH22/calls")")Z"
+rec() { jq --arg at "$at" --arg b "$1" '.reviews += [{submittedAt: $at, body: $b}]' "$GH22/pr.json" > "$GH22/t" && mv "$GH22/t" "$GH22/pr.json"; }
+if [[ $1 == --independent ]]; then
+  rec "<!-- agent: codex-qa -->
+
+## codex qa — PR #7 at $h
+decision: $rev
+
+**verdict:** pass"
+  gh pr edit 7 --add-label codex-approved
+  exit 0
+fi
+printf '%s\n' "$h" > "$AC_LOG_DIR/reviewed-pr-7.sha"
+if [[ -f $GH22/handback && ! -f $GH22/handback.done ]]; then
+  # qa decides the design is wrong: no approval, needs-design on the issue.
+  touch "$GH22/handback.done"
+  rec "<!-- agent: qa -->
+
+## qa — PR #7 at $h
+decision: $rev
+
+### verdict
+request-changes: design"
+  gh pr edit 7 --remove-label claude-approved
+  jq '.labels += [{name: "needs-design"}]' "$GH22/issue.json" > "$GH22/t" && mv "$GH22/t" "$GH22/issue.json"
+  exit 0
+fi
+rec "<!-- agent: qa -->
+
+## qa — PR #7 at $h
+decision: $rev
+
+### verdict
+approve"
+gh pr edit 7 --add-label claude-approved
+EOF
+  chmod +x "$1"/*.sh
+}
+run22() {  # $1 = case; fixtures already written to $GH22
+  ( cd "$REPO" && AC_LOG_DIR="$GH22/log" bash "$T/m22$1/master.sh" 22 > "$T/m22$1.out" 2>&1 )
+}
+first_line() { grep -n "$1" "$2" | head -1 | cut -d: -f1; }
+passed_before_review() {  # "both QA gates passed" printed before any review ran
+  local p r; p=$(first_line "both QA gates passed" "$1"); r=$(first_line "REVIEW-RAN" "$1")
+  [[ -n $p ]] && { [[ -z $r ]] || (( p < r )); }
+}
+
+# decision_rev itself: none without design comments, a digest that moves with
+# an in-place edit, and a non-design comment that does not move it.
+mkdir -p "$GH22"
+w22_pr "" x
+jq -n '{comments: [{id: "a", createdAt: "2026-09-22T10:00:00Z", body: "a human remark"}]}' > "$GH22/issue.json"
+r22none=$(rev22)
+w22_issue "" "$A22_OLD"; D0=$(rev22)
+w22_issue "" "$A22_NEW"; D1=$(rev22)
+jq '.comments[2].body = "an edited human remark"' "$GH22/issue.json" > "$GH22/t" && mv "$GH22/t" "$GH22/issue.json"
+D1b=$(rev22)
+check '[[ $r22none == none ]]' "decision_rev is 'none' with no architect or ux comment"
+check '[[ $D0 =~ ^[0-9a-f]{12}$ && $D1 =~ ^[0-9a-f]{12}$ && $D0 != "$D1" ]]' "decision_rev moves when the architect edits in place"
+check '[[ $D1 == "$D1b" ]]' "decision_rev ignores comments that are not architect or ux"
+# The stub's read of a missing fixture fails as a non-transient gh error would.
+r22fail=$( cd "$REPO" && source "$BIN/common.sh" && GH22="$T/absent" decision_rev 22 7 2>/dev/null ) && r22frc=0 || r22frc=$?
+check '[[ $r22frc != 0 && $r22fail != none ]]' "decision_rev fails on an API error instead of reading as 'none'"
+
+# 22a: startup-pending. needs-design is on the issue when the run begins; the
+# PR carries both approvals at an already-reviewed head under the old design.
+# Red on 17910bad: design ran, force stayed empty, the reviewed-SHA cache hit
+# and "both QA gates passed" came before any review.
+reset22() { rm -rf "$GH22"; mkdir -p "$GH22/log"; : > "$GH22/calls"; : > "$GH22/edits"; }
+reset22; mk22 "$T/m22a"
+w22_issue "needs-design agent:triage" "$A22_OLD"; w22_pr "claude-approved codex-approved" "$D0"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+run22 a
+check 'grep -qx "remove claude-approved" $GH22/edits && grep -qx "remove codex-approved" $GH22/edits' "22a startup-pending: both approvals removed after the architect pass"
+check 'grep -qx "review 7 --full" $GH22/calls && grep -qx "review --independent 7" $GH22/calls' "22a startup-pending: full Claude QA and Codex QA both run again"
+check '! passed_before_review $T/m22a.out' "22a startup-pending: 'both QA gates passed' is not reported before a review"
+check 'grep -q "decision: $D1" $GH22/pr.json && grep -q "both QA gates passed" $T/m22a.out' "22a startup-pending: passes once both records name the new decision"
+
+# 22b: in-loop handback. Claude QA sends it back mid-run; codex-approved from
+# the old design must not let Codex be skipped. The forced full pass is kept.
+reset22; mk22 "$T/m22b"
+w22_issue "ready-to-implement" "$A22_OLD"; w22_pr "claude-approved codex-approved" "$D0"
+touch "$GH22/handback"
+run22 b
+check '[[ $(grep -c "^review 7" $GH22/calls) == 2 ]] && [[ $(sed -n 2p $GH22/calls) == design* ]] && grep -qx "review 7 --full" $GH22/calls' "22b in-loop: handback, architect, then a forced full Claude pass"
+check '[[ $(tail -1 $GH22/calls) == "review --independent 7" ]]' "22b in-loop: Codex reviews the revised design instead of being skipped"
+
+# 22c: revised outside the runner. No label pending; the records name D0 but
+# the architect comment now digests to D1.
+reset22; mk22 "$T/m22c"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "claude-approved codex-approved" "$D0"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+run22 c
+check 'grep -qx "remove claude-approved" $GH22/edits && grep -qx "remove codex-approved" $GH22/edits' "22c outside the runner: both approvals naming a superseded decision are removed"
+check '! passed_before_review $T/m22c.out && grep -qx "review 7 --full" $GH22/calls' "22c outside the runner: reviewed again before any pass is reported"
+check 'grep -q "names decision \`$D0\`" $GH22/runner && grep -q "\`$D1\`" $GH22/runner' "22c outside the runner: the runner comment names both digests"
+
+# 22d: control for 22c — the records name the current decision, so the cache
+# is trusted. This is what shows 22c goes red for the digest, not by accident.
+reset22; mk22 "$T/m22d"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "claude-approved codex-approved" "$D1"
+printf '%s\n' "$H22" > "$GH22/log/reviewed-pr-7.sha"
+run22 d
+check 'grep -q "both QA gates passed" $T/m22d.out && [[ ! -s $GH22/calls && ! -s $GH22/edits ]]' "22d control: matching decision passes from the cache, no review, nothing removed"
+rm -f "$T/stub/gh"; unset GH22 A22_NEW
+
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
 

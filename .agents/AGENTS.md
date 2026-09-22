@@ -46,15 +46,15 @@ Always human-only:
 
 | label | set by | meaning |
 |---|---|---|
-| `needs-design` | triage, **qa or developer** | architect must review — see the handback section |
-| `needs-ux` | triage, architect, **qa or developer** | output surface must be specified before implementation — see the handback section |
+| `needs-design` | triage, **qa or developer** | architect must review — see `qa.md` → sending it back, and approvals below (a design revision voids them) |
+| `needs-ux` | triage, architect, **qa or developer** | output surface must be specified before implementation — see `qa.md` → sending it back, and approvals below (a design revision voids them) |
 | `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
 | `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
 | `in-review` | developer (via PR) | PR open |
-| `claude-approved` | qa (step 5, approve verdict); runner after a Codex recheck pass | Claude QA passed **at the commit it reviewed**, with no pending rig gate — or at an earlier commit whose only successors answer a Codex finding and passed a Codex recheck (the runner's comment names both) |
-| `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed, with no pending rig gate |
+| `claude-approved` | qa (step 5, approve verdict); runner after a Codex recheck pass. **Removed** by the runner on a design revision (below) | Claude QA passed **at the commit it reviewed**, with no pending rig gate — or at an earlier commit whose only successors answer a Codex finding and passed a Codex recheck (the runner's comment names both) |
+| `codex-approved` | codex-qa (pass verdict). **Removed** by the runner on a design revision (below); the runner never adds it | independent Codex QA passed at the commit it reviewed, with no pending rig gate |
 | `needs-work` | qa **or** codex-qa | PR has issues, developer must revise |
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
@@ -77,6 +77,20 @@ revision goes back to Codex alone (`codex-qa.md` → recheck mode). On a recheck
 pass the runner restores `claude-approved` and comments that Claude QA
 approved the base commit and did not review the delta. `AC_CODEX_RECHECK=0`
 turns this off.
+
+**An approval covers a tip and a design, and a design revision voids both
+labels (#560).** Architect and ux edit their comments in place, so the runner
+identifies the design by content: `decision_rev` (`bin/common.sh`) digests
+every architect and ux comment on the issue and PR. Each Claude QA and Codex QA
+record carries `decision: <digest>` under its header, copied from the
+runner's prompt. The runner (`bin/master.sh`) removes both approval labels,
+with a runner comment, after any architect or ux pass while a PR is open,
+whether the handback came from the review loop or was pending when the run
+started, and forces a full review. Before it skips a gate on a label or reports
+both gates passed, it also removes any approval whose record names another
+digest; that catches a revision made outside the runner. Any edit counts,
+typo fixes included. Batch design edits rather than looking for a way around
+the check.
 
 Neither approval label may be applied while `requires-rig` is present, on the
 PR or on the issue it closes. Tree QA names the measurement and stops at the

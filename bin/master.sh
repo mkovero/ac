@@ -169,7 +169,7 @@ limit_stop() {
 # drive() sets it when architect or ux has just changed the design under a diff
 # that may already carry an approval of the design it replaced.
 qa_loop() {
-  local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev pre post
+  local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev pre post dc rev
   # codex_base: the tip Claude QA approved and Codex then failed. While set,
   # a revision goes back to Codex alone (AC_CODEX_RECHECK). Kept on disk so a
   # rerun after a stop still knows which delta Claude has not seen.
@@ -206,6 +206,35 @@ qa_loop() {
   codex_failed_at() {
     [[ $RECHECK == 1 ]] || return 0
     codex_base="$1"; mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$1" > "$cbfile"
+  }
+  # decision_check (#560, R2): an approval label is a claim about a tip AND the
+  # design it was judged against. For each approval label in $ls, the newest
+  # record of the role that set it must name the current decision_rev. A label
+  # whose record does not is removed, and $ls re-read. The architect may edit
+  # while a review runs, and a revision made outside this runner leaves no
+  # label behind, so this runs before any gate is skipped or reported passed.
+  #   0 every present approval covers the current decision
+  #   2 at least one label was removed — take the review path again
+  #   1 could not read or could not clear — the caller stops
+  decision_check() {
+    local rev l role rec rc=0
+    rev="$(decision_rev "$n" "$pr")" \
+      || { echo "  #$n PR #$pr: cannot read the design decision — stopping rather than guessing"; return 1; }
+    for l in claude-approved codex-approved; do
+      has "$l" "$ls" || continue
+      [[ $l == claude-approved ]] && role=qa || role=codex-qa
+      rec="$(newest_record "$pr" "$role")" \
+        || { echo "  #$n PR #$pr: cannot read the $role record — stopping"; return 1; }
+      record_names_decision "$rec" "$rev" && continue
+      echo "  #$n PR #$pr: $l was given under decision $(decision_of_record "$rec"); current is $rev — removing it"
+      invalidate_approvals "$pr" "the newest \`$role\` record names decision \`$(decision_of_record "$rec")\`; the design comments now digest to \`$rev\` (decision_rev). The approval covers a design that no longer stands, so that gate runs again." "$l" \
+        || { echo "  #$n PR #$pr: cannot clear $l — do it by hand"; return 1; }
+      rc=2
+    done
+    if (( rc == 2 )); then
+      ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
+    fi
+    return "$rc"
   }
   # Not every exit path sets STATE, and drive() re-enters this function after a
   # handback. A STATE left over from the previous entry would read as a second
@@ -353,6 +382,17 @@ qa_loop() {
         echo "  #$n PR #$pr: requires-rig under a Codex recheck — full Claude QA path"
         codex_base=""; rm -f "$cbfile"; force=full
       fi
+      # The carry-forward restores an approval Claude gave at the base. If the
+      # design changed since, that approval covers a superseded design (#560).
+      rev=""
+      if [[ -n $codex_base ]]; then
+        rev="$(decision_rev "$n" "$pr")" \
+          || { echo "  #$n PR #$pr: cannot read the design decision — stopping rather than guessing"; return 1; }
+        if ! record_names_decision "$(newest_record "$pr" qa)" "$rev"; then
+          echo "  #$n PR #$pr: Claude QA at ${codex_base:0:8} predates decision $rev — full Claude QA path"
+          codex_base=""; rm -f "$cbfile"; force=full
+        fi
+      fi
       if [[ -n $codex_base && $head != "$codex_base" ]]; then
         echo "  #$n PR #$pr: Codex recheck of ${codex_base:0:8}..${head:0:8} (Claude QA not re-run)"
         local rrc=0 crec
@@ -378,9 +418,14 @@ qa_loop() {
           gh_retry gh pr edit "$pr" -R "$AC_REPO" --add-label claude-approved >/dev/null \
             || { echo "  #$n PR #$pr: could not restore claude-approved — do it by hand"; return 1; }
           gh_retry gh pr comment "$pr" -R "$AC_REPO" --body "<!-- agent: runner -->
-claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`; the commits since answer a Codex finding and passed a Codex recheck (AC_CODEX_RECHECK). Claude QA has not reviewed \`$codex_base..$head\`." >/dev/null || true
+claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`; the commits since answer a Codex finding and passed a Codex recheck (AC_CODEX_RECHECK). Claude QA has not reviewed \`$codex_base..$head\`.
+decision: $rev" >/dev/null || true
           rm -f "$cbfile"
           echo "  #$n PR #$pr: Codex recheck approved — claude-approved carried forward from ${codex_base:0:8}"
+          ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
+          dc=0; decision_check || dc=$?
+          (( dc == 1 )) && return 1
+          (( dc == 2 )) && { codex_base=""; continue; }
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge; return 0
         fi
@@ -396,6 +441,12 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
     # Unless force is set — then the tip is unchanged but the design under it
     # is not, and the cached approval is an approval of a superseded spec.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
+    # Same for a design revised under an unchanged tip: an approval whose
+    # record names another decision is dropped before the cache can reuse it.
+    # A removed claude-approved sends the branch below to a full pass; a
+    # removed codex-approved to codex_gate.
+    dc=0; decision_check || dc=$?
+    (( dc == 1 )) && return 1
     if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
       if has requires-rig "$ls" || has requires-rig "$ils"; then
         echo "  #$n PR #$pr: tree QA complete — requires-rig"
@@ -408,6 +459,9 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
           ls="$(pr_labels "$pr")"
         fi
         if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          dc=0; decision_check || dc=$?
+          (( dc == 1 )) && return 1
+          (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge; return 0
         fi
@@ -451,11 +505,19 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
         rig_step || return 0
         force=full; continue
       elif has claude-approved "$ls"; then
+        # A codex-approved from before this pass is not skipped past on trust,
+        # and the design may have moved while Claude QA ran.
+        dc=0; decision_check || dc=$?
+        (( dc == 1 )) && return 1
+        (( dc == 2 )) && continue
         if ! has codex-approved "$ls"; then
           codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
           ls="$(pr_labels "$pr")"
         fi
         if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          dc=0; decision_check || dc=$?
+          (( dc == 1 )) && return 1
+          (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
           STATE=awaiting-merge
         else
@@ -474,6 +536,23 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
   # already spent the budget. Silence here would read as a clean finish.
   echo "  #$n PR #$pr: dev→qa rounds already spent ($ROUNDS) — stopping"
   return 0
+}
+
+# design_pass_voids <issue> <role> (#560, R1) — called by drive() after an
+# architect or ux pass, whether it was a handback in the review loop or already
+# pending when the run started. Any approval on the open PR was judged against
+# the decision that pass may have revised, and the tip has not moved, so
+# nothing else would clear it: remove both labels and force the next qa_loop
+# into a full pass. Runs even when the pass edited nothing — the check is
+# cheap, a stale approval is not. Sets drive()'s force. No PR, nothing to do.
+design_pass_voids() {
+  local n="$1" role="$2" p
+  p="$(pr_for "$n")" || { echo "  #$n: cannot look up the PR after the $role pass — stopping"; return 1; }
+  [[ -n $p ]] || return 0
+  invalidate_approvals "$p" "a $role pass ran on #$n, and approvals given before it cover a decision that may no longer stand. Both gates run again." \
+    || { echo "  #$n PR #$p: cannot clear approvals — do it by hand"; return 1; }
+  echo "  #$n PR #$p: approvals cleared after the $role pass — full review next"
+  force=full
 }
 
 drive() {
@@ -550,6 +629,7 @@ drive() {
       fi
       ran_ux=1; (( ++ux_passes )); echo "  #$n: ux (pass $ux_passes)"
       "$BIN/ux.sh" "$n" $fg || { echo "  #$n: ux failed"; return 1; }
+      design_pass_voids "$n" ux || return 1
       qa_round=0
       continue
     fi
@@ -565,6 +645,7 @@ drive() {
       fi
       ran_design=1; (( ++design_passes )); echo "  #$n: architect (pass $design_passes)"
       "$BIN/design.sh" "$n" $fg || { echo "  #$n: design failed"; return 1; }
+      design_pass_voids "$n" architect || return 1
       qa_round=0
       continue
     fi

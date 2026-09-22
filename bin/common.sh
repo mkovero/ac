@@ -410,6 +410,73 @@ newest_record() {
     | sort_by(.at) | last | .body // empty"
 }
 
+# decision_rev <issue> [pr] — which revision of the design an approval is
+# judged against (#560). A digest over every design comment on the issue and,
+# when given, its PR: comments whose body opens with `<!-- agent: architect -->`
+# or `<!-- agent: ux -->`, each as its id then its body, in creation order,
+# sha256 cut to 12 hex. `none` when there are none, or when <issue> is empty (a
+# PR that closes nothing has no design to revise).
+#
+# Architect and ux edit their comments in place, so neither a label nor a
+# comment count shows that a decision changed; the content does. Any edit
+# counts, typo fixes included: that errs toward review.
+#
+# A failed read fails the function, never returns `none`: "could not ask" must
+# not read as "no design", the same rule as qa_evidence.
+DECISION_JQ='[.comments[] | select(.body | test("^\\s*<!-- agent: (architect|ux) -->")) | {at: .createdAt, id: .id, body: .body}]'
+decision_rev() {
+  local n="$1" pr="${2:-}" ic pc="[]" all
+  [[ -n $n ]] || { echo none; return 0; }
+  ic=$(gh_retry gh issue view "$n" -R "$AC_REPO" --json comments --jq "$DECISION_JQ") || return 1
+  if [[ -n $pr ]]; then
+    pc=$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq "$DECISION_JQ") || return 1
+  fi
+  # stdin, not --argjson: a long design history can pass the argument limit.
+  all=$(printf '%s\n%s\n' "${ic:-[]}" "${pc:-[]}" | jq -cs 'add | sort_by(.at)') || return 1
+  if [[ $all == "[]" ]]; then echo none; return 0; fi
+  printf '%s' "$all" | jq -j '.[] | "\(.id)\n\(.body)\n"' | sha256sum | cut -c1-12
+}
+
+# record_names_decision <record> <rev> — the record carries `decision: <rev>`
+# (qa.md step 4, codex-qa.md step 5). Markdown emphasis or backticks around the
+# field are tolerated; a different digest, or none at all, is not.
+record_names_decision() {
+  [[ -n $2 ]] || return 1
+  printf '%s\n' "$1" | grep -Eq "(^|[^[:alnum:]])decision:[*_\` ]*$2([^[:alnum:]]|\$)"
+}
+
+# The decision a record names, or `(none recorded)`, for runner comments.
+decision_of_record() {
+  local d
+  d=$(printf '%s\n' "$1" | grep -Eo 'decision:[*_` ]*[0-9a-z]+' | tail -1 | sed -E 's/^decision:[*_` ]*//') || true
+  printf '%s\n' "${d:-(none recorded)}"
+}
+
+# invalidate_approvals <pr> <reason> [label...] — remove the approval labels
+# (default both) that are present on <pr>, and say why in a runner comment.
+# Non-zero if the labels cannot be read or any removal fails: the caller must
+# then stop, never report a pass (#560). Removing nothing posts nothing.
+invalidate_approvals() {
+  local pr="$1" why="$2" cur l rc=0
+  shift 2
+  (($#)) || set -- claude-approved codex-approved
+  local -a gone=()
+  cur=$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name') || return 1
+  for l in "$@"; do
+    printf '%s\n' "$cur" | grep -qx "$l" || continue
+    if gh_retry gh pr edit "$pr" -R "$AC_REPO" --remove-label "$l" >/dev/null; then
+      gone+=("$l")
+    else
+      rc=1
+    fi
+  done
+  if ((${#gone[@]})); then
+    gh_retry gh pr comment "$pr" -R "$AC_REPO" --body "<!-- agent: runner -->
+Removed \`${gone[*]}\`: $why" >/dev/null || true
+  fi
+  return "$rc"
+}
+
 # The architect's file manifest for an issue: repo-relative paths, one per line.
 # Empty output means no manifest — the caller decides whether that is fatal.
 # The newest architect comment that carries a **file manifest** field. Not
