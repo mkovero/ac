@@ -20,6 +20,8 @@
 #  15. the files fence keeps root entries and refuses a bad line too.
 #  16. a `none` manifest is still empty, by master.sh's none regex.
 #  17. a bulleted none is the none declaration, not a file named `none`.
+#  18. two rig passes at one head file two records, in pass order, and a
+#      filing onto an existing name refuses instead of overwriting.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -302,6 +304,34 @@ check 'grep -qF "~ /^[[:space:]\`(]*none/" "$BIN/master.sh" && grep -qF "~ /^[[:
 m_body 17 '**file manifest**' '- `none`' '' '**risks**'
 m_run 17
 check '[[ $(cat $T/rc_17) == 0 && ! -s $T/r_17 ]]' "a bulleted none declaration is empty, not a path named none"
+
+# --- 18: two rig passes at one head file two records, in pass order (#549) -------
+# Red on 50114ee5: rig.sh named the record <date>-rig-pr-<N>-<rev12>.md, so the
+# second pass at a head wrote the first pass's path and replaced it.
+(
+  cd "$REPO" && source "$BIN/common.sh"
+  export AC_SESSION_DIR="$T/sess18"
+  printf 'pass A\n**rig verdict:** pass\n' > "$T/rec18a"
+  printf 'pass B\n**rig verdict:** decline-site\n' > "$T/rec18b"
+  printf 'pass C\n' > "$T/rec18c"
+  file_rig_record 547 d58a04ebac41 2026-09-21T095959Z "$T/rec18a" > "$T/r_18a"; echo $? > "$T/rc_18a"
+  file_rig_record 547 d58a04ebac41 2026-09-21T100000Z "$T/rec18b" > "$T/r_18b"; echo $? > "$T/rc_18b"
+  rc=0; file_rig_record 547 d58a04ebac41 2026-09-21T100000Z "$T/rec18c" > "$T/r_18c" 2> "$T/err_18c" || rc=$?; echo "$rc" > "$T/rc_18c"
+  rc=0; file_rig_record 547 d58a04ebac41 2026-09-21 "$T/rec18c" > /dev/null 2>&1 || rc=$?; echo "$rc" > "$T/rc_18d"
+) 2>/dev/null
+a18="$T/sess18/2026-09-21-rig-pr-547-d58a04ebac41-095959Z.md"
+b18="$T/sess18/2026-09-21-rig-pr-547-d58a04ebac41-100000Z.md"
+check '[[ $(cat $T/rc_18a) == 0 && $(cat $T/rc_18b) == 0 && $(cat $T/r_18a) == "$a18" && $(cat $T/r_18b) == "$b18" ]]' "file_rig_record prints the stamped path of each pass"
+check 'cmp -s "$a18" "$T/rec18a" && cmp -s "$b18" "$T/rec18b"' "a second pass at one head leaves the first record byte-identical"
+check '[[ $(ls "$T/sess18"/*-rig-pr-547-d58a04ebac41-*.md | LC_ALL=C sort | tr "\n" " ") == "$a18 $b18 " ]]' "records for one head sort in pass order by filename"
+check '[[ $(cat $T/rc_18c) == 1 && ! -s $T/r_18c ]] && cmp -s "$b18" "$T/rec18b" && grep -qF "$b18" $T/err_18c' "filing onto an existing name refuses, names it and leaves it unchanged"
+check 'f=$(ls "$T/sess18"/*.refused-* 2>/dev/null) && cmp -s "$f" "$T/rec18c" && grep -qF "$f" $T/err_18c' "a refused pass keeps its record beside the existing one"
+check '[[ $(cat $T/rc_18d) == 2 ]]' "file_rig_record refuses a stamp without a UTC time"
+# Control: the old rule, run twice at one head, keeps only the second pass.
+mkdir -p "$T/old18"; o18="$T/old18/$(date +%F)-rig-pr-547-d58a04ebac41.md"
+cp "$T/rec18a" "$o18"; cp "$T/rec18b" "$o18"
+check '[[ $(ls "$T/old18" | wc -l) == 1 ]] && ! cmp -s "$o18" "$T/rec18a"' "control: the old name let a second pass replace the first record"
+check '! grep -qE "rig-pr-\\\$pr-\\\$rev\.md" "$BIN/rig.sh" && grep -q "file_rig_record" "$BIN/rig.sh"' "rig.sh files through file_rig_record, not a bare -\$rev.md path"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"

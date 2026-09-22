@@ -189,6 +189,32 @@ rig_verdict_of() {
     | tail -1 | sed -E 's/.*\*\*[[:space:]]*//; s/[^[:alnum:]-]+$//' || true
 }
 
+# file_rig_record <pr> <rev12> <stamp> <src> — file one rig pass's record as
+# $AC_SESSION_DIR/<YYYY-MM-DD>-rig-pr-<pr>-<rev12>-<HHMMSS>Z.md and print that
+# path. <stamp> is one UTC clock read, `date -u +%FT%H%M%SZ`: date and time
+# from separate reads misorder two passes straddling UTC midnight on a non-UTC
+# host. One file per pass, so a later pass at the same head sorts after the
+# earlier one and never replaces it (#549). The write is no-clobber: if the
+# name exists, the existing file stays byte-identical, <src> is kept beside it
+# as <name>.refused-<pid>, both paths are named and the return is 1.
+file_rig_record() {
+  local pr="$1" rev="$2" stamp="$3" src="$4" out keep
+  if [[ ! $stamp =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{6}Z)$ ]]; then
+    echo "file_rig_record: stamp '$stamp' is not YYYY-MM-DDTHHMMSSZ" >&2
+    return 2
+  fi
+  out="$AC_SESSION_DIR/${BASH_REMATCH[1]}-rig-pr-$pr-$rev-${BASH_REMATCH[2]}.md"
+  mkdir -p "$AC_SESSION_DIR" || return 1
+  if ( set -o noclobber; cat "$src" > "$out" ) 2>/dev/null; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  keep="$out.refused-$$"
+  cp "$src" "$keep" || keep="(could not keep a copy; source was $src)"
+  echo "file_rig_record: $out already exists; left it unchanged, this pass's record is at $keep" >&2
+  return 1
+}
+
 # provider_limit_check <file> <provider> <mode> — did the provider stop on an
 # account limit? mode `jsonl` reads only the provider's own result/error
 # records, `text` only the tail of plain output. In both, the phrase must START
