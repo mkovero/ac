@@ -28,6 +28,9 @@
 #      literal keys or code lines; a citing bullet does not exempt its
 #      sibling. superseded_names_of's fence.
 #  20. replays of PR #553 round 1 and PR #547 round 2 (needs their commits).
+#  21. the two-review gate pins each reviewer to the model its label names:
+#      qa on codex and codex-qa on claude are refused before any provider CLI
+#      or target seeding; both default pairings launch (#563).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -513,6 +516,45 @@ if git -C "$REPO" cat-file -e "752960a0de^{commit}" 2>/dev/null \
 else
   echo "skip replay PR #553/#547: historical commits not in this clone"
 fi
+
+# --- 21: each approval label is produced by the model it names (#563) ----------
+# The launch marker, not the stderr text, is what fails without the guard: a
+# guard that printed and then launched anyway would still match the message.
+for p in claude codex; do
+  printf '#!/usr/bin/env bash\ntouch "%s/launched-%s"; exit 0\n' "$T" "$p" > "$T/stub/$p"
+  chmod +x "$T/stub/$p"
+done
+r21() {  # r21 <case> <role> [VAR=value...] — run <role> and record rc/stderr
+  local c="$1" role="$2"; shift 2
+  rm -f "$T"/launched-*
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    unset AC_PROVIDER AC_QA_PROVIDER AC_CODEX_QA_PROVIDER
+    export AC_TARGETS="$T/targets21" AC_LIMIT_FILE="$T/limit21"
+    (($#)) && export "$@"
+    rc=0; run "$role" "task" --fg --read > /dev/null 2> "$T/err21$c" || rc=$?
+    echo "$rc" > "$T/rc21$c"
+  )
+  ls "$T" | grep '^launched-' > "$T/launch21$c" || true
+}
+r21 a qa AC_QA_PROVIDER=codex
+r21 b codex-qa AC_CODEX_QA_PROVIDER=claude
+check '[[ $(cat $T/rc21a) == 2 ]] && grep -q "qa provider is fixed to claude" $T/err21a && [[ ! -s $T/launch21a ]]' "qa on codex is refused (2) and launches nothing"
+check '[[ $(cat $T/rc21b) == 2 ]] && grep -q "codex-qa provider is fixed to codex" $T/err21b && [[ ! -s $T/launch21b ]]' "codex-qa on claude is refused (2) and launches nothing"
+check 'grep -q "not an independent second review" $T/err21b' "the codex-qa refusal gives the independence reason"
+check '[[ ! -e $T/targets21 ]]' "a refused reviewer seeds no target"
+r21 c qa
+r21 d codex-qa
+check '[[ $(cat $T/rc21c) == 0 && $(cat $T/launch21c) == launched-claude ]] && ! grep -q "two-review gate" $T/err21c' "default qa launches claude with no refusal"
+check '[[ $(cat $T/rc21d) == 0 && $(cat $T/launch21d) == launched-codex ]] && ! grep -q "two-review gate" $T/err21d' "default codex-qa launches codex with no refusal"
+# review.sh --independent refuses before it asks GitHub for a head, so before
+# any worktree or gate run.
+printf '#!/usr/bin/env bash\ntouch "%s/launched-gh"; exit 1\n' "$T" > "$T/stub/gh"; chmod +x "$T/stub/gh"
+rm -f "$T"/launched-*
+rc=0; ( cd "$REPO" && unset AC_PROVIDER && AC_CODEX_QA_PROVIDER=claude AC_GATE_DIR="$T/gate21" \
+  bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err21e" || rc=$?
+check '[[ $rc == 2 && ! -e $T/launched-gh ]] && grep -q "codex-qa provider is fixed to codex" $T/err21e' "review.sh --independent with codex-qa on claude is refused before any GitHub or gate work"
+rm -f "$T/stub/gh"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
