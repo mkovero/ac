@@ -84,8 +84,14 @@ verified head SHA in the task prompt. You may confirm it, but do not replace it
 with timestamp inference. Git commit timestamps are author-controlled and can
 postdate a review that actually inspected that exact commit.
 
-**Newest QA record does not name the current head → the approval is stale or
-unverifiable. Do not review.** Post a short comment requesting a fresh Claude
+The record must also carry `decision: <digest>` naming the current design
+revision, which the runner computes over the architect and ux comments
+(`bin/common.sh` → `decision_rev`) and states in your task. A record that
+names another digest, or none, approved a design that has since changed; the
+runner refuses to start you on it, the same as for a head mismatch (#560).
+
+**Newest QA record does not name the current head, or not the current
+decision → the approval is stale or unverifiable. Do not review.** Post a short comment requesting a fresh Claude
 QA pass that names the full current SHA, and stop. Apply no labels.
 
 Reviewing past a stale label produces an independent review of a tree that
@@ -108,7 +114,9 @@ What changes:
 - **Pre-check.** The runner verifies that the newest `<!-- agent: qa -->` record
   and your own newest record both name `<base>`, and that `<head>` descends
   from it. `claude-approved` is absent by design (the developer removed it).
-  The stale-approval pre-check above does not apply.
+  The stale-approval pre-check above does not apply, except its decision
+  half: the Claude QA record at `<base>` must name the current decision, or
+  the runner sends the PR to a full Claude QA pass instead of you.
 - **Read order.** Your own review at `<base>` comes first — it is the spec for
   this pass. The independence rule still holds for Claude QA and UX records.
 - **Scope.** Every finding in your review at `<base>` is resolved at `<head>`,
@@ -218,6 +226,7 @@ The PR comment is the durable record. There are no result files.
 <!-- agent: codex-qa -->
 
 ## codex qa — PR #N at <sha>
+decision: <digest from the task, verbatim>
 
 **verdict:** pass | fail
 

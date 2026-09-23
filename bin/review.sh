@@ -47,7 +47,7 @@ independent_review() {
   fi
   ((${#prs[@]})) || { echo "<codex/qa> No PRs require independent QA."; return 0; }
 
-  local pr head wt labels qa_record
+  local pr head wt labels qa_record issue decision
   for pr in "${prs[@]}"; do
     labels="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name')"
     has_label() { printf '%s\n' "$labels" | grep -qx "$1"; }
@@ -81,9 +81,21 @@ independent_review() {
         return 1
       fi
     fi
+    # The design revision this pass is judged against (#560): decision_of_pr,
+    # the digest master.sh compares against. issue_of_pr feeds names_inputs.
+    issue="$(issue_of_pr "$pr")" \
+      || { echo "<codex/qa> PR #$pr: cannot read the issue it closes" >&2; return 1; }
+    decision="$(decision_of_pr "$pr")" \
+      || { echo "<codex/qa> PR #$pr: cannot read the design decision" >&2; return 1; }
+    # Claude QA's record must cover the design as it stands now, in both modes:
+    # a recheck carries that approval forward, a first pass pairs with it.
+    if ! record_names_decision "$qa_record" "$decision"; then
+      echo "<codex/qa> PR #$pr: newest Claude QA record names decision $(decision_of_record "$qa_record"), not the current $decision." >&2
+      echo "<codex/qa> The design changed after that review; a fresh Claude QA pass is required." >&2
+      return 1
+    fi
     # The names step's inputs (gate.sh → stale_names.sh), per PR.
-    local issue
-    issue="$(issue_of_pr "$pr")" && names_inputs "$issue" \
+    names_inputs "$issue" \
       || { echo "<codex/qa> PR #$pr: cannot read its issue's superseded names" >&2; return 1; }
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
@@ -138,6 +150,14 @@ add needs-work and remove codex-approved. Never touch claude-approved,
 in-review, requires-rig, or agent labels. Re-check the PR HEAD before applying
 the final decision; if it changed, do not approve."
     fi
+    task="$task
+
+The architect/ux design comments digest to decision $decision (decision_rev),
+and the runner verified that the newest <!-- agent: qa --> record names it. On
+the line directly under your \`## codex qa — PR #N at <sha>\` header, write
+exactly \`decision: $decision\` (codex-qa.md → step 5); copy it, do not
+recompute it. The runner removes an approval whose record names any other
+decision."
     local gate_rc=0 gate_out
     gate_out="$(cd "$wt" && "$AC_GATE" 2>&1)" || gate_rc=$?
     printf '%s\n' "$gate_out" >&2
@@ -188,6 +208,17 @@ done
 mark="$AC_LOG_DIR/reviewed-pr-$n.sha"
 mkdir -p "$AC_LOG_DIR"
 head_sha="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+# The design revision this pass is judged against (#560), captured as the
+# review starts: an edit made while it runs must not read as covered.
+# decision_of_pr, not issue_of_pr: master.sh compares against the same digest.
+# issue_of_pr feeds names_inputs below.
+issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
+decision="$(decision_of_pr "$n")" || { echo "cannot read the design decision for PR #$n" >&2; exit 1; }
+decision_ask="On the line directly under that head-SHA header line, write exactly
+\`decision: $decision\` (qa.md → step 4). The runner computed it from the
+architect/ux design comments as this pass started; copy it verbatim, do not
+recompute it. The runner removes an approval whose record names any other
+decision."
 
 # qa_evidence() lives in common.sh — counts both comments and reviews.
 qa_comments() { qa_evidence "$n"; }
@@ -232,6 +263,8 @@ Scope of this pass:
 State at the top of your comment which commit range you reviewed, including
 the full $head_sha SHA as the range endpoint.
 
+$decision_ask
+
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 else
   prompt="Review PR #$n in $AC_REPO.
@@ -243,6 +276,8 @@ spec, post a new superseding QA comment, and update labels to its verdict. Do
 not decline to post merely because the PR tip is unchanged.
 
 State the full current head SHA $head_sha at the top of the review comment.
+
+$decision_ask
 
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi
@@ -268,8 +303,7 @@ echo "review worktree: $wt  [review-pr-$n @ $branch]" >&2
 
 link_support "$wt"
 
-# The names step's inputs (gate.sh → stale_names.sh).
-issue="$(issue_of_pr "$n")" || { echo "cannot read the issue PR #$n closes" >&2; exit 1; }
+# The names step's inputs (gate.sh → stale_names.sh). $issue is read above.
 names_inputs "$issue" || exit 1
 
 # The gate runs here, outside the session: once per tree, cached, no tool

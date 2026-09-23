@@ -192,6 +192,7 @@ Post PR review in this structure:
 <!-- agent: qa -->
 
 ## qa — PR #N at <full current head SHA>
+decision: <digest from the runner's prompt, verbatim>
 
 ### spec coverage
 | criterion | provenance | covered | notes |
@@ -233,6 +234,14 @@ not `request-changes: design`. See step 5.}
 {`no`, or: the quantity to measure, the rig configuration, and the value that
 would falsify the claim. See step 5.}
 ```
+
+The `decision:` line names the design revision this review covers: a digest
+the runner takes over every architect and ux comment on the issue and PR when
+the pass starts (`bin/common.sh` → `decision_rev`), and states in your prompt.
+Copy it; do not compute or omit it. An approval is a claim about a tip **and**
+the design it was judged against. When the design comments change, the digest
+changes, and the runner removes any approval whose record names another one
+(#560).
 
 ### step 5 — apply label
 - Approving → apply `claude-approved`, leave `in-review` in place
