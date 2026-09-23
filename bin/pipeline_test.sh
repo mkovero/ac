@@ -697,6 +697,34 @@ check '[[ $D1 == "$D1b" ]]' "decision_rev ignores comments that are not architec
 r22fail=$( cd "$REPO" && source "$BIN/common.sh" && GH22="$T/absent" decision_rev 22 7 2>/dev/null ) && r22frc=0 || r22frc=$?
 check '[[ $r22frc != 0 && $r22fail != none ]]' "decision_rev fails on an API error instead of reading as 'none'"
 
+# record_names_decision reads the field line, not any mention of a digest. The
+# Codex finding on PR #567: an old header field plus the current digest in a
+# sentence passed as covering the current decision.
+rnd22() { ( source "$BIN/common.sh" && record_names_decision "$1" "$2" ); }
+dor22() { ( source "$BIN/common.sh" && decision_of_record "$1" ); }
+hdr22='<!-- agent: qa -->
+
+## qa — PR #7 at abc'
+R22prose="$hdr22
+decision: $D0
+
+the runner requested \`decision: $D1\`."
+R22two="$hdr22
+decision: $D1
+
+decision: $D0"
+R22same="$hdr22
+decision: $D1
+decision: $D1"
+R22one="$hdr22"$'\r\n'"**decision:** \`$D1\`"$'\r\n\r\n### verdict'
+check '! rnd22 "$R22prose" "$D1" && [[ $(dor22 "$R22prose") == "$D0" ]]' \
+  "record_names_decision: an old field with the current digest in prose is refused, and reported as the old field"
+check '! rnd22 "$R22two" "$D1" && ! rnd22 "$R22two" "$D0" && [[ $(dor22 "$R22two") == "(conflicting fields: $D1 $D0)" ]]' \
+  "record_names_decision: two conflicting field lines are refused for either digest"
+check '! rnd22 "$R22same" "$D1"' "record_names_decision: a repeated field line is refused even when both name the digest"
+check 'rnd22 "$R22one" "$D1" && ! rnd22 "$hdr22" "$D1" && [[ $(dor22 "$hdr22") == "(none recorded)" ]]' \
+  "record_names_decision: one emphasised field line (CRLF) passes; no field is refused"
+
 # 22a: startup-pending. needs-design is on the issue when the run begins; the
 # PR carries both approvals at an already-reviewed head under the old design.
 # Red on 17910bad: design ran, force stayed empty, the reviewed-SHA cache hit
@@ -763,6 +791,17 @@ w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "" x
 ( cd "$REPO" && AC_LOG_DIR="$GH22/log" W22_CREV=none timeout 30 bash "$T/m22g/master.sh" 22 > "$T/m22g.out" 2>&1 ); r22g=$?
 check '[[ $r22g != 124 ]] && (( $(grep -c "^review --independent 7" $GH22/calls) <= 2 )) && ! grep -q "both QA gates passed" $T/m22g.out && grep -q "removed again under the same decision $D1: codex-approved" $T/m22g.out' \
   "22g a Codex record that can never name the current decision stops the loop too"
+
+# 22l: the Claude QA session writes the old decision as its field and the
+# current one in prose (Codex finding on PR #567). The runner must treat the
+# record as stale, never as covering D1, and never report both gates passed.
+reset22; mk22 "$T/m22l"
+w22_issue "ready-to-implement" "$A22_NEW"; w22_pr "" x
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" W22_REV="$D0
+
+the runner requested \`decision: $D1\`." timeout 30 bash "$T/m22l/master.sh" 22 > "$T/m22l.out" 2>&1 ); r22l=$?
+check '[[ $r22l != 124 ]] && ! grep -q "both QA gates passed" $T/m22l.out && grep -q "removed again under the same decision $D1: claude-approved" $T/m22l.out' \
+  "22l an old decision field with the current digest in prose never reaches 'both QA gates passed'"
 
 # decision_issue: the runner and review.sh digest the same issue whatever the
 # PR's closing reference says. Branch first, then GitHub's reference, then the
@@ -837,6 +876,15 @@ rc=0; ( cd "$REPO" && unset AC_PROVIDER AC_CODEX_QA_PROVIDER && AC_LOG_DIR="$GH2
   bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err22r" || rc=$?
 check '[[ $rc == 1 && ! -e $T/wt22/codex-pr-7 && ! -e $T/launched-codex ]] && grep -q "names decision $D0, not the current $D1" $T/err22r' \
   "review.sh --independent refuses a Claude QA record naming a superseded decision, before any worktree"
+# The same with the current digest also mentioned in the record's prose.
+reset22; w22_issue "" "$A22_NEW"; w22_pr "claude-approved" "$D0
+
+the runner requested \`decision: $D1\`."
+rm -f "$T"/launched-*
+rc=0; ( cd "$REPO" && unset AC_PROVIDER AC_CODEX_QA_PROVIDER && AC_LOG_DIR="$GH22/log" AC_WT_BASE="$T/wt22" \
+  bash "$BIN/review.sh" --independent 7 ) > /dev/null 2> "$T/err22p" || rc=$?
+check '[[ $rc == 1 && ! -e $T/wt22/codex-pr-7 && ! -e $T/launched-codex ]] && grep -q "names decision $D0, not the current $D1" $T/err22p' \
+  "review.sh --independent refuses an old decision field with the current digest in prose"
 # review.sh states decision_of_pr's digest, not issue_of_pr's: with no closing
 # reference (non-default base) the refusal must still compare against #22's D1.
 reset22; w22_issue "" "$A22_NEW"; w22_pr "claude-approved" "$D0"

@@ -437,19 +437,36 @@ decision_rev() {
   printf '%s' "$all" | jq -j '.[] | "\(.id)\n\(.body)\n"' | sha256sum | cut -c1-12
 }
 
-# record_names_decision <record> <rev> — the record carries `decision: <rev>`
-# (qa.md step 4, codex-qa.md step 5). Markdown emphasis or backticks around the
-# field are tolerated; a different digest, or none at all, is not.
-record_names_decision() {
-  [[ -n $2 ]] || return 1
-  printf '%s\n' "$1" | grep -Eq "(^|[^[:alnum:]])decision:[*_\` ]*$2([^[:alnum:]]|\$)"
+# decision_fields <record> — the value of every `decision:` field line in a
+# record, one per line. A field line holds the field and nothing else
+# (qa.md step 4, codex-qa.md step 5 put it directly under the header); markdown
+# emphasis or backticks around it are tolerated. A `decision: <x>` inside a
+# sentence is prose, not a field, and is never read as one.
+decision_fields() {
+  printf '%s\n' "$1" | sed -nE 's/^[[:space:]>*_`]*decision:[*_` ]*([0-9a-z]+)[*_`[:space:]]*$/\1/p'
 }
 
-# The decision a record names, or `(none recorded)`, for runner comments.
+# record_names_decision <record> <rev> — the record carries exactly one
+# `decision:` field line, and it names <rev>. No field, a different digest, or
+# more than one field (even two naming <rev>) is refused: a record that states
+# its decision twice is not evidence of either, and fails closed as stale.
+record_names_decision() {
+  [[ -n $2 ]] || return 1
+  [[ "$(decision_fields "$1")" == "$2" ]]
+}
+
+# The decision a record names, for runner comments: its one field, or
+# `(none recorded)`, or every field when it carries more than one.
 decision_of_record() {
   local d
-  d=$(printf '%s\n' "$1" | grep -Eo 'decision:[*_` ]*[0-9a-z]+' | tail -1 | sed -E 's/^decision:[*_` ]*//') || true
-  printf '%s\n' "${d:-(none recorded)}"
+  d=$(decision_fields "$1")
+  if [[ -z $d ]]; then
+    printf '%s\n' "(none recorded)"
+  elif [[ $d == *$'\n'* ]]; then
+    printf '(conflicting fields: %s)\n' "$(printf '%s' "$d" | paste -sd' ' -)"
+  else
+    printf '%s\n' "$d"
+  fi
 }
 
 # invalidate_approvals <pr> <reason> [label...] — remove the approval labels
