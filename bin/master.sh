@@ -208,9 +208,12 @@ limit_stop() {
 # move, so UNKNOWN is read again: 5 reads in total, `sleep 5` between them, at
 # most 20 s of UNKNOWN waiting. Each read also goes through gh_retry, whose
 # transient-error backoff is separate: during a GitHub outage the worst case is
-# 5 x gh_retry's backoff plus those 20 s. The bounds are assumed, not measured
-# (#570); if a run exhausts them on a PR that turns out to be mergeable, raise
-# them and cite that run. A failed read, empty output or any other value uses up an attempt
+# 5 x gh_retry's backoff plus those 20 s. Measured on mkovero/ac (#573,
+# 2026-09-23, polling every 1 s): after a push to the PR branch, UNKNOWN
+# cleared within 5 s on each of two pushes. The base-move case (a merge to main
+# under an open PR) was not measurable without a merge and remains assumed; if
+# a run exhausts the bounds on a PR that turns out to be mergeable, raise them
+# and cite that run. A failed read, empty output or any other value uses up an attempt
 # as UNKNOWN — never as MERGEABLE.
 pr_mergeable() {
   local pr="$1" m i tries=5 wait=5
