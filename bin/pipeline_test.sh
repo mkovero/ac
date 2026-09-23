@@ -37,6 +37,10 @@
 #      that edits nothing; a record that can never match stops the loop; the
 #      runner and review.sh digest the same issue; needs-ux at startup; the
 #      Codex-recheck decision check; review.sh --independent's refusal.
+#  23. the epic waiter continues only on a PR whose merge commit is on main:
+#      a closed issue, a closed PR, or a PR merged into another branch stops
+#      it (5); an unverifiable merge keeps polling; a PR merged before the
+#      waiter starts is still the one it checks (#561).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -900,6 +904,110 @@ check '[[ $rc == 1 ]] && grep -q "names decision $D0, not the current $D1" $T/er
 check '! grep -qE "decision_rev \"" "$BIN/review.sh" && [[ $(grep -c "decision=\"\$(decision_of_pr " "$BIN/review.sh") == 2 ]]' \
   "review.sh computes both digests (independent and main path) through decision_of_pr"
 rm -f "$T/stub/gh"; unset GH22 A22_NEW
+
+# --- 23: the epic waiter needs the merge commit on main (#561) -----------------
+# The waiter used to return 0 on a CLOSED issue, and on any mergedAt. The stub
+# answers gh's --jq with real jq over fixture JSON, so any query shape reads
+# the same fixture. It answers the compare API only in the main...<oid> order:
+# reversed, `ahead` would mean landed, and 23c goes red. With W_PR_AFTER set,
+# every PR read after the first issue read answers from that fixture instead:
+# the human merged between the waiter's PR read and its issue read (23g, 23h).
+mkdir -p "$T/stub23"
+cat > "$T/stub23/gh" <<'EOF'
+#!/usr/bin/env bash
+q=""; args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} == --jq ]] && q="${args[i+1]}"; done
+case "$*" in
+  "pr view"*)
+    f="$W_PR"
+    [[ -n ${W_PR_AFTER:-} && -e $W_MARK ]] && f="$W_PR_AFTER" ;;
+  "issue view"*) f="$W_ISSUE"; touch "$W_MARK" ;;
+  "pr list"*) f="$W_LIST" ;;
+  "api repos/x/y/compare/main..."*)
+    [[ -z ${W_CMP_FAIL:-} ]] || { echo "HTTP 404: Not Found" >&2; exit 1; }
+    f="$W_CMP" ;;
+  *) echo "unexpected: gh $*" >&2; exit 1 ;;
+esac
+if [[ -n $q ]]; then jq -r "$q" "$f"; else cat "$f"; fi
+EOF
+chmod +x "$T/stub23/gh"
+w_oid=0123456789abcdef0123456789abcdef01234567
+w_json() { printf '%s\n' "$2" > "$T/w_$1.json"; }  # w_json <name> <json>
+w_json open_pr '{"state":"OPEN","mergedAt":null,"mergeCommit":null,"baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}'
+w_json closed_pr '{"state":"CLOSED","mergedAt":null,"mergeCommit":null,"baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}'
+w_json stacked_pr '{"state":"MERGED","mergedAt":"2026-09-22T10:00:00Z","mergeCommit":{"oid":"'$w_oid'"},"baseRefName":"feature-x","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}'
+w_json main_pr '{"state":"MERGED","mergedAt":"2026-09-22T10:00:00Z","mergeCommit":{"oid":"'$w_oid'"},"baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}'
+w_json issue_open '{"state":"OPEN","stateReason":null}'
+w_json issue_np '{"state":"CLOSED","stateReason":"NOT_PLANNED"}'
+w_json issue_done '{"state":"CLOSED","stateReason":"COMPLETED"}'
+w_json cmp_behind '{"status":"behind"}'
+w_json cmp_diverged '{"status":"diverged"}'
+# w_run <case> <pr> <issue> <compare> [VAR=value...] → out23<case>, rc23<case>.
+# The stub sleep ends the call with 42, so 42 means "polled again".
+w_run() {
+  local c="$1" pr="$2" issue="$3" cmp="$4"; shift 4
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub23:$PATH" AC_MERGE_POLL_SECONDS=1 \
+      W_PR="$T/w_$pr.json" W_ISSUE="$T/w_$issue.json" W_CMP="$T/w_$cmp.json" \
+      W_MARK="$T/w_mark_$c"
+    rm -f "$W_MARK"
+    (($#)) && export "$@"
+    eval "$(sed -n '/^pr_landed()/,/^}/p;/^wait_for_merge()/,/^}/p' "$BIN/master.sh")"
+    sleep() { exit 42; }
+    rc=0; ( wait_for_merge 7 70 ) > "$T/out23$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc23$c"
+  )
+}
+w_run a open_pr issue_np cmp_behind
+w_run b stacked_pr issue_open cmp_diverged
+w_run c main_pr issue_done cmp_behind
+w_run d main_pr issue_open cmp_behind W_CMP_FAIL=1
+w_run e open_pr issue_open cmp_behind
+w_run f closed_pr issue_open cmp_behind
+w_run g open_pr issue_done cmp_behind W_PR_AFTER="$T/w_main_pr.json"
+w_run h open_pr issue_done cmp_behind W_PR_AFTER="$T/w_main_pr.json" W_CMP_FAIL=1
+check '[[ $(cat $T/rc23a) == 5 ]] && grep -q "#7" $T/out23a && grep -q NOT_PLANNED $T/out23a && ! grep -qi merged $T/out23a' "a closed issue with an unmerged PR stops the waiter (5), naming the child and close reason"
+check '[[ $(cat $T/rc23b) == 5 ]] && grep -q "PR #70" $T/out23b && grep -q feature-x $T/out23b && ! grep -qi merged $T/out23b' "a PR merged into another branch stops the waiter (5), naming the PR and its base"
+check '[[ $(cat $T/rc23c) == 0 ]] && grep -q "landed on main (0123456); continuing epic" $T/out23c' "a PR whose merge commit is on main continues the epic"
+check '[[ $(cat $T/rc23d) == 42 ]] && ! grep -qi merged $T/out23d' "a failed ancestry check keeps polling and never continues"
+check '[[ $(cat $T/rc23e) == 42 ]] && grep -q "awaiting your merge" $T/out23e' "an open child with an open PR keeps waiting"
+check '[[ $(cat $T/rc23f) == 5 ]] && grep -q "closed without landing" $T/out23f && ! grep -qi merged $T/out23f' "a PR closed without a merge stops the waiter (5)"
+check '[[ $(cat $T/rc23g) == 0 ]] && grep -q "landed on main (0123456); continuing epic" $T/out23g && ! grep -q "no landed change" $T/out23g' "a merge landing between the PR read and the issue read continues the epic"
+check '[[ $(cat $T/rc23h) == 42 ]] && ! grep -q "no landed change" $T/out23h && ! grep -qi merged $T/out23h' "a merge landing between the reads with a failed ancestry check keeps polling"
+
+# 23i: the handoff from drive to the waiter. qa_loop approved PR #70, and the
+# human merged it before drive_epic reached the waiter, so an open-only PR list
+# no longer shows it. The waiter must still get #70 and find it landed. The
+# same harness with the old open-only lookup at the handoff (23j) must stop
+# short, or 23i cannot tell the two apart.
+check '[[ $(grep -c "STATE=awaiting-merge" "$BIN/master.sh") == $(grep -c "STATE=awaiting-merge; STATE_PR=\"\$pr\"" "$BIN/master.sh") ]] && (( $(grep -c "STATE=awaiting-merge; STATE_PR" "$BIN/master.sh") >= 3 ))' \
+  "every awaiting-merge in qa_loop pins the PR it approved"
+w_json empty_list '[]'
+w_epic() {  # w_epic <case> <drive_epic source filter>
+  local c="$1" filter="$2"
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub23:$PATH" AC_MERGE_POLL_SECONDS=1 AC_WAIT_MERGE=1 \
+      W_PR="$T/w_main_pr.json" W_ISSUE="$T/w_issue_open.json" W_CMP="$T/w_cmp_behind.json" \
+      W_LIST="$T/w_empty_list.json" W_MARK="$T/w_mark_$c"
+    eval "$(sed -n '/^pr_for()/,/^}/p;/^pr_landed()/,/^}/p;/^wait_for_merge()/,/^}/p' "$BIN/master.sh")"
+    eval "$(sed -n '/^drive_epic()/,/^}/p' "$BIN/master.sh" | sed "$filter")"
+    children() { echo 7; }
+    blockers_of() { :; }
+    limit_stop() { :; }
+    drive() { STATE=awaiting-merge; STATE_PR=70; }
+    sleep() { exit 42; }
+    rc=0; ( drive_epic 5 ) > "$T/out23$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc23$c"
+  )
+}
+w_epic i ''
+w_epic j 's/wait_pr="\$STATE_PR"/wait_pr="$(pr_for "$c" || true)"/'
+check '[[ $(cat $T/rc23i) == 0 ]] && grep -q "PR #70 landed on main (0123456); continuing epic" $T/out23i && grep -q "all children processed" $T/out23i' \
+  "a PR merged before the waiter starts is still checked for landing, and the epic continues"
+check 'grep -q "cannot identify the open PR for #7" $T/out23j && ! grep -q "all children processed" $T/out23j' \
+  "control: an open-only lookup at the handoff loses the merged PR"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
