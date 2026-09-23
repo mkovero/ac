@@ -15,6 +15,7 @@ mod common;
 mod basics;
 mod calibrate;
 mod corrupt_cal;
+mod ctrl_timeout;
 mod level_max;
 mod modes;
 mod monitor;

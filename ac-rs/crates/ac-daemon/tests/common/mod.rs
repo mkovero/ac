@@ -289,19 +289,86 @@ impl Drop for Daemon {
     }
 }
 
-/// Default CTRL/DATA socket receive timeout.
+/// Default CTRL send timeout and DATA (SUB) receive timeout.
 const DEFAULT_TIMEOUT_MS: i32 = 5_000;
+
+/// Default CTRL (REQ) receive timeout: how long [`Client::call`] waits for a
+/// daemon reply before failing. It is the only bound on a daemon that never
+/// replies (`.config/nextest.toml` sets no `slow-timeout`), so a hang still
+/// fails within this time.
+///
+/// Set from a full-workspace measurement, not guessed (#564): 3× the slowest
+/// reply any `cmd` gave across four full-workspace nextest runs on the dev VM
+/// (`stop`, 6056 ms), rounded up to whole seconds. Cap 30 s: a need above it
+/// is contention or handler latency, not a margin. The per-`cmd` table is in
+/// the PR for #564; re-measure with the [`SLOW_CALL_REPORT_MS`] lines before
+/// changing it. Valid for that machine only.
+pub const CTRL_RECV_TIMEOUT_MS: i32 = 19_000;
+
+/// A CTRL reply slower than this writes one `slow CTRL call` line to stderr
+/// (`cmd`, elapsed, timeout). A readout, not a gate: nextest shows it only
+/// for a failing test or with `--success-output`, and it is how the margin
+/// behind [`CTRL_RECV_TIMEOUT_MS`] is measured.
+const SLOW_CALL_REPORT_MS: u128 = 1_000;
+
+/// Lines of daemon log quoted in a [`CtrlTimeout`] message.
+const TIMEOUT_LOG_LINES: usize = 20;
+
+/// A CTRL call that got no reply within the client's receive timeout.
+#[derive(Debug)]
+pub struct CtrlTimeout {
+    /// The request's `cmd` field (the whole request if it has none).
+    pub cmd: String,
+    /// The receive timeout the client waited, in ms.
+    pub timeout_ms: i32,
+    /// How long the call actually took before giving up.
+    pub elapsed: Duration,
+    /// The last lines of the daemon's log at the time of the timeout.
+    pub log_tail: String,
+}
+
+impl std::fmt::Display for CtrlTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CTRL `{}`: no reply within the {} ms receive timeout \
+             (gave up after {} ms)\n--- daemon log (last {} lines) ---\n{}",
+            self.cmd,
+            self.timeout_ms,
+            self.elapsed.as_millis(),
+            TIMEOUT_LOG_LINES,
+            self.log_tail,
+        )
+    }
+}
+
+impl std::error::Error for CtrlTimeout {}
+
+/// The name a CTRL request goes by in failure messages: its `cmd` field, or
+/// the whole request when it has none.
+fn cmd_name(cmd: &Value) -> String {
+    match cmd.get("cmd").and_then(Value::as_str) {
+        Some(name) => name.to_string(),
+        None => cmd.to_string(),
+    }
+}
+
+fn last_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
 
 pub struct Client<'a> {
     _ctx: zmq::Context,
     req: zmq::Socket,
     sub: zmq::Socket,
     daemon: &'a Daemon,
+    ctrl_timeout_ms: i32,
 }
 
 impl<'a> Client<'a> {
     pub fn new(d: &'a Daemon) -> Self {
-        Self::with_ctrl_timeout(d, DEFAULT_TIMEOUT_MS)
+        Self::with_ctrl_timeout(d, CTRL_RECV_TIMEOUT_MS)
     }
 
     /// A client whose CTRL receive timeout is not the default. Needed for
@@ -330,6 +397,7 @@ impl<'a> Client<'a> {
             req,
             sub,
             daemon: d,
+            ctrl_timeout_ms,
         }
     }
 
@@ -339,11 +407,51 @@ impl<'a> Client<'a> {
         self.daemon
     }
 
+    /// Send one CTRL request and return the decoded reply. Panics with the
+    /// [`CtrlTimeout`] message (command name, timeout, daemon log tail) when
+    /// no reply arrives in time.
     pub fn call(&self, cmd: Value) -> Value {
+        self.try_call(cmd).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`Self::call`], but a receive timeout comes back as `Err` instead of
+    /// a panic, so a test can assert on it. Any other send/receive/decode
+    /// failure still panics with its own text: only `EAGAIN` from the
+    /// receive is a timeout.
+    ///
+    /// After an `Err` this client is unusable: the REQ socket is still
+    /// waiting for the reply it never got, so a further send fails. There is
+    /// no reconnect or retry here on purpose — a retry would hide the slow
+    /// reply this error exists to report.
+    pub fn try_call(&self, cmd: Value) -> Result<Value, CtrlTimeout> {
+        let name = cmd_name(&cmd);
         let raw = serde_json::to_vec(&cmd).unwrap();
-        self.req.send(raw, 0).unwrap();
-        let bytes = self.req.recv_bytes(0).expect("CTRL recv");
-        serde_json::from_slice(&bytes).expect("CTRL decode")
+        let start = Instant::now();
+        self.req
+            .send(raw, 0)
+            .unwrap_or_else(|e| panic!("CTRL `{name}` send: {e}"));
+        let reply = self.req.recv_bytes(0);
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > SLOW_CALL_REPORT_MS {
+            eprintln!(
+                "slow CTRL call: cmd={name} elapsed_ms={} timeout_ms={}",
+                elapsed.as_millis(),
+                self.ctrl_timeout_ms
+            );
+        }
+        let bytes = match reply {
+            Ok(bytes) => bytes,
+            Err(zmq::Error::EAGAIN) => {
+                return Err(CtrlTimeout {
+                    cmd: name,
+                    timeout_ms: self.ctrl_timeout_ms,
+                    elapsed,
+                    log_tail: last_lines(&self.daemon.log_tail(), TIMEOUT_LOG_LINES),
+                })
+            }
+            Err(e) => panic!("CTRL `{name}` recv: {e}"),
+        };
+        Ok(serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("CTRL `{name}` decode: {e}")))
     }
 
     /// Pop one PUB frame as topic + undecoded payload bytes; `None` on
