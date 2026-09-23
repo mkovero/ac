@@ -210,10 +210,14 @@ limit_stop() {
 # transient-error backoff is separate: during a GitHub outage the worst case is
 # 5 x gh_retry's backoff plus those 20 s. Measured on mkovero/ac (#573,
 # 2026-09-23, polling every 1 s): after a push to the PR branch, UNKNOWN
-# cleared within 5 s on each of two pushes. The base-move case (a merge to main
-# under an open PR) was not measurable without a merge and remains assumed; if
-# a run exhausts the bounds on a PR that turns out to be mergeable, raise them
-# and cite that run. A failed read, empty output or any other value uses up an attempt
+# cleared within 5 s on each of two pushes. After a base move (scratch PR #574,
+# six pushes to its base branch, alternately creating and removing a conflict
+# with the head so each verdict flip proves a recompute against the new tip),
+# the new verdict arrived within 4.1 s every time. The read taken ~0.6 s after
+# a base push still returned the previous verdict rather than UNKNOWN; these
+# bounds do not cover that stale window. If a run exhausts the bounds on a PR
+# that turns out to be mergeable, raise them and cite that run. A failed read,
+# empty output or any other value uses up an attempt
 # as UNKNOWN — never as MERGEABLE.
 pr_mergeable() {
   local pr="$1" m i tries=5 wait=5
