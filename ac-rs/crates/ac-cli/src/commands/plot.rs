@@ -3765,6 +3765,39 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("400")), "{lines:?}");
     }
 
+    /// An arrival inside the guard band leaves the floor on the peak, and
+    /// the continuation is the fixed unmeasured form: no `inf`, no number,
+    /// no arrival sample (#550 UX revision 4).
+    #[test]
+    fn pre_impulse_snr_lines_name_an_unmeasured_arrival_without_a_number() {
+        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        stats.arrival_index = 4;
+        stats.pre_impulse_snr_db = 9.1;
+        stats.band_limited_snr_db = Some(f64::INFINITY);
+        stats.arrival_cross_check = ArrivalCrossCheck::Agrees { gap: 596 };
+        stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalUnmeasured;
+        stats.verdict = IrVerdict::Failed {
+            reason: "pre-impulse SNR below threshold".into(),
+        };
+        let lines = pre_impulse_snr_lines(&stats, Some(&PreImpulseSnrScope::Scored));
+        assert_eq!(
+            lines[1..],
+            [
+                format!("{CONT_INDENT}floor ends 32 samples before peak, sample 600"),
+                format!(
+                    "{CONT_INDENT}not before arrival \u{2014} arrival SNR unmeasured, no floor before it"
+                ),
+                format!("{CONT_INDENT}scored for this sweep's band, length, window"),
+            ]
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("inf") || l.contains('\u{221e}') || l.contains(" 4,")),
+            "{lines:?}"
+        );
+    }
+
     // ─── #537: the band-limited arrival's rows ───────────────────────────
 
     /// #537 UX's `BroadbandLater` shape: 96 kHz, τ 1711, arrival +596 after

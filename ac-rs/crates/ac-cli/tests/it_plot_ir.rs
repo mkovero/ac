@@ -460,7 +460,10 @@ fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
         "  level       -40.0 dBFS  (default)",
         "  captured      4.50 s  (4.00 s sweep + 0.50 s tail)",
         "(required \u{2265} 18.0 dB)",
+        // #550: on a clean loopback the arrival is the peak, so the live
+        // path takes the `arrival and peak` anchor.
         "                floor ends ",
+        " samples before arrival and peak, sample ",
         "                scored for this sweep's band, length, window",
         "rectangular window, 19200 samples (400.00 ms)",
     ] {
