@@ -418,26 +418,41 @@ fn captured_line(duration: Option<f64>, tail_s: Option<f64>) -> String {
 /// The failed-deconvolution banner (#376), with the places to check
 /// (#501 UX): the sweep rows printed above, then the capture chain.
 fn deconvolution_failed_lines(reason: &str) -> Vec<String> {
+    use ac_core::measurement::report::{
+        PRE_IMPULSE_SNR_CHECKS_CHAIN, PRE_IMPULSE_SNR_CHECKS_SWEEP,
+    };
     vec![
         format!("  DECONVOLUTION FAILED \u{2014} {reason}"),
-        format!("{CONT_INDENT}check: sweep length, band, window (above)"),
-        format!("{CONT_INDENT}check: drive level, input gain, distance, room noise"),
+        format!("{CONT_INDENT}check: {PRE_IMPULSE_SNR_CHECKS_SWEEP} (above)"),
+        format!("{CONT_INDENT}check: {PRE_IMPULSE_SNR_CHECKS_CHAIN}"),
     ]
 }
 
 /// The `pre-imp SNR` rows. A finite figure is shown next to the threshold
-/// it was compared against, pass or fail, with the threshold's basis under
-/// it (#501). A non-finite figure has no comparison to qualify.
-fn pre_impulse_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
-    use ac_core::measurement::report::{IrVerdict, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB};
+/// it was compared against, pass or fail. Under it (#550 UX): where the
+/// floor ended — the figure's definition, since the anchor moved — and
+/// whether the threshold was scored for this sweep. A non-finite `Failed`
+/// figure measured no floor, so it prints neither; a zero measured floor
+/// still names its region.
+fn pre_impulse_snr_lines(
+    stats: &ac_core::measurement::report::IrStats,
+    scope: Option<&ac_core::measurement::report::PreImpulseSnrScope>,
+) -> Vec<String> {
+    use ac_core::measurement::report::{IrVerdict, PRE_IMPULSE_SNR_MIN_DB};
+    let context = || {
+        stats
+            .pre_impulse_floor_lines()
+            .into_iter()
+            .chain(scope.map(ToString::to_string))
+            .map(|l| format!("{CONT_INDENT}{l}"))
+    };
     if stats.pre_impulse_snr_db.is_finite() {
-        vec![
-            format!(
-                "  pre-imp SNR   {:.1} dB  (required \u{2265} {:.1} dB)",
-                stats.pre_impulse_snr_db, PRE_IMPULSE_SNR_MIN_DB,
-            ),
-            format!("{CONT_INDENT}{PRE_IMPULSE_SNR_BASIS}"),
-        ]
+        std::iter::once(format!(
+            "  pre-imp SNR   {:.1} dB  (required \u{2265} {:.1} dB)",
+            stats.pre_impulse_snr_db, PRE_IMPULSE_SNR_MIN_DB,
+        ))
+        .chain(context())
+        .collect()
     } else if let IrVerdict::Failed { reason } = &stats.verdict {
         // Non-finite here means `ir_stats` had nothing to measure a floor
         // from at all (see the reason already printed in the banner
@@ -447,7 +462,9 @@ fn pre_impulse_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<S
     } else {
         // Non-finite but `Ok`: a zero floor against a nonzero peak is the
         // best possible capture, not an unmeasurable one.
-        vec!["  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string()]
+        std::iter::once("  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string())
+            .chain(context())
+            .collect()
     }
 }
 
@@ -1503,17 +1520,15 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
 /// the mark qualifies the arrival, which is upstream of the latency.
 fn flight_time_block(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{
-        ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
-        ARRIVAL_SNR_MIN_DB,
+        arrival_snr_low_reason, ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB,
+        ARRIVAL_LOBE_MARGIN_MIN_DB,
     };
     let cross_check = match stats.arrival_cross_check {
         ArrivalCrossCheck::BandLimitUnavailable {
             band_top_hz,
             required_hz,
         } => Some(band_limit_unavailable_reason(band_top_hz, required_hz)),
-        ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => Some(format!(
-            "arrival SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB"
-        )),
+        ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => Some(arrival_snr_low_reason(snr_db)),
         ArrivalCrossCheck::ArrivalAmbiguous { .. } => Some(format!(
             "second lobe within {ARRIVAL_LOBE_MARGIN_MIN_DB:.1} dB (above)"
         )),
@@ -1728,7 +1743,8 @@ fn print_ir_report(report: &MeasurementReport) {
     for line in arrival_check_lines(&stats.arrival_check, stored_period_size) {
         println!("{line}");
     }
-    for line in pre_impulse_snr_lines(&stats) {
+    let scope = ac_core::measurement::report::pre_impulse_snr_scope(report);
+    for line in pre_impulse_snr_lines(&stats, scope.as_ref()) {
         println!("{line}");
     }
     println!(
@@ -2022,7 +2038,8 @@ mod tests {
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, InterPairOffset,
         InterfaceLatency, IrStats, IrVerdict, LatencyBasis, LiveOffset, MeasuredInterPairOffset,
-        MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, ReferenceLatency, WithheldBasis,
+        MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, PreImpulseAnchor,
+        PreImpulseSnrScope, ReferenceLatency, ScoredSweepParam, WithheldBasis,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
     use ac_core::shared::calibration::{EnumerationCheck, TauDisagreement};
@@ -3142,6 +3159,8 @@ mod tests {
             flight_time_s,
             distance_check: DistanceCheck::NotGiven,
             pre_impulse_snr_db: 40.0,
+            pre_impulse_floor_anchor: PreImpulseAnchor::ArrivalAndPeak,
+            pre_impulse_floor_end: 600 - 1024 / 32,
             gate_window_s: 0.01,
             gate_f_low_hz: 100.0,
             gate_window_kind: "tukey".into(),
@@ -3657,24 +3676,29 @@ mod tests {
             deconvolution_failed_lines("pre-impulse SNR below threshold"),
             vec![
                 "  DECONVOLUTION FAILED \u{2014} pre-impulse SNR below threshold".to_string(),
-                format!("{CONT_INDENT}check: sweep length, band, window (above)"),
+                format!("{CONT_INDENT}check: sweep band start, length, window (above)"),
                 format!("{CONT_INDENT}check: drive level, input gain, distance, room noise"),
             ]
         );
     }
 
-    /// The threshold and its basis print on a pass as well as a failure;
-    /// a non-finite figure gets neither.
+    /// The threshold, the floor's end and the scope print on a pass as
+    /// well as a failure (#550 UX); a non-finite `Failed` figure gets none
+    /// of them, a zero measured floor keeps its region and scope.
     #[test]
-    fn pre_impulse_snr_lines_show_the_threshold_and_basis_on_pass_and_fail() {
-        let basis = format!("{CONT_INDENT}fixed threshold, scored for the default sweep only");
+    fn pre_impulse_snr_lines_show_the_threshold_floor_and_scope_on_pass_and_fail() {
+        let floor =
+            format!("{CONT_INDENT}floor ends 32 samples before arrival and peak, sample 600");
+        let scored = PreImpulseSnrScope::Scored;
+        let scope = format!("{CONT_INDENT}scored for this sweep's band, length, window");
         let mut pass = stats_with(None, ArrivalCheck::Agree);
         pass.pre_impulse_snr_db = 21.5;
         assert_eq!(
-            pre_impulse_snr_lines(&pass),
+            pre_impulse_snr_lines(&pass, Some(&scored)),
             vec![
                 "  pre-imp SNR   21.5 dB  (required \u{2265} 18.0 dB)".to_string(),
-                basis.clone(),
+                floor.clone(),
+                scope.clone(),
             ]
         );
         let mut fail = pass.clone();
@@ -3682,20 +3706,65 @@ mod tests {
         fail.verdict = IrVerdict::Failed {
             reason: "pre-impulse SNR below threshold".into(),
         };
+        let unscored = PreImpulseSnrScope::Unscored(vec![ScoredSweepParam::Band]);
         assert_eq!(
-            pre_impulse_snr_lines(&fail),
+            pre_impulse_snr_lines(&fail, Some(&unscored)),
             vec![
                 "  pre-imp SNR   12.3 dB  (required \u{2265} 18.0 dB)".to_string(),
-                basis,
+                floor.clone(),
+                format!("{CONT_INDENT}unscored for this sweep's band"),
             ]
         );
         let mut silent = pass.clone();
         silent.pre_impulse_snr_db = f64::INFINITY;
         assert_eq!(
-            pre_impulse_snr_lines(&silent),
-            vec!["  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string()]
+            pre_impulse_snr_lines(&silent, Some(&scored)),
+            vec![
+                "  pre-imp SNR   \u{221e} dB  (zero measured floor)".to_string(),
+                floor,
+                scope,
+            ]
+        );
+        let mut empty = fail.clone();
+        empty.pre_impulse_snr_db = f64::INFINITY;
+        empty.pre_impulse_floor_end = 0;
+        empty.verdict = IrVerdict::Failed {
+            reason: "no pre-impulse region".into(),
+        };
+        assert_eq!(
+            pre_impulse_snr_lines(&empty, Some(&scored)),
+            vec!["  pre-imp SNR   no pre-impulse region".to_string()]
         );
     }
+
+    /// An arrival that missed its own SNR gate before the peak leaves the
+    /// floor on the peak, and the continuation says so without the pick's
+    /// sample (#550 UX revision 3); its reason is the flight time's
+    /// withheld reason, word for word.
+    #[test]
+    fn pre_impulse_snr_lines_name_an_untrusted_arrival_without_its_sample() {
+        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        stats.arrival_index = 400;
+        stats.pre_impulse_snr_db = 9.4;
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 12.2 };
+        stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalNotTrusted;
+        stats.verdict = IrVerdict::Failed {
+            reason: "pre-impulse SNR below threshold".into(),
+        };
+        let lines = pre_impulse_snr_lines(&stats, Some(&PreImpulseSnrScope::Scored));
+        assert_eq!(
+            lines[1..],
+            [
+                format!("{CONT_INDENT}floor ends 32 samples before peak, sample 600"),
+                format!(
+                    "{CONT_INDENT}not before arrival \u{2014} arrival SNR 12.2 dB, required \u{2265} 35.0 dB"
+                ),
+                format!("{CONT_INDENT}scored for this sweep's band, length, window"),
+            ]
+        );
+        assert!(!lines.iter().any(|l| l.contains("400")), "{lines:?}");
+    }
+
     // ─── #537: the band-limited arrival's rows ───────────────────────────
 
     /// #537 UX's `BroadbandLater` shape: 96 kHz, τ 1711, arrival +596 after

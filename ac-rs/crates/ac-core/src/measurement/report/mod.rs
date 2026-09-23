@@ -52,17 +52,21 @@ mod ir_stats;
 #[cfg(test)]
 mod late_edge_replay;
 mod payload;
+#[cfg(test)]
+mod pre_impulse_region_replay;
 mod provenance;
 
 #[cfg(test)]
 pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
-    arrival_cross_check_tolerance_samples, ArrivalCheck, ArrivalCrossCheck, ArrivalSource,
-    DistanceCheck, DistanceWindow, IrStats, IrVerdict, LatencyBasis, LiveOffset, OnsetStanding,
-    WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
+    arrival_cross_check_tolerance_samples, arrival_snr_low_reason, pre_impulse_snr_scope,
+    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, DistanceWindow, IrStats,
+    IrVerdict, LatencyBasis, LiveOffset, OnsetStanding, PreImpulseAnchor, PreImpulseSnrScope,
+    ScoredSweepParam, WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
     ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
     ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, DISTANCE_SPEED_OF_SOUND_REL_TOL,
-    DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_BASIS, PRE_IMPULSE_SNR_MIN_DB,
+    DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_CHECKS_CHAIN, PRE_IMPULSE_SNR_CHECKS_SWEEP,
+    PRE_IMPULSE_SNR_MIN_DB,
 };
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,

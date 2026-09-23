@@ -1467,7 +1467,12 @@ on a later path than the first. A zero-phase filter leaves a pure delay's peak o
 so the arrival still pairs with `calibrate`'s peak-picked τ. When the
 payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
 is the broadband peak (`ArrivalSource::Peak`) and the flight time is
-withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband.
+withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
+but since #550 the floor under `pre_impulse_snr_db` ends one guard band
+before the band-limited arrival when that arrival is trusted (its standing
+is not `BandLimitedSnrLow`) and precedes the peak, and before the peak
+otherwise (`IrStats::pre_impulse_floor_anchor`, `pre_impulse_floor_end`).
+Derived on read, so a report written earlier re-reads with the new figure.
 `IrStats::arrival_cross_check` guards the pick and compares it with the
 broadband IR, first match wins: `BandLimitUnavailable` (withheld);
 `BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR

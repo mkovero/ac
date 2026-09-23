@@ -8,9 +8,11 @@ use super::{
     ReferenceLatency,
 };
 use crate::measurement::sweep::{
-    band_limit_available, band_limit_top_hz, ir_peak, lobe_window_samples, pre_impulse_snr_db,
-    second_lobe, zero_phase_high_pass, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput,
-    OnsetEstimate, OnsetPick, WindowLimit, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
+    band_limit_available, band_limit_top_hz, ir_default_window_len, ir_peak, lobe_window_samples,
+    pre_impulse_snr_db, pre_impulse_snr_db_before, second_lobe, zero_phase_high_pass, BoundInputs,
+    CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, WindowLimit,
+    ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
+    IR_DEFAULT_F2_HZ,
 };
 use crate::shared::calibration::{
     compare_tau_readings, EnumerationCheck, TauComparison, TauDisagreement,
@@ -64,16 +66,149 @@ use crate::shared::calibration::{
 /// floor − 3 dB) was rejected at those defaults because it accepted a
 /// noise-only capture in 15 of 200 draws; the fixed value accepted none.
 ///
+/// **Tail domain (#550).** The tail is not among the parameters the
+/// scoring depends on, as long as it is at least half the window.
+/// `deconvolve_full` is a full linear convolution and `extract_irs` cuts
+/// the linear IR at `full[N − 1 − ⌊W/2⌋ ..][..W]` (N the sweep length, W the
+/// window), and `full[m]` reads only capture samples `0..=m`. Every capture
+/// of at least `N + ⌈W/2⌉` samples therefore gives the same linear IR, up
+/// to FFT rounding, and the figure is a function of the linear IR alone.
+/// The 0.5 s tail #501 scored against a 0.4 s window stands for every tail
+/// ≥ W/2. A tail below W/2 truncates the late half of the IR, which is
+/// #576, not a scoring question. Harmonic count reaches the linear IR only
+/// through the window clamp, which shows as the window length.
+///
 /// A typed configuration (another band, length or window) is still judged
-/// against this value, which nobody has derived for it (#474). The
-/// operator is told so by [`PRE_IMPULSE_SNR_BASIS`].
+/// against this value, which nobody has derived for it (#474).
+/// [`pre_impulse_snr_scope`] compares exactly those three against the
+/// defaults and names the ones that differ on every read-out.
+///
+/// **Region (#550).** When the band-limited arrival (#537) is trusted —
+/// it cleared [`ARRIVAL_SNR_MIN_DB`], so its standing is not
+/// [`ArrivalCrossCheck::BandLimitedSnrLow`] — the floor ends one guard
+/// band before the *earlier* of that arrival and the broadband peak
+/// ([`IrStats::pre_impulse_floor_anchor`]). Otherwise it ends before the
+/// broadband peak, the region #501 scored: on a noise-only capture the
+/// high-passed argmax is not a response, and anchoring on it accepted 9 of
+/// 400 noise-only draws. On pupu's default-band captures at 1.00 m and −50 dBFS
+/// (`d1p0-onaxis`, 2026-09-21) the broadband argmax was a low-frequency
+/// room mode ≈ 2300 samples after the arrival, so a floor ending before it
+/// held the direct sound and the early field — measured, per capture,
+/// before-argmax vs before-arrival:
+///
+/// | capture | arrival | argmax | before argmax | before arrival |
+/// |---|---|---|---|---|
+/// | 01 | 21246 | 23545 | 17.4 dB | 25.1 dB |
+/// | 02 | 21246 | 23547 | 19.1 dB | 25.3 dB |
+/// | 03 | 21245 | 23545 | 16.1 dB | 21.6 dB |
+/// | 04 | 21245 | 23545 | 17.4 dB | 22.2 dB |
+/// | 05 | 21246 | 23546 | 17.1 dB | 21.5 dB |
+///
+/// Where arrival and peak are the same sample (a clean loopback, or no
+/// band-limited arrival) the region is the one #501 scored, unchanged. The
+/// replay is pinned in `pre_impulse_region_replay.rs`.
 pub const PRE_IMPULSE_SNR_MIN_DB: f64 = 18.0;
 
-/// What [`PRE_IMPULSE_SNR_MIN_DB`] was scored against, as printed under
-/// the pre-impulse SNR by `ac-cli` and inside `ac-scene`'s fault detail
-/// (#501). True on a default run (the gate was checked for this sweep)
-/// and on a typed one (it was not). Changes with the provenance above.
-pub const PRE_IMPULSE_SNR_BASIS: &str = "fixed threshold, scored for the default sweep only";
+/// The places to check under a failed deconvolution, first line: the
+/// sweep rows, the measured lever first (#550 UX — on pupu the band start
+/// moved the figure by 18 dB, the length by 0.5 dB). `ac-cli` prints it
+/// and [`PRE_IMPULSE_SNR_CHECKS_CHAIN`] as two `check:` lines; `ac-scene`'s
+/// fault detail joins them with `, `.
+pub const PRE_IMPULSE_SNR_CHECKS_SWEEP: &str = "sweep band start, length, window";
+
+/// The places to check under a failed deconvolution, second line: the
+/// capture chain. See [`PRE_IMPULSE_SNR_CHECKS_SWEEP`].
+pub const PRE_IMPULSE_SNR_CHECKS_CHAIN: &str = "drive level, input gain, distance, room noise";
+
+/// A sweep parameter [`PRE_IMPULSE_SNR_MIN_DB`] was scored for (#550), in
+/// the order `ac plot ir`'s `IR sweep` block prints them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoredSweepParam {
+    /// f1 and f2 against `IR_DEFAULT_F1_HZ` / `IR_DEFAULT_F2_HZ`.
+    Band,
+    /// The sweep duration against `IR_DEFAULT_DURATION_S`.
+    Length,
+    /// `linear_ir.len()` against `ir_default_window_len(sample_rate_hz)`.
+    Window,
+}
+
+impl ScoredSweepParam {
+    /// Every scoped parameter, in print order.
+    pub const ALL: [ScoredSweepParam; 3] = [Self::Band, Self::Length, Self::Window];
+
+    /// The row name the parameter prints under.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Band => "band",
+            Self::Length => "length",
+            Self::Window => "window",
+        }
+    }
+}
+
+/// Whether [`PRE_IMPULSE_SNR_MIN_DB`] was scored for a report's sweep
+/// (#550): see [`pre_impulse_snr_scope`]. Its `Display` is the scope line
+/// `ac-cli` and `ac-scene` print verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreImpulseSnrScope {
+    /// Band, length and window equal the scored defaults.
+    Scored,
+    /// The parameters that differ, in [`ScoredSweepParam::ALL`] order;
+    /// never empty.
+    Unscored(Vec<ScoredSweepParam>),
+}
+
+impl std::fmt::Display for PreImpulseSnrScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (lead, params): (&str, &[ScoredSweepParam]) = match self {
+            Self::Scored => ("scored", &ScoredSweepParam::ALL),
+            Self::Unscored(params) => ("unscored", params),
+        };
+        let names: Vec<&str> = params.iter().map(|p| p.name()).collect();
+        write!(f, "{lead} for this sweep's {}", names.join(", "))
+    }
+}
+
+/// The scope of [`PRE_IMPULSE_SNR_MIN_DB`] for `report`'s first
+/// `ImpulseResponse` payload (#550): scored when its band, length and
+/// window equal the `plot_ir` defaults it was scored against, otherwise
+/// the ones that differ. Compared exactly — defaults reach the report as
+/// the same constants. Takes no tail and no harmonic count: the linear IR
+/// does not depend on either inside the scored domain (see
+/// [`PRE_IMPULSE_SNR_MIN_DB`]'s tail paragraph). `None` without an
+/// impulse-response payload.
+pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnrScope> {
+    let (sample_rate_hz, f1_hz, f2_hz, duration_s, window_len) =
+        report.data.iter().find_map(|p| match &p.data {
+            MeasurementData::ImpulseResponse {
+                sample_rate_hz,
+                f1_hz,
+                f2_hz,
+                duration_s,
+                linear_ir,
+                ..
+            } => Some((
+                *sample_rate_hz,
+                *f1_hz,
+                *f2_hz,
+                *duration_s,
+                linear_ir.len(),
+            )),
+            _ => None,
+        })?;
+    let differs = |param: &ScoredSweepParam| match param {
+        ScoredSweepParam::Band => f1_hz != IR_DEFAULT_F1_HZ || f2_hz != IR_DEFAULT_F2_HZ,
+        ScoredSweepParam::Length => duration_s != IR_DEFAULT_DURATION_S,
+        ScoredSweepParam::Window => window_len != ir_default_window_len(sample_rate_hz),
+    };
+    let unscored: Vec<ScoredSweepParam> =
+        ScoredSweepParam::ALL.into_iter().filter(differs).collect();
+    Some(if unscored.is_empty() {
+        PreImpulseSnrScope::Scored
+    } else {
+        PreImpulseSnrScope::Unscored(unscored)
+    })
+}
 
 /// Minimum pre-impulse SNR of the high-passed IR, in dB, below which the
 /// band-limited arrival withholds the flight time (#537,
@@ -97,6 +232,16 @@ pub const PRE_IMPULSE_SNR_BASIS: &str = "fixed threshold, scored for the default
 /// coupled-constants test in `arrival_suite.rs` fails if either moves
 /// alone. A longer typed gate raises the noise crest, which errs toward
 /// refusal.
+///
+/// **Also decides the #376 verdict's floor (#550).** Only an arrival that
+/// cleared this value may end [`PRE_IMPULSE_SNR_MIN_DB`]'s floor before
+/// the broadband peak. The noise crest of the high-passed IR over the
+/// default window is about 13 dB (√(2 ln W), derived; 11.5–12.9 dB
+/// measured on noise-only draws). Lowering this toward it lets a noise
+/// argmax cut the floor short again, which accepted 9 of 400 noise-only
+/// draws before #550's revision 3. The negative control
+/// `no_signal_is_refused_before_and_after_the_floor_anchor_moves` fails if
+/// a noise-only draw reaches this value.
 ///
 /// Was 20.0 dB (revision 2): §A.3.4's trigger level taken as the gate on
 /// its own. Falsified by the prototype suite once the earlier-comparable
@@ -193,6 +338,9 @@ pub const ARRIVAL_LOBE_MARGIN_MIN_DB: f64 = 3.0;
 /// the weakest healthy lead lobe sat at −4.4 dB. Coupled to
 /// [`ARRIVAL_CROSS_CHECK_TOLERANCE_S`]: at the 18 dB broadband SNR gate,
 /// pre-arrival noise inside the tolerance peaks near −9 dB, below this.
+/// Since #550 the gate's floor is the pre-arrival one, so that is the
+/// quantity gated; `pre_impulse_region_replay.rs` asserts the margin on the
+/// `d1p0-onaxis` captures.
 pub const ARRIVAL_BROADBAND_COMPARABLE_DB: f64 = 6.0;
 
 /// [`ARRIVAL_CROSS_CHECK_TOLERANCE_S`] at `sample_rate_hz`, rounded to whole
@@ -419,15 +567,8 @@ impl MeasurementReport {
         // would peak at.
         let centre = window_len / 2;
 
-        let pre_region = pre_impulse_region(linear_ir, peak_index);
-        // Same formula `ac-daemon`'s τ gate calls (#368) — one definition
-        // of "pre-impulse SNR", not two that can drift.
-        let pre_impulse_snr_db = pre_impulse_snr_db(linear_ir, peak_index);
-
         // #537: the arrival comes from the zero-phase high-passed IR and is
-        // cross-checked against the broadband peak above. The broadband
-        // peak, its pre-impulse region and `verdict` keep their meaning
-        // (#376/#501 are not re-scored here).
+        // cross-checked against the broadband peak above.
         let BandLimitedArrival {
             arrival_index,
             source: arrival_source,
@@ -437,6 +578,44 @@ impl MeasurementReport {
             broadband_delta_level_db,
             cross_check: arrival_cross_check,
         } = band_limited_arrival(linear_ir, *sample_rate_hz, f2_hz, peak_index);
+
+        // #550: the verdict's floor ends before the first *trusted*
+        // response — the earlier of the arrival and the broadband peak when
+        // the band-limited arrival cleared its own SNR gate — not before the
+        // broadband peak alone, which can sit a room mode after the arrival
+        // and put the direct sound into the floor. An untrusted pick is not
+        // used: on a noise-only capture the high-passed argmax lands early
+        // and at random, and a floor cut short before it accepted 9 of 400
+        // noise-only draws (#550 architect revision 3). The standing is the
+        // single source of trust — `BandLimitedSnrLow` is checked first in
+        // `band_limited_arrival_under`, so any other band-limited standing
+        // cleared `ARRIVAL_SNR_MIN_DB`. The numerator stays the broadband
+        // peak. Same formula `ac-daemon`'s τ gate calls (#368), with the
+        // anchor passed separately.
+        let arrival_trusted = matches!(arrival_source, ArrivalSource::BandLimitedPeak { .. })
+            && !matches!(
+                arrival_cross_check,
+                ArrivalCrossCheck::BandLimitedSnrLow { .. }
+            );
+        let (floor_anchor_index, pre_impulse_floor_anchor) = match arrival_index.cmp(&peak_index) {
+            std::cmp::Ordering::Equal => (peak_index, PreImpulseAnchor::ArrivalAndPeak),
+            std::cmp::Ordering::Less if arrival_trusted => {
+                (arrival_index, PreImpulseAnchor::Arrival)
+            }
+            std::cmp::Ordering::Less
+                if matches!(
+                    arrival_cross_check,
+                    ArrivalCrossCheck::BandLimitedSnrLow { .. }
+                ) =>
+            {
+                (peak_index, PreImpulseAnchor::PeakArrivalNotTrusted)
+            }
+            _ => (peak_index, PreImpulseAnchor::Peak),
+        };
+        let pre_region = pre_impulse_region(linear_ir, floor_anchor_index);
+        let pre_impulse_floor_end = pre_region.len();
+        let pre_impulse_snr_db =
+            pre_impulse_snr_db_before(linear_ir, peak_index, floor_anchor_index);
 
         // The onset picker's validity gate runs off a *median* floor, not
         // off `pre_impulse_snr_db`'s RMS one — see [`onset_floor`] for why
@@ -528,6 +707,8 @@ impl MeasurementReport {
             flight_time_s,
             distance_check,
             pre_impulse_snr_db,
+            pre_impulse_floor_anchor,
+            pre_impulse_floor_end,
             gate_window_s,
             gate_f_low_hz,
             gate_window_kind,
@@ -992,9 +1173,19 @@ pub struct IrStats {
     /// any delay past `d/c` is reported as the excess, not judged. Scored
     /// even when another layer withholds it, so every reason can be named.
     pub distance_check: DistanceCheck,
-    /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
-    /// no pre-impulse energy was measurable at all (silent floor).
+    /// `20·log10(peak_magnitude / rms(linear_ir[..pre_impulse_floor_end]))`:
+    /// the broadband peak over the floor that ends one guard band before
+    /// [`Self::pre_impulse_floor_anchor`] (#550). `+inf` when no
+    /// pre-impulse energy was measurable at all (silent floor).
     pub pre_impulse_snr_db: f64,
+    /// Which index the pre-impulse floor ends before (#550): the earlier of
+    /// [`Self::arrival_index`] and [`Self::peak_index`] when the arrival is
+    /// trusted, otherwise the peak.
+    pub pre_impulse_floor_anchor: PreImpulseAnchor,
+    /// Exclusive end of the pre-impulse floor region, in samples: the
+    /// floor is `linear_ir[..pre_impulse_floor_end]`. Zero when the guard
+    /// band consumes everything before the anchor.
+    pub pre_impulse_floor_end: usize,
     /// Gate window duration, in seconds — the recorded
     /// [`GateParams::gate_length_s`] when the payload carries one.
     pub gate_window_s: f64,
@@ -1022,6 +1213,86 @@ impl IrStats {
     /// gap.
     pub fn broadband_delta_samples(&self) -> Option<i64> {
         self.arrival_cross_check.gap()
+    }
+
+    /// The sample the pre-impulse floor is anchored on (#550): the
+    /// arrival or the peak, whichever [`Self::pre_impulse_floor_anchor`]
+    /// names.
+    pub fn pre_impulse_floor_anchor_index(&self) -> usize {
+        match self.pre_impulse_floor_anchor {
+            PreImpulseAnchor::Peak | PreImpulseAnchor::PeakArrivalNotTrusted => self.peak_index,
+            PreImpulseAnchor::Arrival | PreImpulseAnchor::ArrivalAndPeak => self.arrival_index,
+        }
+    }
+
+    /// Where the pre-impulse floor ends, as `ac-cli` prints it line by line
+    /// and `ac-scene` joins with `, ` (#550 UX): `floor ends 1200 samples
+    /// before arrival, sample 21246`. On
+    /// [`PreImpulseAnchor::PeakArrivalNotTrusted`] a second line names the
+    /// earlier pick that was set aside and why, without its sample: `not
+    /// before arrival — arrival SNR 12.2 dB, required ≥ 35.0 dB`. Empty
+    /// when the floor region is — the verdict's reason already says there
+    /// is no floor.
+    pub fn pre_impulse_floor_lines(&self) -> Vec<String> {
+        if self.pre_impulse_floor_end == 0 {
+            return Vec::new();
+        }
+        let anchor = self.pre_impulse_floor_anchor_index();
+        let mut lines = vec![format!(
+            "floor ends {} samples before {}, sample {anchor}",
+            anchor - self.pre_impulse_floor_end,
+            self.pre_impulse_floor_anchor.name(),
+        )];
+        if self.pre_impulse_floor_anchor == PreImpulseAnchor::PeakArrivalNotTrusted {
+            if let ArrivalCrossCheck::BandLimitedSnrLow { snr_db } = self.arrival_cross_check {
+                lines.push(format!(
+                    "not before arrival \u{2014} {}",
+                    arrival_snr_low_reason(snr_db)
+                ));
+            }
+        }
+        lines
+    }
+}
+
+/// Why a band-limited arrival was not trusted (#537, #550):
+/// `arrival SNR 12.2 dB, required ≥ 35.0 dB`. One string for the flight
+/// time's withheld reason and the pre-impulse floor line, so the two
+/// cannot drift.
+pub fn arrival_snr_low_reason(snr_db: f64) -> String {
+    format!("arrival SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB")
+}
+
+/// Which index [`IrStats::pre_impulse_snr_db`]'s floor ends before, and
+/// whether a band-limited arrival was passed over for it (#550).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreImpulseAnchor {
+    /// A trusted band-limited arrival (one that cleared
+    /// [`ARRIVAL_SNR_MIN_DB`]) precedes the broadband peak — the room-mode
+    /// case #550 fixes.
+    Arrival,
+    /// The broadband peak precedes the arrival
+    /// ([`ArrivalCrossCheck::BroadbandEarlier`]), trusted or not. The
+    /// region is the one #501 scored.
+    Peak,
+    /// The two are the same sample, trusted or not: a clean loopback, or
+    /// no band-limited arrival. The region is the one #501 scored.
+    ArrivalAndPeak,
+    /// The band-limited arrival precedes the peak but missed its own SNR
+    /// gate ([`ArrivalCrossCheck::BandLimitedSnrLow`]), so the floor ends
+    /// before the peak — the region #501 scored — and may contain that
+    /// pick.
+    PeakArrivalNotTrusted,
+}
+
+impl PreImpulseAnchor {
+    /// The anchor's word in the floor line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Arrival => "arrival",
+            Self::Peak | Self::PeakArrivalNotTrusted => "peak",
+            Self::ArrivalAndPeak => "arrival and peak",
+        }
     }
 }
 
@@ -2803,6 +3074,85 @@ mod tests {
         );
     }
 
+    /// #550 architect revision 3, the trusted branch and its fallback on a
+    /// real-shaped IR: #537's room-mode fixture anchors the verdict's floor
+    /// on the arrival; white noise added until the arrival misses
+    /// [`ARRIVAL_SNR_MIN_DB`] — the pick still on the same sample — flips
+    /// the anchor to the peak, and the figure is then the #501 one, bit for
+    /// bit. Also pins the floor line's two forms (#550 UX).
+    #[test]
+    fn an_untrusted_arrival_leaves_the_floor_before_the_peak() {
+        let RoomModeCapture {
+            report,
+            t0,
+            mode_peak,
+        } = direct_plus_room_mode_report();
+        let clean = report.ir_stats().unwrap();
+        assert!(clean.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
+        assert!(clean.arrival_index.abs_diff(t0) <= 1, "test setup");
+        assert_eq!(clean.peak_index, mode_peak, "test setup");
+        assert_eq!(clean.pre_impulse_floor_anchor, PreImpulseAnchor::Arrival);
+        let guard = clean.arrival_index - clean.pre_impulse_floor_end;
+        assert_eq!(
+            clean.pre_impulse_floor_lines(),
+            vec![format!(
+                "floor ends {guard} samples before arrival, sample {}",
+                clean.arrival_index
+            )]
+        );
+
+        let MeasurementData::ImpulseResponse { linear_ir, .. } = &report.data[0].data else {
+            unreachable!()
+        };
+        let noised = [1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3]
+            .into_iter()
+            .find_map(|amplitude| {
+                let ir: Vec<f64> = linear_ir
+                    .iter()
+                    .zip(hashed_uniform_noise(linear_ir.len(), amplitude, 550))
+                    .map(|(h, n)| h + n)
+                    .collect();
+                let stats = ir_report_with_custom_ir(ir.clone(), 96_000)
+                    .ir_stats()
+                    .unwrap();
+                (stats.band_limited_snr_db.unwrap() < ARRIVAL_SNR_MIN_DB).then_some((ir, stats))
+            });
+        let (ir, stats) = noised.expect("no noise level took the arrival under its SNR gate");
+        assert_eq!(
+            stats.arrival_index, clean.arrival_index,
+            "the noise moved the pick, so this is not the same arrival set aside"
+        );
+        // The mode's crest is flat, so the noise may slide the broadband
+        // argmax along it by a few samples; it stays on the mode.
+        let peak = stats.peak_index;
+        assert!(
+            peak.abs_diff(mode_peak) <= 48,
+            "argmax {peak} left the mode crest at {mode_peak}"
+        );
+        let ArrivalCrossCheck::BandLimitedSnrLow { snr_db } = stats.arrival_cross_check else {
+            panic!("standing {:?}", stats.arrival_cross_check)
+        };
+        assert_eq!(
+            stats.pre_impulse_floor_anchor,
+            PreImpulseAnchor::PeakArrivalNotTrusted
+        );
+        assert_eq!(
+            stats.pre_impulse_snr_db.to_bits(),
+            pre_impulse_snr_db(&ir, peak).to_bits(),
+            "the fallback must read the #501 region"
+        );
+        assert_eq!(
+            stats.pre_impulse_floor_lines(),
+            vec![
+                format!("floor ends {guard} samples before peak, sample {peak}"),
+                format!(
+                    "not before arrival \u{2014} arrival SNR {snr_db:.1} dB, required \
+                     \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB"
+                ),
+            ]
+        );
+    }
+
     /// 96 kHz, 0.4 s window, a ±1e-7 floor, and the live latency every
     /// cross-check firing case below subtracts (so a `None` flight time is
     /// the standing's doing, not a missing latency).
@@ -3492,12 +3842,15 @@ mod tests {
 /// `ir_peak` → `pre_impulse_snr_db` — at a −40 dBFS drive.
 #[cfg(test)]
 mod default_sweep_tests {
-    use super::{ir_verdict, pre_impulse_region, IrVerdict, PRE_IMPULSE_SNR_MIN_DB};
+    use super::{
+        ir_verdict, pre_impulse_region, IrVerdict, PreImpulseAnchor, ARRIVAL_SNR_MIN_DB,
+        PRE_IMPULSE_SNR_MIN_DB,
+    };
     use crate::measurement::sweep::{
         deconvolve_full, extract_irs, inverse_sweep, ir_default_window_len, ir_peak, log_sweep,
-        pre_impulse_snr_db, pre_impulse_snr_floor_db, DeconvolvedIrs, SweepParams,
-        IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS,
-        IR_DEFAULT_TAIL_S,
+        pre_impulse_snr_db, pre_impulse_snr_db_before, pre_impulse_snr_floor_db, DeconvolvedIrs,
+        SweepParams, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
+        IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S,
     };
 
     /// −40 dBFS, the standing drive level the rig reading was taken at.
@@ -3790,8 +4143,187 @@ mod default_sweep_tests {
         );
     }
 
+    /// `linear` as `ir_stats` reads it: a default-band report at
+    /// `sample_rate`. The verdict and figure under the shipped (#550)
+    /// anchor come from `ir_stats` itself, not a copy of its rule.
+    fn shipped_stats(linear: Vec<f64>, sample_rate: u32) -> super::IrStats {
+        crate::measurement::report::fixtures::ir_report_with_custom_ir_band(
+            linear,
+            sample_rate,
+            IR_DEFAULT_F2_HZ,
+        )
+        .ir_stats()
+        .expect("an impulse response")
+    }
+
+    /// Test 6 (#550 negative control, architect revision 3): a capture
+    /// with no signal path, 200 draws at 48 kHz and 200 at 96 kHz.
+    /// 1. The rule before #550 (floor before the argmax) refuses every draw.
+    /// 2. The rejected revision-2 rule, computed here — floor before
+    ///    `min(arrival, peak)` whether or not the arrival is trusted —
+    ///    accepts at least one: the proof this control can go red (9 on
+    ///    the branch that falsified it). If a change to the synthetic chain
+    ///    makes it accept none, the control no longer shows the shipped
+    ///    rule doing anything; stop and report rather than drop this.
+    /// 3. The shipped rule (`ir_stats().verdict`) refuses every draw. A
+    ///    draw it accepted would falsify the design — return it to
+    ///    `needs-design` with the count; do not add margin.
+    /// 4. Coupling: no draw's measured band-limited SNR reaches
+    ///    [`ARRIVAL_SNR_MIN_DB`], so none is trusted on a measured figure.
+    ///    Fails if that threshold is lowered toward the noise crest (~13 dB;
+    ///    15.15 dB the maximum over these 400). A pick inside the guard band
+    ///    reads +inf (11 of 400 here); it is not a measurement, and the
+    ///    verdict's floor before it is empty, so the verdict refuses it —
+    ///    asserted per draw.
+    #[test]
+    fn no_signal_is_refused_before_and_after_the_floor_anchor_moves() {
+        let mut rejected_accepts = 0usize;
+        let mut max_arrival_snr = f64::MIN;
+        let mut unmeasured_arrivals = 0usize;
+        for sr in [48_000u32, 96_000] {
+            let (p, wl) = defaults(sr);
+            for seed in 0..NO_SIGNAL_ANCHOR_DRAWS {
+                let draw = no_signal(&p, wl, NO_SIGNAL_DEFAULT_SEED ^ seed);
+                assert!(
+                    matches!(draw.fixed_verdict(), IrVerdict::Failed { .. }),
+                    "{sr} Hz seed {seed}: the rule before #550 accepted a noise-only draw \
+                     at {:.2} dB",
+                    draw.snr_db
+                );
+                let stats = shipped_stats(draw.linear.clone(), sr);
+
+                let anchor = stats.arrival_index.min(stats.peak_index);
+                let rejected = ir_verdict(
+                    stats.peak_magnitude,
+                    pre_impulse_region(&draw.linear, anchor),
+                    pre_impulse_snr_db_before(&draw.linear, stats.peak_index, anchor),
+                );
+                if rejected == IrVerdict::Ok {
+                    rejected_accepts += 1;
+                }
+
+                assert!(
+                    matches!(stats.verdict, IrVerdict::Failed { .. }),
+                    "{sr} Hz seed {seed}: the shipped anchor accepted a noise-only draw at \
+                     {:.2} dB (anchor {:?}) — #550's design is falsified",
+                    stats.pre_impulse_snr_db,
+                    stats.pre_impulse_floor_anchor
+                );
+                match stats.band_limited_snr_db {
+                    Some(snr) if snr.is_finite() => max_arrival_snr = max_arrival_snr.max(snr),
+                    // `pre_impulse_snr_db` reads +inf when the pick sits
+                    // inside the guard band — no floor, not a clear one. The
+                    // verdict's floor then ends before the same index at the
+                    // same length, so it is empty too and the verdict is
+                    // refused on that, not on a measured SNR.
+                    Some(_) => {
+                        unmeasured_arrivals += 1;
+                        assert_eq!(
+                            (stats.pre_impulse_floor_end, stats.pre_impulse_floor_anchor),
+                            (0, PreImpulseAnchor::Arrival),
+                            "{sr} Hz seed {seed}: unmeasured arrival SNR at {} with a floor",
+                            stats.arrival_index
+                        );
+                    }
+                    None => {}
+                }
+            }
+        }
+        assert!(
+            rejected_accepts >= 1,
+            "the rejected min(arrival, peak) rule accepted no noise-only draw — this \
+             control no longer shows the trust condition doing anything"
+        );
+        assert!(
+            max_arrival_snr < ARRIVAL_SNR_MIN_DB,
+            "a noise-only draw's band-limited SNR reached {max_arrival_snr:.2} dB, against \
+             ARRIVAL_SNR_MIN_DB {ARRIVAL_SNR_MIN_DB:.1} dB: noise would be trusted as an \
+             arrival ({unmeasured_arrivals} draws picked inside the guard band, unmeasured)"
+        );
+    }
+
+    /// Test 7 (#550, the #501 regression): on a perfect loopback the
+    /// arrival and the argmax are one sample, so the shipped anchor reads
+    /// the figure #501 scored, to 0.01 dB, over the whole τ range.
+    #[test]
+    fn perfect_loopback_reads_the_same_under_the_shipped_anchor() {
+        let sr = 96_000;
+        let (p, wl) = defaults(sr);
+        for tau in [0, 115, 1709, RIG_TAU_96K, 1967, 3840] {
+            let (old, irs) = loopback(&p, wl, tau, None);
+            let stats = shipped_stats(irs.linear, sr);
+            assert!(
+                (stats.pre_impulse_snr_db - old).abs() < 0.01,
+                "τ = {tau}: shipped anchor {:.3} dB against #501's {old:.3} dB ({:?})",
+                stats.pre_impulse_snr_db,
+                stats.pre_impulse_floor_anchor
+            );
+            assert_eq!(stats.verdict, IrVerdict::Ok, "τ = {tau}");
+        }
+    }
+
+    /// The linear IR of a perfect default-sweep loopback at `sample_rate`,
+    /// delayed by `tau` samples, captured with `tail` samples after the
+    /// sweep.
+    fn loopback_with_tail(sample_rate: u32, tau: usize, tail: usize) -> Vec<f64> {
+        let (p, wl) = defaults(sample_rate);
+        let sweep = log_sweep(&p).expect("sweep");
+        let mut captured = vec![0.0f32; sweep.len() + tail];
+        for (i, &s) in sweep.iter().enumerate() {
+            if let Some(slot) = captured.get_mut(i + tau) {
+                *slot += (AMP * s as f64) as f32;
+            }
+        }
+        analyse(&p, wl, &captured).linear
+    }
+
+    /// Whether two linear IRs are the same up to FFT round-off:
+    /// `max |a − b| ≤ 1e-9 · max |a|` (#550 architect revision 3). The
+    /// 1e-9 is margin over ~1e-13 f64 round-off at this size, assumed, not
+    /// measured.
+    fn same_linear_ir(a: &[f64], b: &[f64]) -> bool {
+        let scale = a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-9 * scale)
+    }
+
+    /// Test 8 (#550, what the scope line rests on): the linear IR — and so
+    /// every quantity the gate reads — does not depend on the tail once
+    /// the tail is at least half the window, so the scope line need not
+    /// name the tail. Can-fail half: the same predicate is false with no
+    /// tail, where the capture ends before the delayed sweep does (τ =
+    /// 20 ms). If it held there, stop and report; do not loosen the
+    /// predicate or change τ.
+    #[test]
+    fn the_figure_does_not_depend_on_a_tail_of_at_least_half_the_window() {
+        let sr = 96_000;
+        let tau = (0.020 * sr as f64).round() as usize;
+        let half_window = ir_default_window_len(sr).div_ceil(2);
+        let default_tail = (IR_DEFAULT_TAIL_S * sr as f64).round() as usize;
+        let scored = loopback_with_tail(sr, tau, default_tail);
+        let half = loopback_with_tail(sr, tau, half_window);
+        assert!(
+            same_linear_ir(&scored, &half),
+            "tail W/2 changed the linear IR against tail 0.5 s"
+        );
+        let (half_snr, scored_snr) = (
+            shipped_stats(half, sr).pre_impulse_snr_db,
+            shipped_stats(scored.clone(), sr).pre_impulse_snr_db,
+        );
+        assert!(
+            (half_snr - scored_snr).abs() < 1e-6,
+            "tail W/2 reads {half_snr:.9} dB, tail 0.5 s {scored_snr:.9} dB"
+        );
+        let none = loopback_with_tail(sr, tau, 0);
+        assert!(
+            !same_linear_ir(&scored, &none),
+            "a zero tail left the linear IR unchanged — this test cannot fail"
+        );
+    }
+
     const NO_SIGNAL_DEFAULT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
     const NO_SIGNAL_DEFAULT_DRAWS: u64 = 40;
+    /// Per rate, for the #550 negative control (architect revision 3).
+    const NO_SIGNAL_ANCHOR_DRAWS: u64 = 200;
     const NO_SIGNAL_OLD_SEED: u64 = 0xC2B2_AE3D_27D4_EB4F;
     const NO_SIGNAL_OLD_DRAWS: u64 = 60;
 

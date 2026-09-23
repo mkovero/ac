@@ -235,7 +235,21 @@ pub fn pre_impulse_region_len(ir_len: usize, peak_index: usize) -> usize {
 /// calculation that could drift apart. `peak_index` is the caller's own
 /// argmax over `ir`; this does not recompute it.
 pub fn pre_impulse_snr_db(ir: &[f64], peak_index: usize) -> f64 {
-    let pre_region = &ir[..pre_impulse_region_len(ir.len(), peak_index)];
+    pre_impulse_snr_db_before(ir, peak_index, peak_index)
+}
+
+/// [`pre_impulse_snr_db`] with the floor ending one guard band before
+/// `floor_anchor` rather than before `peak_index`: `|ir[peak_index]|` over
+/// the RMS of `ir[..pre_impulse_region_len(ir.len(), floor_anchor)]`.
+/// `f64::INFINITY` when that region is empty or silent.
+///
+/// #550: `report::ir_stats` anchors the verdict's floor on the earlier of
+/// a trusted band-limited arrival and the broadband peak, so a room mode that
+/// lifts the broadband argmax past the arrival does not put the direct
+/// sound into the "pre-impulse" floor. With `floor_anchor == peak_index`
+/// this is [`pre_impulse_snr_db`], bit for bit.
+pub fn pre_impulse_snr_db_before(ir: &[f64], peak_index: usize, floor_anchor: usize) -> f64 {
+    let pre_region = &ir[..pre_impulse_region_len(ir.len(), floor_anchor)];
     if pre_region.is_empty() {
         return f64::INFINITY;
     }
