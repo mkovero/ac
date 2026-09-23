@@ -84,17 +84,17 @@ use crate::shared::calibration::{
 /// defaults and names the ones that differ on every read-out.
 ///
 /// **Region (#550).** When the band-limited arrival (#537) is trusted —
-/// it cleared [`ARRIVAL_SNR_MIN_DB`], so its standing is not
-/// [`ArrivalCrossCheck::BandLimitedSnrLow`] — the floor ends one guard
-/// band before the *earlier* of that arrival and the broadband peak
-/// ([`IrStats::pre_impulse_floor_anchor`]). Otherwise it ends before the
-/// broadband peak, the region #501 scored: on a noise-only capture the
-/// high-passed argmax is not a response, and anchoring on it accepted 9 of
-/// 400 noise-only draws. On pupu's default-band captures at 1.00 m and −50 dBFS
-/// (`d1p0-onaxis`, 2026-09-21) the broadband argmax was a low-frequency
-/// room mode ≈ 2300 samples after the arrival, so a floor ending before it
-/// held the direct sound and the early field — measured, per capture,
-/// before-argmax vs before-arrival:
+/// its SNR measured over a non-empty floor before it, and its standing
+/// not [`ArrivalCrossCheck::BandLimitedSnrLow`] (`floor_anchor` holds the
+/// rule) — the floor ends one guard band before the *earlier* of that
+/// arrival and the broadband peak ([`IrStats::pre_impulse_floor_anchor`]).
+/// Otherwise it ends before the broadband peak, the region #501 scored: on
+/// a noise-only capture the high-passed argmax is not a response, and
+/// anchoring on it accepted 9 of 400 noise-only draws. On pupu's
+/// default-band captures at 1.00 m and −50 dBFS (`d1p0-onaxis`, 2026-09-21)
+/// the broadband argmax was a low-frequency room mode ≈ 2300 samples after
+/// the arrival, so a floor ending before it held the direct sound and the
+/// early field — measured, per capture, before-argmax vs before-arrival:
 ///
 /// | capture | arrival | argmax | before argmax | before arrival |
 /// |---|---|---|---|---|
