@@ -563,15 +563,19 @@ rm -f "$T/stub/gh"
 # The waiter used to return 0 on a CLOSED issue, and on any mergedAt. The stub
 # answers gh's --jq with real jq over fixture JSON, so any query shape reads
 # the same fixture. It answers the compare API only in the main...<oid> order:
-# reversed, `ahead` would mean landed, and 22c goes red.
+# reversed, `ahead` would mean landed, and 22c goes red. With W_PR_AFTER set,
+# every PR read after the first issue read answers from that fixture instead:
+# the human merged between the waiter's PR read and its issue read (22g, 22h).
 mkdir -p "$T/stub22"
 cat > "$T/stub22/gh" <<'EOF'
 #!/usr/bin/env bash
 q=""; args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} == --jq ]] && q="${args[i+1]}"; done
 case "$*" in
-  "pr view"*)    f="$W_PR" ;;
-  "issue view"*) f="$W_ISSUE" ;;
+  "pr view"*)
+    f="$W_PR"
+    [[ -n ${W_PR_AFTER:-} && -e $W_MARK ]] && f="$W_PR_AFTER" ;;
+  "issue view"*) f="$W_ISSUE"; touch "$W_MARK" ;;
   "api repos/x/y/compare/main..."*)
     [[ -z ${W_CMP_FAIL:-} ]] || { echo "HTTP 404: Not Found" >&2; exit 1; }
     f="$W_CMP" ;;
@@ -598,7 +602,9 @@ w_run() {
   (
     cd "$REPO" && source "$BIN/common.sh"
     export PATH="$T/stub22:$PATH" AC_MERGE_POLL_SECONDS=1 \
-      W_PR="$T/w_$pr.json" W_ISSUE="$T/w_$issue.json" W_CMP="$T/w_$cmp.json"
+      W_PR="$T/w_$pr.json" W_ISSUE="$T/w_$issue.json" W_CMP="$T/w_$cmp.json" \
+      W_MARK="$T/w_mark_$c"
+    rm -f "$W_MARK"
     (($#)) && export "$@"
     eval "$(sed -n '/^pr_landed()/,/^}/p;/^wait_for_merge()/,/^}/p' "$BIN/master.sh")"
     sleep() { exit 42; }
@@ -612,12 +618,16 @@ w_run c main_pr issue_done cmp_behind
 w_run d main_pr issue_open cmp_behind W_CMP_FAIL=1
 w_run e open_pr issue_open cmp_behind
 w_run f closed_pr issue_open cmp_behind
+w_run g open_pr issue_done cmp_behind W_PR_AFTER="$T/w_main_pr.json"
+w_run h open_pr issue_done cmp_behind W_PR_AFTER="$T/w_main_pr.json" W_CMP_FAIL=1
 check '[[ $(cat $T/rc22a) == 5 ]] && grep -q "#7" $T/out22a && grep -q NOT_PLANNED $T/out22a && ! grep -qi merged $T/out22a' "a closed issue with an unmerged PR stops the waiter (5), naming the child and close reason"
 check '[[ $(cat $T/rc22b) == 5 ]] && grep -q "PR #70" $T/out22b && grep -q feature-x $T/out22b && ! grep -qi merged $T/out22b' "a PR merged into another branch stops the waiter (5), naming the PR and its base"
 check '[[ $(cat $T/rc22c) == 0 ]] && grep -q "landed on main (0123456); continuing epic" $T/out22c' "a PR whose merge commit is on main continues the epic"
 check '[[ $(cat $T/rc22d) == 42 ]] && ! grep -qi merged $T/out22d' "a failed ancestry check keeps polling and never continues"
 check '[[ $(cat $T/rc22e) == 42 ]] && grep -q "awaiting your merge" $T/out22e' "an open child with an open PR keeps waiting"
 check '[[ $(cat $T/rc22f) == 5 ]] && grep -q "closed without landing" $T/out22f && ! grep -qi merged $T/out22f' "a PR closed without a merge stops the waiter (5)"
+check '[[ $(cat $T/rc22g) == 0 ]] && grep -q "landed on main (0123456); continuing epic" $T/out22g && ! grep -q "no landed change" $T/out22g' "a merge landing between the PR read and the issue read continues the epic"
+check '[[ $(cat $T/rc22h) == 42 ]] && ! grep -q "no landed change" $T/out22h && ! grep -qi merged $T/out22h' "a merge landing between the reads with a failed ancestry check keeps polling"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"

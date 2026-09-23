@@ -758,34 +758,42 @@ wait_for_merge() {
       echo "  #$child: could not read PR #$pr — checking again in ${poll}s"
       sleep "$poll"; continue
     fi
+    verdict=""
     if [[ -n $merged_at && $merged_at != - ]]; then
       verdict="$(pr_landed "$pr")"
-      case "$verdict" in
-        landed\ *)
-          oid="${verdict#landed }"
-          echo "  #$child: PR #$pr landed on main (${oid:0:7}); continuing epic"
-          return 0 ;;
-        elsewhere\ *)
-          read -r _ base oid <<< "$verdict"
-          echo "  #$child: PR #$pr's base is $base; merge commit ${oid:0:7} is not on main"
-          return 5 ;;
-        *)
-          echo "  #$child: PR #$pr shows a merge, but whether its commit is on main could not be checked — checking again in ${poll}s"
-          sleep "$poll"; continue ;;
-      esac
+    else
+      if [[ $state == CLOSED ]]; then
+        echo "  #$child: PR #$pr closed without landing on main"
+        return 5
+      fi
+      issue="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state,stateReason \
+        --jq '[.state // "UNKNOWN", .stateReason // "-"] | join("|")' 2>/dev/null || echo 'UNKNOWN|-')"
+      IFS='|' read -r state state_reason <<< "$issue"
+      if [[ $state == CLOSED ]]; then
+        # The PR read above can predate the merge that closed the issue, so
+        # ask the PR again before reading the closure as a non-landing.
+        verdict="$(pr_landed "$pr")"
+        if [[ $verdict == unmerged ]]; then
+          [[ -n $state_reason && $state_reason != - ]] || state_reason="none recorded"
+          echo "  #$child: issue closed (reason: $state_reason) while PR #$pr shows no merge — no landed change found on main"
+          return 5
+        fi
+      fi
     fi
-    if [[ $state == CLOSED ]]; then
-      echo "  #$child: PR #$pr closed without landing on main"
-      return 5
-    fi
-    issue="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state,stateReason \
-      --jq '[.state // "UNKNOWN", .stateReason // "-"] | join("|")' 2>/dev/null || echo 'UNKNOWN|-')"
-    IFS='|' read -r state state_reason <<< "$issue"
-    if [[ $state == CLOSED ]]; then
-      [[ -n $state_reason && $state_reason != - ]] || state_reason="none recorded"
-      echo "  #$child: issue closed (reason: $state_reason) while PR #$pr is still open — no landed change found on main"
-      return 5
-    fi
+    case "$verdict" in
+      "") ;;
+      landed\ *)
+        oid="${verdict#landed }"
+        echo "  #$child: PR #$pr landed on main (${oid:0:7}); continuing epic"
+        return 0 ;;
+      elsewhere\ *)
+        read -r _ base oid <<< "$verdict"
+        echo "  #$child: PR #$pr's base is $base; merge commit ${oid:0:7} is not on main"
+        return 5 ;;
+      *)
+        echo "  #$child: whether PR #$pr's change is on main could not be checked — checking again in ${poll}s"
+        sleep "$poll"; continue ;;
+    esac
     if [[ $mergeable == CONFLICTING || $merge_status == DIRTY ]]; then
       echo "  #$child PR #$pr has merge conflicts with main — integrating"
       "$BIN/integrate.sh" "$pr" $fg || return 3
