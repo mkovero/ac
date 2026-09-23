@@ -206,9 +206,11 @@ limit_stop() {
 # pr_mergeable <pr> → MERGEABLE, CONFLICTING or UNKNOWN on stdout.
 # GitHub answers UNKNOWN while it computes mergeability after a push or a base
 # move, so UNKNOWN is read again: 5 reads in total, `sleep 5` between them, at
-# most 20 s added. The bounds are assumed, not measured (#570); if a run
-# exhausts them on a PR that turns out to be mergeable, raise them and cite
-# that run. A failed read, empty output or any other value uses up an attempt
+# most 20 s of UNKNOWN waiting. Each read also goes through gh_retry, whose
+# transient-error backoff is separate: during a GitHub outage the worst case is
+# 5 x gh_retry's backoff plus those 20 s. The bounds are assumed, not measured
+# (#570); if a run exhausts them on a PR that turns out to be mergeable, raise
+# them and cite that run. A failed read, empty output or any other value uses up an attempt
 # as UNKNOWN — never as MERGEABLE.
 pr_mergeable() {
   local pr="$1" m i tries=5 wait=5

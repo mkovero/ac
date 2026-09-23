@@ -1018,7 +1018,8 @@ check 'grep -q "cannot identify the open PR for #7" $T/out23j && ! grep -q "all 
 # --- 24: "yours to merge" needs GitHub's mergeable, not only labels (#570) -------
 # PR #569 was reported "yours to merge" while GitHub had it CONFLICTING. The
 # stub counts its pr view reads and answers --jq with real jq over a fixture;
-# with M_FAIL set it fails every read with a real (non-transient) error. The
+# with M_FAIL set it fails every read with a real (non-transient) error; with
+# M_UNKNOWN_READS=k the first k reads answer UNKNOWN before the fixture. The
 # sleep stub records its argument instead of sleeping.
 mkdir -p "$T/stub24"
 cat > "$T/stub24/gh" <<'EOF'
@@ -1028,7 +1029,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} == --jq ]] && q="${args[i+
 case "$*" in
   "pr view"*)
     echo x >> "$M_CALLS"
-    [[ -z ${M_FAIL:-} ]] || { echo "GraphQL: Could not resolve to a PullRequest with the number of 569." >&2; exit 1; } ;;
+    [[ -z ${M_FAIL:-} ]] || { echo "GraphQL: Could not resolve to a PullRequest with the number of 569." >&2; exit 1; }
+    (( $(wc -l < "$M_CALLS") > ${M_UNKNOWN_READS:-0} )) || { echo UNKNOWN; exit 0; } ;;
   *) echo "unexpected: gh $*" >&2; exit 1 ;;
 esac
 jq -r "$q" "$M_PR"
@@ -1055,6 +1057,7 @@ g24 a '"CONFLICTING"'
 g24 b '"UNKNOWN"'
 g24 c '"MERGEABLE"' M_FAIL=1
 g24 d '"MERGEABLE"'
+g24 u '"MERGEABLE"' M_UNKNOWN_READS=2
 check '! grep -q "yours to merge" $T/out24a && ! grep -qi ready $T/out24a && grep -q "conflicts with main" $T/out24a && grep -q "bin/integrate.sh 569" $T/out24a' \
   "24a: a CONFLICTING PR is not reported mergeable, and the report names bin/integrate.sh <pr>"
 check '[[ $(cat $T/st24a) == "needs-integration|569" && $(wc -l < $T/calls24a) == 1 ]]' \
@@ -1082,6 +1085,10 @@ check '[[ $(cat $T/out24d) == "  #7 PR #569: both QA gates passed — yours to m
   "24d: a MERGEABLE PR gets the unchanged \"yours to merge\" line and awaiting-merge"
 check '[[ $(wc -l < $T/calls24d) == 1 && ! -s $T/sleeps24d ]]' \
   "24d: a MERGEABLE PR costs one read and no wait"
+# 24u: the verdict comes from a re-read, not the first read — a loop that read
+# once and then only slept would report needs-human here.
+check '[[ $(wc -l < $T/calls24u) == 3 && $(tr "\n" " " < $T/sleeps24u) == "5 5 " && $(cat $T/st24u) == "awaiting-merge|569" ]] && [[ $(cat $T/out24u) == "  #7 PR #569: both QA gates passed — yours to merge" ]]' \
+  "24u: UNKNOWN that resolves to MERGEABLE on the third read stops retrying and reports yours to merge"
 
 # 24e: the epic runner never calls a conflicting child ready. Without
 # AC_WAIT_MERGE it names the integrate step and stops; with it, the existing
