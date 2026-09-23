@@ -56,6 +56,7 @@ export AC_LIMIT_FILE="${_caller_limit_file:-$AC_LOG_DIR/provider-limit.$$}"
 BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
+STATE_PR=""       # the PR qa_loop approved, set with the awaiting-merge state
 STEPS="${AC_STEPS:-8}"
 RECHECK="${AC_CODEX_RECHECK:-1}"
 RIG_AUTO="${AC_RIG_AUTO:-1}"
@@ -482,7 +483,7 @@ decision: $rev" >/dev/null || true
           (( dc == 3 )) && return 0
           (( dc == 2 )) && { codex_base=""; continue; }
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge; return 0
+          STATE=awaiting-merge; STATE_PR="$pr"; return 0
         fi
       fi
     fi
@@ -520,7 +521,7 @@ decision: $rev" >/dev/null || true
           (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge; return 0
+          STATE=awaiting-merge; STATE_PR="$pr"; return 0
         fi
       fi
       echo "  #$n PR #$pr: no approval at a reviewed commit — full QA pass"
@@ -578,7 +579,7 @@ decision: $rev" >/dev/null || true
           (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
           echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge
+          STATE=awaiting-merge; STATE_PR="$pr"
         else
           echo "  #$n PR #$pr: independent QA did not approve — stopping"
           STATE=needs-human
@@ -935,7 +936,7 @@ drive_epic() {
     fi
 
     echo "-- #$c (child of #$e)"
-    STATE=""
+    STATE=""; STATE_PR=""
     drive "$c" || { limit_stop; echo "  #$c: aborted — stopping epic"; return 1; }
 
     case "$STATE" in
@@ -946,11 +947,14 @@ drive_epic() {
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
           while true; do
             wait_rc=0
-            wait_pr="$(pr_for "$c" || true)"
+            # The PR qa_loop approved, not a fresh lookup: pr_for lists open
+            # PRs only, so a merge before this line would lose the PR and
+            # never reach the landing check.
+            wait_pr="$STATE_PR"
             wait_for_merge "$c" "$wait_pr" || wait_rc=$?
             if (( wait_rc == 4 )); then
               echo "  #$c: integration pushed — rerunning both QA gates"
-              STATE=""
+              STATE=""; STATE_PR=""
               drive "$c" || { echo "  #$c: post-integration QA aborted"; return 1; }
               [[ $STATE == awaiting-merge ]] || {
                 echo "  #$c stopped after integration in state: ${STATE:-unknown}"

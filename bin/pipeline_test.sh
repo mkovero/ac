@@ -39,7 +39,8 @@
 #      Codex-recheck decision check; review.sh --independent's refusal.
 #  23. the epic waiter continues only on a PR whose merge commit is on main:
 #      a closed issue, a closed PR, or a PR merged into another branch stops
-#      it (5); an unverifiable merge keeps polling (#561).
+#      it (5); an unverifiable merge keeps polling; a PR merged before the
+#      waiter starts is still the one it checks (#561).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -921,6 +922,7 @@ case "$*" in
     f="$W_PR"
     [[ -n ${W_PR_AFTER:-} && -e $W_MARK ]] && f="$W_PR_AFTER" ;;
   "issue view"*) f="$W_ISSUE"; touch "$W_MARK" ;;
+  "pr list"*) f="$W_LIST" ;;
   "api repos/x/y/compare/main..."*)
     [[ -z ${W_CMP_FAIL:-} ]] || { echo "HTTP 404: Not Found" >&2; exit 1; }
     f="$W_CMP" ;;
@@ -973,6 +975,39 @@ check '[[ $(cat $T/rc23e) == 42 ]] && grep -q "awaiting your merge" $T/out23e' "
 check '[[ $(cat $T/rc23f) == 5 ]] && grep -q "closed without landing" $T/out23f && ! grep -qi merged $T/out23f' "a PR closed without a merge stops the waiter (5)"
 check '[[ $(cat $T/rc23g) == 0 ]] && grep -q "landed on main (0123456); continuing epic" $T/out23g && ! grep -q "no landed change" $T/out23g' "a merge landing between the PR read and the issue read continues the epic"
 check '[[ $(cat $T/rc23h) == 42 ]] && ! grep -q "no landed change" $T/out23h && ! grep -qi merged $T/out23h' "a merge landing between the reads with a failed ancestry check keeps polling"
+
+# 23i: the handoff from drive to the waiter. qa_loop approved PR #70, and the
+# human merged it before drive_epic reached the waiter, so an open-only PR list
+# no longer shows it. The waiter must still get #70 and find it landed. The
+# same harness with the old open-only lookup at the handoff (23j) must stop
+# short, or 23i cannot tell the two apart.
+check '[[ $(grep -c "STATE=awaiting-merge" "$BIN/master.sh") == $(grep -c "STATE=awaiting-merge; STATE_PR=\"\$pr\"" "$BIN/master.sh") ]] && (( $(grep -c "STATE=awaiting-merge; STATE_PR" "$BIN/master.sh") >= 3 ))' \
+  "every awaiting-merge in qa_loop pins the PR it approved"
+w_json empty_list '[]'
+w_epic() {  # w_epic <case> <drive_epic source filter>
+  local c="$1" filter="$2"
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub23:$PATH" AC_MERGE_POLL_SECONDS=1 AC_WAIT_MERGE=1 \
+      W_PR="$T/w_main_pr.json" W_ISSUE="$T/w_issue_open.json" W_CMP="$T/w_cmp_behind.json" \
+      W_LIST="$T/w_empty_list.json" W_MARK="$T/w_mark_$c"
+    eval "$(sed -n '/^pr_for()/,/^}/p;/^pr_landed()/,/^}/p;/^wait_for_merge()/,/^}/p' "$BIN/master.sh")"
+    eval "$(sed -n '/^drive_epic()/,/^}/p' "$BIN/master.sh" | sed "$filter")"
+    children() { echo 7; }
+    blockers_of() { :; }
+    limit_stop() { :; }
+    drive() { STATE=awaiting-merge; STATE_PR=70; }
+    sleep() { exit 42; }
+    rc=0; ( drive_epic 5 ) > "$T/out23$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc23$c"
+  )
+}
+w_epic i ''
+w_epic j 's/wait_pr="\$STATE_PR"/wait_pr="$(pr_for "$c" || true)"/'
+check '[[ $(cat $T/rc23i) == 0 ]] && grep -q "PR #70 landed on main (0123456); continuing epic" $T/out23i && grep -q "all children processed" $T/out23i' \
+  "a PR merged before the waiter starts is still checked for landing, and the epic continues"
+check 'grep -q "cannot identify the open PR for #7" $T/out23j && ! grep -q "all children processed" $T/out23j' \
+  "control: an open-only lookup at the handoff loses the merged PR"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
