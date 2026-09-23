@@ -410,6 +410,90 @@ newest_record() {
     | sort_by(.at) | last | .body // empty"
 }
 
+# decision_rev <issue> [pr] — which revision of the design an approval is
+# judged against (#560). A digest over every design comment on the issue and,
+# when given, its PR: comments whose body opens with `<!-- agent: architect -->`
+# or `<!-- agent: ux -->`, each as its id then its body, in creation order,
+# sha256 cut to 12 hex. `none` when there are none, or when <issue> is empty (a
+# PR that closes nothing has no design to revise).
+#
+# Architect and ux edit their comments in place, so neither a label nor a
+# comment count shows that a decision changed; the content does. Any edit
+# counts, typo fixes included: that errs toward review.
+#
+# A failed read fails the function, never returns `none`: "could not ask" must
+# not read as "no design", the same rule as qa_evidence.
+DECISION_JQ='[.comments[] | select(.body | test("^\\s*<!-- agent: (architect|ux) -->")) | {at: .createdAt, id: .id, body: .body}]'
+decision_rev() {
+  local n="$1" pr="${2:-}" ic pc="[]" all
+  [[ -n $n ]] || { echo none; return 0; }
+  ic=$(gh_retry gh issue view "$n" -R "$AC_REPO" --json comments --jq "$DECISION_JQ") || return 1
+  if [[ -n $pr ]]; then
+    pc=$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq "$DECISION_JQ") || return 1
+  fi
+  # stdin, not --argjson: a long design history can pass the argument limit.
+  all=$(printf '%s\n%s\n' "${ic:-[]}" "${pc:-[]}" | jq -cs 'add | sort_by(.at)') || return 1
+  if [[ $all == "[]" ]]; then echo none; return 0; fi
+  printf '%s' "$all" | jq -j '.[] | "\(.id)\n\(.body)\n"' | sha256sum | cut -c1-12
+}
+
+# decision_fields <record> — the value of every `decision:` field line in a
+# record, one per line. A field line holds the field and nothing else
+# (qa.md step 4, codex-qa.md step 5 put it directly under the header); markdown
+# emphasis or backticks around it are tolerated. A `decision: <x>` inside a
+# sentence is prose, not a field, and is never read as one.
+decision_fields() {
+  printf '%s\n' "$1" | sed -nE 's/^[[:space:]>*_`]*decision:[*_` ]*([0-9a-z]+)[*_`[:space:]]*$/\1/p'
+}
+
+# record_names_decision <record> <rev> — the record carries exactly one
+# `decision:` field line, and it names <rev>. No field, a different digest, or
+# more than one field (even two naming <rev>) is refused: a record that states
+# its decision twice is not evidence of either, and fails closed as stale.
+record_names_decision() {
+  [[ -n $2 ]] || return 1
+  [[ "$(decision_fields "$1")" == "$2" ]]
+}
+
+# The decision a record names, for runner comments: its one field, or
+# `(none recorded)`, or every field when it carries more than one.
+decision_of_record() {
+  local d
+  d=$(decision_fields "$1")
+  if [[ -z $d ]]; then
+    printf '%s\n' "(none recorded)"
+  elif [[ $d == *$'\n'* ]]; then
+    printf '(conflicting fields: %s)\n' "$(printf '%s' "$d" | paste -sd' ' -)"
+  else
+    printf '%s\n' "$d"
+  fi
+}
+
+# invalidate_approvals <pr> <reason> [label...] — remove the approval labels
+# (default both) that are present on <pr>, and say why in a runner comment.
+# Non-zero if the labels cannot be read or any removal fails: the caller must
+# then stop, never report a pass (#560). Removing nothing posts nothing.
+invalidate_approvals() {
+  local pr="$1" why="$2" cur l rc=0
+  shift 2
+  (($#)) || set -- claude-approved codex-approved
+  local -a gone=()
+  cur=$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name') || return 1
+  for l in "$@"; do
+    printf '%s\n' "$cur" | grep -qx "$l" || continue
+    if gh_retry gh pr edit "$pr" -R "$AC_REPO" --remove-label "$l" >/dev/null; then
+      gone+=("$l")
+    else
+      rc=1
+    fi
+  done
+  if ((${#gone[@]})); then
+    gh_retry gh pr comment "$pr" -R "$AC_REPO" --body "<!-- agent: runner -->
+Removed \`${gone[*]}\`: $why" >/dev/null || true
+  fi
+  return "$rc"
+}
+
 # The architect's file manifest for an issue: repo-relative paths, one per line.
 # Empty output means no manifest — the caller decides whether that is fatal.
 # The newest architect comment that carries a **file manifest** field. Not
@@ -525,6 +609,35 @@ superseded_names_of() {
 issue_of_pr() {
   gh_retry gh pr view "$1" -R "$AC_REPO" --json closingIssuesReferences \
     --jq '.closingIssuesReferences[0].number // empty'
+}
+
+# decision_issue <pr> — the issue whose design comments decision_rev digests
+# for <pr>. master.sh (qa_loop) and review.sh both call this, never their own
+# idea of the issue: the record a review writes and the comparison the runner
+# makes must digest the same comments, or no record can ever match and the
+# runner re-reviews without end (#560). Resolved in master.sh pr_for's order:
+# the head branch `issue-N[-slug]` (developer.md step 2), then GitHub's first
+# closing reference, then a `closes #N` in the body — closingIssuesReferences
+# is empty for a PR whose base is not the default branch. Empty when none
+# applies; decision_rev then reads `none`. Fails on a failed read.
+# Known gap: a PR on a non-issue-N branch that closes two issues digests the
+# first closing reference, which need not be the issue the runner drives. Both
+# sides still agree, so the loop ends, but a revision of the driven issue's
+# design made outside the runner goes unseen (a stale approval survives).
+decision_issue() {
+  gh_retry gh pr view "$1" -R "$AC_REPO" --json headRefName,closingIssuesReferences,body --jq '
+    ((.headRefName // "") | capture("^issue-(?<n>[0-9]+)(-|$)").n)
+    // (.closingIssuesReferences[0].number // empty | tostring)
+    // ((.body // "") | capture("[Cc]loses +#(?<n>[0-9]+)\\b").n)
+    // empty'
+}
+
+# decision_of_pr <pr> — decision_rev over decision_issue's issue and <pr>. The
+# one digest both the review roles' records and the runner's comparison use.
+decision_of_pr() {
+  local i
+  i="$(decision_issue "$1")" || return 1
+  decision_rev "$i" "$1"
 }
 
 # names_inputs <issue> — export bin/stale_names.sh's inputs for everything this
