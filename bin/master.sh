@@ -41,7 +41,9 @@
 #   AC_WAIT_MERGE=1      wait at an epic child until its PR's merge commit is
 #                        on main, then continue with the next child; stop the
 #                        epic if the child or its PR closes without that
-#                        (default: stop and return)
+#                        (default: stop and return). An approved child whose
+#                        PR conflicts with main is waited on the same way,
+#                        and the waiter runs bin/integrate.sh on it.
 #   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
 #
 # Verify label names first — a wrong one makes this do nothing while looking
@@ -56,7 +58,7 @@ export AC_LIMIT_FILE="${_caller_limit_file:-$AC_LOG_DIR/provider-limit.$$}"
 BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
-STATE_PR=""       # the PR qa_loop approved, set with the awaiting-merge state
+STATE_PR=""       # the PR qa_loop approved, set with awaiting-merge/needs-integration
 STEPS="${AC_STEPS:-8}"
 RECHECK="${AC_CODEX_RECHECK:-1}"
 RIG_AUTO="${AC_RIG_AUTO:-1}"
@@ -199,6 +201,54 @@ limit_stop() {
   echo "  provider limit — stopping this run: $(cat "$AC_LIMIT_FILE")"
   echo "  nothing after this issue was attempted. rerun once the limit resets."
   exit 75
+}
+
+# pr_mergeable <pr> → MERGEABLE, CONFLICTING or UNKNOWN on stdout.
+# GitHub answers UNKNOWN while it computes mergeability after a push or a base
+# move, so UNKNOWN is read again: 5 reads in total, `sleep 5` between them, at
+# most 20 s of UNKNOWN waiting. Each read also goes through gh_retry, whose
+# transient-error backoff is separate: during a GitHub outage the worst case is
+# 5 x gh_retry's backoff plus those 20 s. Measured on mkovero/ac (#573,
+# 2026-09-23, polling every 1 s): after a push to the PR branch, UNKNOWN
+# cleared within 5 s on each of two pushes. After a base move (scratch PR #574,
+# six pushes to its base branch, alternately creating and removing a conflict
+# with the head so each verdict flip proves a recompute against the new tip),
+# the new verdict arrived within 4.1 s every time. The read taken ~0.6 s after
+# a base push still returned the previous verdict rather than UNKNOWN; these
+# bounds do not cover that stale window. If a run exhausts the bounds on a PR
+# that turns out to be mergeable, raise them and cite that run. A failed read,
+# empty output or any other value uses up an attempt
+# as UNKNOWN — never as MERGEABLE.
+pr_mergeable() {
+  local pr="$1" m i tries=5 wait=5
+  for ((i = 1; ; i++)); do
+    m="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json mergeable --jq '.mergeable // "UNKNOWN"')" || m=""
+    case "$m" in MERGEABLE|CONFLICTING) echo "$m"; return 0 ;; esac
+    (( i >= tries )) && break
+    sleep "$wait"
+  done
+  echo UNKNOWN
+}
+
+# report_approved <issue> <pr> — both QA gates approved <pr>. The only place
+# that may say "yours to merge": labels say the reviewers approved, only
+# GitHub's mergeable says the PR would land. Sets STATE (and STATE_PR) for
+# drive() and drive_epic(): awaiting-merge, needs-integration or needs-human.
+report_approved() {
+  local n="$1" pr="$2"
+  case "$(pr_mergeable "$pr")" in
+    MERGEABLE)
+      echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+      STATE=awaiting-merge; STATE_PR="$pr" ;;
+    CONFLICTING)
+      echo "  #$n PR #$pr: both QA gates approved, but the PR conflicts with main"
+      echo "     next: bin/integrate.sh $pr, then rerun master.sh $n"
+      STATE=needs-integration; STATE_PR="$pr" ;;
+    *)
+      echo "  #$n PR #$pr: both QA gates approved, but mergeability could not be determined"
+      echo "     check: gh pr view $pr -R $AC_REPO --json mergeable, then rerun master.sh $n"
+      STATE=needs-human ;;
+  esac
 }
 
 # qa_loop <issue> <pr> [force]
@@ -482,8 +532,7 @@ decision: $rev" >/dev/null || true
           (( dc == 1 )) && return 1
           (( dc == 3 )) && return 0
           (( dc == 2 )) && { codex_base=""; continue; }
-          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge; STATE_PR="$pr"; return 0
+          report_approved "$n" "$pr"; return 0
         fi
       fi
     fi
@@ -520,8 +569,7 @@ decision: $rev" >/dev/null || true
           (( dc == 1 )) && return 1
           (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
-          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge; STATE_PR="$pr"; return 0
+          report_approved "$n" "$pr"; return 0
         fi
       fi
       echo "  #$n PR #$pr: no approval at a reviewed commit — full QA pass"
@@ -578,8 +626,7 @@ decision: $rev" >/dev/null || true
           (( dc == 1 )) && return 1
           (( dc == 3 )) && return 0
           (( dc == 2 )) && continue
-          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
-          STATE=awaiting-merge; STATE_PR="$pr"
+          report_approved "$n" "$pr"
         else
           echo "  #$n PR #$pr: independent QA did not approve — stopping"
           STATE=needs-human
@@ -940,9 +987,13 @@ drive_epic() {
     drive "$c" || { limit_stop; echo "  #$c: aborted — stopping epic"; return 1; }
 
     case "$STATE" in
-      awaiting-merge)
+      awaiting-merge|needs-integration)
         echo
-        echo "  #$c is ready for your merge."
+        if [[ $STATE == awaiting-merge ]]; then
+          echo "  #$c is ready for your merge."
+        else
+          echo "  #$c: PR #$STATE_PR conflicts with main."
+        fi
         echo "  Later children branch from main and would not see #$c's work."
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
           while true; do
@@ -974,8 +1025,11 @@ drive_epic() {
             (( wait_rc == 0 )) || return 0
             break
           done
-        else
+        elif [[ $STATE == awaiting-merge ]]; then
           echo "  Merge it, then rerun: master.sh $e"
+          [[ -n ${KEEP_GOING:-} ]] || return 0
+        else
+          echo "  Integrate it: bin/integrate.sh $STATE_PR, then rerun: master.sh $e"
           [[ -n ${KEEP_GOING:-} ]] || return 0
         fi ;;
       needs-rig)

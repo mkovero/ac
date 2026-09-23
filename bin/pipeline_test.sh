@@ -41,6 +41,11 @@
 #      a closed issue, a closed PR, or a PR merged into another branch stops
 #      it (5); an unverifiable merge keeps polling; a PR merged before the
 #      waiter starts is still the one it checks (#561).
+#  24. "yours to merge" needs GitHub's mergeable (#570): CONFLICTING names
+#      bin/integrate.sh and sets needs-integration; UNKNOWN is read 5 times,
+#      4 sleeps of 5 s, then reported undetermined; a failed read is UNKNOWN;
+#      MERGEABLE keeps the old line; the epic runner never calls a conflicting
+#      child ready.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -613,6 +618,7 @@ w22_issue() {  # $1 = issue labels (space-separated), $2 = architect comment bod
 w22_pr() {  # $1 = PR labels, $2 = decision both records name
   jq -n --arg ls "$1" --arg d "$2" --arg h "$H22" '{headRefOid: $h,
     headRefName: "issue-22-x", body: "closes #22", closingIssuesReferences: [{number: 22}],
+    mergeable: "MERGEABLE",
     labels: ($ls | split(" ") | map(select(. != "") | {name: .})), comments: [],
     reviews: [{submittedAt: "2026-09-22T12:00:00Z", body: "<!-- agent: qa -->\n\n## qa — PR #7 at \($h)\ndecision: \($d)\n\n### verdict\napprove"},
               {submittedAt: "2026-09-22T12:10:00Z", body: "<!-- agent: codex-qa -->\n\n## codex qa — PR #7 at \($h)\ndecision: \($d)\n\n**verdict:** pass"}]}' > "$GH22/pr.json"
@@ -981,8 +987,8 @@ check '[[ $(cat $T/rc23h) == 42 ]] && ! grep -q "no landed change" $T/out23h && 
 # no longer shows it. The waiter must still get #70 and find it landed. The
 # same harness with the old open-only lookup at the handoff (23j) must stop
 # short, or 23i cannot tell the two apart.
-check '[[ $(grep -c "STATE=awaiting-merge" "$BIN/master.sh") == $(grep -c "STATE=awaiting-merge; STATE_PR=\"\$pr\"" "$BIN/master.sh") ]] && (( $(grep -c "STATE=awaiting-merge; STATE_PR" "$BIN/master.sh") >= 3 ))' \
-  "every awaiting-merge in qa_loop pins the PR it approved"
+check '[[ $(grep -c "STATE=awaiting-merge" "$BIN/master.sh") == 1 ]] && grep -qF "STATE=awaiting-merge; STATE_PR=\"\$pr\"" "$BIN/master.sh"' \
+  "master.sh sets awaiting-merge in one place, and it pins the PR qa_loop approved"
 w_json empty_list '[]'
 w_epic() {  # w_epic <case> <drive_epic source filter>
   local c="$1" filter="$2"
@@ -1008,6 +1014,115 @@ check '[[ $(cat $T/rc23i) == 0 ]] && grep -q "PR #70 landed on main (0123456); c
   "a PR merged before the waiter starts is still checked for landing, and the epic continues"
 check 'grep -q "cannot identify the open PR for #7" $T/out23j && ! grep -q "all children processed" $T/out23j' \
   "control: an open-only lookup at the handoff loses the merged PR"
+
+# --- 24: "yours to merge" needs GitHub's mergeable, not only labels (#570) -------
+# PR #569 was reported "yours to merge" while GitHub had it CONFLICTING. The
+# stub counts its pr view reads and answers --jq with real jq over a fixture;
+# with M_FAIL set it fails every read with a real (non-transient) error; with
+# M_UNKNOWN_READS=k the first k reads answer UNKNOWN before the fixture. The
+# sleep stub records its argument instead of sleeping.
+mkdir -p "$T/stub24"
+cat > "$T/stub24/gh" <<'EOF'
+#!/usr/bin/env bash
+q=""; args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} == --jq ]] && q="${args[i+1]}"; done
+case "$*" in
+  "pr view"*)
+    echo x >> "$M_CALLS"
+    [[ -z ${M_FAIL:-} ]] || { echo "GraphQL: Could not resolve to a PullRequest with the number of 569." >&2; exit 1; }
+    (( $(wc -l < "$M_CALLS") > ${M_UNKNOWN_READS:-0} )) || { echo UNKNOWN; exit 0; } ;;
+  *) echo "unexpected: gh $*" >&2; exit 1 ;;
+esac
+jq -r "$q" "$M_PR"
+EOF
+chmod +x "$T/stub24/gh"
+# g24 <case> <mergeable JSON value> [VAR=value...] → out24<case>,
+# st24<case> (STATE|STATE_PR), calls24<case> (one line per read), sleeps24<case>.
+g24() {
+  local c="$1" m="$2"; shift 2
+  printf '{"mergeable":%s}\n' "$m" > "$T/g24_$c.json"
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub24:$PATH" M_PR="$T/g24_$c.json" M_CALLS="$T/calls24$c"
+    : > "$M_CALLS"; : > "$T/sleeps24$c"
+    (($#)) && export "$@"
+    eval "$(sed -n '/^pr_mergeable()/,/^}/p;/^report_approved()/,/^}/p' "$BIN/master.sh")"
+    sleep() { echo "$*" >> "$T/sleeps24$c"; }
+    STATE=""; STATE_PR=""
+    report_approved 7 569 > "$T/out24$c" 2>&1
+    echo "$STATE|$STATE_PR" > "$T/st24$c"
+  )
+}
+g24 a '"CONFLICTING"'
+g24 b '"UNKNOWN"'
+g24 c '"MERGEABLE"' M_FAIL=1
+g24 d '"MERGEABLE"'
+g24 u '"MERGEABLE"' M_UNKNOWN_READS=2
+check '! grep -q "yours to merge" $T/out24a && ! grep -qi ready $T/out24a && grep -q "conflicts with main" $T/out24a && grep -q "bin/integrate.sh 569" $T/out24a' \
+  "24a: a CONFLICTING PR is not reported mergeable, and the report names bin/integrate.sh <pr>"
+check '[[ $(cat $T/st24a) == "needs-integration|569" && $(wc -l < $T/calls24a) == 1 ]]' \
+  "24a: a CONFLICTING PR sets needs-integration with the PR, after one read"
+# 24a-red: the check the old master.sh fails for the reason it was wrong —
+# a "yours to merge" printed outside the helper, on labels alone.
+outside24() {  # non-comment "yours to merge" lines outside report_approved
+  awk '/^report_approved\(\)/ { f = 1 } f && /^}/ { f = 0; next }
+       !f && !/^[[:space:]]*#/ && /yours to merge/' "$1"
+}
+check '[[ -z $(outside24 "$BIN/master.sh") ]] && sed -n "/^report_approved()/,/^}/p" "$BIN/master.sh" | grep -q "yours to merge"' \
+  "24a: every \"yours to merge\" in master.sh is inside report_approved"
+sed '0,/report_approved "\$n" "\$pr"/s//echo "  #$n PR #$pr: both QA gates passed — yours to merge"/' "$BIN/master.sh" > "$T/master24_old.sh"
+check '[[ -n $(outside24 "$T/master24_old.sh") ]]' \
+  "24a control: one label-only echo restored in qa_loop fails that check"
+check '[[ $(wc -l < $T/calls24b) == 5 && $(tr "\n" " " < $T/sleeps24b) == "5 5 5 5 " ]]' \
+  "24b: UNKNOWN is read 5 times with sleep 5 between reads, then given up"
+check '! grep -q "yours to merge" $T/out24b && grep -q "mergeability could not be determined" $T/out24b && [[ $(cat $T/st24b) == "needs-human|" ]]' \
+  "24b: UNKNOWN after the retries is not reported mergeable; the report says it could not be determined"
+check '[[ $(wc -l < $T/calls24c) == 5 && $(tr "\n" " " < $T/sleeps24c) == "5 5 5 5 " ]]' \
+  "24c: a failed mergeable read counts as UNKNOWN and uses up an attempt"
+check '! grep -q "yours to merge" $T/out24c && grep -q "mergeability could not be determined" $T/out24c && [[ $(cat $T/st24c) == "needs-human|" ]]' \
+  "24c: a failed read is never reported mergeable, even over a MERGEABLE fixture"
+check '[[ $(cat $T/out24d) == "  #7 PR #569: both QA gates passed — yours to merge" && $(cat $T/st24d) == "awaiting-merge|569" ]]' \
+  "24d: a MERGEABLE PR gets the unchanged \"yours to merge\" line and awaiting-merge"
+check '[[ $(wc -l < $T/calls24d) == 1 && ! -s $T/sleeps24d ]]' \
+  "24d: a MERGEABLE PR costs one read and no wait"
+# 24u: the verdict comes from a re-read, not the first read — a loop that read
+# once and then only slept would report needs-human here.
+check '[[ $(wc -l < $T/calls24u) == 3 && $(tr "\n" " " < $T/sleeps24u) == "5 5 " && $(cat $T/st24u) == "awaiting-merge|569" ]] && [[ $(cat $T/out24u) == "  #7 PR #569: both QA gates passed — yours to merge" ]]' \
+  "24u: UNKNOWN that resolves to MERGEABLE on the third read stops retrying and reports yours to merge"
+
+# 24e: the epic runner never calls a conflicting child ready. Without
+# AC_WAIT_MERGE it names the integrate step and stops; with it, the existing
+# waiter integrates (wait_for_merge's CONFLICTING branch, unchanged).
+w_json conflict_pr '{"state":"OPEN","mergedAt":null,"mergeCommit":null,"baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}'
+e24() {  # e24 <case> [VAR=value...] → out24<case>, rc24<case>, integrate24<case>
+  local c="$1"; shift
+  mkdir -p "$T/bin24$c"
+  printf '#!/usr/bin/env bash\necho "integrate $*" >> "%s"\n' "$T/integrate24$c" > "$T/bin24$c/integrate.sh"
+  chmod +x "$T/bin24$c/integrate.sh"
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    unset AC_WAIT_MERGE KEEP_GOING
+    export PATH="$T/stub23:$PATH" AC_MERGE_POLL_SECONDS=1 \
+      W_PR="$T/w_conflict_pr.json" W_ISSUE="$T/w_issue_open.json" W_CMP="$T/w_cmp_behind.json" \
+      W_LIST="$T/w_empty_list.json" W_MARK="$T/w_mark_24$c"
+    (($#)) && export "$@"
+    eval "$(sed -n '/^pr_for()/,/^}/p;/^pr_landed()/,/^}/p;/^wait_for_merge()/,/^}/p;/^drive_epic()/,/^}/p' "$BIN/master.sh")"
+    BIN="$T/bin24$c"; fg=""
+    children() { echo 7; }
+    blockers_of() { :; }
+    limit_stop() { :; }
+    drive() { STATE=needs-integration; STATE_PR=70; }
+    sleep() { exit 42; }
+    rc=0; ( drive_epic 5 ) > "$T/out24$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc24$c"
+  )
+}
+e24 e
+e24 f AC_WAIT_MERGE=1
+check '[[ $(cat $T/rc24e) == 0 ]] && grep -q "integrate.sh 70" $T/out24e && ! grep -q "ready for your merge" $T/out24e && ! grep -q "Merge it" $T/out24e && [[ ! -e $T/integrate24e ]]' \
+  "24e: without AC_WAIT_MERGE a conflicting epic child names bin/integrate.sh <pr>, is not called ready, and nothing runs"
+check '[[ $(cat $T/rc24f) == 0 && $(cat $T/integrate24f) == "integrate 70" ]] && ! grep -q "ready for your merge" $T/out24f' \
+  "24e: with AC_WAIT_MERGE the waiter integrates a conflicting epic child"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
