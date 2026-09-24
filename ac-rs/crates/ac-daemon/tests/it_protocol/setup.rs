@@ -110,11 +110,16 @@ fn setup_updates_snapshot_ring_and_spool_dir() {
     assert_eq!(r2b["ok"], json!(true), "{r2b}");
     assert_eq!(r2b["config"]["snapshot_spool_dir"], json!(leaf_str));
 
-    // snapshot_ring_s <= 0 is ignored (invalid), not silently accepted.
     let r3 = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": -5.0}}));
-    assert_eq!(r3["ok"], json!(true));
+    assert_eq!(r3["ok"], json!(false), "{r3}");
+    let err = r3["error"].as_str().unwrap_or_default();
+    assert!(
+        err.starts_with("setup rejected \u{2014} snapshot_ring_s must be a finite number > 0"),
+        "{err:?}"
+    );
+    let r3b = c.call(json!({"cmd": "setup", "update": {}}));
     assert_eq!(
-        r3["config"]["snapshot_ring_s"],
+        r3b["config"]["snapshot_ring_s"],
         json!(60.0),
         "non-positive snapshot_ring_s must be rejected, not applied"
     );

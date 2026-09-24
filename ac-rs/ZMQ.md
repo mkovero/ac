@@ -917,20 +917,27 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "reference_channel": <int>,     // optional — capture index
     "reference_output_channel": <int> | null,  // optional — playback index;
                                     //   null = reference leaves on the main output
-    "dbu_ref_vrms":      <float>,   // optional
+    "dbu_ref_vrms":      <number>,  // optional — finite, > 0; null refused
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
-    "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
+    "snapshot_ring_s":   <number>,  // optional — finite, > 0; null refused — see `snapshot`
     "snapshot_spool_dir":"<leaf>" | "<absolute path>" | null, // optional — see below
+    "temperature_c":     <number> | null,  // optional — finite; null = clear
+    "server_idle_timeout_secs": <int> | null,  // optional — integer >= 0;
+                                    //   0 or null = clear (no idle timeout)
     "report_dir":        "<absolute path>" | null  // optional — null = do not persist
   }
 }
 ```
 
-The four channel fields follow **Error handling → Wire values**: all four
-are checked before anything is applied, so a malformed one leaves the whole
-config unchanged (`setup rejected — …`, `config  unchanged`).
+The four channel fields and the four scalar keys `dbu_ref_vrms`,
+`snapshot_ring_s`, `temperature_c` and `server_idle_timeout_secs` follow
+**Error handling → Wire values**: all are checked before anything is
+applied, so a wrong type or a value outside the key's domain leaves the
+whole config unchanged (`setup rejected — …`, `config  unchanged`). A float
+for `server_idle_timeout_secs`, `30.0` included, is refused as not an
+integer.
 
 `snapshot_spool_dir` is confined to the daemon's spool root,
 `~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
@@ -3793,8 +3800,11 @@ A value a request supplies is either exactly valid or the **whole request
 is refused** — no default, no worker, no write, no config change (#431).
 Applies to every channel field (`channels`, `output_channel`,
 `input_channel`, `reference_channel`, `reference_output_channel`,
-`pairs[i][j]`, `meas_channel`, `ref_channel`) and to the positional
-`calibrate_mic_curve` arrays.
+`pairs[i][j]`, `meas_channel`, `ref_channel`), to the positional
+`calibrate_mic_curve` arrays, and to the `setup` scalar keys
+`dbu_ref_vrms`, `snapshot_ring_s` (finite, > 0, not nullable),
+`temperature_c` (finite; `null` clears) and `server_idle_timeout_secs`
+(integer ≥ 0; `null` clears) (#516).
 
 | wire value | meaning |
 |---|---|
@@ -3819,7 +3829,8 @@ generate not started — channels[0] must be an integer
 ```
 
 `<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
-`must be a finite number`, `must be an array`.
+`must be a finite number`, `must be a finite number > 0`,
+`must be a non-negative integer`, `must be an array`.
 
 | command | headline | state line |
 |---|---|---|
