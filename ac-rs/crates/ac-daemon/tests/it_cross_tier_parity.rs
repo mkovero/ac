@@ -314,6 +314,127 @@ fn plot_fundamental_dbfs_reflects_mic_curve_at_test_freq() {
     );
 }
 
+/// Load `synthetic_curve_flat(3.0)` on input channel 0 and drain the bus.
+fn set_flat_curve_3db(c: &Client) {
+    let (freqs, gains) = synthetic_curve_flat(3.0);
+    let r = c.call(json!({
+        "cmd":           "calibrate_mic_curve",
+        "op":            "set",
+        "input_channel": 0,
+        "freqs_hz":      freqs,
+        "gain_db":       gains,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    while c.recv_pub(50).is_some() {}
+}
+
+/// Largest value of `spectrum` whose `freqs` entry lies within ±5 % of
+/// `target_hz`. Both arrays are the frame's linear-amplitude fields.
+fn peak_near(frame: &Value, target_hz: f64) -> f64 {
+    let freqs = frame["freqs"].as_array().expect("freqs array");
+    let spec = frame["spectrum"].as_array().expect("spectrum array");
+    freqs
+        .iter()
+        .zip(spec)
+        .filter(|(f, _)| (f.as_f64().unwrap() - target_hz).abs() <= 0.05 * target_hz)
+        .map(|(_, a)| a.as_f64().unwrap_or(f64::NAN))
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// #167: the monitor `visualize/spectrum` columns are linear amplitude,
+/// so a +3 dB flat curve must scale the 1 kHz tone column by
+/// 10^(-3/20), not subtract 3 from it. The pre-#167 code subtracted,
+/// driving the ~0.07 column to ≈ −2.93 — the `> 0` assertion is the one
+/// that fails there. ±0.5 dB is carried over from
+/// `plot_fundamental_dbfs_reflects_mic_curve_at_test_freq` on the same
+/// fake stimulus.
+#[test]
+fn monitor_spectrum_column_reflects_mic_curve_in_linear_domain() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let mf_uncorr = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let uncorr = peak_near(&mf_uncorr, 1000.0);
+    assert!(uncorr > 0.0, "uncorrected 1 kHz column: {uncorr}");
+    while c.recv_pub(50).is_some() {}
+
+    set_flat_curve_3db(&c);
+
+    let mf_corr = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    assert_envelope(&mf_corr, "on", false, "monitor corrected");
+    let corr = peak_near(&mf_corr, 1000.0);
+    assert!(
+        corr > 0.0,
+        "corrected 1 kHz column must stay a positive linear amplitude, got {corr} \
+         (uncorrected {uncorr})"
+    );
+    let delta_db = 20.0 * (uncorr / corr).log10();
+    assert!(
+        (delta_db - 3.0).abs() < 0.5,
+        "expected ≈ 3 dB drop, got Δ={delta_db:.2} dB (uncorrected={uncorr}, corrected={corr})"
+    );
+}
+
+/// #167: plot's `thd_pct`, `harmonic_levels` and `spectrum` under a mic
+/// curve. `thd::analyze` fills the latter two with linear amplitude; the
+/// pre-#167 correction subtracted 3 from each (≈ −3), then read the
+/// result back as dB power, giving `thd_pct` in the thousands of percent
+/// on the fake 0.1-peak sine. THD is a same-terminal ratio
+/// (IEC 60268-3 §15.12.3.2 e), #167): a flat curve scales harmonics and
+/// the total output alike, so `thd_pct` must not move, while the linear
+/// spectrum drops by 3 dB.
+#[test]
+fn plot_thd_and_spectrum_reflect_mic_curve_in_linear_domain() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let pf_uncorr = capture_plot_point(&c, 1000.0);
+    let thd_uncorr = pf_uncorr["thd_pct"].as_f64().expect("thd_pct f64");
+    assert!(
+        thd_uncorr > 0.0 && thd_uncorr < 1.2,
+        "precondition: fake stimulus reads ≈ 1 % THD, got thd_pct={thd_uncorr}"
+    );
+    let spec_uncorr = peak_near(&pf_uncorr, 1000.0);
+    assert!(
+        spec_uncorr > 0.0,
+        "uncorrected spectrum peak: {spec_uncorr}"
+    );
+    while c.recv_pub(50).is_some() {}
+
+    set_flat_curve_3db(&c);
+
+    let pf_corr = capture_plot_point(&c, 1000.0);
+    assert_envelope(&pf_corr, "on", false, "plot corrected");
+    let thd_corr = pf_corr["thd_pct"].as_f64().expect("thd_pct f64");
+    assert!(
+        thd_corr < 1.0,
+        "corrected thd_pct must stay a small ratio, got {thd_corr} (uncorrected {thd_uncorr})"
+    );
+    let thd_delta_db = 20.0 * (thd_uncorr / thd_corr).log10();
+    assert!(
+        thd_delta_db.abs() < 0.5,
+        "flat +3 dB curve must leave thd_pct unchanged, got Δ={thd_delta_db:.2} dB \
+         (uncorrected={thd_uncorr}, corrected={thd_corr})"
+    );
+    for h in pf_corr["harmonic_levels"]
+        .as_array()
+        .expect("harmonic_levels")
+    {
+        let a = h[1].as_f64().expect("harmonic amplitude f64");
+        assert!(
+            a >= 0.0,
+            "harmonic amplitude must stay linear (≥ 0), got {h}"
+        );
+    }
+    let spec_corr = peak_near(&pf_corr, 1000.0);
+    assert!(spec_corr > 0.0, "corrected spectrum peak: {spec_corr}");
+    let delta_db = 20.0 * (spec_uncorr / spec_corr).log10();
+    assert!(
+        (delta_db - 3.0).abs() < 0.5,
+        "expected ≈ 3 dB spectrum drop, got Δ={delta_db:.2} dB"
+    );
+}
+
 /// #99 extension (handoff: transfer-frame-v2 M0, AC #4): the same fake
 /// channel-0 stimulus (1 kHz @ 0.1 peak amplitude, `audio/fake.rs`'s
 /// fallback default — both `monitor_spectrum`'s implicit `set_tone(1000,
@@ -599,14 +720,10 @@ fn parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale() {
 /// for a stimulus that's a near-pure tone (harmonics ≳40 dB down,
 /// contributing <0.01 dB to a linear power sum — negligible).
 ///
-/// No mic curve loaded (SPL cal only) — deliberately avoids exercising
-/// `monitor.rs`'s mic-curve application to the `spectrum` array, which a
-/// close read during this review suggests may apply a dB-domain
-/// correction (`apply_mic_curve_inplace_f64`) to an array documented as
-/// linear amplitude (`AnalysisResult.spectrum`). That's a pre-existing
-/// question unrelated to this PR (monitor.rs is untouched) — flagged in
-/// qa-signoff.md as an out-of-scope finding, not asserted against here
-/// either way.
+/// No mic curve loaded (SPL cal only), so this compares SPL plumbing
+/// alone. The monitor `spectrum` columns' mic-curve correction is linear
+/// since #167 and is covered by
+/// `monitor_spectrum_column_reflects_mic_curve_in_linear_domain`.
 #[test]
 fn parity_transfer_spl_matches_monitor_derived_spl_on_first_frame() {
     let d = Daemon::spawn();

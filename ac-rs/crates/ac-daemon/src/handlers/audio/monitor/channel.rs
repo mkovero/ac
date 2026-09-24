@@ -10,7 +10,7 @@ use ac_core::visualize::time_integration::{EmaIntegrator, LeqIntegrator, TAU_FAS
 // mic-curve helpers live in `handlers::mic` since the Tier 1 handlers also
 // need them; see #97 / #98.
 use crate::handlers::mic::{
-    apply_mic_curve_inplace_f32, apply_mic_curve_inplace_f64, mic_correction_tag,
+    apply_mic_curve_db_f32, apply_mic_curve_linear_f64, mic_correction_tag,
 };
 
 use super::frames::TickCtx;
@@ -97,20 +97,20 @@ impl MicCorrection<'_> {
         mic_correction_tag(self.curve.is_some(), self.enabled)
     }
 
-    /// Correct f32 magnitudes in place.
-    pub(super) fn apply_f32(&self, freqs: &[f32], mags: &mut [f32]) {
+    /// Correct f32 dBFS magnitudes (CWT / CQT / reassigned) in place.
+    pub(super) fn apply_db_f32(&self, freqs: &[f32], mags: &mut [f32]) {
         if self.enabled {
             if let Some(curve) = self.curve {
-                apply_mic_curve_inplace_f32(curve, freqs, mags);
+                apply_mic_curve_db_f32(curve, freqs, mags);
             }
         }
     }
 
-    /// Correct f64 aggregated columns in place.
-    pub(super) fn apply_f64(&self, freqs: &[f64], values: &mut [f64]) {
+    /// Correct f64 linear-amplitude spectrum columns in place (#167).
+    pub(super) fn apply_linear_f64(&self, freqs: &[f64], values: &mut [f64]) {
         if self.enabled {
             if let Some(curve) = self.curve {
-                apply_mic_curve_inplace_f64(curve, freqs, values);
+                apply_mic_curve_linear_f64(curve, freqs, values);
             }
         }
     }

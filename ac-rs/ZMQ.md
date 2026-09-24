@@ -239,9 +239,9 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "fundamental_hz":   <float>,
   "fundamental_dbfs": <float>,
   "linear_rms":       <float>,        // 0–1 dBFS scale
-  "harmonic_levels":  [[<hz>, <amp>], ...],  // 2nd, 3rd, … harmonics
+  "harmonic_levels":  [[<hz>, <amp>], ...],  // 2nd, 3rd, … harmonics; <amp> is linear amplitude — NOT dB
   "noise_floor_dbfs": <float>,
-  "spectrum":         [<float>, ...], // downsampled to ≤ 1000 points, DC bin removed
+  "spectrum":         [<float>, ...], // linear amplitude — NOT dB; downsampled to ≤ 1000 points, DC bin removed
   "freqs":            [<float>, ...], // matching frequency axis (Hz)
   "clipping":         <bool>,
   "ac_coupled":       <bool>,

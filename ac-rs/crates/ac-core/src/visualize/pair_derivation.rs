@@ -59,11 +59,11 @@ pub struct PairDerivation {
 /// Subtract `curve`'s per-frequency correction from `amp` in the linear
 /// domain (`amp *= 10^(-correction_db/20)`) — the mic over-reads by
 /// `correction_db`, so this recovers the acoustic truth. Same scaling
-/// `ac-daemon`'s live path applies inline; small enough, and specific
-/// enough to the linear-amplitude convention, that it doesn't warrant a
-/// third home beyond "wherever needs it" (the daemon's dB-domain sibling,
-/// `apply_mic_curve_inplace_f64`, lives in `ac-daemon::handlers::mic`
-/// since it predates this module and operates in a different domain).
+/// `ac-daemon`'s live path applies (`apply_mic_curve_linear_f64` in
+/// `ac-daemon::handlers::mic`, beside its dB-domain sibling
+/// `apply_mic_curve_db_f64`); small enough, and specific enough to the
+/// linear-amplitude convention, that it doesn't warrant moving both into
+/// a third home shared across crates.
 fn apply_mic_curve_linear(
     curve: &crate::shared::calibration::MicResponse,
     freqs: &[f64],
