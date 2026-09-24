@@ -191,9 +191,9 @@ stored offset matched and applied. One case has been measured (#551): on an
 RME Fireface 400 at 96 kHz, mic-pre input IN2 with phantom off, four
 separate `ac calibrate` runs at 0 dB gain and four at 20 dB all read the
 same τ (1711 samples) — no shift within integer-sample resolution. That
-covers only that interface, rate and gain range, on that channel. Phantom
-power, gains outside 0–20 dB, other rates and other interfaces are
-untested, and another channel of the same pre type is assumed, not
+covers only that interface, rate and the two tested gain settings, on that
+channel. Phantom power, gain settings other than 0 and 20 dB (including
+those between them), other rates and other interfaces are untested, and another channel of the same pre type is assumed, not
 measured, to behave alike. Where the interface's behaviour is not known,
 re-run `ac calibrate` on a pair after changing its input stage.
 

@@ -174,9 +174,9 @@ by the helper script itself.
   difference 0. One JACK lifetime (pid 271238), IN2 phantom off
   throughout. Record: `$AC_HOME/session/2026-09-24-rig-551-gain-vs-offset.md`.
   The offset key holds no input-stage settings; this is the evidence that
-  an IN2 gain change within 0–20 dB leaves the stored offset valid. Not
-  covered: phantom power (it cannot go on a line loopback), gains outside
-  0–20 dB, other rates. IN1's pre is a separate channel of the same type as
+  an IN2 gain change from 0 to 20 dB leaves the stored offset valid. Not
+  covered: phantom power (it cannot go on a line loopback), gain settings
+  other than 0 and 20 dB (including those between them), other rates. IN1's pre is a separate channel of the same type as
   IN2's; that it behaves alike is assumed, not measured. On that
   assumption, gain is excluded as a cause of the +329 vs +335 sample gap at
   a taped 1.00 m; the gap is not attributed.
