@@ -306,24 +306,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
 /// (#430). Laid out like the `calibration unreadable` refusal: continuation
 /// lines are indented to sit under the text after `  error: `.
 fn setup_not_saved(e: &ac_core::config::SaveError) -> String {
-    use ac_core::config::SaveError;
-    match e {
-        SaveError::Write { .. } => format!(
-            "setup not saved \u{2014} configuration unchanged\n\
-             \x20        file   {}\n\
-             \x20        cause  {:#}",
-            e.path().display(),
-            e.cause()
-        ),
-        SaveError::Unreadable { .. } => format!(
-            "setup not saved \u{2014} existing configuration is unreadable\n\
-             \x20        file   {}\n\
-             \x20        cause  {:#}\n\
-             \x20        data   existing file preserved",
-            e.path().display(),
-            e.cause()
-        ),
-    }
+    e.not_saved_message("setup")
 }
 
 /// Refusal reason for a non-absolute `report_dir`: a relative path or a `~`
