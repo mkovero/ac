@@ -302,27 +302,34 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     );
     println!();
 
-    let (ir_frame, report_frame, done_frame) = collect_ir(client, "plot_ir");
+    let frames = collect_ir(client, "plot_ir");
     print_ir_result(
-        ir_frame.as_ref(),
-        report_frame.as_ref(),
+        frames.ir.as_ref(),
+        frames.report.as_ref(),
         ack.get("duration").and_then(|v| v.as_f64()),
         ack.get("tail_s").and_then(|v| v.as_f64()),
     );
+    // The missing-frame lines depend on how the run ended (#588): after an
+    // `error` frame the daemon's fault is already on screen and nothing is
+    // added under it.
+    for line in ir_absence_lines(&frames) {
+        eprintln!("{line}");
+    }
     // Decoded once through the checked reader (#429): the summary and the
     // notes both read this accepted value, so a refused schema version
     // leaves nothing of the report body to print.
-    let report = match decode_ir_report(report_frame.as_ref()) {
-        Ok(r) => Some(r),
-        Err(line) => {
+    let report = match report_body(&frames).map(decode_ir_report) {
+        Some(Ok(r)) => Some(r),
+        Some(Err(line)) => {
             eprintln!("{line}");
             None
         }
+        None => None,
     };
     if let Some(r) = report.as_ref() {
         print_ir_report(r);
     }
-    if let Some(done) = done_frame.as_ref() {
+    if let Some(done) = frames.done.as_ref() {
         for line in report_files_lines(done) {
             println!("{line}");
         }
@@ -1603,15 +1610,17 @@ fn basis_withheld_reason(
     })
 }
 
-/// The `measurement/report` frame's body through the checked reader
-/// (#429). `Err` is the refusal line for stderr — missing frame,
-/// unsupported schema version, or undecodable body; nothing of a refused
-/// report reaches the operator.
-fn decode_ir_report(report_frame: Option<&serde_json::Value>) -> Result<MeasurementReport, String> {
-    let Some(value) = report_frame.and_then(|f| f.get("report")) else {
-        return Err("  !! no measurement/report frame — nothing to summarise".to_string());
-    };
-    match MeasurementReport::from_value(value.clone()) {
+/// A received `measurement/report` frame's body through the checked reader
+/// (#429). `Err` is the refusal line for stderr — unsupported schema
+/// version, or undecodable body; nothing of a refused report reaches the
+/// operator. A missing frame or body is `ir_absence_lines`' business
+/// (#588); a frame without a `report` body decodes as malformed.
+fn decode_ir_report(report_frame: &serde_json::Value) -> Result<MeasurementReport, String> {
+    let value = report_frame
+        .get("report")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match MeasurementReport::from_value(value) {
         Ok(r) => Ok(r),
         Err(ReportReadError::UnsupportedSchema { found, supported }) => Err(format!(
             "  !! unsupported measurement report schema — found v{found}, supported v{}–v{}",
@@ -1838,35 +1847,59 @@ fn report_files_lines(done: &serde_json::Value) -> Vec<String> {
 /// `data` topic the way `plot`/`plot_level` per-point frames are), so this
 /// mirrors `collect_sweep` but keys off the topic string directly.
 ///
-/// The `done` frame is returned too: it carries `report_files` (#472). It is
-/// `None` when the command ended on `error` or a timeout, both already
-/// reported.
-fn collect_ir(
-    client: &mut AcClient,
+/// The `done` frame is returned too: it carries `report_files` (#472). How
+/// the run ended is `end`, not the absence of `done` — `error` and a timeout
+/// both leave `done` as `None`, and `ir_absence_lines` treats them
+/// differently (#588).
+fn collect_ir(client: &mut AcClient, cmd_name: &str) -> IrFrames {
+    collect_ir_frames(|| client.recv_data(300_000), cmd_name)
+}
+
+/// How a `plot_ir` run ended, as seen by `collect_ir` (#588).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IrEnd {
+    /// The terminal `done` frame arrived.
+    Done,
+    /// A terminal `error` frame arrived; its message is already printed.
+    Error,
+    /// No frame arrived within the wait; the timeout is already printed.
+    Timeout,
+}
+
+/// What `collect_ir` received, and how the run ended.
+#[derive(Debug)]
+struct IrFrames {
+    ir: Option<serde_json::Value>,
+    report: Option<serde_json::Value>,
+    done: Option<serde_json::Value>,
+    end: IrEnd,
+}
+
+/// Core of `collect_ir`, generic over the frame source so the end state can
+/// be unit-tested without a real `AcClient`/socket — the same shape as
+/// `collect_sweep_frames`.
+fn collect_ir_frames(
+    mut next_frame: impl FnMut() -> Option<(String, serde_json::Value)>,
     cmd_name: &str,
-) -> (
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
-) {
-    let mut ir_frame = None;
-    let mut report_frame = None;
-    let mut done_frame = None;
-    loop {
-        let frame = match client.recv_data(300_000) {
+) -> IrFrames {
+    let mut ir = None;
+    let mut report = None;
+    let mut done = None;
+    let end = loop {
+        let frame = match next_frame() {
             Some(f) => f,
             None => {
                 eprintln!("\n  error: timeout waiting for {cmd_name} data");
-                break;
+                break IrEnd::Timeout;
             }
         };
         let (topic, data) = frame;
         match topic.as_str() {
-            "measurement/impulse_response" => ir_frame = Some(data),
-            "measurement/report" => report_frame = Some(data),
+            "measurement/impulse_response" => ir = Some(data),
+            "measurement/report" => report = Some(data),
             "done" => {
-                done_frame = Some(data);
-                break;
+                done = Some(data);
+                break IrEnd::Done;
             }
             "error" => {
                 let msg = data
@@ -1874,12 +1907,41 @@ fn collect_ir(
                     .and_then(|v| v.as_str())
                     .unwrap_or("error");
                 eprintln!("\n  !! {msg}");
-                break;
+                break IrEnd::Error;
             }
             _ => {}
         }
+    };
+    IrFrames {
+        ir,
+        report,
+        done,
+        end,
     }
-    (ir_frame, report_frame, done_frame)
+}
+
+/// The stderr lines naming a missing IR or report frame (#588). Nothing
+/// after an `error` frame: the daemon's fault is the whole story, and a
+/// line under it would read as a second fault. After `done` or a timeout,
+/// the IR line first and the report line second, each only when its frame
+/// is missing.
+fn ir_absence_lines(frames: &IrFrames) -> Vec<String> {
+    if frames.end == IrEnd::Error {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if frames.ir.as_ref().and_then(|f| f.get("data")).is_none() {
+        lines.push("  !! no impulse response received".to_string());
+    }
+    if report_body(frames).is_none() {
+        lines.push("  !! no measurement/report frame — nothing to summarise".to_string());
+    }
+    lines
+}
+
+/// The received `measurement/report` frame, when it carries a `report` body.
+fn report_body(frames: &IrFrames) -> Option<&serde_json::Value> {
+    frames.report.as_ref().filter(|f| f.get("report").is_some())
 }
 
 fn print_ir_result(
@@ -1889,7 +1951,6 @@ fn print_ir_result(
     tail_s: Option<f64>,
 ) {
     let Some(data) = ir_frame.and_then(|f| f.get("data")) else {
-        eprintln!("  !! no impulse response received");
         return;
     };
     // Peak, arrival and gate now come from the report frame via
@@ -2038,12 +2099,13 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 mod tests {
     use super::{
         answered_enumeration_lines, arrival_check_lines, arrival_snr_lines, arrival_source_line,
-        broadband_delta_lines, captured_line, collect_sweep_frames, decode_ir_report,
-        deconvolution_failed_lines, distance_lines, earlier_peak_line, flight_time_block,
-        flight_time_line, guard_outcome, inter_pair_offset_lines, ir_notes_lines,
-        ir_stimulus_lines, label_prefix, onset_gap_line, pre_impulse_snr_lines,
-        reference_latency_lines, reference_stored_latency_lines, report_files_lines,
-        second_lobe_line, short_onset_rule, wrap_comma_list, IrTyped, SweepOutcome, CONT_INDENT,
+        broadband_delta_lines, captured_line, collect_ir_frames, collect_sweep_frames,
+        decode_ir_report, deconvolution_failed_lines, distance_lines, earlier_peak_line,
+        flight_time_block, flight_time_line, guard_outcome, inter_pair_offset_lines,
+        ir_absence_lines, ir_notes_lines, ir_stimulus_lines, label_prefix, onset_gap_line,
+        pre_impulse_snr_lines, reference_latency_lines, reference_stored_latency_lines,
+        report_files_lines, second_lobe_line, short_onset_rule, wrap_comma_list, IrEnd, IrFrames,
+        IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, InterPairOffset,
@@ -2076,7 +2138,7 @@ mod tests {
             .and_then(|v| v.as_str());
         assert_eq!(raw, Some("future-schema interpretation"));
 
-        let decoded = decode_ir_report(Some(&frame));
+        let decoded = decode_ir_report(&frame);
         let refusal = decoded.as_ref().expect_err("future schema is refused");
         assert_eq!(
             refusal,
@@ -2092,14 +2154,93 @@ mod tests {
 
     #[test]
     fn missing_or_malformed_report_frame_is_refused() {
-        assert!(decode_ir_report(None)
-            .expect_err("no frame is refused")
-            .contains("no measurement/report frame"));
+        // A missing frame is `ir_absence_lines`' line now (#588); a frame
+        // that reaches the decoder without a body is refused as malformed.
+        assert!(decode_ir_report(&serde_json::json!({}))
+            .expect_err("bodyless frame is refused")
+            .contains("could not decode report"));
         let no_version = serde_json::json!({"report": {"notes": "x"}});
-        assert!(decode_ir_report(Some(&no_version))
+        assert!(decode_ir_report(&no_version)
             .expect_err("versionless report is refused")
             .contains("could not decode report"));
         assert!(ir_notes_lines(None).is_empty());
+    }
+
+    const NO_IR_LINE: &str = "  !! no impulse response received";
+    const NO_REPORT_LINE: &str = "  !! no measurement/report frame \u{2014} nothing to summarise";
+
+    fn ir_frames(ir: bool, report: bool, end: IrEnd) -> IrFrames {
+        IrFrames {
+            ir: ir.then(|| serde_json::json!({"data": {"harmonics": []}})),
+            report: report.then(|| serde_json::json!({"report": {}})),
+            done: (end == IrEnd::Done).then(|| serde_json::json!({})),
+            end,
+        }
+    }
+
+    /// #588: a `plot_ir` run that ended on `error` gets no missing-frame
+    /// lines under the daemon's fault; `done` and a timeout keep both.
+    #[test]
+    fn ir_absence_lines_follow_how_the_run_ended() {
+        let errored = ir_frames(false, false, IrEnd::Error);
+        // The rejected implementation: a line whenever a frame is `None`.
+        // On the same input it prints both lines, so this fixture can fail.
+        let old_rule: Vec<&str> = [
+            errored.ir.is_none().then_some(NO_IR_LINE),
+            errored.report.is_none().then_some(NO_REPORT_LINE),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(old_rule.len(), 2);
+        assert!(ir_absence_lines(&errored).is_empty());
+
+        for end in [IrEnd::Timeout, IrEnd::Done] {
+            assert_eq!(
+                ir_absence_lines(&ir_frames(false, false, end)),
+                vec![NO_IR_LINE.to_string(), NO_REPORT_LINE.to_string()],
+                "{end:?} with no frames"
+            );
+            assert!(ir_absence_lines(&ir_frames(true, true, end)).is_empty());
+        }
+        assert_eq!(
+            ir_absence_lines(&ir_frames(true, false, IrEnd::Timeout)),
+            vec![NO_REPORT_LINE.to_string()]
+        );
+        // A report frame without a `report` body is still a missing report,
+        // as it was before #588.
+        let mut bodyless = ir_frames(true, false, IrEnd::Done);
+        bodyless.report = Some(serde_json::json!({}));
+        assert_eq!(
+            ir_absence_lines(&bodyless),
+            vec![NO_REPORT_LINE.to_string()]
+        );
+    }
+
+    /// #588: `collect_ir_frames` names how the run ended, and stops at a
+    /// terminal `error` without reading what follows.
+    #[test]
+    fn collect_ir_frames_records_the_end_state() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            (
+                "error".to_string(),
+                serde_json::json!({"cmd": "plot_ir", "message": "plot_ir not started"}),
+            ),
+            ("done".to_string(), serde_json::json!({})),
+        ]);
+        let got = collect_ir_frames(|| frames.pop_front(), "plot_ir");
+        assert_eq!(got.end, IrEnd::Error);
+        assert!(got.done.is_none());
+        assert_eq!(frames.len(), 1, "the `done` after `error` must not be read");
+
+        let got = collect_ir_frames(|| None, "plot_ir");
+        assert_eq!(got.end, IrEnd::Timeout);
+
+        let mut frames: VecDeque<(String, serde_json::Value)> =
+            VecDeque::from([("done".to_string(), serde_json::json!({}))]);
+        let got = collect_ir_frames(|| frames.pop_front(), "plot_ir");
+        assert_eq!(got.end, IrEnd::Done);
+        assert!(got.ir.is_none() && got.done.is_some());
     }
 
     fn point(freq_hz: f64) -> serde_json::Value {
