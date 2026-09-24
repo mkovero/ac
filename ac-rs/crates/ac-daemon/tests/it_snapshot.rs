@@ -117,6 +117,57 @@ fn snapshot_with_no_session_running_is_rejected() {
     assert_eq!(r["ok"], json!(false), "snapshot with no session: {r}");
 }
 
+/// Mirrors `handlers::snapshot::SESSION_STARTING_ERROR`; `ac-daemon` has no
+/// library target, so an integration test cannot import it.
+const SESSION_STARTING: &str = "transfer_stream session starting — audio engine start pending";
+const NO_TRANSFER: &str = "no transfer_stream session running";
+
+/// #188: between the `transfer_stream` ok reply and the engine's start
+/// completing, `snapshot` must say the session is starting — never that
+/// there is no session — and must succeed once the engine is up. The fake
+/// start delay (assumed 500 ms: far wider than a CTRL round-trip on a loaded
+/// dev VM) holds that window open. On a build that publishes the ring only
+/// after `eng.start`, the first `snapshot` gets the no-session refusal.
+#[test]
+fn snapshot_during_engine_start_is_refused_as_starting_then_succeeds() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_START_DELAY_MS", "500")]);
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+
+    let first = c.call(json!({"cmd": "snapshot"}));
+    assert_eq!(
+        first,
+        json!({"ok": false, "error": SESSION_STARTING}),
+        "snapshot right after the ok reply\nlog:\n{}",
+        d.log_tail()
+    );
+
+    // Deadline, not delay (assumed 5 s): poll until the ring has started.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let r = c.call(json!({"cmd": "snapshot"}));
+        assert_ne!(
+            r["error"],
+            json!(NO_TRANSFER),
+            "session reported missing during startup: {r}"
+        );
+        if r["ok"] == json!(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "snapshot still refused after 5 s; last reply: {r}\nlog:\n{}",
+            d.log_tail()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let _ = c.call(json!({"cmd": "stop"}));
+}
+
 #[test]
 fn snapshot_fetch_unknown_id_is_rejected() {
     let d = Daemon::spawn();

@@ -37,17 +37,34 @@ use crate::server::ServerState;
 /// is a fast REQ/REP round-trip even over a slow remote link (D6).
 pub const MAX_FETCH_CHUNK_BYTES: usize = 256 * 1024;
 
+/// `snapshot` refusal while a `transfer_stream` session exists but its ring
+/// is still pending — between the CTRL ok reply and the audio engine's start
+/// completing (#188). Distinct from the no-session refusal on purpose: the
+/// session is there, it just has no sample rate to encode yet.
+pub const SESSION_STARTING_ERROR: &str =
+    "transfer_stream session starting — audio engine start pending";
+
 /// Live, growing state for one `transfer_stream` session's snapshot ring.
 /// Lives behind `ServerState::snapshot_ring`; the worker thread mutates
 /// it every capture tick, the `snapshot` CTRL handler reads it on demand.
+///
+/// Two states (#188). The handler publishes a *pending* ring
+/// ([`SnapshotRingState::pending`]) before the worker exists, because the
+/// sample rate — and so the cap in samples — is only known once the engine
+/// has started; the worker then calls [`SnapshotRingState::start`]. A
+/// pending ring holds no samples and cannot produce a snapshot.
 pub struct SnapshotRingState {
+    /// `0` while pending.
     pub sr: u32,
     /// Session input-channel index per ring position (matches the order
     /// `bufs` arrives from `capture_multi`/`unique_ports`).
     pub unique_chans: Vec<u32>,
     pub channels: Vec<VecDeque<f32>>,
-    /// Cap per channel, in samples (`snapshot_ring_s × sr`).
+    /// Cap per channel, in samples (`snapshot_ring_s × sr`); `0` while
+    /// pending.
     cap_samples: usize,
+    /// `Some(snapshot_ring_s)` while pending, `None` once started.
+    pending_ring_s: Option<f64>,
     pub pairs: Vec<(u32, u32)>,
     /// Mirrors the worker's own `pair_delays` — `None` until the
     /// per-pair delay is estimated on warm-up.
@@ -61,6 +78,7 @@ pub struct SnapshotRingState {
 }
 
 impl SnapshotRingState {
+    /// An already-started ring with a known `sr` and cap.
     pub fn new(
         sr: u32,
         unique_chans: Vec<u32>,
@@ -82,12 +100,55 @@ impl SnapshotRingState {
                 .map(|_| VecDeque::with_capacity(cap_samples))
                 .collect(),
             cap_samples,
+            pending_ring_s: None,
             pairs,
             delay_samples,
             weighting_tag,
             integration_tag,
             unique_cals,
         }
+    }
+
+    /// A ring published before the engine has reported its sample rate
+    /// (#188): everything the session plan knows, with the retention held
+    /// in seconds until [`start`](Self::start) turns it into samples.
+    pub fn pending(
+        ring_s: f64,
+        unique_chans: Vec<u32>,
+        pairs: Vec<(u32, u32)>,
+        weighting_tag: String,
+        integration_tag: String,
+        unique_cals: Vec<Option<Calibration>>,
+    ) -> Self {
+        let mut ring = Self::new(
+            0,
+            unique_chans,
+            0,
+            pairs,
+            weighting_tag,
+            integration_tag,
+            unique_cals,
+        );
+        ring.pending_ring_s = Some(ring_s);
+        ring
+    }
+
+    /// Fix the sample rate and allocate the cap; from here on `snapshot`
+    /// can encode this ring. A no-op on a ring that is already started.
+    pub fn start(&mut self, sr: u32) {
+        let Some(ring_s) = self.pending_ring_s.take() else {
+            return;
+        };
+        self.sr = sr;
+        self.cap_samples = (ring_s * sr as f64).round() as usize;
+        for ch in &mut self.channels {
+            ch.reserve(self.cap_samples);
+        }
+    }
+
+    /// `false` between [`pending`](Self::pending) and [`start`](Self::start).
+    pub fn is_started(&self) -> bool {
+        self.pending_ring_s.is_none()
     }
 
     /// Push one tick's captured samples (same shape as `capture_multi`'s
@@ -119,7 +180,16 @@ impl SnapshotRingState {
     /// FLAC encode of up to `snapshot_ring_s` seconds of multichannel
     /// audio would stall that tick loop and glitch the live
     /// `transfer_stream` cadence for the encode's whole duration.
-    fn snapshot_meta_and_channels(&self, daemon_version: &str) -> (SnapshotMeta, Vec<Vec<f32>>) {
+    ///
+    /// `None` on a pending ring: with no sample rate there is nothing to
+    /// encode (#188).
+    fn snapshot_meta_and_channels(
+        &self,
+        daemon_version: &str,
+    ) -> Option<(SnapshotMeta, Vec<Vec<f32>>)> {
+        if !self.is_started() {
+            return None;
+        }
         let channels: Vec<Vec<f32>> = self
             .channels
             .iter()
@@ -183,7 +253,7 @@ impl SnapshotRingState {
             daemon_version: daemon_version.to_string(),
             ring_duration_s: duration_s,
         };
-        (meta, channels)
+        Some((meta, channels))
     }
 }
 
@@ -266,9 +336,15 @@ pub fn snapshot(state: &ServerState, _cmd: &Value) -> Value {
     // the live worker's capture tick (holding this same mutex) for the
     // encode's whole duration. See `snapshot_meta_and_channels`'s doc.
     let daemon_version = env!("CARGO_PKG_VERSION");
+    // A pending ring (#188) means the session exists but the engine has not
+    // reported its sample rate yet; checked under the same lock `start`
+    // takes, so there is no window between the check and the read.
     let (meta, channels) = {
         let ring = ring_handle.lock().unwrap();
-        ring.snapshot_meta_and_channels(daemon_version)
+        match ring.snapshot_meta_and_channels(daemon_version) {
+            Some(v) => v,
+            None => return json!({"ok": false, "error": SESSION_STARTING_ERROR}),
+        }
     };
     let mut meta = meta;
     for ch in meta.per_channel.iter_mut() {
@@ -465,13 +541,45 @@ mod tests {
             vec![None, None, None],
         );
         ring.push_tick(&[vec![0.1; 64], vec![0.2; 64], vec![0.3; 64]]);
-        let (meta, channels) = ring.snapshot_meta_and_channels("test");
+        let (meta, channels) = ring
+            .snapshot_meta_and_channels("test")
+            .expect("a ring built with `new` is started");
         assert_eq!(
             meta.session.delay_samples.len(),
             meta.session.pairs.len(),
             "delay_samples must have one entry per pair before the first sync"
         );
         build_acsnap(&meta, &channels).expect("first-tick snapshot must write");
+    }
+
+    /// #188: a pending ring refuses to produce snapshot metadata, tolerates
+    /// a tick without panicking, and once started carries the `sr` it was
+    /// given and caps at `ring_s × sr`.
+    #[test]
+    fn pending_ring_yields_no_snapshot_until_started() {
+        let mut ring = SnapshotRingState::pending(
+            0.5,
+            vec![0, 1],
+            vec![(0, 1)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None],
+        );
+        assert!(!ring.is_started());
+        ring.push_tick(&[vec![0.1; 8], vec![0.2; 8]]);
+        assert!(ring.snapshot_meta_and_channels("test").is_none());
+
+        ring.start(100);
+        assert!(ring.is_started());
+        for _ in 0..20 {
+            ring.push_tick(&[vec![0.1; 8], vec![0.2; 8]]);
+        }
+        assert_eq!(ring.channels[0].len(), 50, "cap must be ring_s × sr");
+        let (meta, channels) = ring
+            .snapshot_meta_and_channels("test")
+            .expect("a started ring yields a snapshot");
+        assert_eq!(meta.sr, 100);
+        build_acsnap(&meta, &channels).expect("started ring snapshot must write");
     }
 
     /// AC #5 (ring correctness, wraparound): push distinguishable,

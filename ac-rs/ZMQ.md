@@ -3416,6 +3416,14 @@ never by path.
 { "ok": false, "error": "no transfer_stream session running" }
 ```
 
+**Reply — session starting**
+```json
+{ "ok": false, "error": "transfer_stream session starting — audio engine start pending" }
+```
+
+Returned between the `transfer_stream` ok reply and the audio engine's start
+completing. It persists for as long as the engine start does not return.
+
 ---
 
 ### `snapshot_fetch`
