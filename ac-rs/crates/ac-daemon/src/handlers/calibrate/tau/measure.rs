@@ -412,6 +412,21 @@ impl std::error::Error for EdgeRefusal {}
 /// [`EdgeRefusal`]: a same-capture reference (#460) reads `plot_ir`'s own
 /// tail, which the operator sets, so this case is reachable there and needs
 /// its own operator-facing reason.
+///
+/// The rule behind it, `2·half_window > tail`, is deliberately stricter than
+/// the exact condition `plot_ir` refuses on (#576,
+/// [`ac_core::measurement::sweep::linear_ir_min_capture_len`]): the linear
+/// gate reads only about one half-window past the sweep end, while this rule
+/// asks the tail to hold the whole `2·half_window` gate. The extra half is
+/// the calibrate policy margin `TAU_TAIL_S` is sized against (see
+/// `TAU_MIN_HALF_WINDOW_S`), and loosening it would change the reference
+/// leg's reason text for no gain in correctness, so it is kept. The one
+/// relation that must hold — every tail this rule accepts also satisfies the
+/// exact predicate — is pinned from both sides:
+/// `tau_rule_refuses_every_tail_the_linear_ir_capture_predicate_refuses`
+/// drives this rule through `analyse_tau_leg`, and
+/// `tau_tail_rule_is_stricter_than_the_linear_ir_capture_predicate` guards
+/// the predicate side.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TailTooShort {
     pub(crate) half_window_s: f64,
@@ -828,6 +843,69 @@ mod tests {
             TAU_TAIL_S >= 2.0 * TAU_MIN_HALF_WINDOW_S,
             "tail no longer clears the half-window with the margin the doc comment assumed"
         );
+    }
+
+    /// #576: the τ tail rule (`2·half_window > tail` refuses) is a
+    /// sufficient condition for the exact linear-IR capture predicate
+    /// `plot_ir` refuses on. At the shortest tail the τ rule accepts, the
+    /// capture — predicted with the same floor `plot_ir` uses — must still
+    /// hold every sample the τ window's linear gate reads. A longer tail
+    /// only adds samples, so the boundary covers every accepted tail.
+    ///
+    /// This restates the τ rule inline, so it only goes red on the
+    /// predicate side: an edit that makes `linear_ir_min_capture_len` demand
+    /// more than the τ rule's shortest accepted tail supplies. A loosened τ
+    /// rule is caught by
+    /// `tau_rule_refuses_every_tail_the_linear_ir_capture_predicate_refuses`,
+    /// which drives `analyse_tau_leg` itself.
+    #[test]
+    fn tau_tail_rule_is_stricter_than_the_linear_ir_capture_predicate() {
+        for sr in [44_100u32, 48_000, 96_000, 192_000] {
+            let (params, _half, window_len) = synthetic_tau_window(sr);
+            // The shortest tail `2.0 * half_window_s > tail_s` lets through.
+            let tail_s = 2.0 * tau_half_window_s();
+            let tail_samples = (tail_s * sr as f64).floor() as usize;
+            let min =
+                ac_core::measurement::sweep::linear_ir_min_capture_len(&params, 1, window_len)
+                    .expect("τ sweep parameters are valid");
+            assert!(
+                params.n_samples() + tail_samples >= min,
+                "sr={sr}: the τ rule accepts a {tail_s} s tail ({tail_samples} samples) \
+                 but the linear gate reads {} samples past the sweep end",
+                min - params.n_samples()
+            );
+        }
+    }
+
+    /// #576 AC5, through the production rule: at the largest tail the exact
+    /// linear-IR predicate refuses, `analyse_tau_leg` itself must refuse with
+    /// `TailTooShort`. The τ rule is monotone in `tail_s`, so the largest
+    /// refused tail covers every shorter one. Goes red if the τ rule at
+    /// `analyse_tau_leg`'s entry is loosened past the predicate (e.g.
+    /// `0.5 * half_window_s > tail_s`). It does not go red on
+    /// `half_window_s > tail_s`, which is still sufficient (a tail of `h`
+    /// seconds holds at least `ceil(h·sr) − 1` samples). The τ window is
+    /// taken from `synthetic_tau_window`, which mirrors `analyse_tau_leg`'s
+    /// window derivation inline.
+    #[test]
+    fn tau_rule_refuses_every_tail_the_linear_ir_capture_predicate_refuses() {
+        for sr in [44_100u32, 48_000, 96_000, 192_000] {
+            let (params, _half, window_len) = synthetic_tau_window(sr);
+            let n = params.n_samples();
+            let min =
+                ac_core::measurement::sweep::linear_ir_min_capture_len(&params, 1, window_len)
+                    .expect("τ sweep parameters are valid");
+            // Largest tail the exact predicate refuses: one sample short of the gate.
+            let short = min - n - 1;
+            let tail_s = short as f64 / sr as f64;
+            let cap = synthetic_tau_capture(&params, 1711);
+            let err = analyse_tau_leg(&cap[..n + short], &params, tail_s, 0, SnrGate::Constant)
+                .expect_err("the τ leg must refuse a capture its linear gate reads past");
+            assert!(
+                err.downcast_ref::<TailTooShort>().is_some(),
+                "sr={sr}: expected TailTooShort at a {short}-sample tail, got: {err}"
+            );
+        }
     }
 
     /// The rig override parser (#350) accepts a plain number and refuses

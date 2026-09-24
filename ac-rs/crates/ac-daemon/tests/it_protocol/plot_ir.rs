@@ -1306,6 +1306,100 @@ fn plot_ir_refuses_an_unresolvable_reference_before_any_audio() {
     assert_eq!(status["busy"], json!(false), "{status}");
 }
 
+/// Run one `plot_ir` and collect every PUB frame until `done` or `error`,
+/// then keep listening `settle` longer so a late frame is seen too.
+fn plot_ir_frames(c: &Client, req: Value, settle: Duration) -> Vec<(String, Value)> {
+    let reply = c.call(req);
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let mut frames = Vec::new();
+    let mut deadline = Instant::now() + Duration::from_secs(20);
+    let mut ended = false;
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        let Some((t, v)) = c.recv_pub(remaining.max(1)) else {
+            break;
+        };
+        if !ended && (t == "done" || t == "error") {
+            ended = true;
+            deadline = Instant::now() + settle;
+        }
+        frames.push((t, v));
+    }
+    assert!(ended, "plot_ir never finished: {frames:?}");
+    frames
+}
+
+/// #576 AC3: the linear-IR gate reads `N − 1 + ceil(W₁/2)` capture samples.
+/// With a 0.25 s tail (exactly 12000 samples at 48 kHz) and one harmonic
+/// (no clamp), a 24002-sample window reads exactly the capture and runs;
+/// 24003 reads one sample past it and is refused before any stimulus, with
+/// no IR and no report. Before #576 both ran silently.
+#[test]
+fn plot_ir_refuses_a_tail_one_sample_short_of_the_ir_window() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let req = |window_len: usize| {
+        json!({
+            "cmd": "plot_ir",
+            "f1_hz": 200.0,
+            "f2_hz": 8_000.0,
+            "duration": 0.5,
+            "level_dbfs": -6.0,
+            "tail_s": 0.25,
+            "window_len": window_len,
+            "n_harmonics": 1,
+        })
+    };
+
+    let at = plot_ir_frames(&c, req(24_002), Duration::from_millis(200));
+    assert!(
+        !at.iter().any(|(t, _)| t == "error"),
+        "a capture exactly at the minimum must run: {at:?}"
+    );
+    let ir = at
+        .iter()
+        .find(|(t, _)| t == "measurement/impulse_response")
+        .map(|(_, v)| v)
+        .expect("IR frame at the threshold");
+    assert_eq!(ir["window_len_used"][0], json!(24_002), "{ir}");
+    assert!(
+        at.iter().any(|(t, _)| t == "measurement/report"),
+        "report at the threshold"
+    );
+
+    let short = plot_ir_frames(&c, req(24_003), Duration::from_millis(1500));
+    let err = short
+        .iter()
+        .find(|(t, _)| t == "error")
+        .map(|(_, v)| v)
+        .expect("error frame one sample short");
+    assert_eq!(err["cmd"], json!("plot_ir"), "{err}");
+    let msg = err["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.starts_with("plot_ir not started \u{2014} tail too short for the IR window"),
+        "{msg}"
+    );
+    for needle in [
+        "12000 samples  (0.25 s typed, 48000 Hz)",
+        "24003 samples  (0.5001 s, typed)",
+        "12001 samples",
+        "tail 0.26s or longer, or window 24002win or shorter",
+        "stimulus  silent",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+    for topic in ["measurement/impulse_response", "measurement/report", "done"] {
+        assert!(
+            !short.iter().any(|(t, _)| t == topic),
+            "a refused run must not emit {topic}: {short:?}"
+        );
+    }
+    let status = c.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
+}
+
 /// `distance_m` budget: anything but a finite, positive number is refused
 /// before port resolution, with the stimulus stated silent.
 #[test]

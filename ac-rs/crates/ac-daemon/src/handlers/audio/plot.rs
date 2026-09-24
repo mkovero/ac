@@ -19,9 +19,9 @@ use ac_core::measurement::report::{
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
     gated_frequency_response, gated_response_citation, inverse_sweep, ir_default_window_len,
-    log_sweep, noise_tail_start_s, SweepParams, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
-    IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS, IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S,
-    LINEAR_DECONV_TAIL_NOTE,
+    linear_ir_min_capture_len, linear_ir_window_len, log_sweep, noise_tail_start_s, SweepParams,
+    IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ, IR_DEFAULT_N_HARMONICS,
+    IR_DEFAULT_TAIL_S, IR_DEFAULT_WINDOW_S, LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::session::{
@@ -139,6 +139,79 @@ fn request_error(cmd: &str, message: impl std::fmt::Display) -> Value {
         "ok": false,
         "error": format!("{cmd} not started — {message}\n         stimulus  silent"),
     })
+}
+
+/// Capture tail, in samples, that `plot_ir` predicts for a `tail_s` request.
+/// Floor, because the JACK and CPAL backends truncate `tail_s · sr` and the
+/// fake backend rounds it: the floor is never more than any backend's
+/// actual count, so a check against it never admits a short capture. It
+/// can only refuse one sample early, when `tail_s · sr` sits just below an
+/// integer (#576).
+fn predicted_tail_samples(tail_s: f64, sample_rate: u32) -> usize {
+    (tail_s * sample_rate as f64).floor() as usize
+}
+
+/// #576: the refusal for a `plot_ir` request whose predicted capture is
+/// shorter than the linear-IR gate reads
+/// ([`ac_core::measurement::sweep::linear_ir_min_capture_len`]), or `None`
+/// when the capture holds every sample the gate reads. Decided before any
+/// stimulus: the late half of a linear IR from a shorter capture is computed
+/// from samples that were never recorded, so no IR is produced at all.
+///
+/// Counts are in samples, the unit the rule is exact in; seconds appear only
+/// as context. `change` gives one passing value per parameter, both passing
+/// the same predicate with the same floor arithmetic as the check itself.
+/// Errors only where `extract_irs` would, on the same parameters.
+fn ir_tail_refusal(
+    params: &SweepParams,
+    n_harmonics: usize,
+    window_len: usize,
+    window_typed: bool,
+    tail_s: f64,
+    tail_typed: bool,
+) -> anyhow::Result<Option<String>> {
+    let sr = params.sample_rate;
+    let min_capture = linear_ir_min_capture_len(params, n_harmonics, window_len)?;
+    let tail_samples = predicted_tail_samples(tail_s, sr);
+    if params.n_samples() + tail_samples >= min_capture {
+        return Ok(None);
+    }
+    // Capture samples the gate reads past the sweep end: `ceil(W₁/2) − 1`.
+    let needed = min_capture - params.n_samples();
+    let w1 = linear_ir_window_len(params, n_harmonics, window_len)?;
+    let window_context = if w1 != window_len {
+        format!("{window_len} requested, shortened for {n_harmonics}harm")
+    } else {
+        format!(
+            "{:.4} s, {}",
+            w1 as f64 / sr as f64,
+            if window_typed { "typed" } else { "default" }
+        )
+    };
+    // Smallest 0.01 s step that passes, found by stepping up through the
+    // same floor the check uses: rounding `needed / sr` up to two decimals
+    // can land one float below the threshold and suggest a refused tail.
+    let mut centis = (needed as f64 * 100.0 / sr as f64).floor() as u64;
+    while predicted_tail_samples(centis as f64 / 100.0, sr) < needed {
+        centis += 1;
+    }
+    let tail_suggestion = centis as f64 / 100.0;
+    // Largest gate the tail admits: `ceil(W/2) − 1 ≤ tail_samples`.
+    let window_suggestion = 2 * (tail_samples + 1);
+    Ok(Some(format!(
+        "plot_ir not started \u{2014} tail too short for the IR window\n\
+         {i}{:<10}{tail_samples:>7} samples  ({tail_s} s {}, {sr} Hz)\n\
+         {i}{:<10}{w1:>7} samples  ({window_context})\n\
+         {i}{:<10}{needed:>7} samples  (half the window, past the sweep end)\n\
+         {i}{:<10}tail {tail_suggestion:.2}s or longer, or window {window_suggestion}win or shorter\n\
+         {i}stimulus  silent",
+        "tail",
+        if tail_typed { "typed" } else { "default" },
+        "window",
+        "needed",
+        "change",
+        i = "         ",
+    )))
 }
 
 fn point_budget_error(cmd: &str, count: usize) -> Value {
@@ -1013,6 +1086,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let tail_typed = cmd.get("tail_s").is_some();
     let n_harmonics = match bounded_usize(
         cmd,
         "n_harmonics",
@@ -1187,6 +1261,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         let sr = eng.sample_rate();
+        let window_typed = window_len.is_some();
         let window_len = window_len.unwrap_or_else(|| ir_default_window_len(sr));
         // #461: the device-enumeration epoch this capture runs in, sampled
         // once, after `start`, and used for both τ lookups below so the
@@ -1271,6 +1346,31 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         };
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs) as f32;
         let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
+
+        // #576: a tail too short for the linear-IR gate is refused here, once
+        // the rate (and so the defaulted window and sweep length) is known
+        // and before any stimulus. Nothing is played and no IR is produced.
+        let refusal = match ir_tail_refusal(
+            &params,
+            n_harmonics.max(1),
+            window_len,
+            window_typed,
+            tail_s,
+            tail_typed,
+        ) {
+            Ok(r) => r,
+            Err(e) => Some(format!("{e}")),
+        };
+        if let Some(message) = refusal {
+            eng.set_silence();
+            eng.stop();
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"plot_ir","message":message}),
+            );
+            return;
+        }
 
         let xruns_before = eng.xruns();
         let (capture, reference_leg) = match ref_in_port.as_deref() {
@@ -2024,5 +2124,202 @@ mod request_budget_tests {
             super::super::super::checked_log_freq_point_count(100.0, 1000.0, 10_000),
             Ok(MAX_SWEEP_POINTS)
         );
+    }
+}
+
+#[cfg(test)]
+mod ir_tail_refusal_tests {
+    use super::*;
+
+    fn params(duration_s: f64, sample_rate: u32) -> SweepParams {
+        SweepParams {
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s,
+            sample_rate,
+        }
+    }
+
+    fn refusal(
+        p: SweepParams,
+        n_harmonics: usize,
+        window_len: usize,
+        window_typed: bool,
+        tail_s: f64,
+        tail_typed: bool,
+    ) -> Option<String> {
+        ir_tail_refusal(
+            &p,
+            n_harmonics,
+            window_len,
+            window_typed,
+            tail_s,
+            tail_typed,
+        )
+        .expect("valid parameters")
+    }
+
+    /// AC4: the default request (0.5 s tail, 0.4 s window, 5 harmonics) is
+    /// untouched at every supported rate.
+    #[test]
+    fn default_request_is_not_refused() {
+        for sr in [44_100, 48_000, 96_000, 192_000] {
+            let p = params(IR_DEFAULT_DURATION_S, sr);
+            assert_eq!(
+                refusal(
+                    p,
+                    IR_DEFAULT_N_HARMONICS,
+                    ir_default_window_len(sr),
+                    false,
+                    IR_DEFAULT_TAIL_S,
+                    false
+                ),
+                None,
+                "sr={sr}"
+            );
+        }
+    }
+
+    /// The ux layouts on #576, verbatim.
+    #[test]
+    fn refusal_text_matches_the_specified_layouts() {
+        let cases: [(SweepParams, usize, usize, bool, f64, bool, &str); 5] = [
+            (
+                params(4.0, 48_000),
+                5,
+                19_200,
+                false,
+                0.1,
+                true,
+                "plot_ir not started \u{2014} tail too short for the IR window\n\
+                 \x20        tail         4800 samples  (0.1 s typed, 48000 Hz)\n\
+                 \x20        window      19200 samples  (0.4000 s, default)\n\
+                 \x20        needed       9599 samples  (half the window, past the sweep end)\n\
+                 \x20        change    tail 0.20s or longer, or window 9602win or shorter\n\
+                 \x20        stimulus  silent",
+            ),
+            (
+                params(4.0, 48_000),
+                1,
+                24_003,
+                true,
+                0.25,
+                true,
+                "plot_ir not started \u{2014} tail too short for the IR window\n\
+                 \x20        tail        12000 samples  (0.25 s typed, 48000 Hz)\n\
+                 \x20        window      24003 samples  (0.5001 s, typed)\n\
+                 \x20        needed      12001 samples  (half the window, past the sweep end)\n\
+                 \x20        change    tail 0.26s or longer, or window 24002win or shorter\n\
+                 \x20        stimulus  silent",
+            ),
+            (
+                params(20.0, 48_000),
+                5,
+                65_536,
+                true,
+                0.5,
+                false,
+                "plot_ir not started \u{2014} tail too short for the IR window\n\
+                 \x20        tail        24000 samples  (0.5 s default, 48000 Hz)\n\
+                 \x20        window      65536 samples  (1.3653 s, typed)\n\
+                 \x20        needed      32767 samples  (half the window, past the sweep end)\n\
+                 \x20        change    tail 0.69s or longer, or window 48002win or shorter\n\
+                 \x20        stimulus  silent",
+            ),
+            (
+                params(4.0, 44_100),
+                5,
+                65_536,
+                true,
+                0.05,
+                true,
+                "plot_ir not started \u{2014} tail too short for the IR window\n\
+                 \x20        tail         2205 samples  (0.05 s typed, 44100 Hz)\n\
+                 \x20        window      17701 samples  (65536 requested, shortened for 5harm)\n\
+                 \x20        needed       8850 samples  (half the window, past the sweep end)\n\
+                 \x20        change    tail 0.21s or longer, or window 4412win or shorter\n\
+                 \x20        stimulus  silent",
+            ),
+            (
+                params(4.0, 192_000),
+                1,
+                1_048_576,
+                true,
+                0.3,
+                true,
+                "plot_ir not started \u{2014} tail too short for the IR window\n\
+                 \x20        tail        57600 samples  (0.3 s typed, 192000 Hz)\n\
+                 \x20        window    1048576 samples  (5.4613 s, typed)\n\
+                 \x20        needed     524287 samples  (half the window, past the sweep end)\n\
+                 \x20        change    tail 2.74s or longer, or window 115202win or shorter\n\
+                 \x20        stimulus  silent",
+            ),
+        ];
+        for (p, nh, w, w_typed, tail, t_typed, expected) in cases {
+            let got = refusal(p, nh, w, w_typed, tail, t_typed).expect("refused");
+            assert_eq!(got, expected);
+            assert!(got.lines().all(|l| l.chars().count() + 6 <= 80), "{got}");
+        }
+    }
+
+    /// Exactly at the threshold passes; one sample of window past it is
+    /// refused — `N − 1 + ceil(W₁/2)`, not `N + ceil(W/2)`.
+    #[test]
+    fn threshold_is_exact_in_samples() {
+        let p = params(4.0, 48_000);
+        assert_eq!(refusal(p, 1, 24_002, true, 0.25, true), None);
+        assert!(refusal(p, 1, 24_003, true, 0.25, true).is_some());
+    }
+
+    /// Both suggestions on the `change` line pass the same check, and the
+    /// window one is the largest that does.
+    #[test]
+    fn change_suggestions_pass_the_same_check() {
+        for sr in [44_100, 48_000, 96_000, 192_000] {
+            let p = params(4.0, sr);
+            for (tail_s, window_len) in [
+                (0.0, 2),
+                (0.0, 3),
+                (0.01, 4096),
+                (0.05, 19_200),
+                (0.1, 65_536),
+                (0.3, 1_048_576),
+                (0.123, 30_001),
+            ] {
+                let Some(msg) = refusal(p, 1, window_len, true, tail_s, true) else {
+                    continue;
+                };
+                let change = msg
+                    .lines()
+                    .find(|l| l.trim_start().starts_with("change"))
+                    .expect("change line");
+                let tail_tok = change.split_whitespace().nth(2).unwrap();
+                let window_tok = change.split_whitespace().nth(7).unwrap();
+                let tail: f64 = tail_tok.trim_end_matches('s').parse().unwrap();
+                let window: usize = window_tok.trim_end_matches("win").parse().unwrap();
+                assert_eq!(
+                    refusal(p, 1, window_len, true, tail, true),
+                    None,
+                    "sr={sr}: suggested {tail_tok} is itself refused"
+                );
+                assert_eq!(
+                    refusal(p, 1, window, true, tail_s, true),
+                    None,
+                    "sr={sr}: suggested {window_tok} is itself refused"
+                );
+                assert!(
+                    refusal(p, 1, window + 1, true, tail_s, true).is_some(),
+                    "sr={sr}: {window_tok} is not the largest passing window"
+                );
+                let centis = (tail * 100.0).round() as u64;
+                if centis > 0 {
+                    let one_step_less = (centis - 1) as f64 / 100.0;
+                    assert!(
+                        refusal(p, 1, window_len, true, one_step_less, true).is_some(),
+                        "sr={sr}: {tail_tok} is not the smallest passing 0.01 s step"
+                    );
+                }
+            }
+        }
     }
 }
