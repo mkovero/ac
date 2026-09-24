@@ -61,8 +61,8 @@ pub use defaults::{
 pub use floor::pre_impulse_snr_floor_db;
 pub use gated::{gated_frequency_response, tukey_window, GatedResponsePoint};
 pub use harmonics::{
-    extract_irs, pre_impulse_region_len, pre_impulse_snr_db, pre_impulse_snr_db_before,
-    DeconvolvedIrs, HarmonicIr,
+    extract_irs, linear_ir_min_capture_len, linear_ir_window_len, pre_impulse_region_len,
+    pre_impulse_snr_db, pre_impulse_snr_db_before, DeconvolvedIrs, HarmonicIr,
 };
 pub use onset::{
     estimate_onset, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate,

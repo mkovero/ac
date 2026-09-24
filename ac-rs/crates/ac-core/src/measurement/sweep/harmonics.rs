@@ -161,19 +161,19 @@ fn per_order_window_lens(
 /// The linear IR is centred at the sweep endpoint (sample `N−1` of the
 /// forward sweep). Each harmonic IR is centred at
 /// `linear_centre − round(Δt_k · fs)`.
+///
+/// The late half of the linear gate reads `full` past the sweep end, and
+/// `full[m]` depends on capture samples `0..=m` only. A capture shorter
+/// than [`linear_ir_min_capture_len`] therefore yields a linear IR whose
+/// late samples were computed from samples that were never recorded
+/// (#576); callers that choose the capture length check it first.
 pub fn extract_irs(
     full: &[f64],
     p: &SweepParams,
     n_harmonics: usize,
     window_len: usize,
 ) -> Result<DeconvolvedIrs> {
-    p.validate()?;
-    if n_harmonics == 0 {
-        bail!("n_harmonics must be ≥ 1");
-    }
-    if window_len == 0 {
-        bail!("window_len must be ≥ 1");
-    }
+    validate_extract_args(p, n_harmonics, window_len)?;
     let n_sweep = p.n_samples();
     if full.len() < n_sweep {
         bail!(
@@ -185,7 +185,7 @@ pub fn extract_irs(
     let offsets = harmonic_offsets_samples(p, n_harmonics);
     let window_len_used = per_order_window_lens(p, &offsets, window_len)?;
 
-    let linear_centre = n_sweep - 1;
+    let linear_centre = linear_centre_index(p);
     let linear = gate(full, linear_centre, window_len_used[0]);
 
     let mut harmonics = Vec::with_capacity(n_harmonics.saturating_sub(1));
@@ -209,6 +209,62 @@ pub fn extract_irs(
         window_len_used,
         params: *p,
     })
+}
+
+/// The argument checks [`extract_irs`] and [`linear_ir_window_len`] share,
+/// so the predicate refuses exactly what the extraction would.
+fn validate_extract_args(p: &SweepParams, n_harmonics: usize, window_len: usize) -> Result<()> {
+    p.validate()?;
+    if n_harmonics == 0 {
+        bail!("n_harmonics must be ≥ 1");
+    }
+    if window_len == 0 {
+        bail!("window_len must be ≥ 1");
+    }
+    Ok(())
+}
+
+/// Index in `full` at which [`extract_irs`] centres the linear IR: the
+/// sweep endpoint, sample `N−1`.
+fn linear_centre_index(p: &SweepParams) -> usize {
+    p.n_samples() - 1
+}
+
+/// Gate length, in samples, that [`extract_irs`] gives the linear IR
+/// (order 1) for a `window_len` request: the request, clamped to the
+/// spacing of order 2 when `n_harmonics > 1`. The same value as
+/// `DeconvolvedIrs::window_len_used[0]`, available before any capture.
+pub fn linear_ir_window_len(
+    p: &SweepParams,
+    n_harmonics: usize,
+    window_len: usize,
+) -> Result<usize> {
+    validate_extract_args(p, n_harmonics, window_len)?;
+    let offsets = harmonic_offsets_samples(p, n_harmonics);
+    Ok(per_order_window_lens(p, &offsets, window_len)?[0])
+}
+
+/// Minimum capture length, in samples, for which every sample of the
+/// linear IR [`extract_irs`] gates is computed from recorded samples
+/// (#576).
+///
+/// The linear gate starts at `N−1 − gate_centre_index(W₁)` and runs `W₁`
+/// samples, where `N` is the sweep length and `W₁` is
+/// [`linear_ir_window_len`]; so the last `full` index it reads is
+/// `N − 2 + ceil(W₁/2)`. `full` is a linear convolution, so `full[m]`
+/// depends on capture samples `0..=m` only, and the capture must hold
+/// `N − 1 + ceil(W₁/2)` samples. Any shorter capture changes the linear IR;
+/// any longer one leaves it untouched (pinned by
+/// `linear_ir_min_capture_len_is_the_samples_the_gate_reads`).
+pub fn linear_ir_min_capture_len(
+    p: &SweepParams,
+    n_harmonics: usize,
+    window_len: usize,
+) -> Result<usize> {
+    let w1 = linear_ir_window_len(p, n_harmonics, window_len)?;
+    let gate_start = linear_centre_index(p) as i64 - gate_centre_index(w1) as i64;
+    let last_read = gate_start + w1 as i64 - 1;
+    Ok((last_read + 1).max(0) as usize)
 }
 
 /// Number of samples [`pre_impulse_snr_db`] measures its noise floor over:
@@ -657,6 +713,92 @@ mod tests {
                 "note should carry `{needle}` so the operator knows which \
                  knob widens the gap: {note}"
             );
+        }
+    }
+
+    // ─── linear_ir_min_capture_len (#576) ──────────────────────────
+
+    /// `N − 1 + ceil(W₁/2)` for an even and an odd gate, with no neighbour
+    /// to clamp either.
+    #[test]
+    fn linear_ir_min_capture_len_for_even_and_odd_windows() {
+        let p = p_default();
+        let n = p.n_samples();
+        assert_eq!(linear_ir_min_capture_len(&p, 1, 1024).unwrap(), n - 1 + 512);
+        assert_eq!(linear_ir_min_capture_len(&p, 1, 1025).unwrap(), n - 1 + 513);
+        assert_eq!(linear_ir_min_capture_len(&p, 1, 1).unwrap(), n);
+    }
+
+    /// With harmonics the rule is judged on the gate order 1 actually gets,
+    /// not the request: the same length `extract_irs` reports as
+    /// `window_len_used[0]`.
+    #[test]
+    fn linear_ir_min_capture_len_uses_the_clamped_linear_gate() {
+        let (p, full) = deconvolved_default();
+        let requested = 65_536;
+        let w1 = extract_irs(&full, &p, 5, requested)
+            .unwrap()
+            .window_len_used[0];
+        assert!(w1 < requested, "order 1 must be clamped here: {w1}");
+        assert_eq!(linear_ir_window_len(&p, 5, requested).unwrap(), w1);
+        assert_eq!(
+            linear_ir_min_capture_len(&p, 5, requested).unwrap(),
+            p.n_samples() - 1 + w1.div_ceil(2)
+        );
+    }
+
+    /// The predicate is the samples the gate reads, not a rule of thumb.
+    /// One capture of delayed sweep plus noise, so every sample carries
+    /// content, cut at three lengths: at the minimum, past it by recorded
+    /// (non-zero) samples, and one sample short. Past the minimum the linear
+    /// IR moves only by FFT rounding (nothing past it is read); one sample
+    /// short it moves by the dropped sample's contribution, orders of
+    /// magnitude more (the last sample is read).
+    #[test]
+    fn linear_ir_min_capture_len_is_the_samples_the_gate_reads() {
+        let p = p_default();
+        let x = log_sweep(&p).unwrap();
+        let xi = inverse_sweep(&p).unwrap();
+        let max_diff = |a: &[f64], b: &[f64]| {
+            assert_eq!(a.len(), b.len());
+            a.iter()
+                .zip(b)
+                .map(|(u, v)| (u - v).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        for window_len in [1024_usize, 1025] {
+            let min = linear_ir_min_capture_len(&p, 1, window_len).unwrap();
+            let mut state: u32 = 0x2545_f491;
+            let capture: Vec<f32> = (0..min + 10_000)
+                .map(|i| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let noise = (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+                    let sweep = i
+                        .checked_sub(17)
+                        .and_then(|j| x.get(j).copied())
+                        .unwrap_or(0.0);
+                    sweep + 0.5 * noise
+                })
+                .collect();
+            let linear_of = |len: usize| {
+                extract_irs(&deconvolve_full(&capture[..len], &xi), &p, 1, window_len)
+                    .unwrap()
+                    .linear
+            };
+            let at_min = linear_of(min);
+            let short = max_diff(&linear_of(min - 1), &at_min);
+            assert!(
+                short > 0.0,
+                "W={window_len}: one sample short left the IR unchanged"
+            );
+            for extra in [1_usize, 100, 10_000] {
+                let longer = max_diff(&linear_of(min + extra), &at_min);
+                assert!(
+                    longer * 1e6 < short,
+                    "W={window_len}: {extra} recorded samples past the minimum moved \
+                     the linear IR by {longer:e}, against {short:e} for one sample short"
+                );
+            }
         }
     }
 }

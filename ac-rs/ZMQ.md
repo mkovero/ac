@@ -1366,6 +1366,35 @@ An out-of-budget request returns `ok: false`, confirms that the stimulus is
 silent, and emits no audio. `stop` cancels both the sweep and tail portions of
 an accepted `plot_ir` request.
 
+A `tail_s`/`window_len` combination whose capture the linear-IR gate would
+read past is refused after the engine starts and before any stimulus (#576).
+The gate is centred on the sweep end, so it reads `N − 1 + ceil(W₁/2)`
+capture samples, where `N` is the sweep length and `W₁` the gate length the
+linear IR actually gets (`window_len_used[0]`, after any clamp to the order-2
+spacing) — `ac_core::measurement::sweep::linear_ir_min_capture_len`. The
+capture is predicted as `N + floor(tail_s · sr)`; every backend captures at
+least that many samples, so the prediction can only refuse early (by one
+sample, when `tail_s · sr` sits just below an integer), never admit a
+truncated capture. The REP ack has already said `ok: true`, because the
+rate, and with it a defaulted window, is only known once the engine starts;
+the refusal arrives as an `error` frame `{"cmd": "plot_ir", "message": ...}`,
+and no `measurement/impulse_response`, `measurement/report` or `done` frame
+follows. The message uses the refusal layout, with counts in samples and one
+passing value per parameter:
+
+```
+plot_ir not started — tail too short for the IR window
+         tail         4800 samples  (0.1 s typed, 48000 Hz)
+         window      19200 samples  (0.4000 s, default)
+         needed       9599 samples  (half the window, past the sweep end)
+         change    tail 0.20s or longer, or window 9602win or shorter
+         stimulus  silent
+```
+
+The calibrate τ leg keeps its own, stricter rule (`2·half_window > tail_s`
+refuses): it asks the tail to hold the whole τ gate, not the half the gate
+reads, as a calibrate policy margin.
+
 `level_dbfs` above full scale (0 dBFS) is refused before worker spawn.
 
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
