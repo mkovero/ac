@@ -13,7 +13,7 @@
 //! `wire_fixture_on_disk_is_current` (#271) — a regeneration that changes the
 //! numbers shows up in the diff instead of passing unnoticed.
 
-use ac_core::snapshot::read_acsnap;
+use ac_core::snapshot::{read_acsnap, write_acsnap, ChannelMeta, Snapshot};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 use serde_json::json;
 use std::path::PathBuf;
@@ -168,24 +168,52 @@ fn wire_fixture_on_disk_is_current() {
 /// The fixture's content, shared by the regenerator and the currency check so
 /// the two cannot drift apart.
 fn build_wire_frame() -> serde_json::Value {
+    build_wire_frame_from(&read_fixture_snapshot())
+}
+
+fn read_fixture_snapshot() -> Snapshot {
     let bytes = std::fs::read(acsnap_fixture_path()).expect(
         "tests/fixtures/snapshot-fixture-v1.acsnap must exist — regenerate via \
          `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
     );
-    let snap = read_acsnap(&bytes).expect("parse checked-in .acsnap fixture");
+    read_acsnap(&bytes).expect("parse checked-in .acsnap fixture")
+}
 
+/// Metadata for the channel whose session id is `input_channel`.
+///
+/// Mirrors `Snapshot::channel_index_for` in `ac-core` (private there): an id is
+/// a capture-port index, not a FLAC stream position, so the position is found
+/// by matching the id. A miss panics naming the id — it never falls back to
+/// `input_channel as usize`, which is the defect #523 removed.
+fn channel_meta_for(snap: &Snapshot, input_channel: u32) -> &ChannelMeta {
+    let pos = snap
+        .meta
+        .per_channel
+        .iter()
+        .position(|c| c.input_channel == input_channel)
+        .unwrap_or_else(|| {
+            panic!("no per_channel entry has input_channel {input_channel} in the snapshot")
+        });
+    &snap.meta.per_channel[pos]
+}
+
+/// The frame derived from `snap`'s first pair. `build_wire_frame` passes the
+/// checked-in fixture; the #523 regression tests pass modified copies of it.
+fn build_wire_frame_from(snap: &Snapshot) -> serde_json::Value {
     let pair_idx = 0;
     let (meas_ch, ref_ch) = snap.meta.session.pairs[pair_idx];
-    let weighting = WeightingCurve::from_tag(&snap.meta.per_channel[meas_ch as usize].weighting)
+    let meas_meta = channel_meta_for(snap, meas_ch);
+    let ref_meta = channel_meta_for(snap, ref_ch);
+    let weighting = WeightingCurve::from_tag(&meas_meta.weighting)
         .expect("valid weighting tag in fixture meta");
-    let integration = snap.meta.per_channel[meas_ch as usize].integration.clone();
+    let integration = meas_meta.integration.clone();
 
     let d = snap
         .derive_pair(pair_idx, weighting, None)
         .expect("derive_pair on checked-in fixture");
 
-    let meas_cal = snap.meta.per_channel[meas_ch as usize].calibration.as_ref();
-    let ref_cal = snap.meta.per_channel[ref_ch as usize].calibration.as_ref();
+    let meas_cal = meas_meta.calibration.as_ref();
+    let ref_cal = ref_meta.calibration.as_ref();
     let voltage_tag = |c: Option<&ac_core::shared::calibration::Calibration>| {
         if c.and_then(|c| c.vrms_at_0dbfs_in).is_some() {
             "on"
@@ -260,4 +288,65 @@ fn build_wire_frame() -> serde_json::Value {
     });
 
     frame
+}
+
+/// Round-trip `snap` through `write_acsnap` → `read_acsnap`, so the reader's
+/// metadata validation (unique ids, pairs that resolve) checks the modified
+/// snapshot is a legal one before a test derives from it.
+fn round_trip(snap: Snapshot) -> Snapshot {
+    let (bytes, _) = write_acsnap(&snap.meta, &snap.channels).expect("write modified snapshot");
+    read_acsnap(&bytes).expect("modified snapshot must pass read_acsnap validation")
+}
+
+/// #523: stream order reversed, ids kept. Position 0 is now the ref (id 1) and
+/// position 1 the meas (id 0), so indexing `per_channel` by id reads the ref's
+/// calibration for meas and swaps `cal_tags` / changes `spl`. Resolving by id
+/// gives the unmodified frame exactly — same build, same samples, same
+/// calibration, so no cross-build tolerance applies.
+#[test]
+fn frame_resolves_permuted_channels_by_input_id() {
+    let base = read_fixture_snapshot();
+    let expected = build_wire_frame_from(&base);
+
+    assert_eq!(base.meta.session.pairs[0], (0, 1));
+    assert_eq!(base.meta.per_channel[0].input_channel, 0);
+    assert_eq!(base.meta.per_channel[1].input_channel, 1);
+    assert_ne!(
+        base.meta.per_channel[0].calibration, base.meta.per_channel[1].calibration,
+        "precondition: meas and ref calibration must differ, or reading the wrong \
+         channel's metadata is invisible and this test is vacuous"
+    );
+
+    let mut snap = base;
+    snap.meta.per_channel.reverse();
+    snap.meta.channel_map.reverse();
+    snap.channels.reverse();
+    let snap = round_trip(snap);
+    assert_eq!(snap.meta.per_channel[0].input_channel, 1);
+
+    assert_eq!(build_wire_frame_from(&snap), expected);
+}
+
+/// #523: ids that are not positions — triage's `[3, 1]`. Meas relabelled 0→3,
+/// ref keeps 1, positions unchanged. Indexing by id panics on `per_channel[3]`;
+/// resolving by id gives the unmodified frame except the two channel ids.
+#[test]
+fn frame_resolves_out_of_range_input_ids() {
+    let base = read_fixture_snapshot();
+    let expected = build_wire_frame_from(&base);
+
+    let mut snap = base;
+    assert_eq!(snap.meta.per_channel[0].input_channel, 0);
+    snap.meta.per_channel[0].input_channel = 3;
+    snap.meta.session.pairs[0] = (3, 1);
+    let snap = round_trip(snap);
+
+    let mut frame = build_wire_frame_from(&snap);
+    assert_eq!(frame["meas_channel"], 3);
+    assert_eq!(frame["ref_channel"], 1);
+
+    let obj = frame.as_object_mut().expect("frame is an object");
+    obj.insert("meas_channel".into(), expected["meas_channel"].clone());
+    obj.insert("ref_channel".into(), expected["ref_channel"].clone());
+    assert_eq!(frame, expected);
 }
