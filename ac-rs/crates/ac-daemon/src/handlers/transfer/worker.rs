@@ -50,7 +50,7 @@ type SnapshotSpool = Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>;
 /// from the moment they are published until the guard drops (#432).
 ///
 /// Built by [`TransferSessionGuard::publish`], which is also what publishes
-/// `drive_state` and `relock_state`, so no line of code sits between a slot
+/// `drive_state`, `relock_state` and the snapshot ring, so no line of code sits between a slot
 /// becoming visible and something being responsible for clearing it. Moved
 /// into the worker, it is dropped on every way out of the thread — normal
 /// completion, an early `return` when the engine will not open or start, or
@@ -66,12 +66,13 @@ struct TransferSessionGuard {
     snapshot_spool: SnapshotSpool,
     drive_state: Arc<DriveState>,
     relock_state: Arc<RelockRequest>,
+    snapshot_ring: Arc<Mutex<SnapshotRingState>>,
 }
 
 impl TransferSessionGuard {
-    /// Publish `drive_state` and `relock_state` into their slots and take
-    /// ownership of clearing them, along with the snapshot ring slot and
-    /// spool the worker publishes later.
+    /// Publish `drive_state`, `relock_state` and the (pending) snapshot ring
+    /// into their slots and take ownership of clearing them, along with the
+    /// spool the worker fills.
     fn publish(
         drive_state_slot: DriveSlot,
         relock_state_slot: RelockSlot,
@@ -79,6 +80,7 @@ impl TransferSessionGuard {
         snapshot_spool: SnapshotSpool,
         drive_state: Arc<DriveState>,
         relock_state: Arc<RelockRequest>,
+        snapshot_ring: Arc<Mutex<SnapshotRingState>>,
     ) -> TransferSessionGuard {
         let guard = TransferSessionGuard {
             drive_state_slot,
@@ -87,17 +89,15 @@ impl TransferSessionGuard {
             snapshot_spool,
             drive_state,
             relock_state,
+            snapshot_ring,
         };
         let drive = guard.drive_state.clone();
         with_unpoisoned(&guard.drive_state_slot, |slot| *slot = Some(drive));
         let relock = guard.relock_state.clone();
         with_unpoisoned(&guard.relock_state_slot, |slot| *slot = Some(relock));
+        let ring = guard.snapshot_ring.clone();
+        with_unpoisoned(&guard.snapshot_ring_slot, |slot| *slot = Some(ring));
         guard
-    }
-
-    /// Publish this session's snapshot ring; cleared when the guard drops.
-    fn publish_snapshot_ring(&self, ring: Arc<Mutex<SnapshotRingState>>) {
-        with_unpoisoned(&self.snapshot_ring_slot, |slot| *slot = Some(ring));
     }
 }
 
@@ -120,8 +120,10 @@ impl Drop for TransferSessionGuard {
         clear_if_own(&self.relock_state_slot, &self.relock_state);
 
         // Snapshot ring/spool lifecycle ends with the session (deliverable
-        // 3's retention policy — module doc, `handlers/snapshot.rs`).
-        with_unpoisoned(&self.snapshot_ring_slot, |slot| *slot = None);
+        // 3's retention policy — module doc, `handlers/snapshot.rs`). The
+        // ring is published at handler time (#188), so a successor can have
+        // published its own before this guard drops: clear only our own.
+        clear_if_own(&self.snapshot_ring_slot, &self.snapshot_ring);
         crate::handlers::snapshot::clear_spool(&self.snapshot_spool);
         self.snapshot_spool.clear_poison();
     }
@@ -132,7 +134,8 @@ impl Drop for TransferSessionGuard {
 /// session owns for its lifetime.
 ///
 /// Separate from [`SessionPlan`] because the split is not cosmetic —
-/// `drive_state` and `relock_state` are constructed and published *before*
+/// `drive_state`, `relock_state` and the snapshot ring are constructed and
+/// published *before*
 /// the worker spawns, which is what closes the race described in
 /// [`transfer_stream`]. A plan built and then handed over could not have
 /// that property.
@@ -153,20 +156,33 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
     // Publish the drive state BEFORE spawning the worker, so it exists
     // the instant this handler returns `{"ok":true}`. If it were created
-    // inside the closure (as `snapshot_ring` still is), there would be a
-    // window — the whole of `eng.start`, tens to hundreds of ms of JACK
-    // port registration — during which a client that got the ok reply and
-    // immediately armed+fired would be told "no session running". #182's
-    // stimulus client is exactly that caller. Constructing it here closes
-    // the race structurally rather than narrowing it. (The snapshot_ring
-    // twin is tracked separately.)
+    // inside the closure, there would be a window — the whole of
+    // `eng.start`, tens to hundreds of ms of JACK port registration —
+    // during which a client that got the ok reply and immediately
+    // armed+fired would be told "no session running". #182's stimulus
+    // client is exactly that caller. Constructing it here closes the race
+    // structurally rather than narrowing it.
     //
     // `relock_state` is published alongside it for the same structural
     // reason: closing the window between the CTRL reply and the worker
     // actually existing, rather than narrowing it.
     //
-    // The guard that publishes both is the thing that clears them, on
+    // The snapshot ring is published here too (#188), but *pending*: its
+    // cap in samples needs the engine's sample rate, which only exists
+    // after `eng.start`. The worker calls `start(sr)` on it once the
+    // engine is up; until then `snapshot` refuses with the "starting"
+    // error rather than claiming there is no session.
+    //
+    // The guard that publishes all three is the thing that clears them, on
     // every way the worker can end (#432).
+    let snapshot_ring = Arc::new(Mutex::new(SnapshotRingState::pending(
+        plan.snapshot_ring_s,
+        plan.unique_chans.clone(),
+        plan.pairs.clone(),
+        plan.weighting.tag().to_string(),
+        plan.integration_tag.clone(),
+        plan.unique_cals.clone(),
+    )));
     let session = TransferSessionGuard::publish(
         state.drive_state.clone(),
         state.relock_state.clone(),
@@ -174,6 +190,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         state.snapshot_spool.clone(),
         Arc::new(DriveState::new(plan.drive, plan.level_dbfs)),
         Arc::new(RelockRequest::new()),
+        snapshot_ring,
     );
 
     let io = SessionIo {
@@ -277,11 +294,13 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
 
     // Snapshot ring (handoff: snapshot-backend M1, deliverable 1):
     // raw pre-processing samples for every unique session channel,
-    // capped at `snapshot_ring_s` seconds. Crash-safety: wipe any
-    // stale spool from a prior session before publishing this one's
-    // ring handle (module doc, `handlers/snapshot.rs`).
+    // capped at `snapshot_ring_s` seconds. The handler published it
+    // pending (#188). Crash-safety: wipe any stale spool from a prior
+    // session before the ring is started, so no snapshot this session
+    // writes can be deleted by the wipe — a pending ring refuses every
+    // `snapshot` (module doc, `handlers/snapshot.rs`).
     // A refused spool path ends the session here; dropping `guard` clears
-    // the drive/relock slots it published (#432).
+    // the slots it published (#432).
     if let Err(r) =
         crate::handlers::snapshot::reset_spool_dir(&plan.snapshot_spool_dir, &guard.snapshot_spool)
     {
@@ -293,19 +312,8 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         );
         return;
     }
-    let snapshot_cap_samples = (plan.snapshot_ring_s * sr as f64).round() as usize;
-    let snapshot_ring = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::handlers::snapshot::SnapshotRingState::new(
-            sr,
-            plan.unique_chans.clone(),
-            snapshot_cap_samples,
-            plan.pairs.clone(),
-            plan.weighting.tag().to_string(),
-            plan.integration_tag.clone(),
-            plan.unique_cals.clone(),
-        ),
-    ));
-    guard.publish_snapshot_ring(snapshot_ring.clone());
+    let snapshot_ring = guard.snapshot_ring.clone();
+    snapshot_ring.lock().unwrap().start(sr);
 
     // Analysis window: the last `n_averages` Welch blocks, cut on the
     // **stream's own** `k·step` lattice rather than from the head of a
@@ -658,6 +666,7 @@ mod tests {
                 self.spool.clone(),
                 Arc::new(DriveState::new(false, -40.0)),
                 Arc::new(RelockRequest::new()),
+                pending_ring(),
             )
         }
 
@@ -678,17 +687,21 @@ mod tests {
         }
     }
 
-    /// Publish a ring and a spool entry, as a running worker would.
-    fn fill_worker_slots(guard: &TransferSessionGuard) {
-        guard.publish_snapshot_ring(Arc::new(Mutex::new(SnapshotRingState::new(
-            48_000,
+    /// A ring as the handler publishes it: pending, no sample rate yet.
+    fn pending_ring() -> Arc<Mutex<SnapshotRingState>> {
+        Arc::new(Mutex::new(SnapshotRingState::pending(
+            0.01,
             vec![0, 1],
-            480,
             vec![(0, 1)],
             "Z".to_string(),
             "fast".to_string(),
             vec![None, None],
-        ))));
+        )))
+    }
+
+    /// Start the ring and add a spool entry, as a running worker would.
+    fn fill_worker_slots(guard: &TransferSessionGuard) {
+        guard.snapshot_ring.lock().unwrap().start(48_000);
         guard.snapshot_spool.lock().unwrap().insert(
             "snap".to_string(),
             SpoolEntry {
@@ -701,12 +714,21 @@ mod tests {
         );
     }
 
+    /// #188: the ring slot is set by `publish` itself, before any worker
+    /// runs, and holds the pending ring — so `snapshot` in that window sees a
+    /// session that is starting, never an empty slot.
     #[test]
     fn publish_makes_drive_and_relock_visible_before_any_worker_runs() {
         let slots = Slots::new();
         let guard = slots.publish();
         assert!(slots.drive.lock().unwrap().is_some());
         assert!(slots.relock.lock().unwrap().is_some());
+        {
+            let ring = slots.ring.lock().unwrap();
+            let ring = ring.as_ref().expect("ring slot set before any worker");
+            assert!(Arc::ptr_eq(ring, &guard.snapshot_ring));
+            assert!(!ring.lock().unwrap().is_started());
+        }
         drop(guard);
         slots.assert_all_cleared();
     }
@@ -768,26 +790,34 @@ mod tests {
     }
 
     /// #432: a finishing session must not clear drive/relock state a
-    /// successor has since published. Goes red if the `Arc::ptr_eq` check
-    /// in `clear_if_own` is dropped.
+    /// successor has since published; #188 extends that to the snapshot
+    /// ring, now published at handler time too. Goes red if the
+    /// `Arc::ptr_eq` check in `clear_if_own` is dropped, or if the ring is
+    /// cleared unconditionally.
     #[test]
     fn guard_leaves_a_successors_drive_and_relock_state_alone() {
         let slots = Slots::new();
         let guard = slots.publish();
         let successor_drive = Arc::new(DriveState::new(false, -40.0));
         let successor_relock = Arc::new(RelockRequest::new());
+        let successor_ring = pending_ring();
         *slots.drive.lock().unwrap() = Some(successor_drive.clone());
         *slots.relock.lock().unwrap() = Some(successor_relock.clone());
+        *slots.ring.lock().unwrap() = Some(successor_ring.clone());
 
         drop(guard);
 
         let drive = slots.drive.lock().unwrap();
         let relock = slots.relock.lock().unwrap();
+        let ring = slots.ring.lock().unwrap();
         assert!(drive
             .as_ref()
             .is_some_and(|d| Arc::ptr_eq(d, &successor_drive)));
         assert!(relock
             .as_ref()
             .is_some_and(|r| Arc::ptr_eq(r, &successor_relock)));
+        assert!(ring
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(r, &successor_ring)));
     }
 }

@@ -277,6 +277,13 @@ pub(super) const START_FAIL_VAR: &str = "AC_FAKE_START_FAIL_CALLS";
 /// caller-visible `capture_*` call across every fake capture method (a
 /// method that delegates to another is still one call).
 pub(super) const CAPTURE_PANIC_VAR: &str = "AC_FAKE_CAPTURE_PANIC_CALLS";
+/// `AC_FAKE_START_DELAY_MS` (#188): every `FakeEngine::start` sleeps this
+/// many milliseconds before its fail check, standing in for JACK port
+/// registration so the window between a `transfer_stream` ok reply and the
+/// engine's start completing is reachable under `--fake-audio`. Unlike the
+/// three lists above it is a single value applied to every call. Unset or
+/// unparsable ⇒ no sleep, byte-identical to before #188.
+pub(super) const START_DELAY_VAR: &str = "AC_FAKE_START_DELAY_MS";
 
 static ENGINE_OPEN_CALL_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -291,6 +298,16 @@ fn engine_open_fail_list() -> &'static [usize] {
 fn start_fail_list() -> &'static [usize] {
     static LIST: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| call_index_list(START_FAIL_VAR))
+}
+
+fn start_delay() -> Option<std::time::Duration> {
+    static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var(START_DELAY_VAR)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .map(std::time::Duration::from_millis)
+    })
 }
 
 fn capture_panic_list() -> &'static [usize] {
@@ -308,9 +325,13 @@ pub(in crate::audio) fn engine_open_hook() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Consume one `FakeEngine::start` slot; `Err` when this call is listed in
+/// Consume one `FakeEngine::start` slot, after sleeping for
+/// [`START_DELAY_VAR`] if set; `Err` when this call is listed in
 /// [`START_FAIL_VAR`].
 pub(super) fn start_hook() -> anyhow::Result<()> {
+    if let Some(delay) = start_delay() {
+        std::thread::sleep(delay);
+    }
     let call_idx = START_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if start_fail_list().contains(&call_idx) {
         anyhow::bail!("fake engine start failed on call {call_idx} ({START_FAIL_VAR})");
