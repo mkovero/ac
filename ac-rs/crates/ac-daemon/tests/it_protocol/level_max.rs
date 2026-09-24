@@ -184,7 +184,7 @@ fn calibrate_refuses_above_the_maximum_and_accepts_at_it() {
 #[test]
 fn test_dut_refuses_above_the_maximum_and_accepts_at_it() {
     let d = Daemon::spawn_with_config(Some(json!({"reference_channel": 1})));
-    let c = Client::with_ctrl_timeout(&d, 15_000);
+    let c = Client::new(&d);
 
     let r = c.call(json!({"cmd": "test_dut", "level_dbfs": OVER}));
     assert_refused(&r);

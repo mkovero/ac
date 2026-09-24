@@ -33,13 +33,15 @@
 //! field can be documented.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
-use std::{env, fs, thread};
 
-use serde_json::{json, Value};
+use serde_json::json;
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::{Client, Daemon};
 
 /// Commands whose handler only reads state: no worker, no output, no device
 /// mutation. Safe to call in a loop against a fake-audio daemon, and their
@@ -383,101 +385,4 @@ fn documented_reply_keys_match_the_daemon() {
         "ZMQ.md reply blocks disagree with the daemon:\n  {}",
         failures.join("\n  ")
     );
-}
-
-// ---- harness ----
-//
-// Deliberately a private copy of the spawn/call helpers rather than a shared
-// module: each integration test is its own binary, and the alternative is a
-// test-support crate that nothing else currently wants.
-
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(29_600);
-static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
-
-struct Daemon {
-    child: Child,
-    ctrl_port: u16,
-    home: PathBuf,
-}
-
-impl Daemon {
-    fn spawn() -> Self {
-        let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-        let (ctrl, data) = (base, base + 1);
-
-        let n = HOME_CURSOR.fetch_add(1, Ordering::Relaxed);
-        let mut home = env::temp_dir();
-        home.push(format!("ac-daemon-doc-parity-{}-{n}", std::process::id()));
-        let _ = fs::create_dir_all(home.join(".config").join("ac"));
-
-        let child = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .spawn()
-            .expect("spawn ac-daemon");
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() <= deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-        Self {
-            child,
-            ctrl_port: ctrl,
-            home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.home);
-    }
-}
-
-struct Client {
-    _ctx: zmq::Context,
-    req: zmq::Socket,
-}
-
-impl Client {
-    fn new(d: &Daemon) -> Self {
-        let ctx = zmq::Context::new();
-        let req = ctx.socket(zmq::REQ).unwrap();
-        req.set_linger(0).unwrap();
-        req.set_rcvtimeo(3_000).unwrap();
-        req.set_sndtimeo(3_000).unwrap();
-        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port))
-            .unwrap();
-        Self { _ctx: ctx, req }
-    }
-
-    fn call(&self, cmd: Value) -> Value {
-        self.req.send(serde_json::to_vec(&cmd).unwrap(), 0).unwrap();
-        let bytes = self.req.recv_bytes(0).expect("CTRL recv");
-        serde_json::from_slice(&bytes).expect("CTRL decode")
-    }
 }
