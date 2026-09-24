@@ -118,12 +118,37 @@ pub trait AudioEngine: Send + 'static {
     /// `monitor_spectrum` sliding-ring path so refresh rate can be decoupled
     /// from FFT window length without losing contiguity across ticks.
     ///
+    /// Non-blocking, so it does not pace the caller. A streaming sliding-ring
+    /// consumer that relies on the capture call for its tick cadence (the
+    /// CWT / CQT / reassigned monitor modes) wants [`Self::capture_contiguous`]
+    /// instead.
+    ///
     /// Default falls back to `capture_block(max_samples / sr)` — safe but
     /// clears the ring, so sr-agnostic callers still get data. JACK overrides
     /// with a true non-clearing drain.
     fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
         let sr = self.sample_rate() as f64;
         self.capture_block(max_samples as f64 / sr.max(1.0))
+    }
+
+    /// Contiguous single-channel capture for **streaming** consumers.
+    ///
+    /// Same pacing as `capture_block` — blocks until `duration` of audio is
+    /// available — but without the pre-wait `clear()`, and returns everything
+    /// that has accumulated rather than exactly `duration`. The one-channel
+    /// counterpart of [`Self::capture_multi_contiguous`].
+    ///
+    /// Use this wherever successive blocks are appended to one sliding
+    /// analysis ring (the monitor's CWT / CQT / reassigned modes). Use
+    /// `capture_block` for a one-shot measurement, which genuinely wants the
+    /// flush. Issue #210 was those three modes using the one-shot call, which
+    /// spliced every tick's processing time out of the ring.
+    ///
+    /// Default delegates to `capture_block`. That is correct only for a
+    /// backend with no capture ring (the on-demand fake generator), which has
+    /// nothing to clear; every ring-backed backend must override it.
+    fn capture_contiguous(&mut self, duration: f64) -> Result<Vec<f32>> {
+        self.capture_block(duration)
     }
 
     /// Capture two channels simultaneously: (measurement, reference).

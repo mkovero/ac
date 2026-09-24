@@ -29,6 +29,8 @@ pub(super) enum RingDrain {
     Multi,
     /// The #207 fix: no pre-wait clear, drains everything available.
     MultiContiguous,
+    /// The #210 fix: `MultiContiguous` for the measurement channel alone.
+    Contiguous,
 }
 
 /// Push a whole block into a ring producer. A short push means the ring
@@ -213,8 +215,8 @@ impl FakeRings {
     ///
     /// Timeline, matching what a real consumer does against a live ring:
     ///
-    /// 1. the requested drain runs — `clear()` (for every variant except
-    ///    `Available`) throws away whatever accrued during step 3 of the
+    /// 1. the requested drain runs — `clear()` (for the clearing variants
+    ///    `Block`, `Stereo` and `Multi`) throws away whatever accrued during step 3 of the
     ///    *previous* tick, then the wait synthesises this tick's `n` samples
     ///    and they are popped;
     /// 2. the caller gets its block;
@@ -238,9 +240,17 @@ impl FakeRings {
         // will actually be there when the wait runs. Whole periods only — a
         // producer that could deliver a partial period would model the wrong
         // machine (see `FakeRings::period`).
+        // The contiguous drains do not clear either, but they are planned the
+        // same way as the clearing ones: the wait always synthesises the full
+        // request, and whatever `charge_processing` banked comes back out on
+        // top of it — the surplus the real drains return rather than discard.
         let occupied_at_wait = match kind {
             RingDrain::Available => self.rings.occupied(),
-            _ => 0,
+            RingDrain::Block
+            | RingDrain::Stereo
+            | RingDrain::Multi
+            | RingDrain::MultiContiguous
+            | RingDrain::Contiguous => 0,
         };
         let shortfall = n.saturating_sub(occupied_at_wait);
         let fill = shortfall.div_ceil(self.period) * self.period;
@@ -281,6 +291,9 @@ impl FakeRings {
                 RingDrain::MultiContiguous => {
                     rings.capture_multi_contiguous(n, duration, &mut wait)
                 }
+                RingDrain::Contiguous => rings
+                    .capture_contiguous(n, duration, &mut wait)
+                    .map(|b| vec![b]),
             }?
         };
 

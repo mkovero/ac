@@ -498,6 +498,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         continue;
                     }
                     ch.reconnect.note_success();
+                    // Multi-channel capture is time-multiplexed (#434, ZMQ.md
+                    // "Sequential capture"), so this flush means the CWT /
+                    // CQT / reassigned rings of a multi-channel monitor are
+                    // still spliced: each channel's ring gets `tick_secs`
+                    // fragments separated by the other channels' capture
+                    // time. The non-clearing drain in `capture_into_ring`
+                    // (#210) makes the single-channel rings contiguous; it
+                    // does not and cannot fix this case, which needs
+                    // simultaneous multi-port capture.
                     eng.flush_capture();
                 }
                 if mode == Mode::Cwt {

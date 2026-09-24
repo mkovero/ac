@@ -116,9 +116,17 @@ pub(super) enum RingTick {
     Failed,
 }
 
-/// Capture one paced block for `ch`, push it through the loudness meter,
-/// emit its scope frame, and append it to the mode's ring, trimmed to
-/// `ring_cap` from the front.
+/// Capture one paced, non-clearing block for `ch`, push it through the
+/// loudness meter, emit its scope frame, and append it to the mode's ring,
+/// trimmed to `ring_cap` from the front.
+///
+/// The drain is `capture_contiguous`, not `capture_block` (#210): the ring
+/// is a sliding window analysed as one continuous stretch of time, so a
+/// pre-wait `clear()` would discard the audio that arrived while the
+/// previous tick was being processed and splice the fragments together.
+/// `capture_contiguous` still waits for `tick_secs` of audio, which is what
+/// paces these modes, and returns everything buffered, so it never drains
+/// slower than the ring fills (#208).
 ///
 /// This is the half of a CWT / CQT / reassigned tick that does not depend
 /// on which transform runs: the three modes differ only in which ring
@@ -136,7 +144,8 @@ pub(super) fn capture_into_ring(
     // regardless of `--max-fps`, so CWT emitted at 50 fps even when the
     // UI was capped at 30 — wasted work on both sides.
     let tick_secs = ctx.tick_secs;
-    let Some(samples) = capture_or_report(eng.capture_block(tick_secs), ctx.pub_tx, ch.channel)
+    let Some(samples) =
+        capture_or_report(eng.capture_contiguous(tick_secs), ctx.pub_tx, ch.channel)
     else {
         return RingTick::Failed;
     };
@@ -182,6 +191,154 @@ pub(super) fn log_transform_time(
             "{label} ch{channel}: {:.1}ms, ring={ring_len}, out={n_out}",
             t0.elapsed().as_secs_f64() * 1000.0,
         );
+    }
+}
+
+#[cfg(test)]
+mod ring_contiguity_tests {
+    use std::cell::Cell;
+
+    use super::{capture_into_ring, RingTick};
+    use crate::audio::fake::FakeEngine;
+    use crate::audio::AudioEngine;
+    use crate::handlers::audio::monitor::channel::{ChannelState, RingCaps, RingKind};
+    use crate::handlers::audio::monitor::frames::TickCtx;
+
+    /// The rig #207 was measured on: RME Babyface Pro, 96 kHz, quantum 1024.
+    const SR: u32 = 96_000;
+    const PERIOD: usize = 1024;
+    /// Not a multiple of `SR / PERIOD` = 93.75 Hz (161.07 cycles per period),
+    /// so every discarded whole period costs it phase — a splice is visible.
+    /// A commensurate tone such as 15 000 Hz would pass even with the
+    /// clearing drain (`audio/contiguity.rs`,
+    /// `period_quantisation_decides_which_frequencies_expose_the_splice`).
+    const TONE_HZ: f64 = 15_100.0;
+    const AMPLITUDE: f64 = 0.5;
+    /// Per-tick consumer processing time the fake ring accrues between
+    /// drains. 20 ms is 1920 samples, more than one period, so a clearing
+    /// drain discards at least one whole period on every tick and every
+    /// junction inside the ring is a splice.
+    const PROCESS_SECS: f64 = 0.02;
+    /// Monitor tick: the bottom of the handler's [16 ms, 100 ms] clamp.
+    ///
+    /// Must be the short end. At 96 kHz a 16 ms tick is 1536 samples, below
+    /// every ring cap including reassigned's 4096, so each ring spans several
+    /// drains and therefore several junctions. At 50 ms (4800 samples) the
+    /// reassigned ring would hold the tail of a single block, contain no
+    /// junction, and pass even with the clearing drain restored.
+    const TICK_SECS: f64 = 0.016;
+
+    /// `y[n] = x[n+1] + x[n−1] − 2cos(ω)·x[n]`: zero for any pure sinusoid
+    /// at `ω`, whatever its amplitude and phase.
+    fn annihilate(x: &[f64], omega: f64) -> Vec<f64> {
+        let k = 2.0 * omega.cos();
+        x.windows(3).map(|w| w[2] + w[0] - k * w[1]).collect()
+    }
+
+    /// Largest residual left after annihilating both components the fake
+    /// tone contains: the fundamental at `ω` and the 1 % second harmonic at
+    /// `2ω` that `fake/stimulus.rs` adds to every tone.
+    ///
+    /// Zero for a contiguous stream, needing neither amplitude nor phase.
+    /// Across a splice junction the phase jumps and the residual is of order
+    /// the amplitude.
+    fn max_recurrence_residual(x: &[f32], omega: f64) -> f64 {
+        let x: Vec<f64> = x.iter().map(|&v| v as f64).collect();
+        annihilate(&annihilate(&x, omega), 2.0 * omega)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0, f64::max)
+    }
+
+    /// Fill one ring-mode ring at its real cap from a ring-backed fake engine
+    /// and return `(ring contents, samples discarded)`.
+    fn fill_ring(label: &str, kind: RingKind, ring_cap: usize) -> (Vec<f32>, u64) {
+        let mut eng = FakeEngine::new();
+        eng.set_sample_rate(SR);
+        eng.enable_ring_mode(PROCESS_SECS, 0, PERIOD);
+        eng.set_tone(TONE_HZ, AMPLITUDE);
+
+        let caps = RingCaps {
+            cwt: ring_cap,
+            cqt: ring_cap,
+            reass: ring_cap,
+        };
+        let mut ch = ChannelState::new(0, "fake:in".into(), None, None, SR, TONE_HZ, &caps);
+        let (pub_tx, _pub_rx) = crossbeam_channel::unbounded();
+        let scope_frame_idx = Cell::new(0);
+        let ctx = TickCtx {
+            pub_tx: &pub_tx,
+            n_channels: 1,
+            sr: SR,
+            backend: "fake",
+            scope_frame_idx: &scope_frame_idx,
+            mic_corr_enabled: false,
+            tick_secs: TICK_SECS,
+        };
+
+        // Enough ticks to fill the ring and then slide it a few more times,
+        // so its contents are made of several drains' worth of junctions.
+        let per_tick = (TICK_SECS * SR as f64) as usize;
+        let ticks = ring_cap.div_ceil(per_tick) + 4;
+        for _ in 0..ticks {
+            match capture_into_ring(&mut eng, &mut ch, &ctx, kind, ring_cap, 0) {
+                RingTick::Ready { .. } | RingTick::NotReady => {}
+                RingTick::Failed => panic!("fake capture failed"),
+            }
+        }
+        let ring: Vec<f32> = ch.ring_mut(kind).iter().copied().collect();
+        assert_eq!(ring.len(), ring_cap, "{label}: ring must be full");
+        (ring, eng.discarded_samples())
+    }
+
+    /// Issue #210's guard: each of the three sliding rings — CWT at 0.15 s,
+    /// CQT at 1.0 s, reassigned at `DEFAULT_N` — receives an unspliced stream.
+    ///
+    /// The three transforms are not what is under test, and one shared capture
+    /// function feeds all three rings, so the check is on the samples handed
+    /// to each ring rather than a spectral assertion on its transform: the
+    /// pure-sinusoid recurrence residual, which a single splice junction
+    /// raises to the order of the amplitude.
+    ///
+    /// Mutation check: with `capture_block(tick_secs)` restored in
+    /// `capture_into_ring`, both assertions fail for all three rings.
+    #[test]
+    fn ring_modes_receive_contiguous_audio() {
+        let omega = 2.0 * std::f64::consts::PI * TONE_HZ / SR as f64;
+        // Provenance: derived. f32 rounding of a unit-scale sine is ~6e-8 ·
+        // amplitude, and the two cascaded annihilators amplify it at most
+        // 4 × 4 = 16×, so a contiguous ring leaves ~1e-6 · amplitude; a splice
+        // leaves one of order the amplitude. 1e-4 sits orders of magnitude
+        // from both.
+        let bound = 1e-4 * AMPLITUDE;
+        // Every ring and both checks are evaluated before failing, so one run
+        // shows which of the three paths — and which check — went red.
+        let mut failures = Vec::new();
+        for (label, kind, cap) in [
+            ("cwt", RingKind::Cwt, (SR as f64 * 0.15).ceil() as usize),
+            ("cqt", RingKind::Cqt, SR as usize),
+            (
+                "reassigned",
+                RingKind::Reassigned,
+                ac_core::visualize::reassigned::DEFAULT_N,
+            ),
+        ] {
+            let (ring, discarded) = fill_ring(label, kind, cap);
+            if discarded != 0 {
+                failures.push(format!(
+                    "{label}: the capture discarded {discarded} samples — a clearing \
+                     drain is feeding a sliding ring"
+                ));
+            }
+            let residual = max_recurrence_residual(&ring, omega);
+            if residual >= bound {
+                failures.push(format!(
+                    "{label}: recurrence residual {residual:.3e} ≥ {bound:.1e} — the ring \
+                     holds non-contiguous fragments of a {TONE_HZ} Hz tone"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
 

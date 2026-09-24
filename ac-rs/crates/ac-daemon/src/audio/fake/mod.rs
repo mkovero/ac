@@ -316,6 +316,18 @@ impl AudioEngine for FakeEngine {
         self.block_impl(duration)
     }
 
+    /// Streaming single-channel drain (#210). In ring mode it runs the shared
+    /// non-clearing `capture_contiguous`; off ring mode the on-demand
+    /// generator has nothing to clear and `block_impl` is already contiguous.
+    fn capture_contiguous(&mut self, duration: f64) -> Result<Vec<f32>> {
+        capture_panic_hook();
+        let n = self.samples_in(duration);
+        if let Some(out) = self.ring_capture(n, duration, RingDrain::Contiguous) {
+            return Ok(out?.into_iter().next().unwrap_or_default());
+        }
+        self.block_impl(duration)
+    }
+
     /// Fake loopback: returns `samples` delayed by a fixed number of
     /// samples ([`hooks::next_loopback_delay_samples`]), padded with trailing
     /// zeros to `samples.len() + tail` total length. Used by the

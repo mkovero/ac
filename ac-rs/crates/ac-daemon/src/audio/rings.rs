@@ -172,8 +172,11 @@ impl CaptureRings {
     }
 
     // -------------------------------------------------------------------
-    // The three drain sequences. Statement order here is load-bearing —
-    // see the module docs.
+    // The drain sequences. Statement order here is load-bearing — see the
+    // module docs. The clearing drains (`capture_block`, `capture_stereo`,
+    // `capture_multi`) are for one-shot measurements; the streaming drains
+    // (`capture_contiguous`, `capture_multi_contiguous`) wait the same way
+    // but never clear; `capture_available` neither waits nor clears.
     // -------------------------------------------------------------------
 
     /// Single measurement channel: clear, wait, pop.
@@ -195,6 +198,28 @@ impl CaptureRings {
     /// splice, therefore the control arm of H1's single-vs-multi test.
     pub(crate) fn capture_available(&mut self, max_samples: usize) -> Vec<f32> {
         self.pop_meas(max_samples)
+    }
+
+    /// Contiguous single-channel drain — the streaming counterpart of
+    /// [`Self::capture_block`], and the fix for issue #210.
+    ///
+    /// The one-channel form of [`Self::capture_multi_contiguous`], with the
+    /// same two load-bearing differences from the clearing drain: no pre-wait
+    /// `clear()` (so a sliding-ring consumer is never handed a splice), and
+    /// it returns the whole measurement ring rather than `n_needed` (so the
+    /// dropped clear cannot turn into a growing backlog, #208).
+    ///
+    /// Still blocks until `n_needed` is available, so it paces the caller's
+    /// tick loop exactly as `capture_block` did.
+    pub(crate) fn capture_contiguous(
+        &mut self,
+        n_needed: usize,
+        duration: f64,
+        wait: WaitFn<'_>,
+    ) -> Result<Vec<f32>> {
+        wait(&*self, n_needed, duration)?;
+        let n = self.occupied();
+        Ok(self.pop_meas(n))
     }
 
     /// Measurement + first reference, captured in sync.
@@ -355,6 +380,41 @@ mod tests {
         let next = rings.capture_available(200);
         assert_eq!(
             next[0], 200.0,
+            "second drain must continue where the first stopped"
+        );
+        assert_eq!(rings.discarded_samples(), 0);
+    }
+
+    /// `capture_contiguous` waits like `capture_block` but never clears, and
+    /// returns the whole backlog rather than just the request (#210). Each
+    /// call must continue the stream exactly where the previous one stopped.
+    #[test]
+    fn capture_contiguous_never_discards_and_drains_everything() {
+        let mut rings = CaptureRings::new();
+        let (cons, mut prod) = loaded(500, 4096);
+        rings.set_meas(cons);
+
+        let mut next_val = 500u32;
+        let mut wait = |_: &CaptureRings, _: usize, _: f64| {
+            for _ in 0..100 {
+                prod.try_push(next_val as f32).unwrap();
+                next_val += 1;
+            }
+            Ok(())
+        };
+        let got = rings.capture_contiguous(100, 0.01, &mut wait).unwrap();
+        assert_eq!(rings.discarded_samples(), 0, "no pre-wait clear");
+        assert_eq!(
+            got.len(),
+            600,
+            "asked for 100 with 600 buffered — all 600 must come back or latency grows"
+        );
+        assert_eq!(got[0], 0.0, "must read from the oldest sample, not a reset");
+
+        let next = rings.capture_contiguous(100, 0.01, &mut wait).unwrap();
+        assert_eq!(next.len(), 100);
+        assert_eq!(
+            next[0], 600.0,
             "second drain must continue where the first stopped"
         );
         assert_eq!(rings.discarded_samples(), 0);
