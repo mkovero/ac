@@ -870,7 +870,13 @@ fn a_streak_does_not_survive_a_real_disconnect() {
 // ---------------------------------------------------------------
 
 fn ir_frame() -> ac_scene::IrWireFrame {
-    serde_json::from_value(serde_json::json!({
+    serde_json::from_value(ir_frame_json()).expect("ir wire frame")
+}
+
+/// The raw wire JSON `ir_frame` parses — split out so the drain test
+/// (#219) can stamp and serialize it as an injected sidecar frame.
+fn ir_frame_json() -> serde_json::Value {
+    serde_json::json!({
         "samples": [0.0, 1.0, -0.5, 0.0],
         "sr": 48000,
         "stride": 24,
@@ -881,8 +887,7 @@ fn ir_frame() -> ac_scene::IrWireFrame {
         "delay_samples": 231,
         "delay_ms": 4.82,
         "delay_locked": true
-    }))
-    .expect("ir wire frame")
+    })
 }
 
 fn ir_app() -> AcViewApp {
@@ -958,4 +963,117 @@ fn toggle_ir_panel_is_a_noop_outside_the_transfer_view() {
     app.ingest_ir_frame_for_test(ir_frame());
     app.press_for_test(Action::ToggleIrPanel, 0.0);
     assert!(app.current_ir_scene().is_none());
+}
+
+// ---------------------------------------------------------------
+// Drain to newest over an injected DATA stream (#219 Part B)
+// ---------------------------------------------------------------
+
+/// The M2 captured `transfer_stream` frame (the file
+/// `ac-scene/tests/it_fixtures.rs` reads) — the injected payload, so
+/// the drain test runs on a real wire frame rather than a hand-built one.
+const M2_TRANSFER_FRAME: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../tests/fixtures/transfer-frame-v2.json"
+));
+
+/// Transfer frames (and their IR sidecars) in the injected backlog.
+const DRAIN_BACKLOG: i64 = 6;
+
+/// One `<topic> <json>` DATA payload, as the daemon puts it on the wire.
+fn wire(topic: &str, payload: &serde_json::Value) -> Vec<u8> {
+    format!("{topic} {payload}").into_bytes()
+}
+
+/// A mixed DATA backlog shaped like a live `transfer_stream` session
+/// publishes it (the Part A capture on #219): each transfer frame
+/// followed by its `visualize/ir` sidecar, with `keepalive` frames
+/// scattered through. Frame *k* and sidecar *k* carry
+/// `delay_samples = k`, so which one survived a drain is readable off
+/// the held frame. Also carries, mid-stream so an early stop is
+/// visible: a `keepalive` directly after transfer frame 0, a `data`
+/// frame of a type `ac-view` does not consume, and two malformed
+/// frames (no separator; bad JSON). Returns the raw payloads and the
+/// number of malformed ones among them.
+fn mixed_data_backlog() -> (Vec<Vec<u8>>, u64) {
+    let transfer: serde_json::Value =
+        serde_json::from_str(M2_TRANSFER_FRAME).expect("M2 fixture is json");
+    assert_eq!(
+        transfer["type"], "transfer_stream",
+        "M2 fixture must be a transfer_stream frame"
+    );
+    let mut ir = ir_frame_json();
+    ir["type"] = serde_json::json!("visualize/ir");
+    let keepalive = serde_json::json!({"type": "keepalive"});
+
+    let mut frames = Vec::new();
+    let mut malformed = 0;
+    for k in 0..DRAIN_BACKLOG {
+        let mut t = transfer.clone();
+        t["delay_samples"] = serde_json::json!(k);
+        frames.push(wire("data", &t));
+        if k == 0 {
+            frames.push(wire("keepalive", &keepalive));
+        }
+        let mut s = ir.clone();
+        s["delay_samples"] = serde_json::json!(k);
+        frames.push(wire("data", &s));
+        if k == 2 {
+            frames.push(b"data-with-no-separator".to_vec());
+            frames.push(b"data {not json".to_vec());
+            malformed += 2;
+            // Any `data` type this crate has no consumer for.
+            frames.push(wire("data", &serde_json::json!({"type": "not_consumed"})));
+        }
+        if k == 4 {
+            frames.push(wire("keepalive", &keepalive));
+        }
+    }
+    (frames, malformed)
+}
+
+// One drain pass over a backlog must leave the newest transfer frame and
+// the newest IR sidecar held, and nothing pending — the property the
+// load-bearing comment in `drain_frames` claims. Driven through the same
+// `parse_frame` → `poll_next` → `collect_drained` → `ingest_drained`
+// path the live loop runs, with the socket replaced by a queue: no real
+// socket, no timing, so it cannot flake on fill state the way the
+// reverted live-socket version did. Mutation-checked at birth against
+// keep-oldest ingest, stop-at-first-skipped-frame, and
+// stop-at-first-malformed-frame (see the PR for #219 Part B).
+#[test]
+fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
+    let (frames, malformed_injected) = mixed_data_backlog();
+    let mut queue: std::collections::VecDeque<crate::zmq_client::Recv> = frames
+        .iter()
+        .map(|b| crate::zmq_client::parse_frame(b))
+        .collect();
+    // Not vacuous: two frames per transfer tick, plus the extras.
+    assert_eq!(queue.len(), frames.len());
+    assert!(queue.len() > 2 * DRAIN_BACKLOG as usize);
+    assert_eq!(malformed_injected, 2);
+
+    let mut app = ir_app();
+    let mut malformed_counted = 0u64;
+    let (drained, drained_ir) = collect_drained(|| {
+        crate::session::poll_next(
+            || queue.pop_front().unwrap_or(crate::zmq_client::Recv::Empty),
+            &mut malformed_counted,
+        )
+    });
+    assert!(
+        queue.is_empty(),
+        "drain left {} frames pending",
+        queue.len()
+    );
+    assert_eq!(drained.len(), DRAIN_BACKLOG as usize);
+    assert_eq!(drained_ir.len(), DRAIN_BACKLOG as usize);
+    assert_eq!(malformed_counted, malformed_injected);
+
+    let got_new_frame = app.ingest_drained(drained, drained_ir, std::time::Instant::now());
+    assert!(got_new_frame, "no injected transfer frame was accepted");
+    let held = app.last_frame.as_ref().expect("a transfer frame is held");
+    assert_eq!(held.delay_samples, DRAIN_BACKLOG - 1);
+    let held_ir = app.last_ir_frame.as_ref().expect("an IR frame is held");
+    assert_eq!(held_ir.delay_samples, DRAIN_BACKLOG - 1);
 }
