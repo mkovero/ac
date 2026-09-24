@@ -479,6 +479,45 @@ fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
     );
 }
 
+/// #588: a `plot_ir` run that ends on an `error` frame prints the daemon's
+/// fault and nothing under it. The #576 tail-too-short refusal is the
+/// fixture: before #588 two `!!` missing-frame lines followed
+/// `stimulus  silent`. The exit status stays 0 — this issue changes text only.
+#[test]
+fn plot_ir_error_frame_is_the_last_stderr_line() {
+    let rig = Rig::start();
+    let out = rig.ac_output_in(
+        &rig.home,
+        &["plot", "ir", "20hz", "20khz", "4s", "-20dbfs", "0.1s"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("plot_ir not started"),
+        "expected the tail-too-short refusal ({}):\nstdout:\n{}\nstderr:\n{stderr}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    assert!(
+        last.ends_with("stimulus  silent"),
+        "the refusal's safety line must end stderr, got {last:?}:\n{stderr}"
+    );
+    for gone in [
+        "no impulse response received",
+        "no measurement/report frame",
+    ] {
+        assert!(
+            !stderr.contains(gone),
+            "{gone:?} must not follow an error frame:\n{stderr}"
+        );
+    }
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+}
+
 /// #376: a capture whose pre-impulse SNR does not clear the threshold is
 /// reported as a failed deconvolution, not as a result with a number in
 /// it — a short (1024-sample) gate window leaves too few pre-impulse
