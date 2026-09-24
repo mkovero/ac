@@ -2,7 +2,7 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test --workspace # ~900 tests, 14 #[ignore]'d
+cd ac-rs && cargo test --workspace # `test result:` lines give passed/ignored counts
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
@@ -14,8 +14,9 @@ tar zxf - -C ~/.cargo/bin`): same tests, one process each, roughly half the wall
 time. `ac-rs/.config/nextest.toml` serialises the `ac-cli` integration
 binaries, whose per-binary port cursors collide across processes.
 
-**Counts in this file are an order of magnitude, not a figure to check
-against** — they rot silently. Run the command. `--workspace` matters: two
+**This file quotes no test counts, on purpose** — a written count rots
+silently and gets copied into commits as if measured. Run the command and read
+its `test result:` lines. `--workspace` matters: two
 branches that each pass `cargo test -p <crate>` can still break the build
 together, and with no CI here that is the only check.
 
@@ -81,9 +82,6 @@ cargo test -p ac-view             # egui shell: geometry, live/snapshot end-to-e
                                   #   trace distinction (egui_kittest snapshots)
 cargo test --workspace            # all five crates — the only check that catches a cross-crate break
 ```
-
-Rough shape as of 2026-08-06 (899 passed, 14 ignored): `ac-core` 396,
-`ac-daemon` 214, `ac-scene` 115, `ac-cli` 97, `ac-view` the remainder.
 
 ## Checked-in fixtures — and which comparison each one earns
 
