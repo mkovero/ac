@@ -369,6 +369,75 @@ ensure_worktree() {
   printf '%s\n' "$want"
 }
 
+# advance_worktree <branch> — bring the worktree in $PWD up to origin/<branch>
+# before a revision is handed to the developer (#532). Run after `git fetch`
+# and before link_support. Returns 0 when the worktree may be handed over;
+# non-zero, with the reason on stderr, when it may not.
+#
+#   1. HEAD == tip: nothing to do. Uncommitted edits stay (master.sh's
+#      retry-once in the preserved worktree depends on that).
+#   2. HEAD not an ancestor of tip (diverged, force-pushed): nothing to do,
+#      as before. The developer's push fails loudly on it.
+#   3. Strict ancestor, clean tree (no tracked changes, no untracked files):
+#      `merge --ff-only`. Lossless on a clean tree, and it fails closed where
+#      `reset --hard` would override.
+#   4. Strict ancestor, dirty, and the whole working tree already holds the
+#      tip's content (a cut-off Codex run that pushed from here): `reset
+#      --mixed` to the tip, which must leave the tree clean.
+#   5. Strict ancestor, dirty, no match: mutate nothing and refuse. `reset
+#      --mixed` here is what turned a stale checkout behind an integration
+#      merge into a reverse diff of that merge (PR #499, PR #569).
+#
+# Case 4's match is whole-tree, so it refuses where it could have kept:
+#   - a Codex run that pushed and then kept editing (tip + further edits);
+#   - a dirty tree when HEAD..tip touched sparse-excluded paths, since
+#     skip-worktree entries are compared by their stale index blob.
+# Both stop for a human, which is the safe direction.
+advance_worktree() {
+  local branch="$1" tip head wt dirty
+  wt="$(pwd)"
+  tip="$(git rev-parse "origin/$branch")" || return 1
+  head="$(git rev-parse HEAD)" || return 1
+  [[ $head == "$tip" ]] && return 0
+  git merge-base --is-ancestor "$head" "$tip" || return 0
+
+  dirty="$(git status --porcelain --untracked-files=all)" || return 1
+  if [[ -z $dirty ]]; then
+    git merge --ff-only -q "$tip" >&2 || return 1
+  else
+    # Stage the whole working tree (tracked and untracked, not ignored) into a
+    # copy of the index and compare the resulting tree with the tip's. A plain
+    # `git diff <tip>` cannot answer this: it reports a tip file that exists
+    # here only as an untracked file as deleted. The copy keeps the real
+    # index's skip-worktree bits, so sparse-excluded paths keep their index blob.
+    local idx match=0
+    idx="$(git rev-parse --path-format=absolute --git-path index)" || return 1
+    cp "$idx" "$idx.advance.$$" 2>/dev/null \
+      && GIT_INDEX_FILE="$idx.advance.$$" git add -A . 2>/dev/null \
+      && [[ $(GIT_INDEX_FILE="$idx.advance.$$" git write-tree 2>/dev/null) == "$(git rev-parse "$tip^{tree}")" ]] \
+      && match=1
+    rm -f "$idx.advance.$$"
+    if (( ! match )); then
+      {
+        echo "refusing to advance $wt: branch $branch is behind origin/$branch and"
+        echo "the working tree has uncommitted changes that do not match the remote tip."
+        echo "  local HEAD: $head"
+        echo "  remote tip: $tip"
+        echo "Look with:"
+        echo "  git -C $wt status"
+        echo "  git -C $wt diff $tip --stat"
+      } >&2
+      return 1
+    fi
+    git reset -q --mixed "$tip" || return 1
+  fi
+
+  [[ $(git rev-parse HEAD) == "$tip" && -z $(git status --porcelain --untracked-files=all) ]] || {
+    echo "advance_worktree: $wt did not end clean at origin/$branch ($tip)" >&2
+    return 1
+  }
+}
+
 # A cold workspace build is several GB. Running out mid-session leaves a
 # half-written worktree and a session that fails in a confusing way, so check
 # before creating one rather than after.
