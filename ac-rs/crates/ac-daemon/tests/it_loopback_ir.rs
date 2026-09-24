@@ -396,7 +396,7 @@ impl Client {
         let ctx = zmq::Context::new();
         let req = ctx.socket(zmq::REQ).unwrap();
         req.set_linger(0).unwrap();
-        req.set_rcvtimeo(3_000).unwrap();
+        req.set_rcvtimeo(common::CTRL_RECV_TIMEOUT_MS).unwrap();
         req.set_sndtimeo(3_000).unwrap();
         req.connect(&d.ctrl_endpoint()).unwrap();
 

@@ -286,7 +286,7 @@ fn ref_out_port_resolves_from_reference_output_channel() {
         "reference_channel":        2,
         "reference_output_channel": 1,
     })));
-    let c = Client::with_ctrl_timeout(&d, 15_000);
+    let c = Client::new(&d);
 
     let r = c.call(json!({"cmd":"test_hardware"}));
     assert_eq!(r["ok"], json!(true), "test_hardware start: {r}");
@@ -309,7 +309,7 @@ fn ref_out_port_falls_back_to_main_output() {
         "output_channel":    4,
         "reference_channel": 2,
     })));
-    let c = Client::with_ctrl_timeout(&d, 15_000);
+    let c = Client::new(&d);
 
     let r = c.call(json!({"cmd":"test_hardware"}));
     assert_eq!(r["ok"], json!(true), "test_hardware start: {r}");
@@ -334,7 +334,7 @@ fn a_config_whose_meaning_changed_carries_a_migration_warning() {
         "output_channel":    4,
         "reference_channel": 2,
     })));
-    let c = Client::with_ctrl_timeout(&d, 15_000);
+    let c = Client::new(&d);
 
     let r = c.call(json!({"cmd":"test_hardware"}));
     assert_eq!(r["ok"], json!(true), "test_hardware: {r}");
@@ -358,7 +358,7 @@ fn a_configured_reference_output_carries_no_migration_warning() {
         "reference_channel":        2,
         "reference_output_channel": 1,
     })));
-    let c = Client::with_ctrl_timeout(&d, 15_000);
+    let c = Client::new(&d);
 
     let r = c.call(json!({"cmd":"test_hardware"}));
     assert_eq!(r["ok"], json!(true), "test_hardware: {r}");

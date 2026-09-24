@@ -5,7 +5,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use crate::common::{alloc_home, alloc_ports, Client, Daemon};
+use crate::common::{alloc_home, alloc_ports, Client, Daemon, CTRL_RECV_TIMEOUT_MS};
 
 /// #385: `server_connections` carries the same identity fields as `status`.
 #[test]
@@ -222,8 +222,16 @@ fn raw_call(host: &str, port: u16, cmd: Value, timeout_ms: i32) -> Option<Value>
 #[test]
 fn direct_daemon_binds_loopback_by_default() {
     let d = DirectDaemon::spawn(&[]);
-    let s = raw_call("127.0.0.1", d.ctrl, json!({"cmd":"status"}), 1_000).unwrap();
+    let s = raw_call(
+        "127.0.0.1",
+        d.ctrl,
+        json!({"cmd":"status"}),
+        CTRL_RECV_TIMEOUT_MS,
+    )
+    .unwrap();
     assert_eq!(s["listen_mode"], json!("local"));
+    // An observation window, not a reply bound: a shorter window can only
+    // miss a late answer (a false pass), never fail on a slow one.
     assert!(
         raw_call("127.0.0.2", d.ctrl, json!({"cmd":"status"}), 500).is_none(),
         "default daemon must not answer a non-loopback client"
@@ -241,8 +249,13 @@ fn direct_daemon_binds_loopback_by_default() {
 #[test]
 fn public_flag_binds_all_interfaces_with_a_warning() {
     let d = DirectDaemon::spawn(&["--public"]);
-    let s = raw_call("127.0.0.2", d.ctrl, json!({"cmd":"status"}), 1_000)
-        .expect("--public daemon must answer a non-loopback client");
+    let s = raw_call(
+        "127.0.0.2",
+        d.ctrl,
+        json!({"cmd":"status"}),
+        CTRL_RECV_TIMEOUT_MS,
+    )
+    .expect("--public daemon must answer a non-loopback client");
     assert_eq!(s["listen_mode"], json!("public"));
     let log = fs::read_to_string(&d.log).unwrap();
     assert!(
@@ -284,7 +297,7 @@ fn remote_client_cannot_select_a_deletion_target() {
         "127.0.0.2",
         d.ctrl,
         json!({"cmd":"setup","update":{"snapshot_spool_dir": victim.display().to_string()}}),
-        2_000,
+        CTRL_RECV_TIMEOUT_MS,
     )
     .unwrap();
     assert_eq!(r["ok"], json!(false), "{r}");
@@ -293,7 +306,7 @@ fn remote_client_cannot_select_a_deletion_target() {
         "127.0.0.2",
         d.ctrl,
         json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":1}),
-        2_000,
+        CTRL_RECV_TIMEOUT_MS,
     )
     .unwrap();
     assert_eq!(r["ok"], json!(true), "{r}");

@@ -19,9 +19,12 @@
 //! client of the [`Daemon`] here: it drives a *real* JACK server rather than
 //! `--fake-audio`, and folding its routing/`spawn_jack` setup in would put
 //! hardware-only concerns in the path of every fake-audio test. That test
-//! shares [`alloc_ports`] and [`alloc_home`] only. Its non-`#[ignore]`d
-//! harm-case test (`real_port_config_clamps_requested_level_to_rig_ceiling`,
-//! #442) *is* a client of [`Daemon`]/[`Client`] like every test below,
+//! shares [`alloc_ports`] and [`alloc_home`], and takes its CTRL receive
+//! timeout from [`CTRL_RECV_TIMEOUT_MS`] by name, so its private client
+//! cannot drift from the default the way a copied literal would. Its
+//! non-`#[ignore]`d harm-case test
+//! (`real_port_config_clamps_requested_level_to_rig_ceiling`, #442) *is* a
+//! client of [`Daemon`]/[`Client`] like every test below,
 //! though — it runs `--fake-audio` deliberately, to check the config a
 //! real-port run would carry without needing the JACK server that route
 //! implies.
@@ -371,11 +374,12 @@ impl<'a> Client<'a> {
         Self::with_ctrl_timeout(d, CTRL_RECV_TIMEOUT_MS)
     }
 
-    /// A client whose CTRL receive timeout is not the default. Needed for
-    /// commands whose reply is slower than that: `test_hardware` replies only
-    /// after its worker thread is spawned, which has been measured past 3 s
-    /// here. The timeout is set before `connect`, which is where ZMQ latches
-    /// it for this socket.
+    /// A client whose CTRL receive timeout is *shorter* than the default, for
+    /// a test of the timeout itself (`it_protocol/ctrl_timeout.rs`). It is
+    /// not a way to wait longer: a command whose reply outgrows the default
+    /// is a reason to re-measure [`CTRL_RECV_TIMEOUT_MS`] (#564), not to
+    /// override it per test. The timeout is set before `connect`, which is
+    /// where ZMQ latches it for this socket.
     pub fn with_ctrl_timeout(d: &'a Daemon, ctrl_timeout_ms: i32) -> Self {
         let ctx = zmq::Context::new();
         let req = ctx.socket(zmq::REQ).unwrap();
