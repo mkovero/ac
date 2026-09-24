@@ -88,12 +88,23 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 /// THD-as-ratio changes accordingly when the curve isn't flat across
 /// the harmonic series.
 ///
-/// `thd_pct`'s denominator, `total_output_rms`, is **not** corrected: it
-/// is the uncorrected total output `thd::analyze` published, and only the
-/// numerator (the harmonic sum) is rescaled here. This mirrors the
-/// existing, documented choice not to mic-correct `thdn_pct` below — the
-/// residual is not corrected, so the total it contributes to is not
-/// either.
+/// `thd_pct` is recomputed as `√(Σ (hᵢ·sᵢ)²) / (total_output_rms · s₁)`,
+/// with `sᵢ = mic_curve_scale(curve, fᵢ)` and `s₁` the scale at
+/// `fundamental_hz` (#167):
+///
+/// - THD is a ratio of two voltages taken at the same terminals
+///   (IEC 60268-3:2018 §15.12.3.2 e), `d_tot = U2'/U2`), so the curve's
+///   gain at the fundamental cancels. A flat curve leaves `thd_pct` equal
+///   to the uncorrected value; a non-flat one moves it only by each
+///   harmonic's response relative to the fundamental, `sᵢ/s₁`. The
+///   published `total_output_rms` itself is not rewritten.
+/// - `thdn_pct` stays uncorrected (both its terms are raw), so it is
+///   gain-invariant as well.
+/// - The residual part of `U2` is scaled by `s₁` rather than bin by bin.
+///   The relative error on `thd_pct` is at most
+///   `½·(thdn_pct/100)²·maxₖ|1 − (sₖ/s₁)²|` over the residual band, zero
+///   for a flat curve. `thd_pct` reads low when the curve over-reads the
+///   residual band more than the fundamental, high in the opposite case.
 ///
 /// Untouched (intentional, documented):
 ///
@@ -106,20 +117,21 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 ///   scope of #97. The displayed spectrum is corrected, so users can
 ///   eyeball the noise floor at frequencies they care about.
 /// - `thdn_pct` and `total_output_rms` — `thdn_pct` depends on
-///   `noise_floor_dbfs`; same reason. `total_output_rms` is their shared
-///   denominator and the residual within it is likewise uncorrected, so
-///   leaving it alone keeps `thd_pct` and `thdn_pct` on the same basis.
+///   `noise_floor_dbfs`; same reason. `total_output_rms` is published as
+///   measured.
 pub(crate) fn apply_mic_curve_to_analysis(curve: &MicResponse, r: &mut AnalysisResult) {
     apply_mic_curve_linear_f64(curve, &r.freqs, &mut r.spectrum);
     r.fundamental_dbfs -= curve.correction_at(r.fundamental_hz as f32) as f64;
     for h in r.harmonic_levels.iter_mut() {
         h.1 *= mic_curve_scale(curve, h.0);
     }
-    // Recompute THD from corrected harmonics over the uncorrected total
-    // output denominator -- the same basis `thdn_pct` already uses.
-    if r.total_output_rms > 1e-30 && !r.harmonic_levels.is_empty() {
+    // Recompute THD from corrected harmonics over the total output at the
+    // fundamental's correction: a same-terminal ratio, so the curve's gain
+    // at the fundamental cancels (IEC 60268-3 §15.12.3.2 e), #167).
+    let denom = r.total_output_rms * mic_curve_scale(curve, r.fundamental_hz);
+    if denom > 1e-30 && !r.harmonic_levels.is_empty() {
         let harm_pow: f64 = r.harmonic_levels.iter().map(|(_, a)| a * a).sum();
-        r.thd_pct = (harm_pow.sqrt() / r.total_output_rms) * 100.0;
+        r.thd_pct = (harm_pow.sqrt() / denom) * 100.0;
     }
 }
 
@@ -289,34 +301,34 @@ mod tests {
             r.harmonic_levels[0].1
         );
 
-        // THD recomputed from the scaled amplitudes over the *uncorrected*
-        // total-output denominator.
+        // THD recomputed from the scaled amplitudes over the total output
+        // at the fundamental's correction (same-terminal ratio, #167).
         let scaled: Vec<f64> = orig
             .harmonic_levels
             .iter()
             .map(|&(f, a)| a * 10f64.powf(-(curve.correction_at(f as f32) as f64) / 20.0))
             .collect();
         let harm_rss = scaled.iter().map(|a| a * a).sum::<f64>().sqrt();
-        let thd_want = harm_rss / orig.total_output_rms * 100.0;
+        let s1 = 10f64.powf(-(curve.correction_at(1000.0) as f64) / 20.0);
+        let thd_want = harm_rss / (orig.total_output_rms * s1) * 100.0;
         assert!(
             (r.thd_pct - thd_want).abs() < 1e-9,
             "thd_pct: got {} want {thd_want}",
             r.thd_pct
         );
         assert!(
-            r.thd_pct > 0.4 && r.thd_pct < 0.8,
-            "thd_pct: got {}, expected ≈ 0.56 % (1 % H2 less 5 dB)",
+            r.thd_pct > 0.65 && r.thd_pct < 0.75,
+            "thd_pct: got {}, expected ≈ 0.71 % (1 % H2, harmonic 3 dB above fundamental)",
             r.thd_pct
         );
 
-        // The rejected re-fundamental denominator (corrected fundamental
-        // amplitude) must not be what we compute.
-        let corrected_fund_amp = 10f64.powf(r.fundamental_dbfs / 20.0);
-        let rejected_re_fundamental = harm_rss / corrected_fund_amp * 100.0;
+        // The rejected numerator-only rule (corrected harmonics over the raw
+        // total) is biased by the curve at the fundamental: here 10^(2/20).
+        let rejected_numerator_only = harm_rss / orig.total_output_rms * 100.0;
         assert!(
-            (r.thd_pct - rejected_re_fundamental).abs() > 0.1 * r.thd_pct,
-            "thd_pct must not match the rejected re-fundamental value \
-             {rejected_re_fundamental}: got {}",
+            (r.thd_pct - rejected_numerator_only).abs() > 0.1 * r.thd_pct,
+            "thd_pct must not match the rejected numerator-only value \
+             {rejected_numerator_only}: got {}",
             r.thd_pct
         );
 
@@ -345,6 +357,58 @@ mod tests {
         assert_eq!(r.noise_floor_dbfs, orig.noise_floor_dbfs);
         assert_eq!(r.linear_rms, orig.linear_rms);
         assert_eq!(r.total_output_rms, orig.total_output_rms);
+    }
+
+    #[test]
+    fn flat_curve_leaves_thd_pct_invariant() {
+        // THD is a same-terminal ratio (IEC 60268-3 §15.12.3.2 e), #167): a
+        // flat curve is a pure sensitivity error and must cancel. Fixture
+        // from thd.rs `distortion_ratios_are_referenced_to_total_output`
+        // (U2/f1 = √1.25), where total-referenced and re-fundamental THD
+        // differ enough to tell apart.
+        let sr = 48_000u32;
+        let samples: Vec<f32> = (0..sr as usize)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                (0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()
+                    + 0.25 * (2.0 * std::f64::consts::PI * 2000.0 * t).sin()) as f32
+            })
+            .collect();
+        let mut r = ac_core::measurement::thd::analyze(&samples, sr, 1000.0, 10).unwrap();
+        let orig = r.clone();
+        let curve = parse_mic_curve(&flat_curve_text(32, 3.0), None).unwrap();
+
+        super::apply_mic_curve_to_analysis(&curve, &mut r);
+
+        assert!(
+            ((r.thd_pct - orig.thd_pct) / orig.thd_pct).abs() < 1e-9,
+            "flat curve must leave thd_pct unchanged: got {} from {}",
+            r.thd_pct,
+            orig.thd_pct
+        );
+
+        let s1 = 10f64.powf(-3.0 / 20.0);
+        let harm_rss = r
+            .harmonic_levels
+            .iter()
+            .map(|(_, a)| a * a)
+            .sum::<f64>()
+            .sqrt();
+        // Rejected: corrected harmonics over the raw total (≈ 31.6 %).
+        let rejected_numerator_only = orig.thd_pct * s1;
+        // Rejected: corrected harmonics over the corrected fundamental (≈ 50 %).
+        let orig_fund_amp = 10f64.powf(orig.fundamental_dbfs / 20.0);
+        let rejected_re_fundamental = harm_rss / (orig_fund_amp * s1) * 100.0;
+        for (name, rejected) in [
+            ("numerator-only", rejected_numerator_only),
+            ("re-fundamental", rejected_re_fundamental),
+        ] {
+            assert!(
+                (r.thd_pct - rejected).abs() > 0.1 * r.thd_pct,
+                "thd_pct {} must not match the rejected {name} value {rejected}",
+                r.thd_pct
+            );
+        }
     }
 
     #[test]

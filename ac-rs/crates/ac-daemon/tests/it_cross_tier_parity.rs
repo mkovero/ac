@@ -379,10 +379,10 @@ fn monitor_spectrum_column_reflects_mic_curve_in_linear_domain() {
 /// curve. `thd::analyze` fills the latter two with linear amplitude; the
 /// pre-#167 correction subtracted 3 from each (≈ −3), then read the
 /// result back as dB power, giving `thd_pct` in the thousands of percent
-/// on the fake 0.1-peak sine. A flat curve scales every harmonic by the
-/// same 10^(-3/20) over the uncorrected denominator, so corrected THD is
-/// exactly that fraction of the uncorrected reading (the fake source
-/// measures ≈ 1 % THD, so ≈ 0.71 %).
+/// on the fake 0.1-peak sine. THD is a same-terminal ratio
+/// (IEC 60268-3 §15.12.3.2 e), #167): a flat curve scales harmonics and
+/// the total output alike, so `thd_pct` must not move, while the linear
+/// spectrum drops by 3 dB.
 #[test]
 fn plot_thd_and_spectrum_reflect_mic_curve_in_linear_domain() {
     let d = Daemon::spawn();
@@ -412,8 +412,8 @@ fn plot_thd_and_spectrum_reflect_mic_curve_in_linear_domain() {
     );
     let thd_delta_db = 20.0 * (thd_uncorr / thd_corr).log10();
     assert!(
-        (thd_delta_db - 3.0).abs() < 0.5,
-        "flat +3 dB curve must scale thd_pct by 10^(-3/20), got Δ={thd_delta_db:.2} dB \
+        thd_delta_db.abs() < 0.5,
+        "flat +3 dB curve must leave thd_pct unchanged, got Δ={thd_delta_db:.2} dB \
          (uncorrected={thd_uncorr}, corrected={thd_corr})"
     );
     for h in pf_corr["harmonic_levels"]
