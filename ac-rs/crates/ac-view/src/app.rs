@@ -738,52 +738,56 @@ impl AcViewApp {
     /// fields. Returns whether any `transfer_stream` frame was accepted
     /// this pass, which is what gates the spectrum scene rebuild.
     fn drain_frames(&mut self) -> bool {
+        // Drain to the newest queued frame rather than parsing one
+        // per repaint: the daemon publishes faster than the UI
+        // repaints, so a single `if let` would fall progressively
+        // behind. `self.last_frame` is overwritten each iteration,
+        // so the backlog is discarded and only the freshest frame
+        // survives — correct for a live display.
+        //
+        // This claim is only true because `poll_frame` skips frame types
+        // this crate does not consume instead of reporting them as
+        // end-of-stream. It did the latter until issue #219, and the
+        // interleaved `visualize/ir` frame published behind every transfer
+        // frame ended this loop after exactly one, whatever the backlog:
+        // measured at 1 surfaced out of 75 available after a 2 s stall.
+        // The comment was accurate about intent and wrong about behaviour
+        // for as long as that held, so treat it as load-bearing rather
+        // than descriptive — if `poll_frame`'s contract changes back,
+        // this loop silently stops draining again. Enforced by
+        // `app_tests::one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames`.
+        //
+        // Collected first, then fed through `ingest_raw_frame` in
+        // `ingest_drained`: that call needs `&mut self` for the
+        // parse-failure streak (#193), which can't overlap `session`'s own
+        // `&mut self.session` borrow here.
+        let Some(session) = &mut self.session else {
+            return false;
+        };
+        let (drained, drained_ir) =
+            collect_drained(|| session.poll_frame(Duration::from_millis(0)));
+        self.ingest_drained(drained, drained_ir, Instant::now())
+    }
+
+    /// Feed one pass's collected frames through the ingest boundary, in
+    /// arrival order, so the last of each kind is what stays held. Returns
+    /// whether any `transfer_stream` frame was accepted.
+    fn ingest_drained(
+        &mut self,
+        drained: Vec<serde_json::Value>,
+        drained_ir: Vec<serde_json::Value>,
+        now: Instant,
+    ) -> bool {
         let mut got_new_frame = false;
-        if let Some(session) = &mut self.session {
-            // Drain to the newest queued frame rather than parsing one
-            // per repaint: the daemon publishes faster than the UI
-            // repaints, so a single `if let` would fall progressively
-            // behind. `self.last_frame` is overwritten each iteration,
-            // so the backlog is discarded and only the freshest frame
-            // survives — correct for a live display.
-            //
-            // This claim is only true because `poll_frame` skips frame types
-            // this crate does not consume instead of reporting them as
-            // end-of-stream. It did the latter until issue #219, and the
-            // interleaved `visualize/ir` frame published behind every transfer
-            // frame ended this loop after exactly one, whatever the backlog:
-            // measured at 1 surfaced out of 75 available after a 2 s stall.
-            // The comment was accurate about intent and wrong about behaviour
-            // for as long as that held, so treat it as load-bearing rather
-            // than descriptive — if `poll_frame`'s contract changes back,
-            // this loop silently stops draining again.
-            //
-            // Collected first, then fed through `ingest_raw_frame` below:
-            // that call needs `&mut self` for the parse-failure streak
-            // (#193), which can't overlap `session`'s own `&mut self.session`
-            // borrow above. Split by the tagged `PolledFrame` (#286) rather
-            // than merged — a `transfer_stream` frame and its `visualize/ir`
-            // sidecar are independent JSON objects and go to independent
-            // ingest paths.
-            let mut drained = Vec::new();
-            let mut drained_ir = Vec::new();
-            while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
-                match frame {
-                    PolledFrame::Transfer(v) => drained.push(v),
-                    PolledFrame::Ir(v) => drained_ir.push(v),
-                }
+        for frame in drained {
+            if self.ingest_raw_frame(frame, now) {
+                got_new_frame = true;
             }
-            let now = std::time::Instant::now();
-            for frame in drained {
-                if self.ingest_raw_frame(frame, now) {
-                    got_new_frame = true;
-                }
-            }
-            // Same "drain to the newest" discipline as the transfer frame
-            // above — the last one in the backlog wins.
-            for frame in drained_ir {
-                self.ingest_raw_ir_frame(frame);
-            }
+        }
+        // Same "drain to the newest" discipline as the transfer frame
+        // above — the last one in the backlog wins.
+        for frame in drained_ir {
+            self.ingest_raw_ir_frame(frame);
         }
         got_new_frame
     }
@@ -1013,6 +1017,25 @@ fn connect_and_launch_view(
     app.weighting = weighting;
     app.integration = integration;
     Ok(app)
+}
+
+/// Pull frames from `poll` until it reports empty, split by the tagged
+/// `PolledFrame` (#286) — a `transfer_stream` frame and its `visualize/ir`
+/// sidecar are independent JSON objects and go to independent ingest
+/// paths. The socket read is passed in so the drain test can inject a
+/// queue instead (#219 Part B); `drain_frames` passes `Session::poll_frame`.
+fn collect_drained(
+    mut poll: impl FnMut() -> Option<PolledFrame>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut drained = Vec::new();
+    let mut drained_ir = Vec::new();
+    while let Some(frame) = poll() {
+        match frame {
+            PolledFrame::Transfer(v) => drained.push(v),
+            PolledFrame::Ir(v) => drained_ir.push(v),
+        }
+    }
+    (drained, drained_ir)
 }
 
 #[cfg(test)]

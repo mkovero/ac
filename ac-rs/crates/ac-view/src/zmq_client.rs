@@ -45,7 +45,10 @@ pub enum Recv {
 /// is a property of the socket and can never be produced here.
 ///
 /// Wire format: a single frame `<topic> <json>` (ZMQ.md, DATA).
-fn parse_frame(bytes: &[u8]) -> Recv {
+///
+/// `pub(crate)` so the drain test in `app_tests` can build its injected
+/// stream from raw wire bytes through this same decoder (#219 Part B).
+pub(crate) fn parse_frame(bytes: &[u8]) -> Recv {
     let Some(split) = bytes.iter().position(|&b| b == b' ') else {
         return Recv::Malformed("no topic separator");
     };

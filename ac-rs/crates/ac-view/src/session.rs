@@ -45,6 +45,49 @@ pub enum PolledFrame {
     Ir(serde_json::Value),
 }
 
+/// The skip / count-malformed / return-tagged decision behind
+/// [`Session::poll_frame`], with the socket read passed in as `recv`.
+/// Split out so a test can drive it from an injected `Recv` queue with no
+/// socket and no timing (#219 Part B); `poll_frame` is the only production
+/// caller and passes `Client::recv_frame`.
+///
+/// Returns `None` only when `recv` yields [`Recv::Empty`]. A malformed
+/// frame bumps `malformed_frames` and keeps pulling; a frame of a type this
+/// crate does not consume is skipped.
+pub(crate) fn poll_next(
+    mut recv: impl FnMut() -> Recv,
+    malformed_frames: &mut u64,
+) -> Option<PolledFrame> {
+    loop {
+        match recv() {
+            Recv::Empty => return None,
+            // Not end-of-stream. Report it and keep draining — a frame we
+            // could not read says nothing about whether more are queued.
+            Recv::Malformed(why) => {
+                *malformed_frames += 1;
+                if *malformed_frames <= MALFORMED_LOG_LIMIT {
+                    eprintln!(
+                        "ac-view: discarding malformed DATA frame ({why}); \
+                         {} so far",
+                        *malformed_frames
+                    );
+                }
+            }
+            Recv::Frame(topic, v) => {
+                if topic != "data" {
+                    continue;
+                }
+                if v["type"] == "transfer_stream" {
+                    return Some(PolledFrame::Transfer(v));
+                }
+                if v["type"] == "visualize/ir" {
+                    return Some(PolledFrame::Ir(v));
+                }
+            }
+        }
+    }
+}
+
 pub struct Session {
     client: Client,
     launched: bool,
@@ -144,36 +187,12 @@ impl Session {
     /// end-of-stream: `ac-view` has no consumer for it, so it would
     /// otherwise be thrown away one call later anyway.
     pub fn poll_frame(&mut self, timeout: Duration) -> Option<PolledFrame> {
-        loop {
-            match self.client.recv_frame(timeout) {
-                Recv::Empty => return None,
-                // Not end-of-stream. Report it and keep draining — a frame we
-                // could not read says nothing about whether more are queued.
-                Recv::Malformed(why) => {
-                    self.malformed_frames += 1;
-                    if self.malformed_frames <= MALFORMED_LOG_LIMIT {
-                        eprintln!(
-                            "ac-view: discarding malformed DATA frame ({why}); \
-                             {} so far",
-                            self.malformed_frames
-                        );
-                    }
-                }
-                Recv::Frame(topic, v) => {
-                    if topic != "data" {
-                        continue;
-                    }
-                    if v["type"] == "transfer_stream" {
-                        self.last_frame_at = Some(Instant::now());
-                        return Some(PolledFrame::Transfer(v));
-                    }
-                    if v["type"] == "visualize/ir" {
-                        self.last_frame_at = Some(Instant::now());
-                        return Some(PolledFrame::Ir(v));
-                    }
-                }
-            }
+        let client = &self.client;
+        let frame = poll_next(|| client.recv_frame(timeout), &mut self.malformed_frames);
+        if frame.is_some() {
+            self.last_frame_at = Some(Instant::now());
         }
+        frame
     }
 
     /// Malformed DATA frames seen this session. Exposed so a test can assert
