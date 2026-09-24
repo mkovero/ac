@@ -131,6 +131,7 @@ fn cross_check_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
         ArrivalCrossCheck::ArrivalAmbiguous { margin_db, .. } => {
             format!(", second lobe {:+.1} dB", -margin_db)
         }
+        ArrivalCrossCheck::BandLimitedSnrUnmeasured => ", arrival SNR unmeasured".to_string(),
         ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => {
             format!(", arrival SNR {snr_db:.1} dB")
         }
@@ -1139,6 +1140,15 @@ mod tests {
                     22.427,
                 ),
                 "peak above 2 kHz: 22.43 ms round trip, arrival SNR 31.2 dB",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BandLimitedSnrUnmeasured,
+                    consistent.clone(),
+                    None,
+                    22.427,
+                ),
+                "peak above 2 kHz: 22.43 ms round trip, arrival SNR unmeasured",
             ),
             (
                 with(
