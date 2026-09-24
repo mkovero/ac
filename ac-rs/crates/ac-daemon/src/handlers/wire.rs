@@ -13,7 +13,10 @@
 //! | `channels`-style array `null` ([`opt_array`]) | `None` — caller applies its default |
 //! | `pairs`-style array `null` ([`opt_non_null_array`]) | [`WireError`] |
 //! | nullable scalar `null` | `Some(None)` — caller clears |
-//! | integer in 0–4294967295 | the value |
+//! | channel / `u32` reader: integer in 0–4294967295 | the value |
+//! | [`opt_positive_f64`]: finite number > 0 (integer or float); `null` refused | the value |
+//! | [`opt_nullable_finite_f64`]: finite number (integer or float, any sign) | the value |
+//! | [`opt_nullable_u64`]: integer in 0–18446744073709551615 | the value |
 //! | anything else | [`WireError`] — caller refuses the whole request |
 //!
 //! The one thing these readers never do is drop an element or narrow a

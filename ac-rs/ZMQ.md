@@ -3811,8 +3811,16 @@ Applies to every channel field (`channels`, `output_channel`,
 | field absent | configured default |
 | `channels`: `null` or `[]` | configured default |
 | `reference_channel` / `reference_output_channel`: `null` | clear |
-| integer in 0–4294967295 | that channel |
-| anything else present — string, float, negative, > 4294967295, `null` on a non-nullable scalar, non-array `channels`/`pairs`, any bad array element | refused |
+| channel field: integer in 0–4294967295 | that channel |
+| channel field: anything else present — string, float, negative, > 4294967295, `null` on a non-nullable field, non-array `channels`/`pairs`, any bad array element | refused |
+| `dbu_ref_vrms` / `snapshot_ring_s`: finite number > 0 (integer or float) | that value |
+| `dbu_ref_vrms` / `snapshot_ring_s`: anything else — `null`, string, bool, 0, negative | refused |
+| `temperature_c`: finite number (integer or float, any sign) | that value |
+| `temperature_c`: `null` | clear |
+| `temperature_c`: anything else — string, bool, array, object | refused |
+| `server_idle_timeout_secs`: integer in 0–18446744073709551615 | that value (`0` clears) |
+| `server_idle_timeout_secs`: `null` | clear |
+| `server_idle_timeout_secs`: anything else — float (including `30.0`), negative, > 18446744073709551615, string, bool | refused |
 
 Values are never narrowed: 4294967296 is refused, not read as channel 0.
 `fft_n` (`monitor_spectrum`, `set_monitor_params`) and `bpo`
