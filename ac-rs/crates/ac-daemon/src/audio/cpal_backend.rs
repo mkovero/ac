@@ -428,6 +428,24 @@ impl AudioEngine for CpalEngine {
         Ok(samples)
     }
 
+    /// `capture_block` without the pre-wait `clear()`, draining everything
+    /// buffered rather than just `n_needed` — see the trait docs (#210).
+    fn capture_contiguous(&mut self, duration: f64) -> Result<Vec<f32>> {
+        let n_needed = (self.sample_rate as f64 * duration) as usize;
+        let timeout = Instant::now() + Duration::from_secs_f64(duration + 2.0);
+        loop {
+            std::thread::sleep(Duration::from_millis(10));
+            if self.state.ring.lock().unwrap().len() >= n_needed {
+                break;
+            }
+            if Instant::now() > timeout {
+                anyhow::bail!("cpal capture_contiguous timeout after {duration:.1}s");
+            }
+        }
+        let samples: Vec<f32> = self.state.ring.lock().unwrap().drain(..).collect();
+        Ok(samples)
+    }
+
     fn flush_capture(&mut self) {
         self.state.ring.lock().unwrap().clear();
     }

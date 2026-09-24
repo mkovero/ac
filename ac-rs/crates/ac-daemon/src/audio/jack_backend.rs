@@ -951,6 +951,13 @@ impl AudioEngine for JackEngine {
         self.rings.capture_multi(n_needed, duration, &mut waiter)
     }
 
+    fn capture_contiguous(&mut self, duration: f64) -> Result<Vec<f32>> {
+        let n_needed = (self.sample_rate as f64 * duration) as usize;
+        let mut waiter = park_waiter(self.state.clone());
+        self.rings
+            .capture_contiguous(n_needed, duration, &mut waiter)
+    }
+
     fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
         let mut waiter = park_waiter(self.state.clone());
