@@ -83,6 +83,13 @@ labels()    { gh_retry gh issue view "$1" -R "$AC_REPO" --json labels --jq '.lab
 pr_labels() { gh_retry gh pr view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name'; }
 has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 
+# The one definition of "issue N's branch": a jq boolean over a PR object,
+# true when headRefName is issue-N or starts with issue-N-. pr_for and
+# issue_landed both select with it.
+issue_branch_jq() {
+  printf '(.headRefName == "issue-%s") or (.headRefName | startswith("issue-%s-"))' "$1" "$1"
+}
+
 # Match on head branch first — developer.md step 2 specifies issue-{N}-{slug}.
 # Fall back to the PR body's closing reference, because not every branch in
 # this repo follows that convention. Never match on title: titles get edited.
@@ -92,7 +99,7 @@ has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 pr_for() {
   local n="$1" pr
   pr=$(gh_retry gh pr list -R "$AC_REPO" --state open --json number,headRefName --jq \
-    "[.[] | select((.headRefName | startswith(\"issue-$n-\")) or (.headRefName == \"issue-$n\"))] | .[0].number // empty") \
+    "[.[] | select($(issue_branch_jq "$n"))] | .[0].number // empty") \
     || return 1
   [[ -n $pr ]] && { printf '%s\n' "$pr"; return; }
   gh_retry gh pr list -R "$AC_REPO" --state open --json number,body --jq \
@@ -127,6 +134,45 @@ pr_landed() {
     ahead|diverged)   echo "elsewhere $base $oid" ;;
     *)                echo unknown ;;
   esac
+}
+
+# Whether closed issue <n>'s change is on main (#568). Its landing PRs are the
+# merged PRs whose head branch is issue-N or issue-N-* (issue_branch_jq), and
+# nothing else links: not PR bodies or titles, and not GitHub's closer or
+# closedByPullRequestsReferences. Closing keywords match in prose — a merged PR
+# saying "no longer closes #N" closes #N and becomes its closer — so pr_for's
+# body fallback is deliberately not reused. A child that landed through a
+# hand-named branch therefore reads as not landed: a false stop, never a false
+# release. The --search is a pre-filter only; the jq predicate decides. Each
+# candidate goes through pr_landed. Prints one line:
+#   landed <pr> <oid>        some candidate's merge commit is on main
+#   unlanded <pr> [<pr>...]  merged candidates exist, none is on main
+#   none                     no merged issue-N PR
+#   unknown                  a call failed, the list may be cut short, or a
+#                            candidate could not be checked and none landed
+# A failure is never `landed`.
+issue_landed() {
+  local n="$1" limit=100 info count prs pr verdict unlanded="" unsure=""
+  info="$(gh_retry gh pr list -R "$AC_REPO" --state merged --limit "$limit" \
+    --search "head:issue-$n" --json number,headRefName --jq \
+    "[(length | tostring), ([.[] | select($(issue_branch_jq "$n")) | .number | tostring] | join(\" \"))] | join(\"|\")")" \
+    || { echo unknown; return 0; }
+  IFS='|' read -r count prs <<< "$info"
+  [[ $count =~ ^[0-9]+$ ]] || { echo unknown; return 0; }
+  # A full page may have dropped the landed PR: say unchecked, not absent.
+  (( count < limit )) || { echo unknown; return 0; }
+  for pr in $prs; do
+    verdict="$(pr_landed "$pr")"
+    case "$verdict" in
+      landed\ *)   echo "landed $pr ${verdict#landed }"; return 0 ;;
+      elsewhere\ *) unlanded+=" $pr" ;;
+      *)           unsure=1 ;;
+    esac
+  done
+  if [[ -n $unsure ]]; then echo unknown
+  elif [[ -n $unlanded ]]; then echo "unlanded$unlanded"
+  else echo none
+  fi
 }
 
 # A branch with no open PR is a failed earlier run, not a fresh start.
@@ -961,21 +1007,47 @@ wait_for_merge() {
 }
 
 drive_epic() {
-  local e="$1" kids c st wait_rc wait_pr
+  local e="$1" kids c st wait_rc wait_pr landing lpr loid
   mapfile -t kids < <(children "$e")
   (( ${#kids[@]} )) || { echo "  #$e: no sub-issues or task-list refs found"; return 0; }
   echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
 
   for c in "${kids[@]}"; do
     st="$(gh_retry gh issue view "$c" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
-    if [[ $st == CLOSED ]]; then echo "  #$c: closed, skipping"; continue; fi
+    # A closed child is done only when issue_landed finds its change on main.
+    # Otherwise stop, whatever KEEP_GOING says: every later child would build
+    # on a main without it (#568).
+    if [[ $st == CLOSED ]]; then
+      landing="$(issue_landed "$c")"
+      case "$landing" in
+        landed\ *)
+          read -r _ lpr loid <<< "$landing"
+          echo "  #$c: closed, landed on main via PR #$lpr (${loid:0:7}) — skipping"
+          continue ;;
+        none)
+          echo "  #$c: closed, and no merged issue-$c PR was found — stopping epic #$e." ;;
+        unlanded\ *)
+          echo "  #$c: closed; merged PR(s) $(printf '#%s ' ${landing#unlanded })have no merge commit on main — stopping epic #$e." ;;
+        *)
+          echo "  #$c: closed, and whether its change is on main could not be checked — stopping rather than guessing." ;;
+      esac
+      echo "  Reopen #$c or remove it from #$e's child list, then rerun: master.sh $e"
+      return 0
+    fi
 
     # The epic's blocked-by column is a real dependency, not a hint. A child
-    # whose blocker is still open would branch from a main without it.
+    # whose blocker is open, or closed without its change on main, would
+    # branch from a main without it.
     local blk open_blk=""
     for blk in $(blockers_of "$e" "$c"); do
-      [[ "$(gh_retry gh issue view "$blk" -R "$AC_REPO" --json state --jq .state 2>/dev/null)" == CLOSED ]] \
-        || open_blk+="#$blk "
+      if [[ "$(gh_retry gh issue view "$blk" -R "$AC_REPO" --json state --jq .state 2>/dev/null)" != CLOSED ]]; then
+        open_blk+="#$blk "; continue
+      fi
+      case "$(issue_landed "$blk")" in
+        landed\ *) ;;
+        none|unlanded\ *) open_blk+="#$blk (closed, not on main) " ;;
+        *)                open_blk+="#$blk (closed, landing unknown) " ;;
+      esac
     done
     if [[ -n $open_blk ]]; then
       echo "  #$c: blocked by $open_blk— skipping"
@@ -1017,9 +1089,9 @@ drive_epic() {
               # Not KEEP_GOING-able: every later child would build on a main
               # without #$c's change.
               echo "  #$c: no change landed on main — stopping epic #$e."
-              echo "  A rerun of master.sh $e skips closed children and counts a closed blocker"
-              echo "  as done: check #$c's state and PR #$wait_pr before rerunning,"
-              echo "  and reopen #$c or remove it from #$e's child list."
+              echo "  A rerun of master.sh $e stops again at #$c until #$c is reopened or"
+              echo "  removed from #$e, and a closed #$c does not release the children it blocks."
+              echo "  Check #$c's state and PR #$wait_pr, then reopen #$c or remove it from #$e's child list."
               return 0
             fi
             (( wait_rc == 0 )) || return 0
