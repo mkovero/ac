@@ -84,4 +84,4 @@ code continue to work during the transition.
 
 ### Transfer
 
-- H1 estimator (`ac-core/visualize/transfer.rs`) use Müller-Massarani windowed cross-correlation. Estimator internal changes must preserve math correctness of transfer function estimate.
+- H1 estimator (`ac-core/visualize/transfer.rs`) use Welch-averaged H1 (Gxy/Gxx). No held reference for the estimator — see `standards.md` → reference reading. Estimator internal changes must preserve math correctness of transfer function estimate.

@@ -74,7 +74,8 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 |---|---|---|
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
-| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac-core/visualize/transfer.rs` |
+| Farina, AES 108th Conv. preprint #5093 (2000) — "Simultaneous Measurement of Impulse Response and Distortion with a Swept-Sine Technique" | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Log-sweep impulse-response measurement and deconvolution (inverse filter), harmonic-distortion separation — cited by `sweep/mod.rs::citation()` and `farina_citation()`. Not an H1 reference. |
+| Müller & Massarani 2001 | not held — no local copy | H1 / `ac-core/visualize/transfer.rs` checks. Attribution **unverified**: no local copy exists, and `transfer.rs` implements Welch-averaged H1 (Gxy/Gxx). |
 
 ### how to use them during review
 
@@ -189,4 +190,5 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 |---|---|---|
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
-| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac-core/visualize/transfer.rs` |
+| Farina, AES 108th Conv. preprint #5093 (2000) — "Simultaneous Measurement of Impulse Response and Distortion with a Swept-Sine Technique" | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Log-sweep impulse-response measurement and deconvolution (inverse filter), harmonic-distortion separation — cited by `sweep/mod.rs::citation()` and `farina_citation()`. Not an H1 reference. |
+| Müller & Massarani 2001 | not held — no local copy | H1 / `ac-core/visualize/transfer.rs` checks. Attribution **unverified**: no local copy exists, and `transfer.rs` implements Welch-averaged H1 (Gxy/Gxx). |
