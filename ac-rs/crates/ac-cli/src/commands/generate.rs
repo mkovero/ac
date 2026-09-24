@@ -352,16 +352,35 @@ fn channel_info_lines(
     lines
 }
 
+/// How [`wait_loop`] ended. An operator stop and a daemon `error` frame both
+/// print a line, but only the daemon error is a failure (#455).
+enum WaitEnd {
+    /// The daemon published `done` for this command.
+    Done,
+    /// The operator pressed q or Ctrl-C; `stop` was sent.
+    Stopped,
+    /// The daemon published `error` for this command after it had started.
+    DaemonError(String),
+}
+
+/// Wait for the command to end, then print why. A daemon `error` frame ends
+/// the process with status 1, like a rejected ack in `check_ack`; every
+/// caller of this helper inherits that without a branch of its own.
 pub(crate) fn wait_for_stop(client: &mut AcClient, cmd_name: &str) {
     crossterm::terminal::enable_raw_mode().ok();
-    let result = wait_loop(client, cmd_name);
+    let end = wait_loop(client, cmd_name);
     crossterm::terminal::disable_raw_mode().ok();
-    if let Err(reason) = result {
-        println!("\n  {reason}");
+    match end {
+        WaitEnd::Done => {}
+        WaitEnd::Stopped => println!("\n  Stopped."),
+        WaitEnd::DaemonError(msg) => {
+            println!("\n  error: {msg}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
+fn wait_loop(client: &mut AcClient, cmd_name: &str) -> WaitEnd {
     loop {
         if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
             if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
@@ -371,7 +390,7 @@ fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
                         crossterm::terminal::disable_raw_mode().ok();
                         client
                             .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
-                        return Err("Stopped.".into());
+                        return WaitEnd::Stopped;
                     }
                     KeyCode::Char('c')
                         if key
@@ -381,7 +400,7 @@ fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
                         crossterm::terminal::disable_raw_mode().ok();
                         client
                             .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
-                        return Err("Stopped.".into());
+                        return WaitEnd::Stopped;
                     }
                     _ => {}
                 }
@@ -395,10 +414,10 @@ fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("error");
-                return Err(format!("error: {msg}"));
+                return WaitEnd::DaemonError(msg.to_string());
             }
             if topic == "done" && (frame_cmd.is_empty() || frame_cmd == cmd_name) {
-                return Ok(());
+                return WaitEnd::Done;
             }
         }
     }

@@ -198,6 +198,19 @@ pub fn spawn_daemon(
     probe_host: &str,
     first_ports: Option<(u16, u16)>,
 ) -> DaemonGuard {
+    spawn_daemon_with_env(home, local, probe_host, first_ports, &[])
+}
+
+/// [`spawn_daemon`] with extra environment variables on the daemon, e.g. the
+/// fake backend's `AC_FAKE_*` fault hooks (#455). Every retry gets the same
+/// set, and a fresh process, so call-indexed hooks restart at call 0.
+pub fn spawn_daemon_with_env(
+    home: &Path,
+    local: bool,
+    probe_host: &str,
+    first_ports: Option<(u16, u16)>,
+    env: &[(&str, &str)],
+) -> DaemonGuard {
     let home_str = home.to_str().expect("scratch HOME is UTF-8");
     let mut last = String::new();
     for attempt in 0..SPAWN_ATTEMPTS {
@@ -206,7 +219,9 @@ pub fn spawn_daemon(
             _ => alloc_ports(),
         };
         let mut cmd = Command::new(sibling_binary("ac-daemon"));
-        cmd.env("HOME", home).arg("--fake-audio");
+        cmd.env("HOME", home)
+            .envs(env.iter().copied())
+            .arg("--fake-audio");
         if local {
             cmd.arg("--local");
         }
