@@ -446,6 +446,31 @@ impl SaveError {
             SaveError::Unreadable { source, .. } | SaveError::Write { source, .. } => source,
         }
     }
+
+    /// Operator-facing refusal for an update that was not persisted (#430,
+    /// #513), headed by `subject` (`"setup"`, `"session"`). Returned without
+    /// the `  error: ` prefix; continuation lines are indented to sit under
+    /// the text after it, like the `calibration unreadable` refusal. One
+    /// copy of the layout for every command that saves config.
+    pub fn not_saved_message(&self, subject: &str) -> String {
+        match self {
+            SaveError::Write { .. } => format!(
+                "{subject} not saved \u{2014} configuration unchanged\n\
+                 \x20        file   {}\n\
+                 \x20        cause  {:#}",
+                self.path().display(),
+                self.cause()
+            ),
+            SaveError::Unreadable { .. } => format!(
+                "{subject} not saved \u{2014} existing configuration is unreadable\n\
+                 \x20        file   {}\n\
+                 \x20        cause  {:#}\n\
+                 \x20        data   existing file preserved",
+                self.path().display(),
+                self.cause()
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for SaveError {
@@ -556,6 +581,37 @@ mod tests {
         assert_eq!(err.path(), path);
         assert!(format!("{:#}", err.cause()).contains("parsing"), "{err:?}");
         assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[test]
+    fn not_saved_message_pins_the_setup_layout() {
+        // Exact strings: the daemon's `setup` refusal (ZMQ.md) is rendered
+        // by this method, and its integration tests check only the head.
+        let path = PathBuf::from("/h/.config/ac/config.json");
+        let unreadable = SaveError::Unreadable {
+            path: path.clone(),
+            source: anyhow::anyhow!("bad json").context("parsing /h/.config/ac/config.json"),
+        };
+        assert_eq!(
+            unreadable.not_saved_message("setup"),
+            "setup not saved \u{2014} existing configuration is unreadable\n\
+             \x20        file   /h/.config/ac/config.json\n\
+             \x20        cause  parsing /h/.config/ac/config.json: bad json\n\
+             \x20        data   existing file preserved"
+        );
+        let write = SaveError::Write {
+            path,
+            source: anyhow::anyhow!("disk full").context("creating dir /h/.config/ac"),
+        };
+        assert_eq!(
+            write.not_saved_message("setup"),
+            "setup not saved \u{2014} configuration unchanged\n\
+             \x20        file   /h/.config/ac/config.json\n\
+             \x20        cause  creating dir /h/.config/ac: disk full"
+        );
+        assert!(write
+            .not_saved_message("session")
+            .starts_with("session not saved \u{2014} configuration unchanged\n"));
     }
 
     #[test]

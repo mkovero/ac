@@ -26,11 +26,44 @@ fn new_session(name: &str) {
         eprintln!("  error: session {name:?} already exists");
         std::process::exit(1);
     }
-    std::fs::create_dir_all(&dir).ok();
-    let mut cfg = ac_core::config::load(None).unwrap_or_default();
+    // #513: read the config before touching the directory, and undo the
+    // directory if the save is refused, so a refusal leaves nothing behind
+    // and a retry of the same name is not blocked by "already exists".
+    let mut cfg = load_or_refuse();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "  error: cannot create session directory {}: {e}",
+            dir.display()
+        );
+        std::process::exit(1);
+    }
     cfg.session = Some(name.to_string());
-    ac_core::config::save(&cfg, None).ok();
+    if let Err(e) = ac_core::config::save(&cfg, None) {
+        // `remove_dir` only removes an empty directory: the name was free a
+        // moment ago, so this can only undo what this command created.
+        std::fs::remove_dir(&dir).ok();
+        refuse(&e);
+    }
     println!("  Created and switched to session: {name}");
+}
+
+/// Config as it is on disk, or exit 1 with the `session not saved` refusal
+/// (#513). A file that cannot be read is refused rather than replaced by
+/// defaults: defaults would make the active session look unset.
+fn load_or_refuse() -> ac_core::config::Config {
+    match ac_core::config::load(None) {
+        Ok(cfg) => cfg,
+        Err(source) => refuse(&ac_core::config::SaveError::Unreadable {
+            path: ac_core::config::default_config_path(),
+            source,
+        }),
+    }
+}
+
+/// Print the `session not saved` refusal to stderr and exit 1 (#513).
+fn refuse(e: &ac_core::config::SaveError) -> ! {
+    eprintln!("  error: {}", e.not_saved_message("session"));
+    std::process::exit(1);
 }
 
 fn list_sessions() {
@@ -77,9 +110,11 @@ fn use_session(name: &str) {
         eprintln!("  error: session {name:?} not found");
         std::process::exit(1);
     }
-    let mut cfg = ac_core::config::load(None).unwrap_or_default();
+    let mut cfg = load_or_refuse();
     cfg.session = Some(name.to_string());
-    ac_core::config::save(&cfg, None).ok();
+    if let Err(e) = ac_core::config::save(&cfg, None) {
+        refuse(&e);
+    }
     println!("  Switched to session: {name}");
 }
 
@@ -89,13 +124,17 @@ fn rm_session(name: &str) {
         eprintln!("  error: session {name:?} not found");
         std::process::exit(1);
     }
-    std::fs::remove_dir_all(&dir).ok();
-    let cfg = ac_core::config::load(None).unwrap_or_default();
+    // #513: clear the active session first; the directory is deleted only
+    // once the config no longer names it (or never did), so a refusal
+    // deletes nothing.
+    let mut cfg = load_or_refuse();
     if cfg.session.as_deref() == Some(name) {
-        let mut cfg = cfg;
         cfg.session = None;
-        ac_core::config::save(&cfg, None).ok();
+        if let Err(e) = ac_core::config::save(&cfg, None) {
+            refuse(&e);
+        }
     }
+    std::fs::remove_dir_all(&dir).ok();
     println!("  Removed session: {name}");
 }
 
