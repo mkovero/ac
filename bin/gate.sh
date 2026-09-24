@@ -54,7 +54,7 @@ force="" dir="."
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
-    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     *) dir="$a" ;;
   esac
 done

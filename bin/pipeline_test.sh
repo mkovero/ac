@@ -497,6 +497,27 @@ if git -C "$REPO" cat-file -e ffdfe248:bin/gate.sh 2>/dev/null; then
   check '[[ $(cat $T/rc_19hold) == 0 ]]' "(h) control: the gate at ffdfe248 passes case (a)"
 fi
 
+# (n) --help prints the whole header comment, however long it grows (#511).
+# Red on a26c7fd3: the handler printed the fixed range 2,48p, which ended one
+# blank line past the header, so a header grown by two lines lost its last
+# line (the control below).
+last19='# not re-run to see more output.'
+help19() {  # $1 = case, $2 = gate script dir, $3 = flag
+  ( cd "$R19" && PATH="$T/stub:$PATH" bash "$2/gate.sh" "$3" > "$T/r_19$1" 2>&1; echo $? > "$T/rc_19$1" )
+}
+help19 n "$BIN" --help
+check '[[ $(cat $T/rc_19n) == 0 ]] && grep -q "^# Exit: " $T/r_19n && [[ $(tail -n1 $T/r_19n) == "$last19" ]] && ! grep -q "cargo must not run" $T/r_19n' "(n) gate.sh --help exits 0 and prints the header through its last line, no cargo"
+mkdir -p "$T/grow19"
+cp "$BIN/common.sh" "$T/grow19/common.sh"
+sed 's/^# Exit: /# Grown line (#511).\n# Grown again.\n&/' "$BIN/gate.sh" > "$T/grow19/gate.sh"
+help19 ng "$T/grow19" -h
+check '[[ $(cat $T/rc_19ng) == 0 ]] && grep -qx "# Grown again." $T/r_19ng && grep -q "^# Exit: " $T/r_19ng && [[ $(tail -n1 $T/r_19ng) == "$last19" ]]' "(n) a header grown by two lines still prints through its last line with -h"
+mkdir -p "$T/grow19old"
+cp "$BIN/common.sh" "$T/grow19old/common.sh"
+sed "s/-h|--help) awk .*\"\\\$0\"; exit 0 ;;/-h|--help) sed -n '2,48p' \"\$0\"; exit 0 ;;/" "$T/grow19/gate.sh" > "$T/grow19old/gate.sh"
+help19 ngold "$T/grow19old" --help
+check 'grep -q "sed -n .2,48p" $T/grow19old/gate.sh && grep -qx "# Grown again." $T/r_19ngold && ! grep -qxF "$last19" $T/r_19ngold' "(n) control: the fixed 2,48p handler drops the last line of the grown header"
+
 # superseded_names_of: the fence in the newest manifest-bearing architect comment
 m_names() {  # $1 = case → sn_$1 (stdout), snrc_$1
   (
