@@ -4,12 +4,16 @@
 # rig.sh --unlock <token>|--force    release it
 # rig.sh --status                    show who holds it
 #
-# Pipeline mode (rig.md → pipeline mode): take the lock, build the PR head
-# portable, ship it, run the rig role with the check QA named, and require a
-# `<!-- agent: rig -->` record naming that head. The rig role emits only inside
-# the operator's standing consent (AGENTS.md → rig sessions).
+# Pipeline mode (rig.md → pipeline mode): build the PR head portable, then
+# check whether the newest measured rig record carries forward to it
+# (docs/runbooks/rig-testing.md → Carry-forward, #579). If it does, post a
+# carried-forward record and stop without taking the lock or contacting the
+# rig. Otherwise take the lock, ship, run the rig role with the check QA
+# named, and require a `<!-- agent: rig -->` record naming that head. The rig
+# role emits only inside the operator's standing consent (AGENTS.md → rig
+# sessions).
 #
-# Exit: 0 record posted · 3 rig busy (lock held) · 4 rig scripts or access
+# Exit: 0 record posted, carried or measured · 3 rig busy (lock held) · 4 rig scripts or access
 # missing · anything else: the session failed and posted no record at this head.
 #
 #   AC_RIG=pupu            rig profile name (scripts/rig/hosts/<rig>.env)
@@ -125,15 +129,29 @@ head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefO
 issue="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json closingIssuesReferences \
          --jq '.closingIssuesReferences[0].number // empty')"
 rev="${head:0:12}"
+export AC_SESSION_DIR               # carry-forward.sh reads the filed records here
 
-token="$(lock_take "pipeline rig.sh PR #$pr @ $rev ($(uname -n) pid $$)")" || exit $?
+token=""
 wt="$WT_BASE/rig-pr-$pr"
 cleanup() {
   cd "$ROOT" || true
   [[ -d $wt ]] && remove_worktree "$wt"
-  lock_release "$token" || echo "could not release the rig lock — token $token" >&2
+  if [[ -n $token ]]; then
+    lock_release "$token" || echo "could not release the rig lock — token $token" >&2
+  fi
 }
 trap cleanup EXIT
+
+# commit_record <path> <message> — commit a filed record in $AC_HOME, if that
+# is a git repo. Best effort: the record is on disk either way.
+commit_record() {
+  git -C "$AC_HOME" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$AC_HOME" add "$1" || true
+  if ! git -C "$AC_HOME" diff --cached --quiet -- "$1"; then
+    git -C "$AC_HOME" commit -q -m "$2" -- "$1" \
+      || echo "rig: could not commit $1 in \$AC_HOME" >&2
+  fi
+}
 
 require_space "$wt" || exit 1
 # A private ref: FETCH_HEAD is shared by every process using this checkout.
@@ -145,9 +163,44 @@ git update-ref -d "refs/ac/rig/pr-$pr"   # the worktree now holds $head
 link_support "$wt"
 
 # Build and ship here, not in the session: both are mechanical, and a rig
-# session that builds is how the dev VM got OOM-killed once.
+# session that builds is how the dev VM got OOM-killed once. The build comes
+# before the lock: the carry-forward check below needs it, and needs no rig.
 echo "rig: building $rev" >&2
 ( cd "$wt" && "$scripts/build-portable.sh" ) || { echo "portable build failed" >&2; exit 1; }
+stage="$AC_HOME/target-rig-stage/$rev"
+
+# Carry-forward (docs/runbooks/rig-testing.md → Carry-forward, #579). Exit 0
+# carries; 1 (does not) and 2 (could not compare) both run the session.
+carry_out="$(mktemp)" carry_facts="$(mktemp)"
+carry_rc=0
+"$scripts/carry-forward.sh" "$pr" "$stage" "$carry_facts" > "$carry_out" || carry_rc=$?
+if (( carry_rc == 0 )); then
+  before="$(newest_record "$pr" rig)"
+  echo "rig: the newest measured record carries forward to $rev; no session" >&2
+  gh_retry gh pr comment "$pr" -R "$AC_REPO" --body-file "$carry_out" >/dev/null \
+    || { echo "rig: could not post the carried-forward record" >&2; rm -f "$carry_out" "$carry_facts"; exit 1; }
+  url="$(rig_comment_url "$pr" "$head" || true)"
+  measured_at="$(sed -n 's/^measured_at=//p' "$carry_facts")"
+  measured_record="$(sed -n 's/^measured_record=//p' "$carry_facts")"
+  stamp="$(date -u +%FT%H%M%SZ)"
+  record_out="$(file_rig_record "$pr" "$rev" "$stamp" "$carry_out")" || { rm -f "$carry_out" "$carry_facts"; exit 1; }
+  rm -f "$carry_out" "$carry_facts"
+  append_rig_block "$record_out" carried "$head" pass "$url" "$measured_at" "$measured_record" \
+    || echo "rig: could not append the machine block to $record_out" >&2
+  commit_record "$record_out" "rig: PR #$pr at $rev, carried forward from ${measured_at:0:12} $stamp (pipeline)"
+  echo "rig: record filed at $record_out" >&2
+  after="$(newest_record "$pr" rig)"
+  if [[ -z $after || $after == "$before" || $after != *"$head"* || $(rig_verdict_of "$after") != pass ]]; then
+    echo "rig: the carried-forward record naming $head is not the newest rig record" >&2
+    exit 1
+  fi
+  echo "rig: record posted, carried forward, verdict pass" >&2
+  exit 0
+fi
+rm -f "$carry_out" "$carry_facts"
+echo "rig: no carry-forward (exit $carry_rc); running a session" >&2
+
+token="$(lock_take "pipeline rig.sh PR #$pr @ $rev ($(uname -n) pid $$)")" || exit $?
 echo "rig: shipping $rev to $RIG" >&2
 "$scripts/ship.sh" "$RIG" "$rev" || { echo "ship failed" >&2; exit 1; }
 
@@ -190,28 +243,33 @@ full record to $record_in (the runner files it under \$AC_HOME/session and
 commits it; do not commit it here), and post the PR comment exactly as rig.md
 specifies, ending with the rig verdict line." "$@" || true
 
+record_out=""
 if [[ -s $record_in ]]; then
   # One file per pass, stamped at filing time from a single UTC clock read
   # (#549): a second pass at the same head used to replace the first record.
   stamp="$(date -u +%FT%H%M%SZ)"
   record_out="$(file_rig_record "$pr" "$rev" "$stamp" "$record_in")" || exit 1
-  if git -C "$AC_HOME" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "$AC_HOME" add "$record_out" || true
-    if ! git -C "$AC_HOME" diff --cached --quiet -- "$record_out"; then
-      git -C "$AC_HOME" commit -q -m "rig: PR #$pr at $rev, pass $stamp (pipeline)" -- "$record_out" \
-        || echo "rig: could not commit $record_out in \$AC_HOME" >&2
-    fi
-  fi
   echo "rig: record filed at $record_out" >&2
 else
   echo "rig: session wrote no record file at $record_in" >&2
 fi
 
 after="$(newest_record "$pr" rig)"
+verdict=""
+if [[ -n $after && $after != "$before" && $after == *"$head"* ]]; then
+  verdict="$(rig_verdict_of "$after")"
+fi
+# The machine block goes on only once the posted verdict is known; a record
+# without one never carries forward (#579).
+if [[ -n $record_out && -n $verdict ]]; then
+  append_rig_block "$record_out" measured "$head" "$verdict" "$(rig_comment_url "$pr" "$head" || true)" "$stage" \
+    || echo "rig: could not append the machine block to $record_out; it will not carry forward" >&2
+fi
+[[ -n $record_out ]] && commit_record "$record_out" "rig: PR #$pr at $rev, pass $stamp (pipeline)"
+
 if [[ -z $after || $after == "$before" || $after != *"$head"* ]]; then
   echo "rig session posted no record naming $head" >&2
   exit 1
 fi
-verdict="$(rig_verdict_of "$after")"
 echo "rig: record posted, verdict ${verdict:-missing}" >&2
 [[ -n $verdict ]] || exit 1
