@@ -40,8 +40,8 @@ the first two was being written:
 | construct | reported | actual |
 |---|---|---|
 | `cargo test \| tail` | `tail`'s 0, whatever the tests did | — |
-| `cargo test \| grep … \| head -20` | 890 passing | 904 — the result lines were truncated |
-| `cargo test …; grep -c FAILED log` | **failure** | 905 passing, 0 failed |
+| `cargo test \| grep … \| head -20` | a passing count | 14 short of the real one — the result lines were truncated |
+| `cargo test …; grep -c FAILED log` | **failure** | every test passed, none failed |
 
 The third is the instructive one, because **nothing malfunctioned**: `grep -c`
 correctly found zero matches and correctly exited 1 to say so. The status was
