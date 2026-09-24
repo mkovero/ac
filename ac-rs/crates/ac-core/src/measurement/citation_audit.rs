@@ -9,7 +9,7 @@
 //! cited in repo documentation, neither of which is a report concern.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::report::StandardsCitation;
 
@@ -90,8 +90,9 @@ fn citation_standard_resolves(standard: &str, stddocs_root: &Path) -> bool {
 }
 
 /// Pulls every backtick-delimited `stddocs/...pdf` path reference out
-/// of a markdown document. Used to walk the normative-standards table
-/// path columns in `.agents/qa.md` and `ARCHITECTURE.md`.
+/// of a markdown document. Used by `unresolved_doc_references` on every
+/// live doc it walks — chiefly the document map in
+/// `docs/architecture/standards.md`, but any live doc citing a held PDF.
 fn extract_stddocs_pdf_paths(markdown: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut rest = markdown;
@@ -111,6 +112,87 @@ fn extract_stddocs_pdf_paths(markdown: &str) -> Vec<String> {
     paths
 }
 
+/// Repo-root-relative directories whose `*.md` files are scanned without
+/// recursing. Together with `RECURSIVE_DOC_ROOT` this is the whole scan
+/// scope of `unresolved_doc_references`.
+const FLAT_DOC_ROOTS: &[&str] = &["", ".agents", "ac-rs"];
+
+/// Scanned recursively, minus `EXCLUDED_DOC_DIRS`.
+const RECURSIVE_DOC_ROOT: &str = "docs";
+
+/// Dead-but-kept plans: a path they cite describes the tree as it stood
+/// when they were written, so it is not held to today's `stddocs/`.
+/// Same exclusion `bin/stale_names.sh` uses. (`audit/`, `work/` and
+/// `tests/fixtures/` are excluded by not being roots at all.)
+const EXCLUDED_DOC_DIRS: &[&str] = &["docs/superseded"];
+
+/// The standards document map. Pinned by name so that moving or emptying
+/// it fails the real-tree test instead of letting the walk pass
+/// vacuously — the failure #410 reports.
+const STANDARDS_MAP: &str = "docs/architecture/standards.md";
+
+/// `*.md` files directly in `dir`. `is_file()` follows symlinks and is
+/// false for a dangling one, so a missing symlink target is skipped.
+fn markdown_files_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "md") && p.is_file())
+        .collect()
+}
+
+/// Every subdirectory under `dir` (inclusive), skipping any whose
+/// repo-relative path is in `EXCLUDED_DOC_DIRS`.
+fn doc_dirs_under(repo_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let rel = dir.strip_prefix(repo_root).unwrap_or(dir);
+    if EXCLUDED_DOC_DIRS.iter().any(|x| rel == Path::new(x)) {
+        return;
+    }
+    out.push(dir.to_path_buf());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            doc_dirs_under(repo_root, &path, out);
+        }
+    }
+}
+
+/// Every backticked `stddocs/...pdf` reference in a live doc under
+/// `repo_root` that names a file not on disk, as (repo-relative doc
+/// path, cited path) pairs, sorted so failures print in a fixed order.
+/// Live docs are the `*.md` files in `FLAT_DOC_ROOTS` plus those under
+/// `RECURSIVE_DOC_ROOT`, minus `EXCLUDED_DOC_DIRS`.
+fn unresolved_doc_references(repo_root: &Path) -> Vec<(String, String)> {
+    let mut dirs: Vec<PathBuf> = FLAT_DOC_ROOTS.iter().map(|d| repo_root.join(d)).collect();
+    doc_dirs_under(repo_root, &repo_root.join(RECURSIVE_DOC_ROOT), &mut dirs);
+
+    let mut unresolved = Vec::new();
+    for dir in &dirs {
+        for path in markdown_files_in(dir) {
+            let doc = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let label = path
+                .strip_prefix(repo_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for rel in extract_stddocs_pdf_paths(&doc) {
+                if !repo_root.join(&rel).is_file() {
+                    unresolved.push((label.clone(), rel));
+                }
+            }
+        }
+    }
+    unresolved.sort();
+    unresolved
+}
+
 /// Regression guard for #313. `every_measurement_module_emits_populated_citation`
 /// only checks that `standard`/`clause` are non-empty — a well-formed
 /// lie passes it just as well as the truth. That is exactly what
@@ -118,14 +200,23 @@ fn extract_stddocs_pdf_paths(markdown: &str) -> Vec<String> {
 /// AES17-2020 was ever held in `stddocs/` (#312), and the existing
 /// guard could not go red for it. This test additionally resolves each
 /// citation's `standard` to a document actually present in `stddocs/`,
-/// and separately walks the `.agents/qa.md` and `ARCHITECTURE.md`
-/// standards tables for stale path references (#291's own acceptance
-/// criterion: the table and the emitting fns must never disagree).
+/// and separately checks every `stddocs/...pdf` path cited in live repo
+/// docs (#291's own acceptance criterion: the table and the emitting fns
+/// must never disagree).
+///
+/// The standards document map lives in `docs/architecture/standards.md`
+/// (moved there from `.agents/qa.md` on 2026-08-29). Naming scanned
+/// files one by one is what let that move silence this guard (#410), so
+/// the doc half walks bounded roots instead — the repo root, `.agents/`
+/// and `ac-rs/` flat, `docs/` recursively minus `docs/superseded/` —
+/// and pins the map itself: it must exist and cite at least one PDF.
 ///
 /// `stddocs/` is gitignored — held PDFs are licensed and exist only in
 /// the local main tree, not in worktrees (see repo `CLAUDE.md`). This
 /// test skips, visibly, rather than failing when the directory is
 /// absent, so the suite stays runnable where most agent work happens.
+/// The walk itself is proven on fixtures by the `doc_walk_*` tests,
+/// which need no real `stddocs/` and never skip.
 #[test]
 fn every_citation_resolves_to_a_held_document() {
     let stddocs_root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../stddocs"));
@@ -147,18 +238,59 @@ fn every_citation_resolves_to_a_held_document() {
         );
     }
 
-    for (label, path) in [
-        (".agents/qa.md", repo_root.join(".agents/qa.md")),
-        ("ARCHITECTURE.md", repo_root.join("ARCHITECTURE.md")),
-    ] {
-        let doc =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        for rel in extract_stddocs_pdf_paths(&doc) {
-            let full = repo_root.join(&rel);
-            assert!(
-                full.is_file(),
-                "{label} cites `{rel}` which does not exist on disk"
-            );
-        }
-    }
+    let map_path = repo_root.join(STANDARDS_MAP);
+    let map = fs::read_to_string(&map_path).unwrap_or_else(|e| {
+        panic!(
+            "reading the standards map {}: {e} — if it moved, update STANDARDS_MAP",
+            map_path.display()
+        )
+    });
+    assert!(
+        !extract_stddocs_pdf_paths(&map).is_empty(),
+        "{STANDARDS_MAP} cites no `stddocs/...pdf` path — the map was emptied or moved"
+    );
+
+    let unresolved = unresolved_doc_references(repo_root);
+    assert!(
+        unresolved.is_empty(),
+        "docs cite stddocs/ paths that do not exist on disk:\n{}",
+        unresolved
+            .iter()
+            .map(|(doc, rel)| format!("  {doc} cites `{rel}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Fixture repo root with `stddocs/held.pdf` present and `body` written
+/// at `doc_rel`.
+fn fixture_repo(doc_rel: &str, body: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(root.path().join("stddocs")).unwrap();
+    fs::write(root.path().join("stddocs/held.pdf"), b"").unwrap();
+    let doc = root.path().join(doc_rel);
+    fs::create_dir_all(doc.parent().unwrap()).unwrap();
+    fs::write(doc, body).unwrap();
+    root
+}
+
+#[test]
+fn doc_walk_reports_a_missing_pdf_in_the_standards_map() {
+    let root = fixture_repo(STANDARDS_MAP, "| x | `stddocs/missing.pdf` |\n");
+    assert_eq!(
+        unresolved_doc_references(root.path()),
+        vec![(STANDARDS_MAP.to_string(), "stddocs/missing.pdf".to_string())]
+    );
+}
+
+#[test]
+fn doc_walk_passes_once_the_standards_map_reference_is_corrected() {
+    let root = fixture_repo(STANDARDS_MAP, "| x | `stddocs/held.pdf` |\n");
+    assert!(unresolved_doc_references(root.path()).is_empty());
+}
+
+#[test]
+fn doc_walk_skips_superseded_docs() {
+    let root = fixture_repo("docs/superseded/x.md", "`stddocs/missing.pdf`\n");
+    assert!(unresolved_doc_references(root.path()).is_empty());
 }
