@@ -765,8 +765,8 @@ Commands:
                   [report-dir <dir>|none]
                   [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
   calibrate       [output <N>] [input <N>] [level] [show]             level calibration
-  generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
-  generate pink   [channels] [level]                                  pink noise
+  generate sine   [channels] [level] [freq]                           sine (default: configured output, 1 kHz)
+  generate pink   [channels] [level]                                  pink noise (default: configured output)
   generate level  <start> <stop> [freq] [duration]                    level sweep at fixed frequency (output-only)
   generate frequency [freqStart freqStop] [level] [duration]          frequency sweep at fixed level (output-only)
   plot            [freqStart freqStop] [level] [ppd] [<N>bpo] [show]  per-point THD vs freq (+ optional IEC 61260-1 bands)
