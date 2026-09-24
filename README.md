@@ -185,6 +185,18 @@ is applied, and the flight time is off by whatever delay difference the
 routing change introduced, in either direction. Re-run `ac calibrate` on
 every pair whose internal routing has changed.
 
+**A pair's input-stage settings are not in the key either.** Gain, pad and
+phantom power are not part of the offset's key, so changing them leaves the
+stored offset matched and applied. One case has been measured (#551): on an
+RME Fireface 400 at 96 kHz, mic-pre input IN2 with phantom off, four
+separate `ac calibrate` runs at 0 dB gain and four at 20 dB all read the
+same τ (1711 samples) — no shift within integer-sample resolution. That
+covers only that interface, rate and the two tested gain settings, on that
+channel. Phantom power, gain settings other than 0 and 20 dB (including
+those between them), other rates and other interfaces are untested, and another channel of the same pre type is assumed, not
+measured, to behave alike. Where the interface's behaviour is not known,
+re-run `ac calibrate` on a pair after changing its input stage.
+
 **ac does not convert the delay readout into a distance.** #391 removed
 that conversion — and the per-pair calibration layer built to correct it —
 because every input it needed (a taped ground truth, a temperature-derived
