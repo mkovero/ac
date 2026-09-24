@@ -53,6 +53,19 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 fail=0
 check() { if eval "$1"; then echo "ok   $2"; else echo "FAIL $2"; fail=1; fi; }
 
+# #580: an AC_LIMIT_FILE inherited from a calling runner is that runner's live
+# limit file. Fingerprint it read-only, then unset it so every default resolves
+# under $T/log; the check before `exit` proves the suite left it untouched.
+caller_limit="${AC_LIMIT_FILE-}"
+limit_print() {
+  if [[ -z "$1" ]]; then echo none
+  elif [[ -r "$1" ]]; then sha256sum < "$1" | cut -d' ' -f1
+  elif [[ -e "$1" ]]; then echo unreadable
+  else echo absent; fi
+}
+caller_limit_before="$(limit_print "$caller_limit")"
+unset AC_LIMIT_FILE
+
 export AC_HOME="$T/home" AC_LOG_DIR="$T/log" AC_REPO=x/y AC_MIN_FREE_GB=0
 mkdir -p "$T/stub" "$AC_LOG_DIR"
 export PATH="$T/stub:$PATH"
@@ -1126,5 +1139,13 @@ check '[[ $(cat $T/rc24f) == 0 && $(cat $T/integrate24f) == "integrate 70" ]] &&
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
+
+# --- #580: the caller's inherited limit file is untouched ---------------------
+if [[ -z "$caller_limit" ]]; then
+  check 'true' "no AC_LIMIT_FILE inherited, so none to leave untouched (vacuous, #580)"
+else
+  check '[[ $(limit_print "$caller_limit") == "$caller_limit_before" ]]' \
+    "the inherited AC_LIMIT_FILE $caller_limit ($caller_limit_before) is unchanged by the suite (#580)"
+fi
 
 exit $fail
