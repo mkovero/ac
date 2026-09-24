@@ -275,7 +275,11 @@ else re-derives it: not QA, not the rig role, not an architect comment.
    source, so A → B → C compares C with A. A record whose file does not end
    with the runner's machine block (every record filed before #579) never
    carries, and neither does a record already at B: a new session was asked
-   for at that head.
+   for at that head. Every session the runner starts files a record, even
+   one that writes no record file: its posted comment in its place, or,
+   with no comment either, a placeholder without a machine block. A session
+   whose record went missing therefore stops the carry; it never leaves an
+   older pass as the newest source.
 2. **Verdict.** Only `pass` carries. `fail`, `decline` and `decline-site` run
    a session as before.
 3. **Build.** Both manifests have `dirty_files=0` and the same `carry_rule`.

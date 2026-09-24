@@ -203,6 +203,36 @@ record "$d1-rig-pr-7-ffffffffffff-100000Z.md" measured "$A" pass "$tmp/A"
 record "$d1-rig-pr-7-aaaaaaaaaaaa-110000Z.md" measured "$A" fail "$tmp/A"
 expect "a newer fail sorts before an older pass by stamp, not by rev → no carry" 1 7 "$tmp/B"
 
+# A's side comes only from the filed block; B's stage is re-verified by
+# verify_stage, so these guards can only fire on a hand-edited or corrupted
+# block at A. Each case asserts which refusal fired, not only the exit code:
+# B's digests still match A's CARRYSUMS, so a plain table mismatch cannot be
+# what stops them.
+# expect_err <text> <label> — the last expect's stderr names <text>.
+expect_err() {
+    grep -qF -- "$1" "$tmp/err" && ok "$2" || bad "$2 — stderr: $(tail -2 "$tmp/err")"
+}
+arec="$AC_SESSION_DIR/$d1-rig-pr-7-${A:0:12}-100000Z.md"
+zeros="$(printf '0%.0s' {1..64})"
+
+fresh
+record "$d1-rig-pr-7-${A:0:12}-100000Z.md" measured "$A" pass "$tmp/A"
+sed -i "s/^sha256sum=[0-9a-f]*  ac\$/sha256sum=$zeros  ac/" "$arec"
+expect "A's CARRYSUMS line for ac is not its SHA256SUMS line → no carry" 1 7 "$tmp/B"
+expect_err "\`ac\`'s CARRYSUMS line is not its SHA256SUMS line at A" "  … refused by the line-equality guard at A"
+
+fresh
+record "$d1-rig-pr-7-${A:0:12}-100000Z.md" measured "$A" pass "$tmp/A"
+sed -i '/^sha256sum=.*  transfer_probe$/d' "$arec"
+expect "A's CARRYSUMS and SHA256SUMS list different artefacts → no carry" 1 7 "$tmp/B"
+expect_err "CARRYSUMS and SHA256SUMS list different artefacts at A" "  … refused by the per-head artefact-set guard at A"
+
+fresh
+record "$d1-rig-pr-7-${A:0:12}-100000Z.md" measured "$A" pass "$tmp/A"
+sed -i "s/^manifest=rev=.*/manifest=rev=$C/" "$arec"
+expect "A's recorded manifest is for another head → no carry" 1 7 "$tmp/B"
+expect_err "recorded MANIFEST.txt is for $C, not its head $A" "  … refused by the manifest-rev guard"
+
 # A stage that no longer matches its sums cannot be compared.
 fresh
 record "$d1-rig-pr-7-${A:0:12}-100000Z.md" measured "$A" pass "$tmp/A"

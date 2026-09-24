@@ -243,29 +243,47 @@ full record to $record_in (the runner files it under \$AC_HOME/session and
 commits it; do not commit it here), and post the PR comment exactly as rig.md
 specifies, ending with the rig verdict line." "$@" || true
 
-record_out=""
-if [[ -s $record_in ]]; then
-  # One file per pass, stamped at filing time from a single UTC clock read
-  # (#549): a second pass at the same head used to replace the first record.
-  stamp="$(date -u +%FT%H%M%SZ)"
-  record_out="$(file_rig_record "$pr" "$rev" "$stamp" "$record_in")" || exit 1
-  echo "rig: record filed at $record_out" >&2
-else
-  echo "rig: session wrote no record file at $record_in" >&2
-fi
-
 after="$(newest_record "$pr" rig)"
-verdict=""
+posted=0 verdict=""
 if [[ -n $after && $after != "$before" && $after == *"$head"* ]]; then
+  posted=1
   verdict="$(rig_verdict_of "$after")"
 fi
+
+# A session ran at $head, so something is filed for it whatever it left
+# behind. $AC_SESSION_DIR is the carry rule's only input: a session that files
+# nothing would leave an older measured pass as the newest source, and a later
+# run at identical binaries would carry that pass over this session's posted
+# fail (#579). With no record file, the posted comment is filed in its place;
+# with no posted comment either, a placeholder with no machine block is, and
+# nothing carries past it.
+record_src="$record_in"
+if [[ ! -s $record_in ]]; then
+  echo "rig: session wrote no record file at $record_in; the runner files one" >&2
+  record_src="$(mktemp)"
+  if (( posted )); then
+    printf '<!-- runner: the session wrote no record file; this is its posted PR comment, filed by bin/rig.sh (#579) -->\n\n%s\n' \
+      "$after" > "$record_src"
+  else
+    printf '<!-- runner: a rig session ran at %s and left no record file and no PR comment naming this head. Placeholder filed by bin/rig.sh with no machine block, so no record carries forward past it (#579). -->\n' \
+      "$head" > "$record_src"
+  fi
+fi
+# One file per pass, stamped at filing time from a single UTC clock read
+# (#549): a second pass at the same head used to replace the first record.
+stamp="$(date -u +%FT%H%M%SZ)"
+record_out="$(file_rig_record "$pr" "$rev" "$stamp" "$record_src")" || record_out=""
+[[ $record_src != "$record_in" ]] && rm -f "$record_src"
+[[ -n $record_out ]] || exit 1
+echo "rig: record filed at $record_out" >&2
+
 # The machine block goes on only once the posted verdict is known; a record
 # without one never carries forward (#579).
-if [[ -n $record_out && -n $verdict ]]; then
+if [[ -n $verdict ]]; then
   append_rig_block "$record_out" measured "$head" "$verdict" "$(rig_comment_url "$pr" "$head" || true)" "$stage" \
     || echo "rig: could not append the machine block to $record_out; it will not carry forward" >&2
 fi
-[[ -n $record_out ]] && commit_record "$record_out" "rig: PR #$pr at $rev, pass $stamp (pipeline)"
+commit_record "$record_out" "rig: PR #$pr at $rev, ${verdict:-no verdict} $stamp (pipeline)"
 
 if [[ -z $after || $after == "$before" || $after != *"$head"* ]]; then
   echo "rig session posted no record naming $head" >&2

@@ -49,7 +49,8 @@
 #  25. rig.sh carries a measured pass forward without the rig (#579): exit 0,
 #      a carried record naming the measured head, no ssh — so no lock_take;
 #      a newer carried record is never the source; with no record to carry,
-#      the same run reaches lock_take.
+#      the same run reaches lock_take; a session that writes no record file
+#      still leaves a filed record, so an older pass never carries over it.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -1260,6 +1261,42 @@ filed25c="$(ls "$T/sess25c"/*-rig-pr-7-"${H25:0:12}"-*.md 2>/dev/null)"
 check '[[ $(cat $T/rc25c) == 0 ]] && grep -q "^ship " $T/ssh25 && [[ -n $filed25c ]] && grep -qx "kind=measured" "$filed25c" && grep -qx "head=$H25" "$filed25c" && grep -qx "verdict=pass" "$filed25c" && grep -q "^carrysum=.*  it_loopback_ir$" "$filed25c" && [[ $(tail -1 "$filed25c") == "\`\`\`" ]]' \
   "25c: a measured session's filed record ends with a kind=measured block holding the stage's digests"
 check '[[ $(cat $T/rc25c_carry) == 0 ]]' "25c: carry-forward.sh reads that block back: a later head with the same binaries carries"
+
+# 25d/25e: a session that writes no rig-record.md still leaves a filed record,
+# so an older measured pass at identical binaries (A, filed earlier) is not the
+# newest source afterwards. d: the session posts `fail`; the runner files that
+# comment with a kind=measured, verdict=fail block. e: the session posts
+# nothing; the runner files a placeholder with no block. Then A's record is
+# added with an earlier stamp and rig.sh runs again at the same head: without
+# the runner's filing it would carry A's pass over the session's outcome.
+cat > "$T/stub25/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ $STUB25_POST == fail ]]; then
+  printf '<!-- agent: rig -->\n## rig — PR #7 at %s\n\n**rig verdict:** fail\n' "$GH25_HEAD" > "$GH25_DB.body"
+  gh pr comment 7 --body-file "$GH25_DB.body" >/dev/null
+fi
+echo '{"type":"result","result":"done"}'
+EOF
+chmod +x "$T/stub25/claude"
+for c in d e; do
+  post=fail; [[ $c == e ]] && post=none
+  (export AC_PROVIDER=claude AC_RIG_PROVIDER=claude STUB25_POST=$post; r25 $c)
+  cp "$T/rc25$c" "$T/rc25${c}1"
+  ls "$T/sess25$c"/*-rig-pr-7-"${H25:0:12}"-*.md > "$T/filed25${c}1" 2>/dev/null || : > "$T/filed25${c}1"
+  cp "$T/sess25a/2026-09-23-rig-pr-7-${A25:0:12}-100000Z.md" "$T/sess25$c/"
+  sleep 1   # the second pass's filing stamp must differ from the first's
+  (export AC_PROVIDER=claude AC_RIG_PROVIDER=claude STUB25_POST=$post; r25 $c)
+done
+filed25d="$(head -1 "$T/filed25d1")"
+filed25e="$(head -1 "$T/filed25e1")"
+check '[[ $(wc -l < $T/filed25d1) == 1 ]] && grep -qx "kind=measured" "$filed25d" && grep -qx "verdict=fail" "$filed25d" && grep -q "^\*\*rig verdict:\*\* fail$" "$filed25d" && [[ $(cat $T/rc25d1) == 0 ]]' \
+  "25d: a session that posts fail with no record file gets its comment filed, with a kind=measured verdict=fail block"
+check '! grep -q "Carried forward" <<<"$(jq -r ".comments[].body" "$T/db25d")" && grep -q "no carry — the newest measured record is already at $H25" "$T/out25d"' \
+  "25d: a rerun at the same head does not carry the older pass at A over that fail"
+check '[[ $(wc -l < $T/filed25e1) == 1 ]] && ! grep -q "rig-runner" "$filed25e" && grep -q "Placeholder filed by bin/rig.sh" "$filed25e" && [[ $(cat $T/rc25e1) == 1 ]]' \
+  "25e: a session that posts nothing and writes no record file gets a placeholder with no machine block"
+check '! grep -q "Carried forward" <<<"$(jq -r ".comments[].body" "$T/db25e")" && grep -q "no carry — the newest measured record .* has no runner machine block" "$T/out25e"' \
+  "25e: a rerun at the same head does not carry the older pass at A past the placeholder"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
