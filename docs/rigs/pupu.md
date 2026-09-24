@@ -176,8 +176,9 @@ by the helper script itself.
   The offset key holds no input-stage settings; this is the evidence that
   an IN2 gain change from 0 to 20 dB leaves the stored offset valid. Not
   covered: phantom power (it cannot go on a line loopback), gain settings
-  other than 0 and 20 dB (including those between them), other rates. IN1's pre is a separate channel of the same type as
-  IN2's; that it behaves alike is assumed, not measured. On that
+  other than 0 and 20 dB (including those between them), other rates.
+  IN1's pre is a separate channel of the same type as IN2's; that it
+  behaves alike is assumed, not measured. On that
   assumption, gain is excluded as a cause of the +329 vs +335 sample gap at
   a taped 1.00 m; the gap is not attributed.
 - **Ceilings (nominal dBFS): −40 standing, −50 on anything that drives the
