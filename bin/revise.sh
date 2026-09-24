@@ -20,14 +20,9 @@ wt="$(ensure_worktree "$branch" "$WT_BASE/$branch")" \
 cd "$wt"
 sparse_trim "$wt"
 git_retry git fetch -q origin "$branch"
-# A cut-off Codex run may have pushed the PR commit while its sandbox was
-# unable to advance this linked worktree's Git metadata. If the local tip is a
-# strict ancestor of the remote PR tip, advance only HEAD/index and preserve
-# every working-tree edit for the resumed revision.
-if [[ $(git rev-parse HEAD) != $(git rev-parse "origin/$branch") ]] \
-    && git merge-base --is-ancestor HEAD "origin/$branch"; then
-  git reset --mixed "origin/$branch"
-fi
+# Before link_support: a support link that is not ignored would make a clean
+# worktree read as dirty. Refusal exits before any agent starts (#532).
+advance_worktree "$branch" || exit 1
 link_support "$wt"
 
 # The names step's inputs (gate.sh → stale_names.sh), for the developer's own

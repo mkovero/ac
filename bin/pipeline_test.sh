@@ -57,6 +57,13 @@
 #      stops the epic and a closed blocker holds its dependents; a landed one
 #      skips or releases as before; a PR that only mentions the issue in prose
 #      (armed: pr_for's body fallback would take it) links nothing.
+#  27. advance_worktree, revise.sh's step to the PR tip (#532): a clean
+#      worktree behind a merge made elsewhere fast-forwards clean (armed: the
+#      old reset --mixed leaves a reverse diff on the same fixture); a dirty
+#      tree holding the tip's content is kept clean at the tip (the 18876391
+#      Codex recovery); a dirty tree that does not match is refused untouched;
+#      the PR #569 shape (pre-merge content as edits over an ancestor) is
+#      refused with nothing normalised into the index.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -1440,6 +1447,77 @@ check '[[ ! -s $T/driven26h ]] && grep -q "could not be checked" $T/out26h && ! 
   "26h: a failed ancestry check on the only candidate stops the epic"
 check '! grep -q "closed, skipping" "$BIN/master.sh" && ! grep -q "skips closed children" "$BIN/master.sh"' \
   "26: the old closed-means-done wording is gone from master.sh"
+
+# --- 27: advance_worktree never hands a reverse diff to the developer (#532) ----
+# Branch b: C1 → P (the PR's own commit). main: C1 → M (what main gained: an
+# edit and a new file). Tip = merge of main into b, made in another clone and
+# pushed — the integrate.sh shape. Each case gets its own clone of the origin.
+(
+  export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+  O="$T/o27.git"; git init -q --bare "$O"
+  S="$T/s27"; git init -q -b b "$S" && cd "$S"
+  printf 'a1\n' > a.txt; printf 'b1\n' > b.txt; git add . && git commit -qm C1
+  git checkout -qb main; printf 'a-main\n' > a.txt; printf 'new\n' > new.txt
+  git add . && git commit -qm M
+  git checkout -q b; printf 'b-pr\n' > b.txt; printf 'c-pr\n' > c.txt
+  git add . && git commit -qm P
+  git remote add origin "$O" && git push -q origin b main
+  git rev-parse b~1 > "$T/c1_27"; git rev-parse b > "$T/p_27"
+  B="$T/b27"; git clone -q -b b "$O" "$B" && cd "$B"
+  git merge -q --no-ff origin/main -m "integrate main" && git push -q origin b
+  git rev-parse HEAD > "$T/tip_27"
+) > /dev/null 2>&1
+C1_27="$(cat "$T/c1_27")"; P27="$(cat "$T/p_27")"; TIP27="$(cat "$T/tip_27")"
+mk27() {  # $1 = dir, $2 = local HEAD; origin/b is the merge tip
+  git clone -q -b b "$T/o27.git" "$1" && git -C "$1" reset -q --hard "$2"
+}
+adv27() {  # $1 = dir, $2 = tag → rc, stderr, HEAD, porcelain under $T/*27$2
+  ( cd "$1" && source "$BIN/common.sh"
+    rc=0; advance_worktree b 2> "$T/err27$2" || rc=$?; echo "$rc" > "$T/rc27$2" )
+  git -C "$1" rev-parse HEAD > "$T/head27$2"
+  git -C "$1" status --porcelain --untracked-files=all > "$T/st27$2"
+}
+
+# 27a: clean worktree at P (the incident: 76ae71c7 behind 6e478485).
+mk27 "$T/a27" "$P27" > /dev/null 2>&1
+cp -a "$T/a27" "$T/a27old"
+git -C "$T/a27old" reset -q --mixed origin/b
+git -C "$T/a27old" status --porcelain --untracked-files=all > "$T/st27old"
+adv27 "$T/a27" a
+check '[[ -n $TIP27 && $TIP27 != "$P27" && $(git -C $T/a27 rev-parse origin/b) == "$TIP27" && $(git -C $T/a27 rev-list --parents -n1 $TIP27 | wc -w) == 3 ]]' \
+  "27: fixture tip is a merge commit made outside the worktree under test"
+check 'grep -q "a.txt" $T/st27old && grep -q "new.txt" $T/st27old' \
+  "27a armed: the old reset --mixed leaves the reverse of the merge on the same fixture"
+check '[[ $(cat $T/rc27a) == 0 && $(cat $T/head27a) == "$TIP27" && ! -s $T/st27a ]]' \
+  "27a: a clean worktree behind a merge made elsewhere ends clean at the tip"
+
+# 27b: HEAD at P, working tree already holds the tip (a cut-off Codex push).
+mk27 "$T/b27w" "$P27" > /dev/null 2>&1
+git -C "$T/b27w" archive "$TIP27" | tar -x -C "$T/b27w"
+git -C "$T/b27w" status --porcelain --untracked-files=all > "$T/st27bpre"
+adv27 "$T/b27w" b
+check 'grep -q "a.txt" $T/st27bpre && grep -q "new.txt" $T/st27bpre && [[ $(cat $T/rc27b) == 0 && $(cat $T/head27b) == "$TIP27" && ! -s $T/st27b ]]' \
+  "27b: a dirty tree matching the tip is kept and ends clean at the tip (18876391 recovery)"
+
+# 27c: HEAD at P, an unrelated local edit.
+mk27 "$T/c27" "$P27" > /dev/null 2>&1
+printf 'local edit\n' >> "$T/c27/b.txt"; sum27c="$(sha256sum < "$T/c27/b.txt")"
+adv27 "$T/c27" c
+check '[[ $(cat $T/rc27c) != 0 && $(cat $T/head27c) == "$P27" && $(sha256sum < $T/c27/b.txt) == "$sum27c" ]] && grep -qF "$T/c27" $T/err27c && grep -q "branch b " $T/err27c && grep -q "$TIP27" $T/err27c' \
+  "27c: a dirty tree that does not match is refused untouched, naming worktree, branch and tip"
+
+# 27d: the PR #569 shape. HEAD at C1, the pre-merge PR content (P) sitting as
+# uncommitted edits — what an earlier --mixed left behind.
+mk27 "$T/d27" "$C1_27" > /dev/null 2>&1
+git -C "$T/d27" archive "$P27" | tar -x -C "$T/d27"
+cp -a "$T/d27" "$T/d27old"; git -C "$T/d27old" reset -q --mixed origin/b
+adv27 "$T/d27" d
+check 'git -C $T/d27old diff --quiet origin/b -- a.txt new.txt; [[ $? == 1 ]]' \
+  "27d armed: the old reset --mixed turns the #569 shape into a reverse diff of the merged files"
+check '[[ $(cat $T/rc27d) != 0 && $(cat $T/head27d) == "$C1_27" && $(git -C $T/d27 write-tree) == $(git -C $T/d27 rev-parse "$C1_27^{tree}") ]] && [[ $(cat $T/d27/b.txt) == b-pr && $(cat $T/d27/a.txt) == a1 && ! -e $T/d27/new.txt ]]' \
+  "27d: the #569 shape is refused with HEAD, index and working tree as they were"
+check 'grep -q "^advance_worktree \"\$branch\" || exit 1$" $BIN/revise.sh && [[ $(grep -n "^advance_worktree" $BIN/revise.sh | cut -d: -f1) -lt $(grep -n "^link_support" $BIN/revise.sh | cut -d: -f1) && $(grep -n "^advance_worktree" $BIN/revise.sh | cut -d: -f1) -lt $(grep -n "run developer" $BIN/revise.sh | cut -d: -f1) ]] && ! grep -q "reset --mixed" $BIN/revise.sh' \
+  "27: revise.sh exits on a refusal before link_support and the developer run"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
