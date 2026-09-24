@@ -258,7 +258,7 @@ approving (see `.agents/qa.md`'s display-truth gate).
 
 ## What is verified numerically
 
-### THD accuracy (ac-core `analysis` module)
+### THD accuracy (ac-core `measurement::thd` module)
 
 These tests generate synthetic signals with mathematically known distortion and verify the analyzer returns correct values:
 
