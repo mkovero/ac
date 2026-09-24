@@ -167,6 +167,19 @@ by the helper script itself.
   both read 1711 samples. That is consistent with 0 but was not taken in one
   capture, so it is not in the stored form `plot ir` reads; the step above
   re-establishes it (#544 rig check step 1).
+- **IN2 mic-pre gain does not move the loopback τ, 0 vs 20 dB (#551)** —
+  provenance: measured 2026-09-24, 96 kHz / 256, pair AN2 → IN2. Gain
+  readback (IN1, IN2) `20,0` then `20,20`; four separate `calibrate` runs
+  per setting, all 1711 samples, within-setting spread 0, median
+  difference 0. One JACK lifetime (pid 271238), IN2 phantom off
+  throughout. Record: `$AC_HOME/session/2026-09-24-rig-551-gain-vs-offset.md`.
+  The offset key holds no input-stage settings; this is the evidence that
+  an IN2 gain change within 0–20 dB leaves the stored offset valid. Not
+  covered: phantom power (it cannot go on a line loopback), gains outside
+  0–20 dB, other rates. IN1's pre is a separate channel of the same type as
+  IN2's; that it behaves alike is assumed, not measured. On that
+  assumption, gain is excluded as a cause of the +329 vs +335 sample gap at
+  a taped 1.00 m; the gap is not attributed.
 - **Ceilings (nominal dBFS): −40 standing, −50 on anything that drives the
   speaker** (operator, 2026-09-14). The daemon has no configurable ceiling:
   since #459 it refuses only above full scale and never clamps. Both limits
