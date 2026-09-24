@@ -16,7 +16,7 @@ pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
         _ => unreachable!(),
     };
 
-    let channels = resolve_channels(ch_spec, client);
+    let channels = resolve_channels(ch_spec, client, "sine");
 
     println!();
     let mut infos = channel_levels(client, &channels, level);
@@ -85,7 +85,7 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
         _ => unreachable!(),
     };
 
-    let channels = resolve_channels(ch_spec, client);
+    let channels = resolve_channels(ch_spec, client, "pink");
 
     println!();
     let mut infos = channel_levels(client, &channels, level);
@@ -144,20 +144,104 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
 
 /// The channels to report and send. An explicit list was already validated
 /// by the parser, so it is used as given; only an omitted list asks the
-/// daemon for the configured output.
-fn resolve_channels(ch_spec: &Option<Vec<u32>>, client: &mut AcClient) -> Vec<u32> {
+/// daemon for the configured output. When that fails, nothing is sent and
+/// the process exits 1 (#517) — no channel is invented.
+fn resolve_channels(ch_spec: &Option<Vec<u32>>, client: &mut AcClient, subcmd: &str) -> Vec<u32> {
     if let Some(channels) = ch_spec {
-        channels.clone()
-    } else {
-        let ack = client.send_cmd(&serde_json::json!({"cmd": "setup", "update": {}}), None);
-        let ch = ack
-            .as_ref()
-            .and_then(|a| a.get("config"))
-            .and_then(|c| c.get("output_channel"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        vec![ch]
+        return channels.clone();
     }
+    let reply = client.send_cmd(&serde_json::json!({"cmd": "setup", "update": {}}), None);
+    match configured_output(reply.as_ref()) {
+        Ok(ch) => vec![ch],
+        Err(e) => {
+            for line in unresolved_channel_lines(&e, subcmd) {
+                eprintln!("{line}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Why the configured output could not be read from a `setup` reply.
+#[derive(Debug, PartialEq)]
+enum UnresolvedChannel {
+    /// No reply at all (timeout, socket failure).
+    NoReply,
+    /// `ok` was not `true`; the daemon's `error` text, if any.
+    Refused(Option<String>),
+    /// `ok: true` but no `config.output_channel`.
+    NoKey,
+    /// `output_channel` present but not a `u32`.
+    Unusable(serde_json::Value),
+}
+
+/// The configured output channel from a `setup` reply, or why there is none.
+/// `ok` is checked first: a refused reply carries no `config`.
+fn configured_output(reply: Option<&serde_json::Value>) -> Result<u32, UnresolvedChannel> {
+    let reply = reply.ok_or(UnresolvedChannel::NoReply)?;
+    if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(UnresolvedChannel::Refused(
+            reply
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        ));
+    }
+    let v = reply
+        .get("config")
+        .and_then(|c| c.get("output_channel"))
+        .ok_or(UnresolvedChannel::NoKey)?;
+    v.as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| UnresolvedChannel::Unusable(v.clone()))
+}
+
+/// The stderr refusal for an unresolved default channel (#517 UX). The last
+/// line is the same for every cause.
+fn unresolved_channel_lines(e: &UnresolvedChannel, subcmd: &str) -> Vec<String> {
+    const INDENT: &str = "         ";
+    let mut lines = Vec::new();
+    match e {
+        UnresolvedChannel::NoReply => {
+            lines.push("  error: no channel given, and the server did not answer `setup`".into());
+        }
+        UnresolvedChannel::Refused(msg) => {
+            lines.push("  error: no channel given, and the server refused `setup`:".into());
+            match msg {
+                Some(m) => {
+                    let mut it = m.lines();
+                    if let Some(first) = it.next() {
+                        lines.push(format!("{INDENT}{first}"));
+                    }
+                    lines.extend(it.map(str::to_string));
+                }
+                None => lines.push(format!("{INDENT}server gave no reason")),
+            }
+        }
+        UnresolvedChannel::NoKey => {
+            lines.push(
+                "  error: no channel given, and the `setup` reply has no output_channel".into(),
+            );
+        }
+        UnresolvedChannel::Unusable(v) => {
+            lines.push(
+                "  error: no channel given, and `setup` returned an unusable output_channel".into(),
+            );
+            let text = serde_json::to_string(v).unwrap_or_default();
+            let shown = if text.chars().count() > 54 {
+                let mut t: String = text.chars().take(53).collect();
+                t.push('\u{2026}');
+                t
+            } else {
+                text
+            };
+            lines.push(format!("{INDENT}output_channel = {shown}"));
+        }
+    }
+    lines.push(format!(
+        "{INDENT}nothing was emitted \u{2014} pass the channel: ac generate {subcmd} <N>"
+    ));
+    lines
 }
 
 fn get_cal_for_channel(client: &mut AcClient, ch: u32) -> Option<serde_json::Value> {
@@ -375,5 +459,175 @@ mod tests {
             "source": "probe",
         }));
         assert_eq!(channel_info_lines(1, None, -40.0, Some(&c)).len(), 1);
+    }
+
+    fn classify(reply: serde_json::Value) -> Result<u32, UnresolvedChannel> {
+        configured_output(Some(&reply))
+    }
+
+    #[test]
+    fn a_missing_reply_is_refused_not_defaulted() {
+        assert_eq!(configured_output(None), Err(UnresolvedChannel::NoReply));
+    }
+
+    #[test]
+    fn a_failed_reply_is_refused_with_its_error_text() {
+        assert_eq!(
+            classify(serde_json::json!({"ok": false, "error": "unknown command: 'setup'"})),
+            Err(UnresolvedChannel::Refused(Some(
+                "unknown command: 'setup'".into()
+            )))
+        );
+        assert_eq!(
+            classify(serde_json::json!({"ok": false})),
+            Err(UnresolvedChannel::Refused(None))
+        );
+        // `ok` is checked before the key: a refused reply that still carries
+        // a channel is not used.
+        assert_eq!(
+            classify(serde_json::json!({"ok": false, "config": {"output_channel": 3}})),
+            Err(UnresolvedChannel::Refused(None))
+        );
+    }
+
+    #[test]
+    fn a_reply_without_the_key_is_refused() {
+        assert_eq!(
+            classify(serde_json::json!({"ok": true})),
+            Err(UnresolvedChannel::NoKey)
+        );
+        assert_eq!(
+            classify(serde_json::json!({"ok": true, "config": {}})),
+            Err(UnresolvedChannel::NoKey)
+        );
+    }
+
+    #[test]
+    fn a_reply_with_the_key_resolves_to_that_channel() {
+        assert_eq!(
+            classify(serde_json::json!({"ok": true, "config": {"output_channel": 3}})),
+            Ok(3)
+        );
+        assert_eq!(
+            classify(serde_json::json!({"ok": true, "config": {"output_channel": 0}})),
+            Ok(0)
+        );
+        assert_eq!(
+            classify(serde_json::json!({"ok": true, "config": {"output_channel": 4294967295u64}})),
+            Ok(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_u32_is_unusable_not_narrowed() {
+        for v in [
+            serde_json::json!(4294967296u64),
+            serde_json::json!("3"),
+            serde_json::json!(-1),
+            serde_json::json!(3.0),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                classify(serde_json::json!({"ok": true, "config": {"output_channel": v.clone()}})),
+                Err(UnresolvedChannel::Unusable(v))
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_lines_match_the_ux_spec() {
+        assert_eq!(
+            unresolved_channel_lines(&UnresolvedChannel::NoReply, "sine"),
+            [
+                "  error: no channel given, and the server did not answer `setup`",
+                "         nothing was emitted \u{2014} pass the channel: ac generate sine <N>",
+            ]
+        );
+        assert_eq!(
+            unresolved_channel_lines(
+                &UnresolvedChannel::Refused(Some("unknown command: 'setup'".into())),
+                "pink"
+            ),
+            [
+                "  error: no channel given, and the server refused `setup`:",
+                "         unknown command: 'setup'",
+                "         nothing was emitted \u{2014} pass the channel: ac generate pink <N>",
+            ]
+        );
+        assert_eq!(
+            unresolved_channel_lines(&UnresolvedChannel::Refused(None), "sine")[1],
+            "         server gave no reason"
+        );
+        assert_eq!(
+            unresolved_channel_lines(&UnresolvedChannel::NoKey, "sine"),
+            [
+                "  error: no channel given, and the `setup` reply has no output_channel",
+                "         nothing was emitted \u{2014} pass the channel: ac generate sine <N>",
+            ]
+        );
+        assert_eq!(
+            unresolved_channel_lines(
+                &UnresolvedChannel::Unusable(serde_json::json!(4294967296u64)),
+                "sine"
+            ),
+            [
+                "  error: no channel given, and `setup` returned an unusable output_channel",
+                "         output_channel = 4294967296",
+                "         nothing was emitted \u{2014} pass the channel: ac generate sine <N>",
+            ]
+        );
+        assert_eq!(
+            unresolved_channel_lines(&UnresolvedChannel::Unusable(serde_json::json!("3")), "sine")
+                [1],
+            "         output_channel = \"3\""
+        );
+    }
+
+    #[test]
+    fn a_multi_line_daemon_error_indents_only_its_first_line() {
+        let msg = "setup not saved: x\n                 continued here".to_string();
+        let lines = unresolved_channel_lines(&UnresolvedChannel::Refused(Some(msg)), "sine");
+        assert_eq!(lines[1], "         setup not saved: x");
+        assert_eq!(lines[2], "                 continued here");
+    }
+
+    #[test]
+    fn a_long_unusable_value_is_truncated_to_80_columns() {
+        let long = "x".repeat(100);
+        let lines = unresolved_channel_lines(
+            &UnresolvedChannel::Unusable(serde_json::Value::String(long)),
+            "sine",
+        );
+        let expected = format!("         output_channel = \"{}\u{2026}", "x".repeat(52));
+        assert_eq!(lines[1], expected);
+        assert_eq!(lines[1].chars().count(), 80);
+        // Exactly 54 characters of JSON text is shown whole.
+        let fits = serde_json::Value::String("y".repeat(52));
+        let lines = unresolved_channel_lines(&UnresolvedChannel::Unusable(fits), "sine");
+        assert_eq!(
+            lines[1],
+            format!("         output_channel = \"{}\"", "y".repeat(52))
+        );
+    }
+
+    #[test]
+    fn the_last_refusal_line_is_the_same_for_every_cause() {
+        let causes = [
+            UnresolvedChannel::NoReply,
+            UnresolvedChannel::Refused(None),
+            UnresolvedChannel::Refused(Some("a\nb".into())),
+            UnresolvedChannel::NoKey,
+            UnresolvedChannel::Unusable(serde_json::Value::Null),
+        ];
+        for sub in ["sine", "pink"] {
+            let expected = format!(
+                "         nothing was emitted \u{2014} pass the channel: ac generate {sub} <N>"
+            );
+            for c in &causes {
+                let lines = unresolved_channel_lines(c, sub);
+                assert_eq!(lines.last().unwrap(), &expected, "{c:?}");
+                assert!(lines.iter().all(|l| l.chars().count() <= 80), "{lines:?}");
+            }
+        }
     }
 }
