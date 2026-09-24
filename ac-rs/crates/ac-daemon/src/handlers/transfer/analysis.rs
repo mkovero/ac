@@ -167,7 +167,7 @@ pub(super) fn analyse_pair(
     // recover truth.
     if mc_enabled {
         if let Some(curve) = curve_opt.as_ref() {
-            mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
+            mic::apply_mic_curve_db_f64(curve, &freqs, &mut mag);
         }
     }
 

@@ -3,17 +3,25 @@
 //!
 //! The mic over-reads by `curve.correction_at(f)` dB at frequency `f`
 //! (that's the contract `MicResponse` exposes — it stores the mic's
-//! deviation from flat). Subtracting the correction recovers the
-//! truthful acoustic level. These helpers do the subtraction in place
-//! on dB-domain magnitudes, leaving non-finite bins (NaN / -inf
-//! sentinels) untouched.
+//! deviation from flat). Removing the correction recovers the truthful
+//! acoustic level. The same correction takes two forms, and the helper
+//! name states which one a call site is in (#167):
+//!
+//! - **dB domain** (`apply_mic_curve_db_f32` / `apply_mic_curve_db_f64`):
+//!   subtract `corr_db` from a dB magnitude.
+//! - **linear domain** (`apply_mic_curve_linear_f64`, built on
+//!   `mic_curve_scale`): multiply a linear amplitude by `10^(-corr_db/20)`.
+//!
+//! Both leave non-finite values (NaN / -inf sentinels) untouched. Picking
+//! the wrong one is not a small error: subtracting a dB offset from a
+//! linear amplitude of ~0.1 drives it negative.
 
 use ac_core::measurement::sweep::GatedResponsePoint;
 use ac_core::shared::calibration::MicResponse;
 use ac_core::shared::types::AnalysisResult;
 
 /// Subtract the curve from an `f32` dB-magnitude column in-place.
-pub(crate) fn apply_mic_curve_inplace_f32(curve: &MicResponse, freqs: &[f32], mags: &mut [f32]) {
+pub(crate) fn apply_mic_curve_db_f32(curve: &MicResponse, freqs: &[f32], mags: &mut [f32]) {
     for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
         if m.is_finite() {
             *m -= curve.correction_at(f);
@@ -21,10 +29,11 @@ pub(crate) fn apply_mic_curve_inplace_f32(curve: &MicResponse, freqs: &[f32], ma
     }
 }
 
-/// `f64` variant for the FFT-aggregator path (where
-/// `spectrum_to_columns_wire` returns `Vec<f64>`) and for the Tier 1
-/// `AnalysisResult.spectrum` path.
-pub(crate) fn apply_mic_curve_inplace_f64(curve: &MicResponse, freqs: &[f64], mags: &mut [f64]) {
+/// Subtract the curve from an `f64` dB-magnitude column in-place — the
+/// transfer `magnitude_db` and gated-response paths. Not for linear
+/// amplitudes (monitor columns, `AnalysisResult.spectrum`,
+/// `harmonic_levels`): those take [`apply_mic_curve_linear_f64`].
+pub(crate) fn apply_mic_curve_db_f64(curve: &MicResponse, freqs: &[f64], mags: &mut [f64]) {
     for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
         if m.is_finite() {
             *m -= curve.correction_at(f as f32) as f64;
@@ -32,7 +41,7 @@ pub(crate) fn apply_mic_curve_inplace_f64(curve: &MicResponse, freqs: &[f64], ma
     }
 }
 
-/// Linear-amplitude counterpart of [`apply_mic_curve_inplace_f64`].
+/// Linear-amplitude counterpart of [`apply_mic_curve_db_f64`].
 ///
 /// Same correction and same sign, different domain: subtracting
 /// `corr_db` from a dB magnitude and scaling a linear amplitude by
@@ -44,6 +53,18 @@ pub(crate) fn apply_mic_curve_inplace_f64(curve: &MicResponse, freqs: &[f64], ma
 /// Kept beside the dB form so the two are read and edited together.
 pub(crate) fn mic_curve_scale(curve: &MicResponse, f: f64) -> f64 {
     10.0_f64.powf(-(curve.correction_at(f as f32) as f64) / 20.0)
+}
+
+/// Scale an `f64` linear-amplitude column in-place by
+/// [`mic_curve_scale`] at each frequency — the monitor `spectrum` columns
+/// and `AnalysisResult.spectrum`. Same non-finite skip contract as
+/// [`apply_mic_curve_db_f64`], so the two read as a pair.
+pub(crate) fn apply_mic_curve_linear_f64(curve: &MicResponse, freqs: &[f64], amps: &mut [f64]) {
+    for (a, &f) in amps.iter_mut().zip(freqs.iter()) {
+        if a.is_finite() {
+            *a *= mic_curve_scale(curve, f);
+        }
+    }
 }
 
 /// Status flag stamped on every monitor / Tier-1 frame so the UI (and
@@ -60,7 +81,9 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 
 /// Apply the mic-curve correction to a Tier 1 `AnalysisResult` in
 /// place: spectrum bins, fundamental level, harmonic levels, and
-/// `thd_pct` recomputed from the corrected harmonics. The mic is
+/// `thd_pct` recomputed from the corrected harmonics. `spectrum` and
+/// `harmonic_levels` are linear amplitudes (as `thd::analyze` fills
+/// them) and are scaled; `fundamental_dbfs` is dB and is subtracted. The mic is
 /// frequency-dependent so different bins shift by different amounts;
 /// THD-as-ratio changes accordingly when the curve isn't flat across
 /// the harmonic series.
@@ -87,26 +110,22 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 ///   denominator and the residual within it is likewise uncorrected, so
 ///   leaving it alone keeps `thd_pct` and `thdn_pct` on the same basis.
 pub(crate) fn apply_mic_curve_to_analysis(curve: &MicResponse, r: &mut AnalysisResult) {
-    apply_mic_curve_inplace_f64(curve, &r.freqs, &mut r.spectrum);
+    apply_mic_curve_linear_f64(curve, &r.freqs, &mut r.spectrum);
     r.fundamental_dbfs -= curve.correction_at(r.fundamental_hz as f32) as f64;
     for h in r.harmonic_levels.iter_mut() {
-        h.1 -= curve.correction_at(h.0 as f32) as f64;
+        h.1 *= mic_curve_scale(curve, h.0);
     }
     // Recompute THD from corrected harmonics over the uncorrected total
     // output denominator -- the same basis `thdn_pct` already uses.
     if r.total_output_rms > 1e-30 && !r.harmonic_levels.is_empty() {
-        let harm_pow: f64 = r
-            .harmonic_levels
-            .iter()
-            .map(|(_, db)| 10f64.powf(db / 10.0))
-            .sum();
+        let harm_pow: f64 = r.harmonic_levels.iter().map(|(_, a)| a * a).sum();
         r.thd_pct = (harm_pow.sqrt() / r.total_output_rms) * 100.0;
     }
 }
 
 /// Apply mic-curve correction to a gated (quasi-anechoic) frequency
 /// response in place — the frequency-domain route #285 requires for
-/// `plot_ir`. Reuses [`apply_mic_curve_inplace_f64`]'s subtraction on
+/// `plot_ir`. Reuses [`apply_mic_curve_db_f64`]'s subtraction on
 /// the derived `magnitude_db` column, keyed by each point's `freq_hz`.
 ///
 /// Deliberately does not touch any impulse response: by the time a
@@ -124,7 +143,7 @@ pub(crate) fn apply_mic_curve_to_gated_response(
 ) {
     let freqs: Vec<f64> = points.iter().map(|p| p.freq_hz).collect();
     let mut mags: Vec<f64> = points.iter().map(|p| p.magnitude_db).collect();
-    apply_mic_curve_inplace_f64(curve, &freqs, &mut mags);
+    apply_mic_curve_db_f64(curve, &freqs, &mut mags);
     for (p, m) in points.iter_mut().zip(mags) {
         p.magnitude_db = m;
     }
@@ -150,11 +169,11 @@ mod tests {
     }
 
     #[test]
-    fn flat_curve_uniform_offset_on_spectrum_f64() {
+    fn flat_curve_uniform_offset_on_spectrum_db_f64() {
         let curve = parse_mic_curve(&flat_curve_text(32, 3.0), None).unwrap();
         let freqs: Vec<f64> = (1..=10).map(|i| 100.0 * i as f64).collect();
         let mut mags: Vec<f64> = vec![-20.0; freqs.len()];
-        apply_mic_curve_inplace_f64(&curve, &freqs, &mut mags);
+        apply_mic_curve_db_f64(&curve, &freqs, &mut mags);
         // Mic over-reads by 3 dB everywhere → corrected reads -23 dB.
         for &m in &mags {
             assert!((m - -23.0).abs() < 0.01, "got {m}");
@@ -162,14 +181,32 @@ mod tests {
     }
 
     #[test]
+    fn flat_curve_uniform_scale_on_spectrum_linear_f64() {
+        let curve = parse_mic_curve(&flat_curve_text(32, 3.0), None).unwrap();
+        let freqs: Vec<f64> = (1..=10).map(|i| 100.0 * i as f64).collect();
+        let mut amps: Vec<f64> = vec![0.1; freqs.len()];
+        amps[3] = f64::NAN;
+        amps[4] = f64::INFINITY;
+        apply_mic_curve_linear_f64(&curve, &freqs, &mut amps);
+        // Mic over-reads by 3 dB everywhere → 0.1 · 10^(-3/20) = 0.07079.
+        let expected = 0.1 * 10f64.powf(-3.0 / 20.0);
+        for (i, &a) in amps.iter().enumerate() {
+            match i {
+                3 => assert!(a.is_nan(), "NaN must stay NaN, got {a}"),
+                4 => assert_eq!(a, f64::INFINITY, "inf must stay inf"),
+                _ => assert!((a - expected).abs() < 1e-6, "amps[{i}] got {a}"),
+            }
+        }
+    }
+
+    #[test]
     fn analysis_result_corrected_in_place() {
-        // Curve has +2 dB at 1 kHz, +5 dB at 2 kHz. A signal that
-        // analyzed to fund=−10 dBFS @1 k, 2nd harmonic=−40 dBFS @2 k
-        // should correct to −12 / −45 and THD% should drop accordingly.
-        let curve_text = "100 0\n500 1\n1000 2\n1500 3.5\n2000 5\n4000 6\n8000 5.5\n16000 4\n\
-                          200 0.4\n300 0.8\n400 1.0\n600 1.2\n700 1.4\n800 1.6\n900 1.8\n\
-                          1100 2.2\n1200 2.4\n1300 2.6\n1400 3.0\n";
-        // Need at least 16 points; pad.
+        // Curve has +2 dB at 1 kHz, +5 dB at 2 kHz. A real `thd::analyze`
+        // result (linear `spectrum` and `harmonic_levels`, as production
+        // produces them — #167) for a -10 dBFS 1 kHz sine with a 1 %
+        // 2nd harmonic: fundamental_dbfs drops 2 dB, the spectrum and H2
+        // amplitudes scale by 10^(-2/20) and 10^(-5/20), and THD% is
+        // recomputed from the scaled amplitudes.
         let mut text = String::new();
         let mut points: Vec<(f32, f32)> = vec![
             (100.0, 0.0),
@@ -197,76 +234,117 @@ mod tests {
         for (f, g) in &points {
             text.push_str(&format!("{f}\t{g}\n"));
         }
-        let _ = curve_text;
         let curve = parse_mic_curve(&text, None).unwrap();
 
-        // Uncorrected total output: sqrt(fund_amp^2 + h2_amp^2) at the
-        // pre-correction levels (-10 dBFS fundamental, -40 dBFS H2) -- the
-        // denominator thd::analyze would have published, and which mic
-        // correction must leave alone.
-        let total_output_rms =
-            (10f64.powf(-10.0 / 20.0).powi(2) + 10f64.powf(-40.0 / 20.0).powi(2)).sqrt();
-
-        let mut r = AnalysisResult {
-            fundamental_hz: 1000.0,
-            fundamental_dbfs: -10.0,
-            linear_rms: 0.1,
-            thd_pct: 0.0, // recomputed
-            thdn_pct: 0.5,
-            total_output_rms,
-            harmonic_levels: vec![(2000.0, -40.0)],
-            noise_floor_dbfs: -90.0,
-            spectrum: vec![-90.0; 4],
-            freqs: vec![500.0, 1000.0, 2000.0, 4000.0],
-            clipping: false,
-            ac_coupled: false,
-        };
-        let orig_thdn = r.thdn_pct;
-        let orig_floor = r.noise_floor_dbfs;
-        let orig_rms = r.linear_rms;
-        let orig_total_output_rms = r.total_output_rms;
-        super::apply_mic_curve_to_analysis(&curve, &mut r);
+        let sr = 48_000u32;
+        let fund_amp = 10f64.powf(-10.0 / 20.0);
+        let samples: Vec<f32> = (0..sr as usize)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                (fund_amp * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()
+                    + 0.01 * fund_amp * (2.0 * std::f64::consts::PI * 2000.0 * t).sin())
+                    as f32
+            })
+            .collect();
+        let mut r = ac_core::measurement::thd::analyze(&samples, sr, 1000.0, 10).unwrap();
+        let orig = r.clone();
         assert!(
-            (r.fundamental_dbfs - -12.0).abs() < 0.01,
-            "fund: got {}",
-            r.fundamental_dbfs
+            orig.spectrum.iter().all(|a| *a >= 0.0),
+            "fixture precondition: thd::analyze spectrum is linear amplitude"
         );
+
+        super::apply_mic_curve_to_analysis(&curve, &mut r);
+
         assert!(
-            (r.harmonic_levels[0].1 - -45.0).abs() < 0.01,
-            "h2: got {}",
+            (r.fundamental_dbfs - (orig.fundamental_dbfs - 2.0)).abs() < 0.01,
+            "fund: got {} from {}",
+            r.fundamental_dbfs,
+            orig.fundamental_dbfs
+        );
+
+        // Spectrum bin at 1 kHz scaled by 10^(-2/20).
+        let k1 = orig
+            .freqs
+            .iter()
+            .position(|&f| (f - 1000.0).abs() < 1e-9)
+            .expect("1 kHz bin");
+        let want = orig.spectrum[k1] * 10f64.powf(-2.0 / 20.0);
+        assert!(
+            ((r.spectrum[k1] - want) / want).abs() < 1e-6,
+            "spec@1k: got {} want {want}",
+            r.spectrum[k1]
+        );
+        // Every bin scaled by the curve at its own frequency — never shifted.
+        for (i, (&a, &a0)) in r.spectrum.iter().zip(&orig.spectrum).enumerate() {
+            let want = a0 * 10f64.powf(-(curve.correction_at(orig.freqs[i] as f32) as f64) / 20.0);
+            assert!((a - want).abs() <= 1e-12 + 1e-9 * want.abs(), "spec[{i}]");
+        }
+
+        // H2 amplitude scaled by 10^(-5/20).
+        assert_eq!(r.harmonic_levels[0].0, 2000.0);
+        let h2_want = orig.harmonic_levels[0].1 * 10f64.powf(-5.0 / 20.0);
+        assert!(
+            ((r.harmonic_levels[0].1 - h2_want) / h2_want).abs() < 1e-6,
+            "h2: got {} want {h2_want}",
             r.harmonic_levels[0].1
         );
-        // Spectrum bins corrected by curve at each freq.
-        let expected_curve_at = [1.0_f64, 2.0, 5.0, 6.0];
-        for (i, m) in r.spectrum.iter().enumerate() {
-            assert!(
-                (m - (-90.0 - expected_curve_at[i])).abs() < 0.05,
-                "spec[{i}] got {m}"
-            );
-        }
-        // THD recomputed over the *uncorrected* total-output denominator:
-        // corrected h2 -45 dBFS = 0.005623, total_output_rms unchanged =
-        // 0.316386. THD = 0.005623 / 0.316386 * 100 ≈ 1.777%.
-        // The rejected re-fundamental value (corrected fund -12 dBFS =
-        // 0.2512) would give 0.005623 / 0.2512 * 100 ≈ 2.238% -- assert
-        // against that too so a revert to the fundamental denominator
-        // cannot pass silently.
-        let rejected_re_fundamental = 2.238;
+
+        // THD recomputed from the scaled amplitudes over the *uncorrected*
+        // total-output denominator.
+        let scaled: Vec<f64> = orig
+            .harmonic_levels
+            .iter()
+            .map(|&(f, a)| a * 10f64.powf(-(curve.correction_at(f as f32) as f64) / 20.0))
+            .collect();
+        let harm_rss = scaled.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let thd_want = harm_rss / orig.total_output_rms * 100.0;
         assert!(
-            (r.thd_pct - 1.777).abs() < 0.01,
-            "thd_pct: got {}",
+            (r.thd_pct - thd_want).abs() < 1e-9,
+            "thd_pct: got {} want {thd_want}",
             r.thd_pct
         );
         assert!(
-            (r.thd_pct - rejected_re_fundamental).abs() > 0.1,
-            "thd_pct must not match the rejected re-fundamental value: got {}",
+            r.thd_pct > 0.4 && r.thd_pct < 0.8,
+            "thd_pct: got {}, expected ≈ 0.56 % (1 % H2 less 5 dB)",
             r.thd_pct
         );
+
+        // The rejected re-fundamental denominator (corrected fundamental
+        // amplitude) must not be what we compute.
+        let corrected_fund_amp = 10f64.powf(r.fundamental_dbfs / 20.0);
+        let rejected_re_fundamental = harm_rss / corrected_fund_amp * 100.0;
+        assert!(
+            (r.thd_pct - rejected_re_fundamental).abs() > 0.1 * r.thd_pct,
+            "thd_pct must not match the rejected re-fundamental value \
+             {rejected_re_fundamental}: got {}",
+            r.thd_pct
+        );
+
+        // The rejected pre-#167 implementation: subtract dB offsets from
+        // the linear harmonic amplitudes, then read them back as dB.
+        let rejected_db_on_linear = orig
+            .harmonic_levels
+            .iter()
+            .map(|&(f, a)| {
+                let db = a - curve.correction_at(f as f32) as f64;
+                10f64.powf(db / 10.0)
+            })
+            .sum::<f64>()
+            .sqrt()
+            / orig.total_output_rms
+            * 100.0;
+        assert!(
+            rejected_db_on_linear > 10.0 * r.thd_pct,
+            "the dB-on-linear path ({rejected_db_on_linear} %) must be far from the \
+             corrected one ({} %)",
+            r.thd_pct
+        );
+
         // Untouched fields stay untouched.
-        assert_eq!(r.thdn_pct, orig_thdn);
-        assert_eq!(r.noise_floor_dbfs, orig_floor);
-        assert_eq!(r.linear_rms, orig_rms);
-        assert_eq!(r.total_output_rms, orig_total_output_rms);
+        assert_eq!(r.thdn_pct, orig.thdn_pct);
+        assert_eq!(r.noise_floor_dbfs, orig.noise_floor_dbfs);
+        assert_eq!(r.linear_rms, orig.linear_rms);
+        assert_eq!(r.total_output_rms, orig.total_output_rms);
     }
 
     #[test]
@@ -334,7 +412,7 @@ mod tests {
     }
 
     /// (#306 QA test coverage gap) `apply_mic_curve_to_gated_response`
-    /// inherits `apply_mic_curve_inplace_f64`'s non-finite-bin skip
+    /// inherits `apply_mic_curve_db_f64`'s non-finite-bin skip
     /// contract (module doc above) but had no direct test on this call
     /// site — a zero/degenerate FFT bin producing `-inf` dB is plausible
     /// on `GatedResponsePoint`.

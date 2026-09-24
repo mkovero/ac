@@ -142,7 +142,7 @@ pub(super) fn emit_ring_frames(
     xruns: u32,
 ) -> (u64, &'static str) {
     let mc = ch.mic_correction(ctx);
-    mc.apply_f32(freqs, mags);
+    mc.apply_db_f32(freqs, mags);
     let mc_tag = mc.tag();
     let ts_ns = now_ns();
     let mags: &[f32] = mags;
@@ -217,7 +217,7 @@ pub(super) fn spectrum_columns(
             ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
         ),
     };
-    mc.apply_f64(&freqs, &mut columns);
+    mc.apply_linear_f64(&freqs, &mut columns);
     (columns, freqs)
 }
 

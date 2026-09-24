@@ -1587,9 +1587,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             GATED_RESPONSE_ALPHA,
         );
         // Mic-curve correction (#285): applied here, to the already-gated
-        // derived spectrum, in the frequency domain — the same
-        // `mic::apply_mic_curve_inplace_f64` subtraction `plot`/
-        // `plot_level` use on `AnalysisResult.spectrum`. `irs.linear`
+        // derived spectrum, in the frequency domain — the dB-domain
+        // helper (`mic::apply_mic_curve_db_f64`) on the gated
+        // `magnitude_db` column. `irs.linear`
         // above (and the arrival/gate it was extracted with) is never
         // touched: by this point gating is already done, so there is no
         // time axis left for a FIR's group delay to disturb.
