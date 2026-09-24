@@ -8,7 +8,7 @@
 #
 # Stages into $AC_HOME/target-rig-stage/<rev12>/:
 #   ac  ac-daemon  ir_probe  transfer_probe  it_loopback_ir
-#   MANIFEST.txt  SHA256SUMS  build.log  test-build.log
+#   MANIFEST.txt  SHA256SUMS  CARRYSUMS  build.log  test-build.log
 #
 # Procedure: docs/runbooks/rig-testing.md.
 
@@ -38,16 +38,22 @@ stage="$(stage_root)/$rev"
 artefacts=(ac ac-daemon ir_probe transfer_probe it_loopback_ir)
 mkdir -p "$stage"
 # A failed earlier run must not leave old binaries beside a new manifest.
-(cd "$stage" && rm -f "${artefacts[@]}" MANIFEST.txt SHA256SUMS build.log test-build.log test-build.jsonl)
+(cd "$stage" && rm -f "${artefacts[@]}" MANIFEST.txt SHA256SUMS CARRYSUMS build.log test-build.log test-build.jsonl)
 
 # One target dir per commit. A target dir shared across worktrees can report
 # `Finished` without compiling and hand back another ref's binaries.
 export CARGO_TARGET_DIR="${RIG_TARGET_DIR:-$(ac_home)/target-rig-$rev}"
+# RUSTFLAGS is split on whitespace, so the remap below needs a path without it.
+[[ $CARGO_TARGET_DIR != *[[:space:]]* ]] || die "CARGO_TARGET_DIR contains whitespace: $CARGO_TARGET_DIR"
 
 # Portable CPU baseline — rigs reject target-cpu=native builds with SIGILL.
 # RUSTFLAGS replaces ac-rs/.cargo/config.toml's rustflags wholesale, so the
 # mold linker flag is restated here.
-export RUSTFLAGS="-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold"
+# The remap and strip make a build independent of the per-commit target dir
+# and of crate-hash symbol suffixes, so two heads that compile to the same
+# code produce byte-identical binaries (carry-forward, #579). Without them a
+# comment-only delta changed every artefact but one.
+export RUSTFLAGS="-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold --remap-path-prefix=$CARGO_TARGET_DIR=/ac-target -C strip=symbols"
 
 cd "$top/ac-rs" || die "no ac-rs/ under $top"
 note "building $rev (dirty files: $dirty) into $CARGO_TARGET_DIR"
@@ -97,7 +103,17 @@ daemon_path="$rel/ac-daemon"
 grep -aqF "$daemon_path" "$stage/it_loopback_ir" ||
     die "it_loopback_ir does not embed $daemon_path — cargo changed how it locates the daemon; fix ship.sh before shipping"
 
+# The inverse: everything else must not contain the target dir. If the remap
+# stopped working, the rule would silently never carry; fail here instead.
+for a in ac ac-daemon ir_probe transfer_probe; do
+    if grep -aqF "$CARGO_TARGET_DIR" "$stage/$a"; then
+        die "$a embeds $CARGO_TARGET_DIR — --remap-path-prefix no longer covers it; carry-forward (#579) would never match"
+    fi
+done
+
 (cd "$stage" && sha256sum "${artefacts[@]}" >SHA256SUMS)
+carry_sums "$stage" "$CARGO_TARGET_DIR" >"$stage/CARRYSUMS" ||
+    die "could not compute CARRYSUMS for $stage"
 
 cat >"$stage/MANIFEST.txt" <<EOF
 rev=$rev_full
@@ -109,11 +125,14 @@ rustflags=$RUSTFLAGS
 cargo_target_dir=$CARGO_TARGET_DIR
 compiled_this_run=$compiled
 it_loopback_ir_daemon_path=$daemon_path
+carry_rule=$CARRY_RULE
 EOF
 
 note "staged $stage"
 cat "$stage/MANIFEST.txt"
 cat "$stage/SHA256SUMS"
+note "CARRYSUMS (docs/runbooks/rig-testing.md → Carry-forward)"
+cat "$stage/CARRYSUMS" >&2
 if [[ $compiled == no ]]; then
     note "no 'Compiling ac-*' line: this target dir already held $rev's build. Fine for a rerun of the same commit; if RIG_TARGET_DIR is shared across refs, distrust these hashes."
 fi

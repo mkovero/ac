@@ -215,6 +215,50 @@ file_rig_record() {
   return 1
 }
 
+# append_rig_block <record> measured <head> <verdict> <comment-url> <stage>
+# append_rig_block <record> carried  <head> <verdict> <comment-url> <measured-at> <measured-record>
+# Append the runner's machine block to a filed rig record: the last thing in
+# the file, a ```rig-runner fence of key=value lines. scripts/rig/carry-forward.sh
+# reads it; that script and docs/runbooks/rig-testing.md → "Carry-forward" (#579)
+# define what the fields mean. A measured block carries the stage's
+# MANIFEST.txt, SHA256SUMS and CARRYSUMS, one `manifest=` / `sha256sum=` /
+# `carrysum=` line per line of each. Returns 1, appending nothing, when a
+# measured stage lacks one of them: that record then never carries.
+append_rig_block() {
+  local rec="$1" kind="$2" head="$3" verdict="$4" url="$5" f
+  case $kind in
+    measured)
+      for f in MANIFEST.txt SHA256SUMS CARRYSUMS; do
+        [[ -s $6/$f ]] || { echo "append_rig_block: no $6/$f" >&2; return 1; }
+      done ;;
+    carried) ;;
+    *) echo "append_rig_block: kind '$kind'" >&2; return 2 ;;
+  esac
+  {
+    printf '\n<!-- runner machine block: docs/runbooks/rig-testing.md → Carry-forward (#579) -->\n'
+    printf '```rig-runner\nkind=%s\nhead=%s\nverdict=%s\ncomment=%s\n' "$kind" "$head" "$verdict" "$url"
+    case $kind in
+      measured)
+        sed 's/^/manifest=/' "$6/MANIFEST.txt"
+        sed 's/^/sha256sum=/' "$6/SHA256SUMS"
+        sed 's/^/carrysum=/' "$6/CARRYSUMS" ;;
+      carried)
+        printf 'measured_at=%s\nmeasured_record=%s\n' "$6" "$7" ;;
+    esac
+    printf '```\n'
+  } > "$rec.block.$$" || { rm -f "$rec.block.$$"; return 1; }
+  cat "$rec.block.$$" >> "$rec"
+  rm -f "$rec.block.$$"
+}
+
+# rig_comment_url <pr> <head> — URL of the newest `<!-- agent: rig -->` PR
+# comment that names <head>. Empty when there is none.
+rig_comment_url() {
+  gh_retry gh pr view "$1" -R "$AC_REPO" --json comments --jq "
+    [.comments[] | select((.body | startswith(\"<!-- agent: rig -->\")) and (.body | contains(\"$2\")))]
+    | sort_by(.createdAt) | last | .url // empty"
+}
+
 # provider_limit_check <file> <provider> <mode> — did the provider stop on an
 # account limit? mode `jsonl` reads only the provider's own result/error
 # records, `text` only the tail of plain output. In both, the phrase must START

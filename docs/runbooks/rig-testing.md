@@ -40,7 +40,8 @@ scripts/rig/build-portable.sh --allow-dirty   # records the dirty count instead
 ```
 
 Stages `ac`, `ac-daemon`, `ir_probe`, `transfer_probe` and `it_loopback_ir`
-with `MANIFEST.txt` and `SHA256SUMS` in `$AC_HOME/target-rig-stage/<rev12>/`.
+with `MANIFEST.txt`, `SHA256SUMS` and `CARRYSUMS` in
+`$AC_HOME/target-rig-stage/<rev12>/`.
 What it guarantees, and why each is there:
 
 - **One cargo target dir per commit** (`$AC_HOME/target-rig-<rev12>`). A
@@ -49,6 +50,14 @@ What it guarantees, and why each is there:
   compiled.
 - **Portable CPU** (`-C target-cpu=x86-64`). `ac-rs/.cargo/config.toml` builds
   for the host CPU; rigs reject that with `SIGILL`.
+- **Reproducible across commits** (`--remap-path-prefix=<target dir>=/ac-target
+  -C strip=symbols`). Without them the per-commit target dir and the crate-hash
+  symbol suffixes change the binaries of a commit that only edits a comment.
+  The build refuses to stage if `ac`, `ac-daemon`, `ir_probe` or
+  `transfer_probe` still contains the target dir. Stripped binaries keep panic
+  messages with file:line; to symbolise a backtrace, rebuild the same rev
+  locally, which now gives the same bytes. This is what makes
+  [carry-forward](#carry-forward) possible.
 - **On disk, not `/tmp`.** `/tmp` is RAM-backed; a full target dir fills it
   and fails as a link error, not a disk error.
 - Never build on a rig — 192.168.9.25 is the development VM's hypervisor host.
@@ -254,13 +263,75 @@ The emitting scripts restore the ac config's channels and stop the daemons
 they started. Rerun `preflight.sh` at the end and paste it as "rig state
 left behind", with the mic position and anything deliberately left changed.
 
+## Carry-forward
+
+The one statement of when a rig record made at head A still counts at a later
+head B of the same PR (#579). `scripts/rig/carry-forward.sh` applies it and
+`bin/rig.sh` runs it after building B and before taking the rig lock. Nobody
+else re-derives it: not QA, not the rig role, not an architect comment.
+
+1. **Source.** Only the newest *measured* record for the PR, in filing-stamp
+   order under `$AC_HOME/session/`. A carried-forward record is never a
+   source, so A → B → C compares C with A. A record whose file does not end
+   with the runner's machine block (every record filed before #579) never
+   carries, and neither does a record already at B: a new session was asked
+   for at that head. Every session the runner starts files a record, even
+   one that writes no record file: its posted comment in its place, or,
+   with no comment either, a placeholder without a machine block. A session
+   whose record went missing therefore stops the carry; it never leaves an
+   older pass as the newest source.
+2. **Verdict.** Only `pass` carries. `fail`, `decline` and `decline-site` run
+   a session as before.
+3. **Build.** Both manifests have `dirty_files=0` and the same `carry_rule`.
+   At each head `CARRYSUMS` lists the same artefacts as `SHA256SUMS`, the two
+   heads list the same artefacts, and every digest is equal.
+4. **Digest.** For `ac`, `ac-daemon`, `ir_probe` and `transfer_probe` the
+   `CARRYSUMS` line *is* the `SHA256SUMS` line, the plain sha256 `ship.sh`
+   verifies on the rig. For `it_loopback_ir` it is the sha256 after zeroing
+   the `.note.gnu.build-id` descriptor and replacing the stage's
+   `cargo_target_dir` with a fixed token. The test binary embeds that path by
+   design (`env!("CARGO_BIN_EXE_ac-daemon")`), and it is exactly the path
+   `ship.sh` re-points on the rig with its symlink.
+5. **Fail closed.** No record, no machine block, a failed build, a missing
+   artefact, a stage that no longer matches its own sums, a parse error or
+   any mismatch → no carry, with the reason printed. Nothing defaults to
+   "carries".
+
+When it carries, the runner posts a `<!-- agent: rig -->` comment at B that
+names A and B in full, links A's rig comment and the filed record, gives the
+five-row digest table, and ends with `**rig verdict:** pass`. It files that
+comment as B's record, with a `kind=carried` block. Such a record counts
+exactly as a record measured at B would, and it covers exactly what A's
+measured record covers.
+
+The machine block is a ```` ```rig-runner ```` fence of `key=value` lines at
+the end of the filed record, written only by the runner
+(`bin/common.sh` → `append_rig_block`). A measured block has `kind`, `head`,
+`verdict`, `comment`, and the stage's `MANIFEST.txt`, `SHA256SUMS` and
+`CARRYSUMS` one line each (`manifest=`, `sha256sum=`, `carrysum=`). A carried
+block has `measured_at` and `measured_record` in their place.
+
+To compare two stages by hand, for example the same two heads built twice:
+
+```bash
+scripts/rig/carry-forward.sh --stages "$AC_HOME/target-rig-stage/<revA>" "$AC_HOME/target-rig-stage/<revB>"
+```
+
+Measured on #578's pair, `210a7ff15d58` → `f64b26d113ec` (a rustdoc-only
+delta). Before these build flags, 4 of 5 artefacts differed. With them, all 5
+match and the pair carries. That is n = 1. A toolchain change between A and
+B makes the digests differ, and the rule then costs a session. It never
+carries wrongly.
+
 ## Traps that have cost sessions
 
 - **sha256, never size or mtime** — identical size and mtime have been a
   different binary.
-- **Identical hashes across refs that should differ** means nothing was
-  rebuilt (shared target dir). Differing hashes across refs are normal —
-  absolute paths are baked into binaries.
+- **Identical hashes across refs whose code differs** means nothing was
+  rebuilt (shared target dir). Refs that differ only in comments or docs now
+  produce identical `ac`, `ac-daemon`, `ir_probe` and `transfer_probe`; that
+  is [carry-forward](#carry-forward) working, and `compiled_this_run=yes` in
+  the manifest tells the two cases apart.
 - **`generate sine` / `generate pink` run until `ac stop`.** Never background
   one; use the bounded commands (`generate level`, `generate frequency`,
   `plot level`, `plot ir`).

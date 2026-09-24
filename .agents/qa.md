@@ -387,10 +387,15 @@ the same commit, with the record as evidence:
   record at the current head** → stay `rig-pending` and leave the label. Say
   what is unresolved. That is a human's call, like any unmeasurable criterion.
 
-A later push voids a rig record the same way it voids an approval: the record
-must name the head you are reviewing. If a later push makes the rig question
-moot (the code stops depending on the unmeasured value), say so and remove the
-label, with the reason.
+A rig record counts only at the head it names, and a push to a new head needs
+a new one (#579). A record at the current head is either one measured there or
+one the runner carried forward to it under `docs/runbooks/rig-testing.md` →
+**Carry-forward**, and in no other case. A carried record names the head it was
+measured at: judge whether it closes the named check against that measured
+record's content, exactly as you would at that head. Do not apply the
+carry-forward rule yourself or accept an older record on your own reasoning.
+If a later push makes the rig question moot (the code stops depending on the
+unmeasured value), say so and remove the label, with the reason.
 
 The same applies when the issue's current architect decision says **rig check:
 none** with a reason, on an issue that carries `requires-rig`. Check that the
@@ -424,7 +429,7 @@ them.
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
-- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, on a `decline-site` record after filing the follow-up issue, or when a push or the architect's `rig check: none` made the question moot (say why).
+- No remove `requires-rig` except on a rig record at the current head (measured there, or carried forward by the runner per `docs/runbooks/rig-testing.md` → Carry-forward, #579) whose verdict is `pass` and that closes the named check, on a `decline-site` record after filing the follow-up issue, or when a push or the architect's `rig check: none` made the question moot (say why).
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.

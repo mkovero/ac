@@ -186,3 +186,71 @@ daemon_identity() {
     readlink -f "/proc/$p/exe"
 }
 '
+
+# --- carry-forward (docs/runbooks/rig-testing.md → "Carry-forward", #579) ----
+
+# Version of the carry-forward rule a stage was built under. build-portable.sh
+# writes it to MANIFEST.txt; two stages compare only when it is equal. Bump it
+# when the build flags or the digest below change meaning.
+CARRY_RULE=1
+
+# Artefacts whose CARRYSUMS digest is not their plain sha256 (rule 4): the ones
+# that embed the per-commit target dir by design. it_loopback_ir spawns the
+# daemon at env!("CARGO_BIN_EXE_ac-daemon"), an absolute path under the target
+# dir, and its build-id is derived from bytes that include it.
+CARRY_REWRITTEN=(it_loopback_ir)
+
+# The fixed token carry_digest substitutes for the stage's target dir.
+CARRY_TARGET_TOKEN='@CARGO_TARGET_DIR@'
+
+# carry_digest <file> <target_dir> — sha256 of <file> with the
+# .note.gnu.build-id descriptor zeroed and every occurrence of <target_dir>
+# replaced by $CARRY_TARGET_TOKEN. Fails (non-zero, nothing printed) on
+# anything that is not a little-endian ELF64 file or on an empty target dir.
+carry_digest() {
+    python3 - "$1" "$2" "$CARRY_TARGET_TOKEN" <<'PY'
+import hashlib, struct, sys
+path, target, token = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+if not target:
+    sys.exit("carry_digest: empty target dir")
+b = bytearray(open(path, "rb").read())
+if b[:4] != b"\x7fELF" or b[4] != 2 or b[5] != 1:
+    sys.exit(f"carry_digest: {path} is not a little-endian ELF64 file")
+shoff, = struct.unpack_from("<Q", b, 0x28)
+shentsize, shnum, shstrndx = struct.unpack_from("<HHH", b, 0x3A)
+def sh(i):
+    # sh_name, sh_offset, sh_size
+    o = shoff + i * shentsize
+    name, = struct.unpack_from("<I", b, o)
+    off, size = struct.unpack_from("<QQ", b, o + 0x18)
+    return name, off, size
+_, stroff, _ = sh(shstrndx)
+for i in range(shnum):
+    name, off, size = sh(i)
+    end = b.index(b"\0", stroff + name)
+    if bytes(b[stroff + name:end]) == b".note.gnu.build-id":
+        # Elf64_Nhdr: namesz, descsz, type (4 bytes each), then "GNU\0".
+        descsz, = struct.unpack_from("<I", b, off + 4)
+        b[off + 16:off + 16 + descsz] = bytes(descsz)
+print(hashlib.sha256(bytes(b).replace(target, token)).hexdigest())
+PY
+}
+
+# carry_sums <stage> <target_dir> — the CARRYSUMS lines for a stage, in
+# SHA256SUMS order and format: the SHA256SUMS line itself for every artefact
+# except those in CARRY_REWRITTEN, which get carry_digest. Fails if any
+# digest cannot be computed.
+carry_sums() {
+    local stage=$1 target=$2 sum name d r rewritten
+    [[ -s $stage/SHA256SUMS ]] || { echo "carry_sums: no $stage/SHA256SUMS" >&2; return 1; }
+    while read -r sum name; do
+        rewritten=0
+        for r in "${CARRY_REWRITTEN[@]}"; do [[ $name == "$r" ]] && rewritten=1; done
+        if ((rewritten)); then
+            d="$(carry_digest "$stage/$name" "$target")" || return 1
+            printf '%s  %s\n' "$d" "$name"
+        else
+            printf '%s  %s\n' "$sum" "$name"
+        fi
+    done <"$stage/SHA256SUMS"
+}

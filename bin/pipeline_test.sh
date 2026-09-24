@@ -46,6 +46,11 @@
 #      4 sleeps of 5 s, then reported undetermined; a failed read is UNKNOWN;
 #      MERGEABLE keeps the old line; the epic runner never calls a conflicting
 #      child ready.
+#  25. rig.sh carries a measured pass forward without the rig (#579): exit 0,
+#      a carried record naming the measured head, no ssh — so no lock_take;
+#      a newer carried record is never the source; with no record to carry,
+#      the same run reaches lock_take; a session that writes no record file
+#      still leaves a filed record, so an older pass never carries over it.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -1136,6 +1141,162 @@ check '[[ $(cat $T/rc24e) == 0 ]] && grep -q "integrate.sh 70" $T/out24e && ! gr
   "24e: without AC_WAIT_MERGE a conflicting epic child names bin/integrate.sh <pr>, is not called ready, and nothing runs"
 check '[[ $(cat $T/rc24f) == 0 && $(cat $T/integrate24f) == "integrate 70" ]] && ! grep -q "ready for your merge" $T/out24f' \
   "24e: with AC_WAIT_MERGE the waiter integrates a conflicting epic child"
+
+# --- 25: rig.sh carries a measured pass forward without the rig (#579) -----------
+# The rig is reached only through ssh/scp (lock_take, ship.sh, the session), so
+# a stubbed ssh that logs and answers "busy" shows whether the run touched it.
+# carry-forward.sh and lib.sh are the production files; build-portable.sh is a
+# stub that stages identical fixture binaries (no cargo) at the PR head.
+R25="$T/repo25"; O25="$T/origin25.git"
+git init -q "$R25" && git -C "$R25" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git clone -q --bare "$R25" "$O25" && git -C "$R25" remote add origin "$O25"
+git -C "$R25" push -q origin HEAD:refs/pull/7/head
+H25="$(git -C "$R25" rev-parse HEAD)"
+A25=210a7ff15d58aaaaaaaaaaaaaaaaaaaaaaaaaaaa
+X25=ffffffffffff0000000000000000000000000000
+mkdir -p "$T/stub25" "$T/rig25" "$T/home/rig-hosts"
+printf 'RIG_HOST=h\nRIG_USER=u\nRIG_SSH_KEY=k\n' > "$T/home/rig-hosts/pupu.access.env"
+for s in ssh scp; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\necho "rig busy: stub" >&2\nexit 3\n' "$s" "$T/ssh25" > "$T/stub25/$s"
+done
+ln -s "$REPO/scripts/rig/carry-forward.sh" "$REPO/scripts/rig/lib.sh" "$T/rig25/"
+cat > "$T/mkstage25.sh" <<EOF
+# mkstage25 <dir> <rev> — a stage whose binaries are the same at every rev.
+source "$REPO/scripts/rig/lib.sh"
+mkstage25() {
+  mkdir -p "\$1"
+  for n in ac ac-daemon ir_probe transfer_probe; do echo "binary \$n" > "\$1/\$n"; done
+  cp /bin/true "\$1/it_loopback_ir"
+  (cd "\$1" && sha256sum ac ac-daemon ir_probe transfer_probe it_loopback_ir > SHA256SUMS)
+  carry_sums "\$1" /x/target-rig > "\$1/CARRYSUMS"
+  printf 'rev=%s\ndirty_files=0\ncargo_target_dir=/x/target-rig\ncarry_rule=%s\n' "\$2" "\$CARRY_RULE" > "\$1/MANIFEST.txt"
+}
+EOF
+cat > "$T/rig25/build-portable.sh" <<EOF
+#!/usr/bin/env bash
+source "$T/mkstage25.sh"
+r="\$(git rev-parse HEAD)"
+mkstage25 "\$AC_HOME/target-rig-stage/\${r:0:12}" "\$r"
+EOF
+printf '#!/usr/bin/env bash\necho "ship $*" >> "%s"\nexit 1\n' "$T/ssh25" > "$T/rig25/ship.sh"
+chmod +x "$T/stub25"/* "$T/rig25/build-portable.sh" "$T/rig25/ship.sh"
+cat > "$T/stub25/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *headRefOid*) echo "$GH25_HEAD"; exit ;;
+  *closingIssuesReferences*) echo 579; exit ;;
+  "pr comment"*)
+    while (($#)); do [[ $1 == --body-file ]] && f=$2; shift; done
+    n=$(jq '.comments | length' "$GH25_DB")
+    jq --rawfile b "$f" --arg n "$n" \
+      '.comments += [{createdAt: ("2026-09-24T00:00:0" + $n + "Z"), body: $b, url: ("https://x/c/" + $n)}]' \
+      "$GH25_DB" > "$GH25_DB.new" && mv "$GH25_DB.new" "$GH25_DB"
+    echo "https://x/c/$n"; exit ;;
+esac
+while (($#)); do [[ $1 == --jq ]] && { jq -r "$2" < "$GH25_DB"; exit; }; shift; done
+EOF
+chmod +x "$T/stub25/gh"
+r25() {  # r25 <case> — run rig.sh 7 against session dir $T/sess25<case>
+  local c="$1"
+  printf '{"comments":[{"createdAt":"2026-09-23T00:00:00Z","body":"<!-- agent: qa -->\\nrig verification required: x","url":"q"}],"reviews":[]}\n' > "$T/db25$c"
+  (
+    cd "$R25"
+    export PATH="$T/stub25:$PATH" GH25_HEAD="$H25" GH25_DB="$T/db25$c" AC_RIG=pupu \
+      AC_RIG_SCRIPTS="$T/rig25" AC_SESSION_DIR="$T/sess25$c" AC_WT_BASE="$T/wt25$c" \
+      AC_TARGET="$T/home/target" AC_TARGETS="$T/home/target/wt" AC_GH_RETRIES=1
+    rc=0; bash "$BIN/rig.sh" 7 > "$T/out25$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc25$c"
+  )
+}
+( cd "$REPO" && source "$BIN/common.sh" && source "$T/mkstage25.sh"
+  mkstage25 "$T/stageA25" "$A25"
+  mkdir -p "$T/sess25a" "$T/sess25b"
+  # a: a measured pass at A, then a newer carried record at X. The carried one
+  # must be skipped; A is the source.
+  f="$T/sess25a/2026-09-23-rig-pr-7-${A25:0:12}-100000Z.md"
+  printf 'measured\n**rig verdict:** pass\n' > "$f"
+  append_rig_block "$f" measured "$A25" pass "https://x/c/a" "$T/stageA25"
+  g="$T/sess25a/2026-09-23-rig-pr-7-${X25:0:12}-110000Z.md"
+  printf 'carried\n**rig verdict:** pass\n' > "$g"
+  append_rig_block "$g" carried "$X25" pass "https://x/c/x" "$A25" "$f"
+  # b: nothing filed for the PR.
+) 2>/dev/null
+rm -f "$T/ssh25"; r25 a; mv "$T/ssh25" "$T/ssh25a" 2>/dev/null || : > "$T/ssh25a"
+r25 b; mv "$T/ssh25" "$T/ssh25b" 2>/dev/null || : > "$T/ssh25b"
+posted25="$(jq -r '.comments[-1].body' "$T/db25a")"
+filed25="$(ls "$T/sess25a"/*-rig-pr-7-"${H25:0:12}"-*.md 2>/dev/null)"
+check '[[ $(cat $T/rc25a) == 0 && ! -s $T/ssh25a ]]' "25a: rig.sh exits 0 on a carry without any ssh, so without lock_take or ship"
+check '[[ $posted25 == "<!-- agent: rig -->"* && $posted25 == *"$H25"* && $posted25 == *"measured at (A): \`$A25\`"* && $(grep -c "| match |" <<<"$posted25") == 5 && $(grep -c "^\*\*rig verdict:\*\* pass$" <<<"$posted25") == 1 ]]' \
+  "25a: the carried comment names the head, the measured head A (not the newer carried X), five matches, one pass verdict"
+check '[[ -n $filed25 ]] && grep -qx "kind=carried" "$filed25" && grep -qx "measured_at=$A25" "$filed25" && grep -qx "comment=https://x/c/1" "$filed25"' \
+  "25a: the carried record is filed with a kind=carried block naming A and its own comment"
+check '[[ $(cat $T/rc25b) == 3 ]] && grep -q "^ssh " $T/ssh25b && ! grep -q "^ship " $T/ssh25b && grep -q "no carry" $T/out25b' \
+  "25b: control — with no record to carry, the same run reaches lock_take (stub ssh: busy, exit 3)"
+
+# 25c: a measured session. The rig lock and ship succeed (stubs), the stubbed
+# session writes its record and posts a pass; the runner files the record and
+# appends a kind=measured block with this stage's digests, which a later head
+# with the same binaries then carries from.
+for s in ssh scp; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\ncat > /dev/null\nexit 0\n' "$s" "$T/ssh25" > "$T/stub25/$s"
+done
+printf '#!/usr/bin/env bash\necho "ship $*" >> "%s"\n' "$T/ssh25" > "$T/rig25/ship.sh"
+cat > "$T/stub25/claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'measured session\n**rig verdict:** pass\n' > rig-record.md
+printf '<!-- agent: rig -->\n## rig — PR #7 at %s\n\n**rig verdict:** pass\n' "$GH25_HEAD" > "$GH25_DB.body"
+gh pr comment 7 --body-file "$GH25_DB.body" >/dev/null
+echo '{"type":"result","result":"done"}'
+EOF
+chmod +x "$T/stub25/claude"
+rm -f "$T/ssh25"
+(export AC_PROVIDER=claude AC_RIG_PROVIDER=claude; r25 c)
+filed25c="$(ls "$T/sess25c"/*-rig-pr-7-"${H25:0:12}"-*.md 2>/dev/null)"
+(
+  cd "$REPO" && source "$T/mkstage25.sh"
+  mkstage25 "$T/stageB25" 0b0b0b0b0b0b0000000000000000000000000000
+  rc=0; AC_SESSION_DIR="$T/sess25c" "$REPO/scripts/rig/carry-forward.sh" 7 "$T/stageB25" > /dev/null 2>&1 || rc=$?
+  echo "$rc" > "$T/rc25c_carry"
+) 2>/dev/null
+check '[[ $(cat $T/rc25c) == 0 ]] && grep -q "^ship " $T/ssh25 && [[ -n $filed25c ]] && grep -qx "kind=measured" "$filed25c" && grep -qx "head=$H25" "$filed25c" && grep -qx "verdict=pass" "$filed25c" && grep -q "^carrysum=.*  it_loopback_ir$" "$filed25c" && [[ $(tail -1 "$filed25c") == "\`\`\`" ]]' \
+  "25c: a measured session's filed record ends with a kind=measured block holding the stage's digests"
+check '[[ $(cat $T/rc25c_carry) == 0 ]]' "25c: carry-forward.sh reads that block back: a later head with the same binaries carries"
+
+# 25d/25e: a session that writes no rig-record.md still leaves a filed record,
+# so an older measured pass at identical binaries (A, filed earlier) is not the
+# newest source afterwards. d: the session posts `fail`; the runner files that
+# comment with a kind=measured, verdict=fail block. e: the session posts
+# nothing; the runner files a placeholder with no block. Then A's record is
+# added with an earlier stamp and rig.sh runs again at the same head: without
+# the runner's filing it would carry A's pass over the session's outcome.
+cat > "$T/stub25/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ $STUB25_POST == fail ]]; then
+  printf '<!-- agent: rig -->\n## rig — PR #7 at %s\n\n**rig verdict:** fail\n' "$GH25_HEAD" > "$GH25_DB.body"
+  gh pr comment 7 --body-file "$GH25_DB.body" >/dev/null
+fi
+echo '{"type":"result","result":"done"}'
+EOF
+chmod +x "$T/stub25/claude"
+for c in d e; do
+  post=fail; [[ $c == e ]] && post=none
+  (export AC_PROVIDER=claude AC_RIG_PROVIDER=claude STUB25_POST=$post; r25 $c)
+  cp "$T/rc25$c" "$T/rc25${c}1"
+  ls "$T/sess25$c"/*-rig-pr-7-"${H25:0:12}"-*.md > "$T/filed25${c}1" 2>/dev/null || : > "$T/filed25${c}1"
+  cp "$T/sess25a/2026-09-23-rig-pr-7-${A25:0:12}-100000Z.md" "$T/sess25$c/"
+  sleep 1   # the second pass's filing stamp must differ from the first's
+  (export AC_PROVIDER=claude AC_RIG_PROVIDER=claude STUB25_POST=$post; r25 $c)
+done
+filed25d="$(head -1 "$T/filed25d1")"
+filed25e="$(head -1 "$T/filed25e1")"
+check '[[ $(wc -l < $T/filed25d1) == 1 ]] && grep -qx "kind=measured" "$filed25d" && grep -qx "verdict=fail" "$filed25d" && grep -q "^\*\*rig verdict:\*\* fail$" "$filed25d" && [[ $(cat $T/rc25d1) == 0 ]]' \
+  "25d: a session that posts fail with no record file gets its comment filed, with a kind=measured verdict=fail block"
+check '! grep -q "Carried forward" <<<"$(jq -r ".comments[].body" "$T/db25d")" && grep -q "no carry — the newest measured record is already at $H25" "$T/out25d"' \
+  "25d: a rerun at the same head does not carry the older pass at A over that fail"
+check '[[ $(wc -l < $T/filed25e1) == 1 ]] && ! grep -q "rig-runner" "$filed25e" && grep -q "Placeholder filed by bin/rig.sh" "$filed25e" && [[ $(cat $T/rc25e1) == 1 ]]' \
+  "25e: a session that posts nothing and writes no record file gets a placeholder with no machine block"
+check '! grep -q "Carried forward" <<<"$(jq -r ".comments[].body" "$T/db25e")" && grep -q "no carry — the newest measured record .* has no runner machine block" "$T/out25e"' \
+  "25e: a rerun at the same head does not carry the older pass at A past the placeholder"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"

@@ -231,6 +231,9 @@ check** (architect or triage).
     and a part skipped for any reason other than needing someone on site.
 - Restore every rig config file you changed, and leave the rig as the final
   preflight shows it. Labels stay untouched: Claude QA reads the verdict.
+- The runner may post a carried-forward record at a head instead of starting
+  a session there (`docs/runbooks/rig-testing.md` → Carry-forward, #579).
+  That record is the runner's; a session never writes one.
 
 ## where records live
 
