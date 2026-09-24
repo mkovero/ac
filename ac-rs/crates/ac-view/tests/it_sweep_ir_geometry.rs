@@ -158,6 +158,8 @@ fn a_load_failure_paints_its_own_header_and_detail_not_a_trace() {
         SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: 9.7,
             reason: "pre-impulse SNR below threshold".to_string(),
+            floor: Some("floor ends 1200 samples before arrival, sample 20563".to_string()),
+            scope: Some("scored for this sweep's band, length, window".to_string()),
         },
         // #429: two-line detail must reach the screen as one text shape.
         SweepIrFault::UnsupportedSchema {
@@ -197,6 +199,8 @@ fn the_two_failure_modes_paint_different_headers() {
     let low_snr = SweepIrFault::LowPreImpulseSnr {
         pre_impulse_snr_db: 9.7,
         reason: "pre-impulse SNR below threshold".to_string(),
+        floor: Some("floor ends 1200 samples before arrival, sample 20563".to_string()),
+        scope: Some("scored for this sweep's band, length, window".to_string()),
     };
     assert_ne!(
         SweepIrFault::NotASweepDerivedIr.header(),
@@ -216,6 +220,8 @@ fn a_low_snr_failure_paints_its_own_header_and_detail_not_a_trace() {
     let fault = SweepIrFault::LowPreImpulseSnr {
         pre_impulse_snr_db: 9.7,
         reason: "pre-impulse SNR below threshold".to_string(),
+        floor: Some("floor ends 1200 samples before arrival, sample 20563".to_string()),
+        scope: Some("scored for this sweep's band, length, window".to_string()),
     };
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));

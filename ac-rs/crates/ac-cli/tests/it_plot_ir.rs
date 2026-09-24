@@ -267,8 +267,10 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     );
 
     // ── the rest of the printed summary ───────────────────────────────
-    // #501 UX: a pass states the threshold and its basis too — the margin
-    // is the reading — and the stimulus rows carry the typed values.
+    // #501 UX: a pass states the threshold too — the margin is the
+    // reading — and the stimulus rows carry the typed values. #550 UX: the
+    // floor's end and this sweep's scope print under it; every scoped
+    // parameter here is off its default.
     for want in [
         "  IR sweep\n",
         "  band       200 Hz \u{2192} 8000 Hz  (typed)",
@@ -278,7 +280,8 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "  tail          0.10 s  (typed)",
         "  captured      0.60 s  (0.50 s sweep + 0.10 s tail)",
         "(required \u{2265} 18.0 dB)",
-        "                fixed threshold, scored for the default sweep only",
+        "                floor ends ",
+        "                unscored for this sweep's band, length, window",
     ] {
         assert!(
             stdout.contains(want),
@@ -457,7 +460,11 @@ fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
         "  level       -40.0 dBFS  (default)",
         "  captured      4.50 s  (4.00 s sweep + 0.50 s tail)",
         "(required \u{2265} 18.0 dB)",
-        "fixed threshold, scored for the default sweep only",
+        // #550: on a clean loopback the arrival is the peak, so the live
+        // path takes the `arrival and peak` anchor.
+        "                floor ends ",
+        " samples before arrival and peak, sample ",
+        "                scored for this sweep's band, length, window",
         "rectangular window, 19200 samples (400.00 ms)",
     ] {
         assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
@@ -490,7 +497,7 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         "expected a failed-deconvolution banner:\n{stdout}"
     );
     for want in [
-        "check: sweep length, band, window (above)",
+        "check: sweep band start, length, window (above)",
         "check: drive level, input gain, distance, room noise",
     ] {
         assert!(
@@ -503,9 +510,11 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         "a cable has no mic; the check list says input gain:\n{stdout}"
     );
     // The exact plausible-looking-wrong-number shape #376 exists to
-    // close: neither line may print on a failed verdict.
+    // close: neither line may print on a failed verdict. The arrival *row*
+    // is what is refused; #550's floor line names the arrival only as the
+    // floor boundary, so match the row label, not the word.
     assert!(
-        !stdout.contains("arrival "),
+        !stdout.lines().any(|l| l.starts_with("  arrival ")),
         "arrival must not print on a failed verdict:\n{stdout}"
     );
     assert!(
@@ -521,8 +530,13 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         "pre-imp SNR line must state the threshold it failed against:\n{stdout}"
     );
     assert!(
-        stdout.contains("fixed threshold, scored for the default sweep only"),
-        "the threshold's basis must print under it:\n{stdout}"
+        stdout.contains("                floor ends ")
+            && stdout.contains("                unscored for this sweep's band, length, window"),
+        "the floor's end and the sweep's scope must print under it:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("fixed threshold"),
+        "the pre-#550 basis line must not print:\n{stdout}"
     );
     assert!(
         stdout.contains("  window     1024 samples  (typed)"),

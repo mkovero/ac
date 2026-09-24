@@ -26,8 +26,8 @@
 use std::ops::RangeInclusive;
 
 use ac_core::measurement::report::{
-    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, IrVerdict, LatencyBasis,
-    LiveOffset, MeasurementData, MeasurementReport, WithheldBasis, PRE_IMPULSE_SNR_BASIS,
+    pre_impulse_snr_scope, ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck,
+    IrVerdict, LatencyBasis, LiveOffset, MeasurementData, MeasurementReport, WithheldBasis,
     PRE_IMPULSE_SNR_MIN_DB,
 };
 
@@ -236,16 +236,26 @@ pub enum SweepIrFault {
     /// and in `ac-cli`'s `print_ir_report`. Both consumers read the one
     /// verdict `ir_stats` computes, so they cannot disagree about what
     /// counts as failed, or about why (#387 QA finding).
+    ///
+    /// `floor` and `scope` (#550) are ac-core's floor line(s) — joined
+    /// with `, ` — and scope line, built once in
+    /// [`SweepIrScene::from_report`] so [`Self::detail`] only formats.
+    /// `None` when no floor region was measured (the non-finite `reason`
+    /// case), which is the rule `ac plot ir` prints them by.
     LowPreImpulseSnr {
         pre_impulse_snr_db: f64,
         reason: String,
+        floor: Option<String>,
+        scope: Option<String>,
     },
 }
 
 /// Where to look when the pre-impulse gate refuses a capture — the sweep
-/// first, then the capture chain; the same places `ac plot ir` names.
+/// first, band start leading, then the capture chain; `ac plot ir`'s two
+/// `check:` lines ([`ac_core::measurement::report::PRE_IMPULSE_SNR_CHECKS_SWEEP`]
+/// and `_CHAIN`) joined, pinned by a test.
 const LOW_SNR_CHECKS: &str =
-    "sweep length, band, window, drive level, input gain, distance, room noise";
+    "sweep band start, length, window, drive level, input gain, distance, room noise";
 
 impl SweepIrFault {
     /// Header line — occupies the same panel-geometry slot the success
@@ -259,6 +269,7 @@ impl SweepIrFault {
             SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db,
                 reason,
+                ..
             } => {
                 if pre_impulse_snr_db.is_finite() {
                     format!(
@@ -282,8 +293,8 @@ impl SweepIrFault {
     /// loader cannot know whether a bad file is a live snapshot, a
     /// report from an ungated measurement, a stale format, a sweep
     /// configuration the threshold was not scored for, low drive level,
-    /// input gain, distance, or room noise. The check list and the
-    /// threshold's basis are the ones `ac plot ir` prints (#501).
+    /// input gain, distance, or room noise. The check list, the floor's end
+    /// and the scope are the ones `ac plot ir` prints (#501, #550).
     pub fn detail(&self) -> String {
         match self {
             SweepIrFault::NotASweepDerivedIr => {
@@ -304,12 +315,23 @@ impl SweepIrFault {
             SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db,
                 reason,
+                floor,
+                scope,
             } => {
                 if pre_impulse_snr_db.is_finite() {
+                    let context: Vec<&str> = [floor, scope]
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    let context = if context.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", context.join("; "))
+                    };
                     format!(
                         "pre-impulse SNR {pre_impulse_snr_db:.1} dB below required \
-                         {PRE_IMPULSE_SNR_MIN_DB:.1} dB ({PRE_IMPULSE_SNR_BASIS}) \
-                         — check {LOW_SNR_CHECKS}"
+                         {PRE_IMPULSE_SNR_MIN_DB:.1} dB{context} — check {LOW_SNR_CHECKS}"
                     )
                 } else {
                     // Same `reason` text as `header()` above, not a
@@ -374,9 +396,20 @@ impl SweepIrScene {
         // trace or arrival geometry is built — same rule #376 applies to
         // the CLI text read-out (`ac-cli`'s `print_ir_report`).
         if let IrVerdict::Failed { reason } = &stats.verdict {
+            // #550: where the floor ended and whether 18 dB was scored for
+            // this sweep — ac-core's strings, printed only when a floor was
+            // measured, as `ac plot ir` does.
+            let floor_lines = stats.pre_impulse_floor_lines();
+            let floor = (!floor_lines.is_empty()).then(|| floor_lines.join(", "));
+            let scope = floor
+                .as_ref()
+                .and(pre_impulse_snr_scope(report))
+                .map(|s| s.to_string());
             return Err(SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db: stats.pre_impulse_snr_db,
                 reason: reason.clone(),
+                floor,
+                scope,
             });
         }
 
@@ -1247,6 +1280,8 @@ mod tests {
                 reason: "no measurable pre-impulse floor (peak too close to \
                          the start of the gated window)"
                     .to_string(),
+                floor: None,
+                scope: None,
             })
         );
     }
@@ -1302,11 +1337,14 @@ mod tests {
         let ac_core::measurement::report::IrVerdict::Failed { reason } = &stats.verdict else {
             panic!("fixture must exercise the #376 failure path: {stats:?}");
         };
+        // #550: the floor and scope come from ac-core, verbatim.
         assert_eq!(
             SweepIrScene::from_report(&r),
             Err(SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db: stats.pre_impulse_snr_db,
                 reason: reason.clone(),
+                floor: Some("floor ends 8 samples before arrival and peak, sample 10".to_string()),
+                scope: Some("unscored for this sweep's length, window".to_string()),
             })
         );
     }
@@ -1314,21 +1352,63 @@ mod tests {
     #[test]
     fn low_pre_impulse_snr_header_and_detail_carry_the_measured_and_required_values() {
         let fault = SweepIrFault::LowPreImpulseSnr {
-            pre_impulse_snr_db: 9.7,
+            pre_impulse_snr_db: 12.6,
             reason: "pre-impulse SNR below threshold".to_string(),
+            floor: Some("floor ends 1200 samples before arrival, sample 20563".to_string()),
+            scope: Some("scored for this sweep's band, length, window".to_string()),
         };
-        assert!(fault.header().contains("9.7 dB"));
+        assert!(fault.header().contains("12.6 dB"));
         assert!(fault.header().contains("18.0 dB threshold"));
-        assert!(fault.detail().contains("9.7 dB"));
+        assert!(fault.detail().contains("12.6 dB"));
         assert!(fault.detail().contains("required 18.0 dB"));
-        // #501 UX: the exact GUI form of the CLI's basis row and check rows.
+        // #550 UX: the exact GUI form of the CLI's floor, scope and check
+        // rows.
         assert_eq!(
             fault.detail(),
-            "pre-impulse SNR 9.7 dB below required 18.0 dB (fixed threshold, scored for \
-             the default sweep only) — check sweep length, band, window, drive level, \
-             input gain, distance, room noise"
+            "pre-impulse SNR 12.6 dB below required 18.0 dB — floor ends 1200 samples \
+             before arrival, sample 20563; scored for this sweep's band, length, window \
+             — check sweep band start, length, window, drive level, input gain, distance, \
+             room noise"
         );
         assert!(!fault.detail().contains("mic gain"));
+    }
+
+    /// #550 UX revision 3: an untrusted arrival's continuation joins the
+    /// floor clause with `, `, word for word.
+    #[test]
+    fn low_pre_impulse_snr_detail_names_an_untrusted_arrival() {
+        let fault = SweepIrFault::LowPreImpulseSnr {
+            pre_impulse_snr_db: 9.4,
+            reason: "pre-impulse SNR below threshold".to_string(),
+            floor: Some(
+                [
+                    "floor ends 1200 samples before peak, sample 26828",
+                    "not before arrival \u{2014} arrival SNR 12.2 dB, required \u{2265} 35.0 dB",
+                ]
+                .join(", "),
+            ),
+            scope: Some("scored for this sweep's band, length, window".to_string()),
+        };
+        assert_eq!(
+            fault.detail(),
+            "pre-impulse SNR 9.4 dB below required 18.0 dB — floor ends 1200 samples \
+             before peak, sample 26828, not before arrival — arrival SNR 12.2 dB, required \
+             \u{2265} 35.0 dB; scored for this sweep's band, length, window — check sweep \
+             band start, length, window, drive level, input gain, distance, room noise"
+        );
+    }
+
+    /// #550 UX: the GUI's check list is `ac plot ir`'s two `check:` lines
+    /// joined, so the two cannot drift.
+    #[test]
+    fn low_snr_checks_are_the_cli_check_lines_joined() {
+        use ac_core::measurement::report::{
+            PRE_IMPULSE_SNR_CHECKS_CHAIN, PRE_IMPULSE_SNR_CHECKS_SWEEP,
+        };
+        assert_eq!(
+            LOW_SNR_CHECKS,
+            format!("{PRE_IMPULSE_SNR_CHECKS_SWEEP}, {PRE_IMPULSE_SNR_CHECKS_CHAIN}")
+        );
     }
 
     /// The non-finite branch has two distinguishable causes — no signal
@@ -1343,12 +1423,16 @@ mod tests {
         let no_signal = SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: f64::INFINITY,
             reason: "no signal captured (linear IR is all zero)".to_string(),
+            floor: None,
+            scope: None,
         };
         let guard_band = SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: f64::INFINITY,
             reason: "no measurable pre-impulse floor (peak too close to \
                      the start of the gated window)"
                 .to_string(),
+            floor: None,
+            scope: None,
         };
         assert!(no_signal.header().contains("no signal captured"));
         assert!(guard_band
@@ -1360,11 +1444,12 @@ mod tests {
             .contains("peak too close to the start of the gated window"));
         assert_eq!(
             no_signal.detail(),
-            "no signal captured (linear IR is all zero) — check sweep length, band, \
+            "no signal captured (linear IR is all zero) — check sweep band start, length, \
              window, drive level, input gain, distance, room noise"
         );
         assert!(guard_band.detail().ends_with(
-            " — check sweep length, band, window, drive level, input gain, distance, room noise"
+            " — check sweep band start, length, window, drive level, input gain, distance, \
+             room noise"
         ));
         // The two causes must not collapse into one string, and neither
         // may claim silence — the peak was measurable in both cases.
