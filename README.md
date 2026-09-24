@@ -397,13 +397,12 @@ CTRL is a REP socket on 5556, DATA a PUB socket on 5557. Wire protocol:
 ## Testing
 
 ```bash
-cd ac-rs && cargo test --workspace   # ~900 tests; 14 are #[ignore]'d
+cd ac-rs && cargo test --workspace   # `test result:` lines give passed/ignored counts
 pytest tests/ -q          # black-box ZMQ protocol tests (spawns --fake-audio daemon)
 ```
 
-Roughly, measured 2026-08-06: `ac-core` 396, `ac-daemon` 214, `ac-scene` 115,
-`ac-cli` 97, `ac-view` the remainder. These drift — run the command rather
-than citing them. The `#[ignore]`d ones need real hardware (JACK loopback,
+No counts are quoted here — they drift; run the command rather than citing
+one. The `#[ignore]`d tests need real hardware (JACK loopback,
 stimulus-emitting contiguity checks), a live daemon, a real GPU adapter
 for the display-truth snapshot harness, or exist to regenerate fixtures.
 See [`TESTING.md`](TESTING.md).

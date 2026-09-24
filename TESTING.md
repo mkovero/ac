@@ -2,7 +2,7 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test --workspace # ~900 tests, 14 #[ignore]'d
+cd ac-rs && cargo test --workspace # `test result:` lines give passed/ignored counts
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
@@ -14,8 +14,9 @@ tar zxf - -C ~/.cargo/bin`): same tests, one process each, roughly half the wall
 time. `ac-rs/.config/nextest.toml` serialises the `ac-cli` integration
 binaries, whose per-binary port cursors collide across processes.
 
-**Counts in this file are an order of magnitude, not a figure to check
-against** — they rot silently. Run the command. `--workspace` matters: two
+**This file quotes no test counts, on purpose** — a written count rots
+silently and gets copied into commits as if measured. Run the command and read
+its `test result:` lines. `--workspace` matters: two
 branches that each pass `cargo test -p <crate>` can still break the build
 together, and with no CI here that is the only check.
 
@@ -39,8 +40,8 @@ the first two was being written:
 | construct | reported | actual |
 |---|---|---|
 | `cargo test \| tail` | `tail`'s 0, whatever the tests did | — |
-| `cargo test \| grep … \| head -20` | 890 passing | 904 — the result lines were truncated |
-| `cargo test …; grep -c FAILED log` | **failure** | 905 passing, 0 failed |
+| `cargo test \| grep … \| head -20` | a passing count | 14 short of the real one — the result lines were truncated |
+| `cargo test …; grep -c FAILED log` | **failure** | every test passed, none failed |
 
 The third is the instructive one, because **nothing malfunctioned**: `grep -c`
 correctly found zero matches and correctly exited 1 to say so. The status was
@@ -81,9 +82,6 @@ cargo test -p ac-view             # egui shell: geometry, live/snapshot end-to-e
                                   #   trace distinction (egui_kittest snapshots)
 cargo test --workspace            # all five crates — the only check that catches a cross-crate break
 ```
-
-Rough shape as of 2026-08-06 (899 passed, 14 ignored): `ac-core` 396,
-`ac-daemon` 214, `ac-scene` 115, `ac-cli` 97, `ac-view` the remainder.
 
 ## Checked-in fixtures — and which comparison each one earns
 
@@ -260,7 +258,7 @@ approving (see `.agents/qa.md`'s display-truth gate).
 
 ## What is verified numerically
 
-### THD accuracy (ac-core `analysis` module)
+### THD accuracy (ac-core `measurement::thd` module)
 
 These tests generate synthetic signals with mathematically known distortion and verify the analyzer returns correct values:
 
