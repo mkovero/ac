@@ -346,6 +346,87 @@ fn setup_refuses_malformed_reference_channel() {
     assert_eq!(r["config"]["reference_channel"], Value::Null);
 }
 
+/// #516: the four scalar keys were read with `as_f64` / `as_u64` and a
+/// value of the wrong type — or `snapshot_ring_s <= 0` — was skipped with
+/// `ok: true`. Each wrong type and each out-of-domain value now refuses the
+/// whole update, valid siblings included.
+#[test]
+fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
+    let d = Daemon::spawn_with_config(Some(seeded_cfg()));
+    let c = Client::new(&d);
+    let before = config_of(&c);
+
+    const POSITIVE: &str = "must be a finite number > 0";
+    const FINITE: &str = "must be a finite number";
+    const NON_NEG_INT: &str = "must be a non-negative integer";
+    let cases = [
+        ("dbu_ref_vrms", json!("0.775"), POSITIVE),
+        ("dbu_ref_vrms", json!(0), POSITIVE),
+        ("dbu_ref_vrms", json!(-1.0), POSITIVE),
+        ("dbu_ref_vrms", Value::Null, POSITIVE),
+        ("dbu_ref_vrms", json!(true), POSITIVE),
+        ("snapshot_ring_s", json!("30"), POSITIVE),
+        ("snapshot_ring_s", json!(-1), POSITIVE),
+        ("snapshot_ring_s", json!(0.0), POSITIVE),
+        ("snapshot_ring_s", Value::Null, POSITIVE),
+        ("temperature_c", json!("24"), FINITE),
+        ("temperature_c", json!(true), FINITE),
+        ("temperature_c", json!([]), FINITE),
+        ("server_idle_timeout_secs", json!("300"), NON_NEG_INT),
+        ("server_idle_timeout_secs", json!(-1), NON_NEG_INT),
+        ("server_idle_timeout_secs", json!(1.5), NON_NEG_INT),
+        ("server_idle_timeout_secs", json!(30.0), NON_NEG_INT),
+    ];
+    for (key, bad, domain) in cases {
+        let mut update = json!({
+            "output_channel": 2,
+            "dbu_ref_vrms": 1.0,
+            "temperature_c": 21.5,
+        });
+        update[key] = bad.clone();
+        let r = c.call(json!({"cmd": "setup", "update": update}));
+        let what = format!("{key} = {bad}");
+        assert_refused(
+            &r,
+            &what,
+            &[
+                &format!("setup rejected \u{2014} {key} {domain}\n"),
+                &format!("received  {bad}"),
+                "config    unchanged",
+            ],
+        );
+        assert_eq!(config_of(&c), before, "{what}: config must be unchanged");
+    }
+}
+
+/// Valid values for all four scalar keys are still applied and persisted.
+#[test]
+fn setup_applies_valid_scalar_keys() {
+    let d = Daemon::spawn_with_config(Some(seeded_cfg()));
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "setup", "update": {
+        "dbu_ref_vrms": 1.0,
+        "snapshot_ring_s": 45,
+        "temperature_c": -5.5,
+        "server_idle_timeout_secs": 300,
+    }}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let cfg = config_of(&c);
+    assert_eq!(cfg["dbu_ref_vrms"], json!(1.0), "{cfg}");
+    assert_eq!(cfg["snapshot_ring_s"], json!(45.0), "{cfg}");
+    assert_eq!(cfg["temperature_c"], json!(-5.5), "{cfg}");
+    assert_eq!(cfg["server_idle_timeout_secs"], json!(300), "{cfg}");
+
+    // `null` clears the nullable pair; `0` also clears the timeout.
+    let r = c.call(json!({"cmd": "setup", "update": {
+        "temperature_c": null, "server_idle_timeout_secs": 0,
+    }}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let cfg = config_of(&c);
+    assert!(cfg["temperature_c"].is_null(), "{cfg}");
+    assert!(cfg["server_idle_timeout_secs"].is_null(), "{cfg}");
+}
+
 /// 4294967299 = 2^32 + 3: narrowed, it was accepted as bpo 3.
 #[test]
 fn ioct_bpo_above_u32_is_refused() {

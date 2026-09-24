@@ -917,20 +917,27 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "reference_channel": <int>,     // optional — capture index
     "reference_output_channel": <int> | null,  // optional — playback index;
                                     //   null = reference leaves on the main output
-    "dbu_ref_vrms":      <float>,   // optional
+    "dbu_ref_vrms":      <number>,  // optional — finite, > 0; null refused
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
-    "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
+    "snapshot_ring_s":   <number>,  // optional — finite, > 0; null refused — see `snapshot`
     "snapshot_spool_dir":"<leaf>" | "<absolute path>" | null, // optional — see below
+    "temperature_c":     <number> | null,  // optional — finite; null = clear
+    "server_idle_timeout_secs": <int> | null,  // optional — integer >= 0;
+                                    //   0 or null = clear (no idle timeout)
     "report_dir":        "<absolute path>" | null  // optional — null = do not persist
   }
 }
 ```
 
-The four channel fields follow **Error handling → Wire values**: all four
-are checked before anything is applied, so a malformed one leaves the whole
-config unchanged (`setup rejected — …`, `config  unchanged`).
+The four channel fields and the four scalar keys `dbu_ref_vrms`,
+`snapshot_ring_s`, `temperature_c` and `server_idle_timeout_secs` follow
+**Error handling → Wire values**: all are checked before anything is
+applied, so a wrong type or a value outside the key's domain leaves the
+whole config unchanged (`setup rejected — …`, `config  unchanged`). A float
+for `server_idle_timeout_secs`, `30.0` included, is refused as not an
+integer.
 
 `snapshot_spool_dir` is confined to the daemon's spool root,
 `~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
@@ -3793,16 +3800,27 @@ A value a request supplies is either exactly valid or the **whole request
 is refused** — no default, no worker, no write, no config change (#431).
 Applies to every channel field (`channels`, `output_channel`,
 `input_channel`, `reference_channel`, `reference_output_channel`,
-`pairs[i][j]`, `meas_channel`, `ref_channel`) and to the positional
-`calibrate_mic_curve` arrays.
+`pairs[i][j]`, `meas_channel`, `ref_channel`), to the positional
+`calibrate_mic_curve` arrays, and to the `setup` scalar keys
+`dbu_ref_vrms`, `snapshot_ring_s` (finite, > 0, not nullable),
+`temperature_c` (finite; `null` clears) and `server_idle_timeout_secs`
+(integer ≥ 0; `null` clears) (#516).
 
 | wire value | meaning |
 |---|---|
 | field absent | configured default |
 | `channels`: `null` or `[]` | configured default |
 | `reference_channel` / `reference_output_channel`: `null` | clear |
-| integer in 0–4294967295 | that channel |
-| anything else present — string, float, negative, > 4294967295, `null` on a non-nullable scalar, non-array `channels`/`pairs`, any bad array element | refused |
+| channel field: integer in 0–4294967295 | that channel |
+| channel field: anything else present — string, float, negative, > 4294967295, `null` on a non-nullable field, non-array `channels`/`pairs`, any bad array element | refused |
+| `dbu_ref_vrms` / `snapshot_ring_s`: finite number > 0 (integer or float) | that value |
+| `dbu_ref_vrms` / `snapshot_ring_s`: anything else — `null`, string, bool, 0, negative | refused |
+| `temperature_c`: finite number (integer or float, any sign) | that value |
+| `temperature_c`: `null` | clear |
+| `temperature_c`: anything else — string, bool, array, object | refused |
+| `server_idle_timeout_secs`: integer in 0–18446744073709551615 | that value (`0` clears) |
+| `server_idle_timeout_secs`: `null` | clear |
+| `server_idle_timeout_secs`: anything else — float (including `30.0`), negative, > 18446744073709551615, string, bool | refused |
 
 Values are never narrowed: 4294967296 is refused, not read as channel 0.
 `fft_n` (`monitor_spectrum`, `set_monitor_params`) and `bpo`
@@ -3819,7 +3837,8 @@ generate not started — channels[0] must be an integer
 ```
 
 `<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
-`must be a finite number`, `must be an array`.
+`must be a finite number`, `must be a finite number > 0`,
+`must be a non-negative integer`, `must be an array`.
 
 | command | headline | state line |
 |---|---|---|

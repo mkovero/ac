@@ -3,7 +3,8 @@
 //!
 //! Pure functions over `&Value` — no `ServerState`, no config. Every handler
 //! that reads a channel number, a `u32` knob or a positional numeric array
-//! takes it from here, so "invalid" has one definition and one refusal
+//! — and each scalar `setup` key (#516) — takes it from here, so "invalid"
+//! has one definition and one refusal
 //! layout. The meaning of each wire shape:
 //!
 //! | wire value | reader result |
@@ -12,7 +13,10 @@
 //! | `channels`-style array `null` ([`opt_array`]) | `None` — caller applies its default |
 //! | `pairs`-style array `null` ([`opt_non_null_array`]) | [`WireError`] |
 //! | nullable scalar `null` | `Some(None)` — caller clears |
-//! | integer in 0–4294967295 | the value |
+//! | channel / `u32` reader: integer in 0–4294967295 | the value |
+//! | [`opt_positive_f64`]: finite number > 0 (integer or float); `null` refused | the value |
+//! | [`opt_nullable_finite_f64`]: finite number (integer or float, any sign) | the value |
+//! | [`opt_nullable_u64`]: integer in 0–18446744073709551615 | the value |
 //! | anything else | [`WireError`] — caller refuses the whole request |
 //!
 //! The one thing these readers never do is drop an element or narrow a
@@ -35,6 +39,8 @@ pub(crate) enum Problem {
     NotInteger,
     OutOfRange,
     NotFinite,
+    NotPositive,
+    NotNonNegativeInteger,
     NotArray,
 }
 
@@ -44,6 +50,8 @@ impl Problem {
             Problem::NotInteger => "must be an integer",
             Problem::OutOfRange => "is outside 0\u{2013}4294967295",
             Problem::NotFinite => "must be a finite number",
+            Problem::NotPositive => "must be a finite number > 0",
+            Problem::NotNonNegativeInteger => "must be a non-negative integer",
             Problem::NotArray => "must be an array",
         }
     }
@@ -145,6 +153,47 @@ pub(crate) fn opt_nullable_u32(obj: &Value, field: &str) -> Result<Option<Option
     }
 }
 
+/// Optional non-nullable field that must be a finite number > 0. Absent →
+/// `None` (keep); anything else present, `null` included, → exactly valid or
+/// refused.
+pub(crate) fn opt_positive_f64(obj: &Value, field: &str) -> Result<Option<f64>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(v) => match v.as_f64() {
+            Some(x) if x.is_finite() && x > 0.0 => Ok(Some(x)),
+            _ => Err(WireError::new(field, Problem::NotPositive, v)),
+        },
+    }
+}
+
+/// Optional nullable finite number. Absent → `None` (keep), `null` →
+/// `Some(None)` (clear), finite number → `Some(Some(x))` (set).
+pub(crate) fn opt_nullable_finite_f64(
+    obj: &Value,
+    field: &str,
+) -> Result<Option<Option<f64>>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => finite_f64(v, field).map(|x| Some(Some(x))),
+    }
+}
+
+/// Optional nullable non-negative integer in `0..=u64::MAX`. Absent → `None`
+/// (keep), `null` → `Some(None)` (clear), integer → `Some(Some(n))` (set).
+/// A float — `30.0` included — a negative, a string or anything above
+/// u64 is refused.
+pub(crate) fn opt_nullable_u64(obj: &Value, field: &str) -> Result<Option<Option<u64>>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => v
+            .as_u64()
+            .map(|n| Some(Some(n)))
+            .ok_or_else(|| WireError::new(field, Problem::NotNonNegativeInteger, v)),
+    }
+}
+
 /// Optional array field. Absent or `null` → `None`; present and not an
 /// array → refused.
 pub(crate) fn opt_array<'a>(
@@ -235,6 +284,61 @@ mod tests {
         assert_eq!(opt_nullable_u32(&field(json!(3)), "x"), Ok(Some(Some(3))));
         assert!(opt_nullable_u32(&field(json!("x")), "x").is_err());
         assert!(opt_nullable_u32(&field(json!(4294967296u64)), "x").is_err());
+    }
+
+    #[test]
+    fn positive_f64_refuses_null_zero_negative_and_non_numbers() {
+        assert_eq!(opt_positive_f64(&json!({}), "x"), Ok(None));
+        assert_eq!(opt_positive_f64(&field(json!(0.775)), "x"), Ok(Some(0.775)));
+        assert_eq!(opt_positive_f64(&field(json!(2)), "x"), Ok(Some(2.0)));
+        for v in [
+            json!(0),
+            json!(0.0),
+            json!(-1),
+            json!("0.775"),
+            Value::Null,
+            json!(true),
+        ] {
+            let e = opt_positive_f64(&field(v.clone()), "x").unwrap_err();
+            assert_eq!(
+                (e.field.as_str(), e.problem),
+                ("x", Problem::NotPositive),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_finite_f64_three_states() {
+        assert_eq!(opt_nullable_finite_f64(&json!({}), "x"), Ok(None));
+        assert_eq!(
+            opt_nullable_finite_f64(&field(Value::Null), "x"),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            opt_nullable_finite_f64(&field(json!(-5.5)), "x"),
+            Ok(Some(Some(-5.5)))
+        );
+        for v in [json!("24"), json!(true), json!([])] {
+            let e = opt_nullable_finite_f64(&field(v.clone()), "x").unwrap_err();
+            assert_eq!(e.problem, Problem::NotFinite, "{v}");
+        }
+    }
+
+    #[test]
+    fn nullable_u64_refuses_negative_float_string_and_overflow() {
+        assert_eq!(opt_nullable_u64(&json!({}), "x"), Ok(None));
+        assert_eq!(opt_nullable_u64(&field(Value::Null), "x"), Ok(Some(None)));
+        assert_eq!(opt_nullable_u64(&field(json!(0)), "x"), Ok(Some(Some(0))));
+        assert_eq!(
+            opt_nullable_u64(&field(json!(u64::MAX)), "x"),
+            Ok(Some(Some(u64::MAX)))
+        );
+        let above: Value = serde_json::from_str("18446744073709551616").unwrap();
+        for v in [json!(-1), json!(1.5), json!(30.0), json!("300"), above] {
+            let e = opt_nullable_u64(&field(v.clone()), "x").unwrap_err();
+            assert_eq!(e.problem, Problem::NotNonNegativeInteger, "{v}");
+        }
     }
 
     #[test]

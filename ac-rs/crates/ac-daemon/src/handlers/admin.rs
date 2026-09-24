@@ -31,6 +31,25 @@ fn parse_setup_channels(update: &Value) -> Result<SetupChannels, wire::WireError
     })
 }
 
+/// The four scalar keys of a `setup` update, each validated (#516). Outer
+/// `None` = key absent (keep); the nullable keys carry `Some(None)` for
+/// `null` (clear).
+struct SetupScalars {
+    dbu_ref_vrms: Option<f64>,
+    snapshot_ring_s: Option<f64>,
+    temperature_c: Option<Option<f64>>,
+    server_idle_timeout_secs: Option<Option<u64>>,
+}
+
+fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> {
+    Ok(SetupScalars {
+        dbu_ref_vrms: wire::opt_positive_f64(update, "dbu_ref_vrms")?,
+        server_idle_timeout_secs: wire::opt_nullable_u64(update, "server_idle_timeout_secs")?,
+        snapshot_ring_s: wire::opt_positive_f64(update, "snapshot_ring_s")?,
+        temperature_c: wire::opt_nullable_finite_f64(update, "temperature_c")?,
+    })
+}
+
 pub fn status(state: &ServerState) -> Value {
     let workers = state.workers.lock().unwrap();
     let running: Option<String> = workers.keys().next().cloned();
@@ -172,6 +191,15 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
                 "error": e.refusal("setup rejected", &[("config", "unchanged")])})
         }
     };
+    // #516: the scalar keys likewise — a wrong type or a value outside the
+    // key's domain refuses the update instead of being skipped.
+    let scalars = match parse_setup_scalars(update) {
+        Ok(s) => s,
+        Err(e) => {
+            return json!({"ok": false,
+                "error": e.refusal("setup rejected", &[("config", "unchanged")])})
+        }
+    };
 
     // Every change is made on a copy and committed to `state.cfg` only after
     // it is on disk (#430), so a failed save leaves memory and disk agreeing
@@ -207,7 +235,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         cfg.reference_output_channel = v;
         cfg.reference_output_port = None;
     }
-    if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {
+    if let Some(v) = scalars.dbu_ref_vrms {
         cfg.dbu_ref_vrms = v;
     }
     if let Some(v) = update.get("server_enabled").and_then(Value::as_bool) {
@@ -231,18 +259,13 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if update.get("dmm_host").is_some() {
         cfg.dmm_host = update["dmm_host"].as_str().map(str::to_string);
     }
-    if let Some(v) = update.get("server_idle_timeout_secs") {
-        if v.is_null() {
-            cfg.server_idle_timeout_secs = None;
-        } else if let Some(n) = v.as_u64() {
-            cfg.server_idle_timeout_secs = if n == 0 { None } else { Some(n) };
-        }
+    // `0` clears the timeout, as `null` does.
+    if let Some(v) = scalars.server_idle_timeout_secs {
+        cfg.server_idle_timeout_secs = v.filter(|&n| n != 0);
     }
     // Snapshot backend (handoff: snapshot-backend M1, deliverable 1/2).
-    if let Some(v) = update.get("snapshot_ring_s").and_then(Value::as_f64) {
-        if v > 0.0 {
-            cfg.snapshot_ring_s = v;
-        }
+    if let Some(v) = scalars.snapshot_ring_s {
+        cfg.snapshot_ring_s = v;
     }
     if let Some(dir) = spool_update {
         cfg.snapshot_spool_dir = dir;
@@ -250,12 +273,8 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     // Room temperature for the delay readout's ms → m conversion (#243).
     // `null` clears it back to the conventional 343 m/s, which is a
     // different statement from any temperature the operator could type.
-    if let Some(v) = update.get("temperature_c") {
-        if v.is_null() {
-            cfg.temperature_c = None;
-        } else if let Some(t) = v.as_f64() {
-            cfg.temperature_c = Some(t);
-        }
+    if let Some(v) = scalars.temperature_c {
+        cfg.temperature_c = v;
     }
 
     // `update: {}` is a read (`ac generate`, the GPIO handler): it never
