@@ -51,6 +51,12 @@
 #      a newer carried record is never the source; with no record to carry,
 #      the same run reaches lock_take; a session that writes no record file
 #      still leaves a filed record, so an older pass never carries over it.
+#  26. an epic rerun reads a closed child or blocker as done only when a
+#      merged issue-N PR's merge commit is on main (#568): with none, one
+#      merged elsewhere, a truncated listing or a failed check, a closed child
+#      stops the epic and a closed blocker holds its dependents; a landed one
+#      skips or releases as before; a PR that only mentions the issue in prose
+#      (armed: pr_for's body fallback would take it) links nothing.
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -1297,6 +1303,143 @@ check '[[ $(wc -l < $T/filed25e1) == 1 ]] && ! grep -q "rig-runner" "$filed25e" 
   "25e: a session that posts nothing and writes no record file gets a placeholder with no machine block"
 check '! grep -q "Carried forward" <<<"$(jq -r ".comments[].body" "$T/db25e")" && grep -q "no carry — the newest measured record .* has no runner machine block" "$T/out25e"' \
   "25e: a rerun at the same head does not carry the older pass at A past the placeholder"
+
+# --- 26: an epic rerun needs a closed child's change on main (#568) ---------------
+# Fixtures live per case in $D: issue_<n>.json, list_<n>.json (merged PRs for a
+# `--search head:issue-<n>` listing; list_open.json with no --search), pr_<p>.json
+# and cmp_<oid>.json. A missing compare fixture fails the call, so pr_landed
+# reads `unknown`. The stub applies --limit like gh does, so a full page is a
+# full page. drive() records every issue it is handed: "not driven" is read,
+# not inferred. KEEP_GOING=1 throughout, so a stop is not KEEP_GOING's doing.
+mkdir -p "$T/stub26"
+cat > "$T/stub26/gh" <<'EOF'
+#!/usr/bin/env bash
+q=""; lim=30; search=""; args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --jq) q="${args[i+1]}" ;;
+    --limit) lim="${args[i+1]}" ;;
+    --search) search="${args[i+1]}" ;;
+  esac
+done
+case "$*" in
+  "issue view"*) f="$D/issue_$3.json" ;;
+  "pr view"*) f="$D/pr_$3.json" ;;
+  "pr list"*)
+    if [[ -n $search ]]; then f="$D/list_${search#head:issue-}.json"; else f="$D/list_open.json"; fi
+    [[ -e $f ]] || f="$D/empty.json" ;;
+  "api repos/x/y/compare/main..."*) f="$D/cmp_${2##*...}.json" ;;
+  *) echo "unexpected: gh $*" >&2; exit 1 ;;
+esac
+[[ -e $f ]] || { echo "HTTP 404: Not Found" >&2; exit 1; }
+[[ $1 == pr && $2 == list ]] && { jq ".[:$lim]" "$f" > "$f.page"; f="$f.page"; }
+if [[ -n $q ]]; then jq -r "$q" "$f"; else cat "$f"; fi
+EOF
+chmod +x "$T/stub26/gh"
+o_main=1111111111111111111111111111111111111111
+o_off=2222222222222222222222222222222222222222
+o_fail=3333333333333333333333333333333333333333
+# f26 <case> <name> <json>: one fixture file for one case.
+f26() { mkdir -p "$T/d26$1"; printf '%s\n' "$3" > "$T/d26$1/$2.json"; }
+p26() {  # p26 <case> <pr> <oid>: a PR merged into main at <oid>
+  f26 "$1" "pr_$2" '{"state":"MERGED","mergedAt":"2026-09-22T10:00:00Z","mergeCommit":{"oid":"'"$3"'"},"baseRefName":"main"}'
+}
+s26() {  # s26 <case> <issue> <OPEN|CLOSED>...
+  local c="$1"; shift
+  while (($#)); do f26 "$c" "issue_$1" '{"state":"'"$2"'"}'; shift 2; done
+}
+base26() {  # shared fixtures: PRs 101 landed, 102 merged off main, 103 unverifiable
+  local c="$1"
+  f26 "$c" empty '[]'
+  f26 "$c" "cmp_$o_main" '{"status":"behind"}'
+  f26 "$c" "cmp_$o_off" '{"status":"diverged"}'
+  p26 "$c" 101 "$o_main"; p26 "$c" 102 "$o_off"; p26 "$c" 103 "$o_fail"
+  p26 "$c" 104 "$o_main"
+}
+# e26 <case> <children> <blocker rows "child:blocker ..."> → out26<case>,
+# rc26<case>, driven26<case>
+e26() {
+  local c="$1"
+  # Not `kids` or `$c` below: drive_epic's own locals would shadow them.
+  kids26="$2" rows26="$3" driven26="$T/driven26$1"
+  : > "$T/driven26$c"
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub26:$PATH" D="$T/d26$c" KEEP_GOING=1
+    unset AC_WAIT_MERGE
+    eval "$(sed -n '/^issue_branch_jq()/,/^}/p;/^pr_for()/,/^}/p;/^pr_landed()/,/^}/p;/^issue_landed()/,/^}/p;/^drive_epic()/,/^}/p' "$BIN/master.sh")"
+    children() { printf '%s\n' $kids26; }
+    blockers_of() { local r; for r in $rows26; do [[ ${r%%:*} == "$2" ]] && echo "${r#*:}"; done; }
+    limit_stop() { :; }
+    drive() { echo "$1" >> "$driven26"; STATE=needs-human; }
+    rc=0; ( drive_epic 5 ) > "$T/out26$c" 2>&1 || rc=$?
+    echo "$rc" > "$T/rc26$c"
+  )
+}
+for c in a b c d e f g h; do base26 $c; done
+# a: closed child, no merged issue-11 PR at all.
+s26 a 11 CLOSED 12 OPEN
+e26 a "11 12" ""
+# b: closed child whose only issue-11 PR merged, but not onto main.
+s26 b 11 CLOSED 12 OPEN
+f26 b list_11 '[{"number":102,"headRefName":"issue-11-x"}]'
+e26 b "11 12" ""
+# c: blockers closed without a landed PR (11: none; 15: unverifiable) hold
+# their dependents; an unrelated later child still runs.
+s26 c 11 CLOSED 12 OPEN 13 OPEN 14 OPEN 15 CLOSED
+f26 c list_15 '[{"number":103,"headRefName":"issue-15"}]'
+e26 c "12 13 14" "12:11 14:15"
+# d: closed child that landed is skipped; the next child runs.
+s26 d 11 CLOSED 12 OPEN
+f26 d list_11 '[{"number":101,"headRefName":"issue-11"}]'
+e26 d "11 12" ""
+# e: closed blocker that landed releases its dependent.
+s26 e 11 CLOSED 12 OPEN
+f26 e list_11 '[{"number":101,"headRefName":"issue-11-y"}]'
+e26 e "12" "12:11"
+# f: prose trap. PR 104 is merged, on main, and says "no longer closes #11" —
+# but its branch is not issue-11. The search pre-filter hands it over anyway.
+s26 f 11 CLOSED 12 OPEN
+f26 f list_11 '[{"number":104,"headRefName":"other-branch","body":"This no longer closes #11."}]'
+f26 f list_open '[{"number":104,"headRefName":"other-branch","body":"This no longer closes #11."}]'
+e26 f "11 12" ""
+# g: a full page (== the limit) may have cut the landed PR: unknown, not none.
+s26 g 11 CLOSED 12 OPEN
+f26 g list_11 "$(jq -nc '[range(1000;1100) | {number: ., headRefName: "issue-110-\(.)"}]')"
+e26 g "11 12" ""
+# h: the only candidate's ancestry check fails.
+s26 h 11 CLOSED 12 OPEN
+f26 h list_11 '[{"number":103,"headRefName":"issue-11"}]'
+e26 h "11 12" ""
+# Arming for f and g, with the same stub and fixtures.
+arm26() {
+  (
+    cd "$REPO" && source "$BIN/common.sh"
+    export PATH="$T/stub26:$PATH" D="$T/d26$1"
+    eval "$(sed -n '/^issue_branch_jq()/,/^}/p;/^pr_for()/,/^}/p;/^pr_landed()/,/^}/p;/^issue_landed()/,/^}/p' "$BIN/master.sh")"
+    shift; "$@"
+  )
+}
+check '[[ $(cat $T/rc26a) == 0 && ! -s $T/driven26a ]] && ! grep -q skipping $T/out26a && grep -q "no merged issue-11 PR was found — stopping epic #5" $T/out26a && grep -q "Reopen #11 or remove it from #5" $T/out26a' \
+  "26a: a closed child with no merged issue-N PR stops the epic; nothing after it is driven"
+check '[[ $(cat $T/rc26b) == 0 && ! -s $T/driven26b ]] && ! grep -q skipping $T/out26b && grep -q "merged PR(s) #102 have no merge commit on main" $T/out26b' \
+  "26b: a closed child whose PR merged off main stops the epic"
+check '[[ $(cat $T/driven26c) == 13 ]] && grep -q "#12: blocked by #11 (closed, not on main) — skipping" $T/out26c && grep -q "#14: blocked by #15 (closed, landing unknown) — skipping" $T/out26c' \
+  "26c: closed blockers not on main or unverifiable hold their dependents; an unrelated child still runs"
+check '[[ $(cat $T/driven26d) == 12 ]] && grep -q "#11: closed, landed on main via PR #101 (1111111) — skipping" $T/out26d' \
+  "26d: a closed child that landed is skipped and the next child runs"
+check '[[ $(cat $T/driven26e) == 12 ]] && ! grep -q blocked $T/out26e' \
+  "26e: a closed blocker that landed releases its dependent"
+check '[[ $(cat $T/rc26f) == 0 && ! -s $T/driven26f ]] && ! grep -q skipping $T/out26f && [[ $(arm26 f issue_landed 11) == none ]]' \
+  "26f: a merged PR that only mentions the issue in prose does not land it"
+check '[[ $(arm26 f pr_for 11) == 104 && $(arm26 f pr_landed 104) == "landed $o_main" ]]' \
+  "26f control: the trap is armed — pr_for's body fallback takes PR 104, and 104 is on main"
+check '[[ ! -s $T/driven26g ]] && grep -q "could not be checked — stopping rather than guessing" $T/out26g && [[ $(arm26 g issue_landed 11) == unknown ]]' \
+  "26g: a merged-PR listing as long as the limit reads unknown and stops the epic"
+check '[[ ! -s $T/driven26h ]] && grep -q "could not be checked" $T/out26h && ! grep -q skipping $T/out26h' \
+  "26h: a failed ancestry check on the only candidate stops the epic"
+check '! grep -q "closed, skipping" "$BIN/master.sh" && ! grep -q "skips closed children" "$BIN/master.sh"' \
+  "26: the old closed-means-done wording is gone from master.sh"
 
 # --- 7: no pipeline script reads the shared FETCH_HEAD ---------------------------
 check '! grep -n "FETCH_HEAD" "$BIN"/*.sh | grep -v "^$BIN/pipeline_test.sh:" | grep -v -E ":[0-9]+:[[:space:]]*#" | grep -q .' "no bin script uses the shared FETCH_HEAD outside a comment"
