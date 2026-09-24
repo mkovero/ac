@@ -9,10 +9,10 @@ use super::{
 };
 use crate::measurement::sweep::{
     band_limit_available, band_limit_top_hz, ir_default_window_len, ir_peak, lobe_window_samples,
-    pre_impulse_snr_db, pre_impulse_snr_db_before, second_lobe, zero_phase_high_pass, BoundInputs,
-    CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, WindowLimit,
-    ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
-    IR_DEFAULT_F2_HZ,
+    pre_impulse_region_len, pre_impulse_snr_db, pre_impulse_snr_db_before, second_lobe,
+    zero_phase_high_pass, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate,
+    OnsetPick, WindowLimit, ARRIVAL_HIGH_PASS_CORNER_HZ, BAND_LIMIT_MIN_F2_RATIO,
+    IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ,
 };
 use crate::shared::calibration::{
     compare_tau_readings, EnumerationCheck, TauComparison, TauDisagreement,
@@ -212,7 +212,9 @@ pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnr
 
 /// Minimum pre-impulse SNR of the high-passed IR, in dB, below which the
 /// band-limited arrival withholds the flight time (#537,
-/// [`ArrivalCrossCheck::BandLimitedSnrLow`]). Separate from
+/// [`ArrivalCrossCheck::BandLimitedSnrLow`]). Applies only to a measured
+/// SNR: a pick with no floor before it is
+/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] (#577). Separate from
 /// [`PRE_IMPULSE_SNR_MIN_DB`], which gates the broadband deconvolution and
 /// keeps its meaning.
 ///
@@ -236,8 +238,9 @@ pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnr
 /// **Also decides the #376 verdict's floor (#550).** Only an arrival that
 /// cleared this value may end [`PRE_IMPULSE_SNR_MIN_DB`]'s floor before
 /// the broadband peak. An unmeasured SNR — a pick inside the guard band,
-/// whose `+inf` has no floor under it — does not count as clearing it for
-/// that floor, whatever #577 decides for the standing. The noise crest of the high-passed IR over the
+/// with no floor under it — does not count as clearing it for that floor,
+/// and its standing is [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`]
+/// (#577). The noise crest of the high-passed IR over the
 /// default window is about 13 dB (√(2 ln W), derived; 11.5–12.9 dB
 /// measured on noise-only draws). Lowering this toward it lets a noise
 /// argmax cut the floor short again, which accepted 9 of 400 noise-only
@@ -464,6 +467,11 @@ pub(crate) fn band_limited_arrival_under(
     }
     let h_hp = zero_phase_high_pass(linear_ir, sample_rate_hz, corner_hz);
     let (arrival_index, arrival_magnitude) = ir_peak(&h_hp);
+    // An empty floor before the pick is no measurement: `pre_impulse_snr_db`
+    // would read it as `+inf` and clear any threshold (#577). Tested on the
+    // region's length, from the same function that builds the region, so a
+    // non-empty all-zero floor's `+inf` stays a measured value.
+    let snr_measured = pre_impulse_region_len(h_hp.len(), arrival_index) > 0;
     let snr_db = pre_impulse_snr_db(&h_hp, arrival_index);
     let tolerance = arrival_cross_check_tolerance_samples(sample_rate_hz);
     let lobe_window = lobe_window_samples(sample_rate_hz, corner_hz);
@@ -488,7 +496,9 @@ pub(crate) fn band_limited_arrival_under(
     let argmax_gap = peak_index as i64 - arrival_index as i64;
     let mut broadband_delta_level_db = None;
     // A NaN SNR (a non-finite IR) withholds like a low one.
-    let cross_check = if snr_db.is_nan() || snr_db < rule.snr_min_db {
+    let cross_check = if !snr_measured {
+        ArrivalCrossCheck::BandLimitedSnrUnmeasured
+    } else if snr_db.is_nan() || snr_db < rule.snr_min_db {
         ArrivalCrossCheck::BandLimitedSnrLow { snr_db }
     } else if let Some(l) = lobe.filter(|l| l.margin_db < ARRIVAL_LOBE_MARGIN_MIN_DB) {
         ArrivalCrossCheck::ArrivalAmbiguous {
@@ -518,7 +528,7 @@ pub(crate) fn band_limited_arrival_under(
     BandLimitedArrival {
         arrival_index,
         source: ArrivalSource::BandLimitedPeak { corner_hz },
-        band_limited_snr_db: Some(snr_db),
+        band_limited_snr_db: snr_measured.then_some(snr_db),
         lobe_margin_db: Some(lobe_margin_db),
         lobe_offset: lobe.map(|l| l.offset),
         broadband_delta_level_db,
@@ -965,14 +975,15 @@ pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64]
 /// draws (#550 architect revision 3).
 ///
 /// The standing alone does not decide trust. A pick inside the guard band
-/// has an empty floor, so its SNR reads `+inf` and clears
-/// [`ARRIVAL_SNR_MIN_DB`] without having been measured (#577). Trusting
-/// it emptied the verdict's floor on 11 of 400 noise-only draws, and the
-/// refusal then blamed a peak that sat far outside the guard band (#550
-/// revision 4). The measured test is on the region's length, not on the
-/// SNR's finiteness: `+inf` over a non-empty all-zero floor is measured
-/// and stays trusted. It is decided before `BandLimitedSnrLow`, so the
-/// anchor holds whichever standing #577 gives an unmeasured pick.
+/// has an empty floor, so its SNR was never measured; its standing is
+/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] (#577). Before #577 its
+/// `+inf` cleared [`ARRIVAL_SNR_MIN_DB`], and trusting it emptied the
+/// verdict's floor on 11 of 400 noise-only draws, and the refusal then
+/// blamed a peak that sat far outside the guard band (#550 revision 4).
+/// The measured test is on the region's length, not on the SNR's
+/// finiteness: `+inf` over a non-empty all-zero floor is measured and
+/// stays trusted. It is decided before the standing, the same length test
+/// #577's standing uses, so the two agree on which picks are unmeasured.
 fn floor_anchor(
     arrival_index: usize,
     peak_index: usize,
@@ -1141,8 +1152,12 @@ pub struct IrStats {
     /// (#537), not that offset.
     pub arrival_index: usize,
     /// Pre-impulse SNR of the high-passed IR at [`Self::arrival_index`],
-    /// in dB, gated at [`ARRIVAL_SNR_MIN_DB`]. `None` when the arrival is
-    /// not band-limited.
+    /// in dB, gated at [`ARRIVAL_SNR_MIN_DB`]. `None` when it was not
+    /// measured, and the standing says which: the arrival is not
+    /// band-limited ([`ArrivalCrossCheck::BandLimitUnavailable`]), or the
+    /// pick sits inside the guard band so no floor precedes it
+    /// ([`ArrivalCrossCheck::BandLimitedSnrUnmeasured`], #577). `+inf` only
+    /// over a non-empty all-zero floor, which is a measurement.
     pub band_limited_snr_db: Option<f64>,
     /// How far the largest other local maximum of the high-passed IR within
     /// one corner period of the arrival sits below it, in dB (#537
@@ -1271,7 +1286,7 @@ impl IrStats {
     /// before arrival — arrival SNR 12.2 dB, required ≥ 35.0 dB`. On
     /// [`PreImpulseAnchor::PeakArrivalUnmeasured`] the second line is the
     /// fixed `not before arrival — ` + [`ARRIVAL_SNR_UNMEASURED_REASON`]: it
-    /// never formats the arrival SNR, which is `+inf` there (#577). Empty
+    /// never formats the arrival SNR, which was not measured there (#577). Empty
     /// when the floor region is — the verdict's reason already says there
     /// is no floor.
     pub fn pre_impulse_floor_lines(&self) -> Vec<String> {
@@ -1305,9 +1320,10 @@ impl IrStats {
 }
 
 /// Why a band-limited arrival inside the guard band was not trusted for the
-/// pre-impulse floor (#550 UX revision 4): there was no floor before it to
-/// measure its SNR against. A fixed string, so an unmeasured `+inf` never
-/// prints as a number.
+/// pre-impulse floor (#550 UX revision 4), and why
+/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] withholds the flight time
+/// (#577): there was no floor before it to measure its SNR against. A fixed
+/// string, so an unmeasured SNR never prints as a number.
 pub const ARRIVAL_SNR_UNMEASURED_REASON: &str = "arrival SNR unmeasured, no floor before it";
 
 /// Why a band-limited arrival was not trusted (#537, #550):
@@ -1344,8 +1360,9 @@ pub enum PreImpulseAnchor {
     /// The band-limited arrival precedes the peak but sits inside the guard
     /// band, so there was no floor to measure its SNR against (#550
     /// revision 4). The floor ends before the peak — the region #501
-    /// scored. Decided before the standing, whatever #577 makes of the
-    /// `+inf` SNR.
+    /// scored. Decided before the standing, on the same region length that
+    /// makes the standing [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`]
+    /// (#577).
     PeakArrivalUnmeasured,
 }
 
@@ -1469,6 +1486,13 @@ pub enum ArrivalCrossCheck {
     /// is #537's defect when a room mode sits late, so the flight time is
     /// withheld.
     BandLimitUnavailable { band_top_hz: f64, required_hz: f64 },
+    /// The high-passed pick sits inside the guard band, so no floor precedes
+    /// it and its SNR was never measured (#577). Not
+    /// [`Self::BandLimitedSnrLow`]: the SNR is absent, not low, and an empty
+    /// floor's `+inf` would otherwise clear [`ARRIVAL_SNR_MIN_DB`].
+    /// [`IrStats::band_limited_snr_db`] is `None`. Withholds the flight
+    /// time.
+    BandLimitedSnrUnmeasured,
     /// The high-passed IR's pre-impulse SNR is below
     /// [`ARRIVAL_SNR_MIN_DB`]. Withholds the flight time.
     BandLimitedSnrLow { snr_db: f64 },
@@ -1503,6 +1527,7 @@ impl ArrivalCrossCheck {
         matches!(
             self,
             ArrivalCrossCheck::BandLimitUnavailable { .. }
+                | ArrivalCrossCheck::BandLimitedSnrUnmeasured
                 | ArrivalCrossCheck::BandLimitedSnrLow { .. }
                 | ArrivalCrossCheck::ArrivalAmbiguous { .. }
                 | ArrivalCrossCheck::EarlierComparable { .. }
@@ -3219,17 +3244,15 @@ mod tests {
 
     /// #550 architect revision 4: the floor anchor as a table, one row per
     /// variant, plus the two rows that pin the ordering. The unmeasured row
-    /// under `BandLimitedSnrLow { +inf }` fixes the order before #577 lands;
-    /// the unmeasured row under `Agrees` fails on the revision-3 rule, which
-    /// read trust from the standing alone.
+    /// under `BandLimitedSnrUnmeasured` is the pairing shipped code builds
+    /// (#577); the unmeasured row under `Agrees` fails on the revision-3
+    /// rule, which read trust from the standing alone.
     #[test]
     fn floor_anchor_table() {
         let (arrival, peak) = (21_246usize, 23_545usize);
         let agrees = ArrivalCrossCheck::Agrees { gap: 0 };
         let low = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 12.2 };
-        let low_inf = ArrivalCrossCheck::BandLimitedSnrLow {
-            snr_db: f64::INFINITY,
-        };
+        let unmeasured = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
         let earlier = ArrivalCrossCheck::BroadbandEarlier {
             gap: arrival as i64 - peak as i64,
         };
@@ -3279,7 +3302,7 @@ mod tests {
                 arrival,
                 peak,
                 BAND_LIMITED,
-                &low_inf,
+                &unmeasured,
                 0,
                 (peak, PreImpulseAnchor::PeakArrivalUnmeasured),
             ),
@@ -3310,7 +3333,7 @@ mod tests {
     }
 
     /// #550 UX revision 4: the unmeasured continuation is a fixed string. It
-    /// never formats the `+inf` SNR or the arrival sample, and the
+    /// never formats an SNR or the arrival sample, and the
     /// not-trusted form keeps its number (the anchor arms must not collapse).
     #[test]
     fn an_unmeasured_arrival_prints_the_fixed_continuation() {
@@ -3326,10 +3349,8 @@ mod tests {
         )
         .len();
         let guard = peak - stats.pre_impulse_floor_end;
-        stats.band_limited_snr_db = Some(f64::INFINITY);
-        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow {
-            snr_db: f64::INFINITY,
-        };
+        stats.band_limited_snr_db = None;
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
         stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalUnmeasured;
         let lines = stats.pre_impulse_floor_lines();
         assert_eq!(
@@ -3506,6 +3527,38 @@ mod tests {
             stats.arrival_cross_check,
             ArrivalCrossCheck::BandLimitedSnrLow { snr_db: snr }
         );
+        assert_eq!(stats.flight_time_s, None);
+    }
+
+    /// #577: a high-passed pick inside the guard band (index < len/32) has
+    /// no floor before it. The rejected rule, computed here, reads the empty
+    /// floor's `+inf` as clearing [`ARRIVAL_SNR_MIN_DB`] — asserted first,
+    /// so this test is known to reach the defect. The shipped standing is
+    /// unmeasured, carries no SNR, and withholds the flight time.
+    #[test]
+    fn cross_check_band_limited_snr_unmeasured_inside_the_guard_band() {
+        let t0 = 100usize;
+        assert!(t0 < CC_LEN / 32, "test setup: pick outside the guard band");
+        let mut ir = cc_floor();
+        ir[t0] = 0.5;
+        let h_hp = zero_phase_high_pass(&ir, 96_000, ARRIVAL_HIGH_PASS_CORNER_HZ);
+        assert_eq!(ir_peak(&h_hp).0, t0, "test setup: high-passed argmax");
+        let rejected_snr = pre_impulse_snr_db(&h_hp, t0);
+        let rejected_withholds = rejected_snr.is_nan() || rejected_snr < ARRIVAL_SNR_MIN_DB;
+        assert_eq!(rejected_snr, f64::INFINITY, "test setup");
+        assert!(
+            !rejected_withholds,
+            "the rejected rule already refuses this pick: the test no longer reaches #577"
+        );
+
+        let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
+        assert_eq!(stats.arrival_index, t0);
+        assert_eq!(
+            stats.arrival_cross_check,
+            ArrivalCrossCheck::BandLimitedSnrUnmeasured
+        );
+        assert_eq!(stats.band_limited_snr_db, None);
+        assert!(stats.arrival_cross_check.withholds_flight_time());
         assert_eq!(stats.flight_time_s, None);
     }
 
@@ -4414,6 +4467,10 @@ mod default_sweep_tests {
     ///    PR #578); it is not a measurement, so it is not trusted. Per draw:
     ///    anchor `PeakArrivalUnmeasured`, the peak's floor region, and the
     ///    verdict before #550, exactly. At least one such draw must occur.
+    /// 6. #577: every draw's arrival standing withholds the flight time, and
+    ///    the standing is `BandLimitedSnrUnmeasured` with no SNR exactly when
+    ///    the pick's floor region is empty — asserted on the standing
+    ///    itself, not only on the verdict.
     #[test]
     fn no_signal_is_refused_before_and_after_the_floor_anchor_moves() {
         let mut rejected_accepts = 0usize;
@@ -4451,10 +4508,33 @@ mod default_sweep_tests {
                 if let Some(snr) = stats.band_limited_snr_db.filter(|s| s.is_finite()) {
                     max_arrival_snr = max_arrival_snr.max(snr);
                 }
-                // `pre_impulse_snr_db` reads +inf when the pick sits inside
-                // the guard band — no floor, not a clear one (#577). Such a
-                // pick is not trusted (revision 4): the floor stays before
-                // the peak and the verdict is the one before #550, exactly.
+                // #577: the arrival standing refuses on every draw, and a
+                // pick with no floor before it is unmeasured, never passed.
+                assert!(
+                    stats.arrival_cross_check.withholds_flight_time(),
+                    "{sr} Hz seed {seed}: noise-only draw's arrival standing {:?} produces \
+                     a flight time",
+                    stats.arrival_cross_check
+                );
+                let arrival_floor_empty =
+                    pre_impulse_region(&draw.linear, stats.arrival_index).is_empty();
+                assert_eq!(
+                    stats.arrival_cross_check == ArrivalCrossCheck::BandLimitedSnrUnmeasured,
+                    arrival_floor_empty,
+                    "{sr} Hz seed {seed}: standing {:?} at arrival {}",
+                    stats.arrival_cross_check,
+                    stats.arrival_index
+                );
+                if arrival_floor_empty {
+                    assert_eq!(
+                        stats.band_limited_snr_db, None,
+                        "{sr} Hz seed {seed}: an unmeasured SNR reported as a value"
+                    );
+                }
+                // A pick inside the guard band has no floor, not a clear one
+                // (#577). Such a pick is not trusted (revision 4): the floor
+                // stays before the peak and the verdict is the one before
+                // #550, exactly.
                 if stats.arrival_index < stats.peak_index
                     && pre_impulse_region(&draw.linear, stats.arrival_index).is_empty()
                 {

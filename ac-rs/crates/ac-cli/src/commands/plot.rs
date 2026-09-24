@@ -804,7 +804,8 @@ fn distance_withheld_reason(stats: &ac_core::measurement::report::IrStats) -> Op
 
 /// The `arrival SNR` block (#537 UX): the band-limited IR's pre-impulse SNR
 /// beside the gate it is held to, and what that gate rests on. On
-/// `BandLimitUnavailable`, one row saying why it was not measured.
+/// `BandLimitUnavailable` and `BandLimitedSnrUnmeasured` (#577), one row
+/// saying why it was not measured: no number, no threshold, no basis.
 fn arrival_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{ArrivalCrossCheck, ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB};
     if let ArrivalCrossCheck::BandLimitUnavailable {
@@ -818,10 +819,16 @@ fn arrival_snr_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<Strin
             band_limit_unavailable_reason(band_top_hz, required_hz)
         )];
     }
+    let above = above_corner(stats).unwrap_or_default();
+    if stats.arrival_cross_check == ArrivalCrossCheck::BandLimitedSnrUnmeasured {
+        return vec![format!(
+            "{}not measured \u{2014} no floor before arrival ({above})",
+            label_prefix("arrival SNR")
+        )];
+    }
     let Some(snr) = stats.band_limited_snr_db else {
         return Vec::new();
     };
-    let above = above_corner(stats).unwrap_or_default();
     let value = if snr.is_finite() {
         format!("{snr:.1} dB  ({above}, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB)")
     } else {
@@ -1521,13 +1528,16 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
 fn flight_time_block(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{
         arrival_snr_low_reason, ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB,
-        ARRIVAL_LOBE_MARGIN_MIN_DB,
+        ARRIVAL_LOBE_MARGIN_MIN_DB, ARRIVAL_SNR_UNMEASURED_REASON,
     };
     let cross_check = match stats.arrival_cross_check {
         ArrivalCrossCheck::BandLimitUnavailable {
             band_top_hz,
             required_hz,
         } => Some(band_limit_unavailable_reason(band_top_hz, required_hz)),
+        ArrivalCrossCheck::BandLimitedSnrUnmeasured => {
+            Some(ARRIVAL_SNR_UNMEASURED_REASON.to_string())
+        }
         ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => Some(arrival_snr_low_reason(snr_db)),
         ArrivalCrossCheck::ArrivalAmbiguous { .. } => Some(format!(
             "second lobe within {ARRIVAL_LOBE_MARGIN_MIN_DB:.1} dB (above)"
@@ -3767,14 +3777,15 @@ mod tests {
 
     /// An arrival inside the guard band leaves the floor on the peak, and
     /// the continuation is the fixed unmeasured form: no `inf`, no number,
-    /// no arrival sample (#550 UX revision 4).
+    /// no arrival sample (#550 UX revision 4). The standing is the one
+    /// shipped code gives such a pick (#577).
     #[test]
     fn pre_impulse_snr_lines_name_an_unmeasured_arrival_without_a_number() {
         let mut stats = stats_with(None, ArrivalCheck::Agree);
         stats.arrival_index = 4;
         stats.pre_impulse_snr_db = 9.1;
-        stats.band_limited_snr_db = Some(f64::INFINITY);
-        stats.arrival_cross_check = ArrivalCrossCheck::Agrees { gap: 596 };
+        stats.band_limited_snr_db = None;
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
         stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalUnmeasured;
         stats.verdict = IrVerdict::Failed {
             reason: "pre-impulse SNR below threshold".into(),
@@ -3799,6 +3810,52 @@ mod tests {
     }
 
     // ─── #537: the band-limited arrival's rows ───────────────────────────
+
+    /// #577 UX: a pick with no floor before it prints one `arrival SNR` row
+    /// saying it was not measured — no number, no `∞`, no threshold, no
+    /// basis — and the flight time is withheld with the #550 reason, word
+    /// for word. A measured `+inf` (non-empty all-zero floor) under `Agrees`
+    /// still prints `zero measured floor`: the two cases must not fold.
+    #[test]
+    fn an_unmeasured_arrival_snr_prints_no_number() {
+        use ac_core::measurement::report::ARRIVAL_SNR_UNMEASURED_REASON;
+        let mut stats = stats_with(Some(596.0 / 96_000.0), ArrivalCheck::Agree);
+        stats.band_limited_snr_db = None;
+        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
+        let rows = arrival_snr_lines(&stats);
+        assert_eq!(
+            rows,
+            vec![format!(
+                "{}not measured \u{2014} no floor before arrival (above 2 kHz)",
+                label_prefix("arrival SNR")
+            )]
+        );
+        for row in &rows {
+            assert!(
+                !row.contains('\u{221e}')
+                    && !row.contains("inf")
+                    && !row.contains("required")
+                    && !row.contains("zero measured floor"),
+                "{row:?}"
+            );
+        }
+        assert_eq!(
+            flight_time_block(&stats),
+            [format!(
+                "{}withheld \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}",
+                label_prefix("flight time")
+            )]
+        );
+
+        let mut silent = stats.clone();
+        silent.band_limited_snr_db = Some(f64::INFINITY);
+        silent.arrival_cross_check = ArrivalCrossCheck::Agrees { gap: 0 };
+        assert!(
+            arrival_snr_lines(&silent)[0].contains("zero measured floor"),
+            "{:?}",
+            arrival_snr_lines(&silent)
+        );
+    }
 
     /// #537 UX's `BroadbandLater` shape: 96 kHz, τ 1711, arrival +596 after
     /// τ and the broadband peak +1502 samples after the arrival.
@@ -4312,6 +4369,12 @@ mod tests {
         };
         lines.extend(earlier_peak_line(&earlier));
         lines.extend(flight_time_block(&earlier));
+        let mut unmeasured = wide.clone();
+        unmeasured.arrival_source = ArrivalSource::BandLimitedPeak { corner_hz: 500.0 };
+        unmeasured.band_limited_snr_db = None;
+        unmeasured.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
+        lines.extend(flight_time_block(&unmeasured));
+        lines.extend(arrival_snr_lines(&unmeasured));
         for (distance, flight) in [(10.0, 2_798.0 + 166.0), (10.0, 5_000.0), (0.5, 100.0)] {
             let mut d = wide.clone();
             d.distance_check = distance_scored(distance, flight);

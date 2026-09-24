@@ -1472,11 +1472,13 @@ but since #550 the floor under `pre_impulse_snr_db` ends one guard band
 before the band-limited arrival when that arrival is trusted and precedes
 the peak, and before the peak otherwise (`IrStats::pre_impulse_floor_anchor`,
 `pre_impulse_floor_end`). Trusted means its SNR was measured (a non-empty
-floor before the arrival, so a pick inside the guard band and its `+inf` SNR
-do not count) and its standing is not `BandLimitedSnrLow`.
+floor before the arrival, so a pick inside the guard band does not count) and
+its standing is not `BandLimitedSnrLow`.
 Derived on read, so a report written earlier re-reads with the new figure.
 `IrStats::arrival_cross_check` guards the pick and compares it with the
 broadband IR, first match wins: `BandLimitUnavailable` (withheld);
+`BandLimitedSnrUnmeasured` (#577: the high-passed pick sits inside the guard
+band, so no floor precedes it and `band_limited_snr_db` is `None` — withheld);
 `BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR
 `band_limited_snr_db` is below 35 dB — ISO 3382-1:2009 §A.3.4's −20 dB
 trigger above the background's peaks — withheld); `ArrivalAmbiguous`
