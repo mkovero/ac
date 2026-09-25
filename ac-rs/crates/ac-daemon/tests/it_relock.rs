@@ -3,16 +3,19 @@
 //! `fake_correlated_pair` (see `it_set_drive.rs`'s doc for why it, not the
 //! plain idle tone) gives a deterministic delay to lock onto — the fake
 //! backend's correlated-pair generator is a seeded pseudorandom stream
-//! (`audio/fake.rs::correlated_source_at`), so re-estimating against the
-//! same configured `delay_samples` reliably reproduces the same lock. That
-//! determinism is what lets these tests assert "the new lag equals the
-//! old" rather than merely "some lag exists" — a plain idle-tone pair could
-//! not distinguish a re-lock that worked from one that silently failed and
-//! defaulted to 0, since a digital loopback's own genuine delay is also 0.
-//! It also means the correlated signal on the capture side is independent
-//! of the daemon's own output stage, so toggling `set_drive` here changes
-//! only `engine_on`/the drive-edge trigger, never the thing being locked
-//! onto.
+//! (`audio/fake/stimulus.rs::correlated_source_at`), so re-estimating
+//! against the same configured `delay_samples` reliably reproduces the same
+//! lock. That determinism is what lets these tests assert "the new lag
+//! equals the old" rather than merely "some lag exists" — a plain idle-tone
+//! pair could not distinguish a re-lock that worked from one that silently
+//! failed and defaulted to 0, since a digital loopback's own genuine delay
+//! is also 0. These sessions are drivable, so their outputs are open and a
+//! `set_drive on` is heard: the fake adds the generator's noise to the
+//! pair rather than replacing it. That noise is seeded per channel, so it
+//! is uncorrelated between meas and ref — a drive lowers the pair's
+//! coherence but leaves its correlated component (the configured
+//! `delay_samples` and `gain`) unchanged, and every lock, drive on or off,
+//! must find `LOCK_DELAY_SAMPLES`.
 
 use std::thread;
 use std::time::Duration;
@@ -187,6 +190,9 @@ fn a_lock_taken_with_drive_off_is_discarded_on_the_first_drive_on() {
         "drive-on edge did not trigger a new attempt: before {attempts_before}, after {}",
         attempts(&after)
     );
+    // This re-lock both starts and completes under drive, so it pins that
+    // the drive's contribution stays uncorrelated at lag 0.
+    assert_eq!(delay_samples(&after), LOCK_DELAY_SAMPLES);
 }
 
 // ---------------------------------------------------------------------

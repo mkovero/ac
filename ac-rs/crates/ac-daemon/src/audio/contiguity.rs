@@ -177,7 +177,7 @@ fn assemble_window_with_period(
         sr,
         "engine rate must match the rate the analysis assumes"
     );
-    eng.set_tone(tone_hz, 0.5);
+    eng.set_external_tones(&[(tone_hz, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
     eng.enable_ring_mode(process_secs, 1, period);
@@ -496,7 +496,7 @@ fn discard_count_tracks_the_modelled_processing_time() {
 
     let mut eng = FakeEngine::new();
     eng.set_sample_rate(sr);
-    eng.set_tone(TONE_HZ, 0.5);
+    eng.set_external_tones(&[(TONE_HZ, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.enable_ring_mode(0.01, 0, SAMPLE_ACCURATE);
     for _ in 0..ticks {
@@ -909,7 +909,7 @@ fn contiguous_drain_does_not_accumulate_a_backlog() {
 
     let mut eng = FakeEngine::new();
     eng.set_sample_rate(sr);
-    eng.set_tone(TONE_HZ, 0.5);
+    eng.set_external_tones(&[(TONE_HZ, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
     // process_secs deliberately larger than the chunk: every tick accrues
@@ -973,7 +973,7 @@ fn fake_engine_honours_a_non_default_sample_rate() {
     eng.set_sample_rate(SR);
     assert_eq!(eng.sample_rate(), SR, "set_sample_rate must take effect");
 
-    eng.set_tone(tone, 0.5);
+    eng.set_external_tones(&[(tone, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     let window = eng.capture_block(2.5).unwrap();
     assert_eq!(

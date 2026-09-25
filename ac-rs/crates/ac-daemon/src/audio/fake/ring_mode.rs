@@ -236,6 +236,17 @@ impl FakeRings {
         duration: f64,
         kind: RingDrain,
     ) -> Result<Vec<Vec<f32>>> {
+        // One ref ring per registered ref port, read in order. A mismatch
+        // would mean some ring reads no port or two rings read one; refuse
+        // rather than substitute (the #254 shape, applied to ring mode).
+        let ref_ports = ports.len().saturating_sub(1);
+        if ref_ports != self.n_refs() {
+            anyhow::bail!(
+                "fake ring mode: {} ref ring(s) allocated but {} ref port(s) registered",
+                self.n_refs(),
+                ref_ports
+            );
+        }
         // The clearing drains empty the ring first, so plan the fill from what
         // will actually be there when the wait runs. Whole periods only — a
         // producer that could deliver a partial period would model the wrong

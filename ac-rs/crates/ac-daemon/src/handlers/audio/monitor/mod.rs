@@ -273,17 +273,19 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // backend only, real hardware is never touched by this command.
         // Precedence when more than one is given: fake_tones > fake_noise_dbfs
         // > freq_hz/amplitude single-tone (the pre-#170 default path).
+        // External setters, not the generator's: monitor opens no outputs,
+        // and a generator with nothing connected captures zeros (#204).
         if fake {
             if let Some(tones) = &fake_tones {
                 let pairs: Vec<(f64, f64)> = tones
                     .iter()
                     .map(|t| (t.freq_hz, dbfs_to_amplitude(t.level_dbfs)))
                     .collect();
-                eng.set_tone_pair(&pairs);
+                eng.set_external_tones(&pairs);
             } else if let Some(noise_dbfs) = fake_noise_dbfs {
-                eng.set_broadband_noise(dbfs_to_amplitude(noise_dbfs));
+                eng.set_external_noise(dbfs_to_amplitude(noise_dbfs));
             } else {
-                eng.set_tone(freq_hz, amplitude);
+                eng.set_external_tones(&[(freq_hz, amplitude)]);
             }
         }
         let sr = eng.sample_rate();

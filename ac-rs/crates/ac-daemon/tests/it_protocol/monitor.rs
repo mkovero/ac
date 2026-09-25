@@ -204,8 +204,8 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
 #[test]
 fn monitor_spectrum_fake_tones_produce_two_distinct_peaks() {
     // #170 display-truth harness: `fake_tones` must actually reach the
-    // fake engine (via `dbfs_to_amplitude` + `set_tone_pair` in
-    // handlers/audio/monitor.rs) and produce two independently-detectable
+    // fake engine (via `dbfs_to_amplitude` + `set_external_tones` in
+    // handlers/audio/monitor/mod.rs) and produce two independently-detectable
     // spectral peaks at their requested levels — the I1/I3 stimulus this
     // harness needs. Frequencies chosen well clear of each other and of
     // the LF/HF crossover so both land cleanly in one FFT.
