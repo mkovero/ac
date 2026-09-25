@@ -19,6 +19,7 @@ mod ctrl_timeout;
 mod level_max;
 mod modes;
 mod monitor;
+mod monitor_soak;
 mod mtw;
 mod out_of_range;
 mod plot_ir;
