@@ -48,35 +48,13 @@ module with `verified: true` from the start — do not reintroduce
 
 ## applicable standards
 
-Source docs in `stddocs/` at (main) repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
+Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
-**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and one paper alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. 
-
-### normative standards
-
-| standard | file | applies to |
-|---|---|---|
-| AES-17-2020 | `stddocs/iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf` | THD+N methodology, notch filter specs, measurement conditions, result expression — digital audio |
-| IEC 60268-3:2018 | `stddocs/iec-full/IEC60268-3.pdf` | Sound system equipment — amplifiers: frequency response, S/N, dynamic range |
-| IEC 61260-1:2014 | `stddocs/iec-full/IEC61260-1.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
-| IEC 61672-1:2013 | `stddocs/iec-full/IEC61672-1.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
-| ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
-| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LKFS), true-peak |
-| ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
-| ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
-| ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
-
-### reference reading (non-normative)
-
-Not standards, but hold authoritative derivations + worked examples. Consult when standard text ambiguous or when checking numerical results.
-
-| document | file | useful for |
-|---|---|---|
-| Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
-| Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
-| Farina, AES 108th Conv. preprint #5093 (2000) — "Simultaneous Measurement of Impulse Response and Distortion with a Swept-Sine Technique" | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Log-sweep impulse-response measurement and deconvolution (inverse filter), harmonic-distortion separation — cited by `sweep/mod.rs::citation()` and `farina_citation()`. Not an H1 reference. |
+The held documents — normative standards and reference reading — and their paths are listed once, in the [document map](#document-map).
 
 ### how to use them during review
+
+"Them" = the documents listed in the [document map](#document-map).
 
 **AES-17** = primary normative reference for `ac-core/measurement/thd.rs`. Read relevant clause — no paraphrase. Check:
 - THD+N residual computed after fundamental removal and divided by total signal level
@@ -119,7 +97,7 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 
 Every PR touching output formatting, unit display, or measurement computation:
 
-1. Identify which standard(s) apply to changed code (use table above)
+1. Identify which standard(s) apply to changed code (module → standard: the per-module table under "Standards tracked" at the top of this file; standard → file: the [document map](#document-map))
 2. Read relevant clause in actual PDF — no memory, no summary above; summaries are orientation, not authoritative
 3. Answer: does implementation match standard's requirements for both value computation AND display/labelling format?
 4. Cite standard + clause number in review comment, e.g.:
@@ -163,7 +141,7 @@ Corollary for citations: **cite a section by name, not by line number.** A
 
 ## document map
 
-Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
+Source docs in `stddocs/` at (main) repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
 **Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and one paper alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. A file of the same name previously sat at `stddocs/iec-full/` too, but it was a mislabelled copy of IEC 60268-3 — not an edition or variant of the Cabot paper — and has been deleted. If a same-named file ever reappears under `iec-full/`, treat it as suspect and verify against its first page before citing it; don't assume it's the fuller copy. Copy the cell.
 
