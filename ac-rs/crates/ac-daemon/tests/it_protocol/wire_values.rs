@@ -40,10 +40,16 @@ fn assert_idle(c: &Client<'_>, what: &str) {
     );
 }
 
+/// `generate_pink` reads no `freq_hz`, and an unread field is refused
+/// (#628), so only `generate` carries one.
 fn generate(c: &Client<'_>, cmd: &str, channels: Value) -> Value {
-    c.call(json!({
-        "cmd": cmd, "freq_hz": 1000.0, "level_dbfs": -40.0, "channels": channels,
-    }))
+    let mut req = json!({
+        "cmd": cmd, "level_dbfs": -40.0, "channels": channels,
+    });
+    if cmd == "generate" {
+        req["freq_hz"] = json!(1000.0);
+    }
+    c.call(req)
 }
 
 #[test]
