@@ -102,12 +102,16 @@ pub const PLAUSIBILITY_TOL_DB: f64 = 6.0;
 ///
 /// The window is **not** a vote over independent frames. The LF-only slice
 /// is bit-identical between recomputes, so its power-mean repeats for
-/// `hop_ticks + 1` frames: at the soak's `hop_ticks` = 4 the 10 frames cover
-/// two LF recomputes, and one out-of-tolerance recompute fills 5 slots and
-/// fires by itself. What keeps that from being a false red is the healthy
-/// margin, which the soak prints ([`SoakStats`]): measured 0.67 dB max
-/// |cur − baseline| against the 6 dB tolerance (#189, three runs,
-/// bit-identical readouts).
+/// `hop_ticks` frames (#616; before it the daemon recomputed every
+/// `hop_ticks + 1` ticks). At the soak's `hop_ticks` = 4 the 10 frames cover
+/// two to three LF recomputes, and one out-of-tolerance recompute fills 4
+/// slots, one short of [`PLAUSIBILITY_WINDOW_MIN_VIOLATIONS`]: it no longer
+/// fires by itself, two bad recomputes in the window do. That lost
+/// single-recompute sensitivity is recorded here, not repaired; retuning the
+/// window is the same separate decision as I5a / I5c. What keeps the window
+/// from being a false red is the healthy margin, which the soak prints
+/// ([`SoakStats`]): measured 0.67 dB max |cur − baseline| against the 6 dB
+/// tolerance (#189, three runs, bit-identical readouts).
 pub const PLAUSIBILITY_WINDOW: usize = 10;
 pub const PLAUSIBILITY_WINDOW_MIN_VIOLATIONS: usize = 5;
 
@@ -576,8 +580,10 @@ mod tests {
         (None, c.counts())
     }
 
-    /// A healthy stream: LF recomputes every `period` frames (the daemon's
-    /// actual `hop_ticks + 1`), HF tracks the LF level.
+    /// A healthy stream: LF recomputes every `period` frames, HF tracks the
+    /// LF level. The healthy-stream callers pass 5 at `hop_ticks` = 4, the
+    /// daemon's `hop_ticks + 1` cadence before #616 (it now recomputes
+    /// every `hop_ticks`); that is still inside I5c's tolerance.
     fn healthy(i: usize, period: usize) -> SoakFrame {
         frame(&lf_content(i / period, -40.0), &[-40.0; HF_COLS])
     }
