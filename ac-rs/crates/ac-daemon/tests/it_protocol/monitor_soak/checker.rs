@@ -14,9 +14,11 @@
 //!
 //! Invariants, judged on every frame, first violation wins, in priority
 //! order bounded > continuity > liveness > rate > plausibility:
-//! - **I4-t** (bounded), from frame 0: no NaN/Inf, no value above
-//!   0 dBFS + [`BOUNDED_TOL_DB`].
-//! - **I2-t** (continuity), post-settle: LF/HF splice step within
+//! - **I4-t** (bounded), from frame 0: no NaN, no `+inf`, no value above
+//!   0 dBFS + [`BOUNDED_TOL_DB`]. `-inf` (an exact-zero amplitude on the
+//!   wire) is legal here; a collapsed LF band is I5b's to catch.
+//! - **I2-t** (continuity), post-settle, split at `crossover_hz`: LF/HF
+//!   splice step within
 //!   [`CONTINUITY_TOL_DB`], violation only after [`CONTINUITY_STREAK`]
 //!   consecutive out-of-tolerance frames.
 //! - **I5a** (liveness), post-settle: LF slice bit-identical for more than
@@ -26,6 +28,12 @@
 //! - **I5b** (plausibility), post-settle: LF power-mean against its own
 //!   baseline; out of [`PLAUSIBILITY_TOL_DB`] in a majority of a rolling
 //!   window.
+//!
+//!
+//! I5a, I5b and I5c judge the **LF-only slice**, `freqs < lf_edge_hz`, not
+//! everything below the crossover: the columns in `[lf_edge_hz,
+//! crossover_hz)` are cross-faded with HF, which is recomputed every tick, so
+//! they change on every frame of a healthy daemon. See [`lf_only_edge_hz`].
 //!
 //! The constants are ported from the `ac-ui --headless-test` I5 soak
 //! (c9523d9, removed with the ac-ui detach in ec4c6db); their rationale is
@@ -84,6 +92,25 @@ pub const PLAUSIBILITY_TOL_DB: f64 = 6.0;
 /// frames and would reset a streak forever.
 pub const PLAUSIBILITY_WINDOW: usize = 10;
 pub const PLAUSIBILITY_WINDOW_MIN_VIOLATIONS: usize = 5;
+
+/// Half-width, in octaves, of the band across which the daemon cross-fades
+/// LF into HF around `crossover_hz`. Published wire contract: ZMQ.md →
+/// `### Dual-resolution low-frequency path (#142)` ("cross-faded linearly in
+/// linear amplitude across a ±1/6-octave band at the crossover"); the value
+/// behind it is `ac-core`'s private `BLEND_HALF_OCTAVE`. The soak is a wire
+/// consumer, so it takes the width from the document, not the crate.
+///
+/// If the blend band widens, blend columns fall inside the LF-only slice and
+/// I5c goes red on every run — loud. If it narrows, the slice stays LF-only
+/// and only loses a little coverage. The coupling is recorded by
+/// `blend_columns_outside_lf_edge_do_not_count_as_lf_changes`.
+pub const BLEND_HALF_OCTAVE_WIRE: f64 = 1.0 / 6.0;
+
+/// Upper edge of the LF-only slice: the low end of the blend band,
+/// `crossover_hz / 2^BLEND_HALF_OCTAVE_WIRE`.
+pub fn lf_only_edge_hz(crossover_hz: f64) -> f64 {
+    crossover_hz / 2f64.powf(BLEND_HALF_OCTAVE_WIRE)
+}
 
 /// One published spectrum frame: display columns and their dBFS values.
 #[derive(Clone, Debug)]
@@ -144,11 +171,12 @@ pub struct CheckCounts {
     pub lf_changes: usize,
 }
 
-/// Split index: LF = `freqs[..split]`, HF = `freqs[split..]`.
-pub fn lf_split(freqs: &[f64], crossover_hz: f64) -> usize {
+/// Split index: `freqs[..split]` below `edge_hz`, `freqs[split..]` at or
+/// above it.
+pub fn lf_split(freqs: &[f64], edge_hz: f64) -> usize {
     freqs
         .iter()
-        .position(|&f| f >= crossover_hz)
+        .position(|&f| f >= edge_hz)
         .unwrap_or(freqs.len())
 }
 
@@ -162,10 +190,12 @@ pub fn power_mean_db(vals: &[f64]) -> f64 {
     10.0 * mean_pow.log10()
 }
 
-/// I4-t on one frame, independent of any checker state.
+/// I4-t on one frame, independent of any checker state. `-inf` is legal: it
+/// is an exact-zero amplitude, which the wire can carry. NaN (a negative or
+/// non-numeric amplitude) and `+inf` are garbage.
 pub fn check_bounded(sf: &SoakFrame, frame_idx: usize) -> Option<Violation> {
     for (i, &v) in sf.spectrum.iter().enumerate() {
-        if !v.is_finite() {
+        if v.is_nan() || v == f64::INFINITY {
             return Some(Violation {
                 invariant: Invariant::Bounded,
                 class: "garbage",
@@ -191,6 +221,7 @@ pub fn check_bounded(sf: &SoakFrame, frame_idx: usize) -> Option<Violation> {
 
 pub struct SoakChecker {
     crossover_hz: f64,
+    lf_edge_hz: f64,
     hop_ticks: f64,
     settle_frames: usize,
 
@@ -209,11 +240,15 @@ pub struct SoakChecker {
 }
 
 impl SoakChecker {
+    /// `crossover_hz`: where I2-t splits LF from HF.
+    /// `lf_edge_hz`: upper edge of the LF-only slice I5a/I5b/I5c judge
+    /// (normally [`lf_only_edge_hz`]`(crossover_hz)`).
     /// `hop_ticks`: expected frames between LF recomputes, unrounded.
     /// `settle_frames`: frames judged by I4-t only before the rest engage.
-    pub fn new(crossover_hz: f64, hop_ticks: f64, settle_frames: usize) -> Self {
+    pub fn new(crossover_hz: f64, lf_edge_hz: f64, hop_ticks: f64, settle_frames: usize) -> Self {
         Self {
             crossover_hz,
+            lf_edge_hz,
             hop_ticks,
             settle_frames,
             next_idx: 0,
@@ -275,7 +310,8 @@ impl SoakChecker {
             }
         }
 
-        let lf = &sf.spectrum[..split];
+        let lf_only = lf_split(&sf.freqs, self.lf_edge_hz).min(sf.spectrum.len());
+        let lf = &sf.spectrum[..lf_only];
         if lf.is_empty() {
             return None;
         }
@@ -391,6 +427,8 @@ mod tests {
     const HF_COLS: usize = 7;
 
     /// LF columns at 100..700 Hz (below the crossover), HF at 800..1400 Hz.
+    /// With the wire blend width the LF-only edge is ≈668 Hz, so the 700 Hz
+    /// column is a blend column and 100..600 Hz is the LF-only slice.
     fn frame(lf: &[f64], hf: &[f64]) -> SoakFrame {
         let mut freqs = Vec::new();
         let mut spectrum = Vec::new();
@@ -420,7 +458,12 @@ mod tests {
         n: usize,
         make: impl Fn(usize) -> SoakFrame,
     ) -> (Option<Violation>, CheckCounts) {
-        let mut c = SoakChecker::new(CROSSOVER_HZ, hop_ticks, settle);
+        let mut c = SoakChecker::new(
+            CROSSOVER_HZ,
+            lf_only_edge_hz(CROSSOVER_HZ),
+            hop_ticks,
+            settle,
+        );
         for i in 0..n {
             if let Some(v) = c.check_frame(&make(i)) {
                 return (Some(v), c.counts());
@@ -559,6 +602,77 @@ mod tests {
     }
 
     #[test]
+    fn exact_zero_amplitude_is_legal_for_bounded() {
+        // -inf dBFS is an exact-zero amplitude on the wire, not garbage.
+        let mut f = healthy(0, 5);
+        f.spectrum[9] = f64::NEG_INFINITY;
+        assert!(check_bounded(&f, 0).is_none());
+        f.spectrum[9] = f64::INFINITY;
+        let v = check_bounded(&f, 0).expect("+inf not caught");
+        assert_eq!(v.class, "garbage");
+    }
+
+    #[test]
+    fn collapsed_lf_band_is_plausibility() {
+        // From frame 60 the LF-only slice (100..600 Hz) is exact zero
+        // amplitude, -inf dBFS; the 700 Hz blend column stays live. I4-t
+        // lets -inf through; I5b needs 5 bad frames and I5a needs more than
+        // 2 x 4, so the collapse is reported as plausibility, not a freeze.
+        const COLLAPSE_AT: usize = 60;
+        let (v, _) = run(4.0, 20, 200, |i| {
+            let mut lf = lf_content(i / 4, -40.0);
+            if i >= COLLAPSE_AT {
+                for x in lf.iter_mut().take(LF_COLS - 1) {
+                    *x = f64::NEG_INFINITY;
+                }
+            }
+            frame(&lf, &[-40.0; HF_COLS])
+        });
+        let v = v.expect("collapsed LF band not caught");
+        assert_eq!(v.invariant, Invariant::Plausibility, "{v:?}");
+        assert_eq!(v.class, "drift");
+        assert!(v.frame_idx >= COLLAPSE_AT, "{v:?}");
+    }
+
+    #[test]
+    fn blend_columns_outside_lf_edge_do_not_count_as_lf_changes() {
+        // LF-only columns change once every hop_ticks frames; the blend
+        // column (700 Hz, in [edge, crossover)) changes every frame, as HF
+        // does on the daemon. The checker built with the wire blend width
+        // must stay green; the rejected slice (edge = crossover_hz), computed
+        // here, must read the blend churn as LF changing every frame.
+        const HOP: usize = 4;
+        let make = |i: usize| {
+            let mut lf = lf_content(i / HOP, -40.0);
+            lf[LF_COLS - 1] = -40.0 + (i as f64 * 1.3).sin();
+            frame(&lf, &[-40.0; HF_COLS])
+        };
+        let edge = lf_only_edge_hz(CROSSOVER_HZ);
+        assert!(
+            edge > 600.0 && edge < 700.0,
+            "LF-only edge {edge:.1} Hz must separate the 600 Hz LF column from \
+             the 700 Hz blend column"
+        );
+
+        let mut good = SoakChecker::new(CROSSOVER_HZ, edge, HOP as f64, 20);
+        let mut rejected = SoakChecker::new(CROSSOVER_HZ, CROSSOVER_HZ, HOP as f64, 20);
+        let mut rejected_v = None;
+        for i in 0..300 {
+            let f = make(i);
+            if let Some(v) = good.check_frame(&f) {
+                panic!("LF-edge checker flagged a healthy stream: {v:?}");
+            }
+            if rejected_v.is_none() {
+                rejected_v = rejected.check_frame(&f);
+            }
+        }
+        assert!(good.counts().rate > 200, "{:?}", good.counts());
+        let v = rejected_v.expect("slice at crossover_hz did not go red on blend churn");
+        assert_eq!(v.invariant, Invariant::Rate, "{v:?}");
+        assert_eq!(v.class, "wrong-rate");
+    }
+
+    #[test]
     fn nan_is_bounded_garbage() {
         let (v, _) = run(4.0, 1000, 10, |i| {
             let mut f = healthy(i, 5);
@@ -577,7 +691,7 @@ mod tests {
         // Crossover below every column: LF slice empty. The counts must show
         // it, so the runner's coverage assertion fails rather than passes
         // vacuously.
-        let mut c = SoakChecker::new(10.0, 4.0, 0);
+        let mut c = SoakChecker::new(10.0, lf_only_edge_hz(10.0), 4.0, 0);
         for i in 0..100 {
             assert!(c.check_frame(&healthy(i, 5)).is_none());
         }

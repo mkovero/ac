@@ -214,6 +214,18 @@ documented reply keys of the read-only commands against a live `--fake-audio`
 daemon. It does not check DATA payloads, field types or values: a green run
 means the roster and the read-only replies agree, not that the prose is true.
 
+`it_protocol::monitor_soak` is the temporal (onset-delay) gate for the
+`monitor_spectrum` pipeline. The monitor tests beside it settle, read one frame
+and judge it, so they cannot see a ring wrap, EMA state poisoning or an LF band
+updating at the wrong rate. The soak runs seeded noise through a `--fake-audio`
+daemon for a length derived from the ack's `lf_fft_n` / `lf_overlap_pct` /
+`lf_avg_tau_ms`, and judges every frame: bounded (I4-t), LF/HF splice (I2-t),
+LF liveness (I5a), plausibility (I5b) and LF update rate (I5c). Its clock is
+the received-frame count, one frame per tick, not wall time, so a loaded host
+cannot turn it red. On the first violation it dumps frames N-1/N/N+1 as CSVs
+under `CARGO_TARGET_TMPDIR`. It does not cover drift of the tick itself
+against wall time, multi-channel monitoring, or the CWT/CQT/reassigned modes.
+
 #### ac-scene
 
 `tests/`: `it_transfer`, `it_live_frame`, `it_mtw_display`, `it_smoothing`,
