@@ -889,6 +889,10 @@ drive() {
       return 1
     fi
     echo "  #$n: opened PR #$pr"
+    # in-review marks a PR handed to QA (#605). The runner owns every entry
+    # into review: here, after a revision, and after integration. Added here
+    # and not at qa_loop entry, which also takes PRs qa left at needs-work.
+    gh_retry gh pr edit "$pr" -R "$AC_REPO" --add-label in-review >/dev/null 2>&1 || true
     st=0; qa_loop "$n" "$pr" || st=$?
     (( st == 0 )) || return "$st"
     case "$STATE" in

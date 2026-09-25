@@ -64,6 +64,9 @@
 #      Codex recovery); a dirty tree that does not match is refused untouched;
 #      the PR #569 shape (pre-merge content as edits over an ancestor) is
 #      refused with nothing normalised into the index.
+#  28. a first-pass PR carries in-review when QA starts (#605): the runner adds
+#      it after implement opens the PR (armed: master.sh without that line
+#      reaches QA with no labels).
 set -u
 BIN="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$BIN/.." && pwd)"
@@ -647,7 +650,9 @@ case "$kind $verb" in
   "api "*) ;;
   "issue view") jq -r "${jqx:-.}" "$GH22/issue.json" ;;
   "pr view")    jq -r "${jqx:-.}" "$GH22/pr.json" ;;
-  "pr list")    jq -r "${jqx:-.}" <<< '[{"number":7,"headRefName":"issue-22-x","body":"closes #22"}]' ;;
+  "pr list")    # No pr.json: no open PR yet (case 28, before implement opens one).
+    if [[ -f $GH22/pr.json ]]; then l='[{"number":7,"headRefName":"issue-22-x","body":"closes #22"}]'; else l='[]'; fi
+    jq -r "${jqx:-.}" <<< "$l" ;;
   "pr edit")
     for l in "${rmv[@]}"; do echo "remove $l" >> "$GH22/edits"; upd --arg l "$l" '.labels |= map(select(.name != $l))'; done
     for l in "${add[@]}"; do echo "add $l" >> "$GH22/edits"; upd --arg l "$l" '.labels |= (. + [{name: $l}] | unique_by(.name))'; done ;;
@@ -961,6 +966,43 @@ check '[[ $rc == 1 ]] && grep -q "names decision $D0, not the current $D1" $T/er
 # never calls decision_rev with an issue of its own choosing.
 check '! grep -qE "decision_rev \"" "$BIN/review.sh" && [[ $(grep -c "decision=\"\$(decision_of_pr " "$BIN/review.sh") == 2 ]]' \
   "review.sh computes both digests (independent and main path) through decision_of_pr"
+
+# --- 28: a first-pass PR is in-review when QA starts (#605) --------------------
+# No PR at start; implement.sh opens one with no labels. review.sh records the
+# PR's label set at invocation, then acts as case 22's review stub.
+mk28() {  # $1 = dir
+  mk22 "$1"
+  mv "$1/review.sh" "$1/review-22.sh"
+  cat > "$1/review.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "labels-at-review $*: $(jq -r '[.labels[].name] | sort | join(" ")' "$GH22/pr.json")" >> "$GH22/calls"
+exec "$(dirname "$0")/review-22.sh" "$@"
+EOF
+  cat > "$1/implement.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "implement $*" >> "$GH22/calls"
+jq -n --arg h "$H22" '{headRefOid: $h, headRefName: "issue-22-x", body: "closes #22",
+  closingIssuesReferences: [{number: 22}], mergeable: "MERGEABLE",
+  labels: [], comments: [], reviews: []}' > "$GH22/pr.json"
+EOF
+  chmod +x "$1"/*.sh
+}
+reset22; mk28 "$T/m28"; w22_issue "ready-to-implement agent:triage agent:architect" "$A22_NEW"
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m28/master.sh" 22 > "$T/m28.out" 2>&1 )
+cp "$GH22/calls" "$T/calls28"
+check 'grep -qx "implement 22" $T/calls28 && [[ $(grep "^labels-at-review 7" $T/calls28 | head -1) == "labels-at-review 7: in-review" ]]' \
+  "28: a first-pass PR carries in-review, and nothing else, when QA starts"
+# Armed: the same fixture against this master.sh with the add-label line
+# removed. Matched by content, so a moved or reworded line fails here loudly.
+line28='gh_retry gh pr edit "$pr" -R "$AC_REPO" --add-label in-review >/dev/null 2>&1 || true'
+reset22; mk28 "$T/m28old"
+grep -vxF "    $line28" "$BIN/master.sh" > "$T/m28old/master.sh"
+w22_issue "ready-to-implement agent:triage agent:architect" "$A22_NEW"
+( cd "$REPO" && AC_LOG_DIR="$GH22/log" timeout 30 bash "$T/m28old/master.sh" 22 > "$T/m28old.out" 2>&1 )
+check '[[ $(grep -cxF "    $line28" $BIN/master.sh) == 1 && $(( $(wc -l < $BIN/master.sh) - $(wc -l < $T/m28old/master.sh) )) == 1 ]]' \
+  "28 armed: the control master.sh is this one minus exactly the first-pass add-label line"
+check 'grep -qx "implement 22" $GH22/calls && [[ $(grep "^labels-at-review 7" $GH22/calls | head -1) == "labels-at-review 7: " ]]' \
+  "28 armed: without that line the same first-pass PR reaches QA with no labels"
 rm -f "$T/stub/gh"; unset GH22 A22_NEW
 
 # --- 23: the epic waiter needs the merge commit on main (#561) -----------------
