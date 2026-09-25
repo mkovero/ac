@@ -46,6 +46,7 @@ fn transfer_scene() -> TransferScene {
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Ladder,
         fault: None,
         calibration: None,
     };

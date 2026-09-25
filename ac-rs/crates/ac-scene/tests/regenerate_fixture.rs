@@ -21,7 +21,7 @@ use std::path::PathBuf;
 fn acsnap_fixture_path() -> PathBuf {
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../tests/fixtures/snapshot-fixture-v2.acsnap"
+        "/../../../tests/fixtures/snapshot-fixture-v3.acsnap"
     ))
 }
 
@@ -173,7 +173,7 @@ fn build_wire_frame() -> serde_json::Value {
 
 fn read_fixture_snapshot() -> Snapshot {
     let bytes = std::fs::read(acsnap_fixture_path()).expect(
-        "tests/fixtures/snapshot-fixture-v2.acsnap must exist — regenerate via \
+        "tests/fixtures/snapshot-fixture-v3.acsnap must exist — regenerate via \
          `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
     );
     read_acsnap(&bytes).expect("parse checked-in .acsnap fixture")

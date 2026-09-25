@@ -413,15 +413,32 @@ fn draw_legend(
     );
     for (i, run) in stored.iter().enumerate() {
         let marker = if run.focused { "▸ " } else { "  " };
-        let smoothing = run.scene.smoothing_readout.unwrap_or("");
         let (label, captured_at_utc) = (run.label, run.captured_at_utc);
-        text(
-            painter,
-            egui::pos2(layout.content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
-            Align2::LEFT_TOP,
-            format!("{marker}{label}  {captured_at_utc}  {smoothing}"),
-            focus_text_color(run.focused),
-        );
+        let color = focus_text_color(run.focused);
+        // Identity, then how the trace was derived, then what was done to
+        // it (#221 UX): a narrow window clips the smoothing caption first
+        // and the estimator statement last. Each is its own span, placed
+        // after the one before it, and the two scene strings are drawn
+        // verbatim — never joined into this row's `format!`.
+        let mut next = painter
+            .text(
+                egui::pos2(layout.content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
+                Align2::LEFT_TOP,
+                format!("{marker}{label}  {captured_at_utc}"),
+                FontId::default(),
+                color,
+            )
+            .right_top()
+            + egui::vec2(ROW_H, 0.0);
+        if let Some(estimator) = &run.scene.estimator_readout {
+            next = painter
+                .text(next, Align2::LEFT_TOP, estimator, FontId::default(), color)
+                .right_top()
+                + egui::vec2(ROW_H, 0.0);
+        }
+        if let Some(smoothing) = run.scene.smoothing_readout {
+            text(painter, next, Align2::LEFT_TOP, smoothing, color);
+        }
     }
 }
 

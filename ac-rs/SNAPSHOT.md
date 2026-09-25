@@ -13,10 +13,12 @@ A snapshot is **raw pre-processing capture plus full provenance** — not a
 saved display. It captures every session channel's raw samples exactly as
 delivered by the audio backend, before any gain, calibration, weighting,
 or DSP touches them. Every calibrated or derived quantity a live
-`transfer_stream` session ships on the wire (H1, calibrated spectra, SPL)
-is re-derivable offline from a `.acsnap`'s raw samples, using the
-identical `ac-core` functions the daemon's live path calls — see
-`ac_core::visualize::pair_derivation` and `ac_core::snapshot::Snapshot::derive_pair`.
+`transfer_stream` session ships on the wire (H1, calibrated spectra, SPL,
+and — format v3, #221 — the multi-time-window ladder columns the transfer
+view draws) is re-derivable offline from a `.acsnap`'s raw samples, using
+the identical `ac-core` functions the daemon's live path calls — see
+`ac_core::visualize::pair_derivation`, `ac_core::visualize::mtw::replay`
+and `ac_core::snapshot::Snapshot::derive_pair`.
 
 **Self-containment is a hard requirement.** Reading and reprocessing a
 `.acsnap` needs no daemon, no audio backend, and no external config
@@ -43,10 +45,13 @@ Both entries are required; a reader must reject a file missing either one.
   nearest, saturate to `[-2²³, 2²³-1]`. Samples that already sit on the
   i24 grid (real 24-bit ADC hardware) round-trip **bit-exact**.
   Synthetic/fake-audio `f32` that doesn't sit on the grid quantizes at
-  the 1-LSB floor, `20·log10(1/2²³) ≈ -138.99 dBFS` — any tolerance
-  comparing live vs. reprocessed values must account for exactly this
-  floor and nothing more (see `it_snapshot.rs`'s I-B parity test for the
-  worked derivation).
+  the 1-LSB floor, `20·log10(1/2²³) ≈ -138.99 dBFS`. Synthetic `f32`
+  beyond ±1 — which real capture cannot produce, but the fake backend
+  can when a drive is added to its full-scale correlated source — is
+  clamped. A tolerance comparing live vs. reprocessed values must account
+  for rounding and, under such a fake stimulus, the clamp (see
+  `it_snapshot.rs`'s I-B parity test and #221's ladder replay test, whose
+  tolerance comment measures the clamp's contribution).
 - Encoded via `flacenc` (pure Rust, no system library — required since
   `ac-view`, D8, links `ac-core` directly and must build on whatever
   platform it ships on). Decoded via `claxon` (also pure Rust), not
@@ -62,7 +67,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "sr": 48000,
   "channel_map": ["meas_0", "ref"],
   "per_channel": [
@@ -86,7 +91,24 @@ Both entries are required; a reader must reject a file missing either one.
   "session": {
     "pairs": [[0, 1]],
     "delay_samples": [0],
-    "nperseg": 48000
+    "nperseg": 48000,
+    "mtw": [
+      {
+        "offset": 0,
+        "origin": -1392000,
+        "n_blocks": 4,
+        "ppo": 48.0,
+        "f_min": 20.0,
+        "f_max": 24000.0,
+        "nfft": 4096,
+        "hop": 2048,
+        "stages": [
+          { "decim": 1, "rate": 48000.0 },
+          { "decim": 4, "rate": 12000.0 },
+          { "decim": 12, "rate": 4000.0 }
+        ]
+      }
+    ]
   },
   "captured_at_utc": "2026-07-16T00:00:00Z",
   "daemon_version": "0.2.0",
@@ -96,7 +118,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `format_version` | int | `write_acsnap` writes `2`; `read_acsnap` reads `1` and `2`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). v2 (#637) added `per_channel[i].stream_sha256`; v1 files are read exactly as before, under the v1 limit in *Reader validation*. |
+| `format_version` | int | `write_acsnap` writes `3`; `read_acsnap` reads `1`, `2` and `3`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). v2 (#637) added `per_channel[i].stream_sha256`; v3 (#221) added `session.mtw`. v1 files are read exactly as before, under the v1 limit in *Reader validation*; v1 and v2 files have no ladder to replay. |
 | `sr` | int | Sample rate, Hz. Also `audio.flac`'s own stream rate — a reader cross-checks the two match. |
 | `channel_map` | `[string]` | FLAC stream channel index → session role (`"meas_0"`, `"meas_1"`, `"ref"`, …). The field a reader checks first. |
 | `per_channel` | `[ChannelMeta]` | Same order as `channel_map`. |
@@ -108,7 +130,8 @@ Both entries are required; a reader must reject a file missing either one.
 | `per_channel[i].stream_sha256` | string | **v2: required. v1: must be absent.** SHA-256, 64 lowercase hex characters, of `audio.flac` stream `i`: every sample on the i24 grid as `i32` little-endian, in stream order over the whole stream. The writer computes it from the audio it encodes. A binding check — which stream this entry describes — not integrity or tamper protection. |
 | `session.pairs` | `[[int,int]]` | `(meas_input_channel, ref_input_channel)` per pair, session indices — not FLAC stream positions. |
 | `session.delay_samples` | `[int]` | Per-pair ref↔meas delay in samples, same order as `pairs`. |
-| `session.nperseg` | int | Welch segment length in effect. `h1_estimate_core` currently pins this to `sr`, but it's recorded explicitly — a future estimator change can't silently break old snapshots. |
+| `session.nperseg` | int | Welch segment length in effect. `h1_estimate_core` currently pins this to `sr` (`ac_core::visualize::transfer::h1_nperseg`), but it's recorded explicitly — a future estimator change can't silently break old snapshots. |
+| `session.mtw` | `[object｜null]` | **v3: required, one entry per `pairs` entry. v1/v2: must be absent.** Per pair, the live multi-time-window ladder's provenance, or `null` for a pair that had none (it never locked, or the rate has no ladder). `offset`: the alignment offset (signed full-rate samples) the ladder was built with. `origin`: the ladder's first input sample as a signed full-rate index relative to the first stored sample — negative when the ladder started before the ring's retained window. `n_blocks`, `ppo`, `f_min`/`f_max`: the averaging depth and column grid the live frame was assembled at. `nfft`, `hop`, `stages[{decim, rate}]`: the ladder layout, which a reader must build identically to replay — see *Offline derivation*. |
 | `captured_at_utc` | RFC3339 string | Wall-clock instant `snapshot` was triggered (the ring's *tail* — the ring's start is `ring_duration_s` seconds earlier). |
 | `daemon_version` | string | `ac-daemon`'s own version string. |
 | `ring_duration_s` | float | Actual captured duration in this file (≤ the session's configured `snapshot_ring_s` — shorter if the session hadn't run that long yet). |
@@ -131,19 +154,26 @@ that breaks any of these rules, and `write_acsnap` refuses to write one
    `per_channel` entry. Rule 3 makes that entry the only one.
 6. A channel whose `voltage_check` is refused carries no
    `vrms_at_0dbfs_*` in its `calibration` (#466).
-7. **v2 only.** `per_channel[i].stream_sha256` equals the digest of
+7. **v2 and later.** `per_channel[i].stream_sha256` equals the digest of
    decoded stream `i` (#637). Because the digest travels inside the entry,
    any reorder of `per_channel` against the audio — two same-role entries
    swapped, or `channel_map` and `per_channel` permuted together — moves a
    digest off its stream.
+8. **v3.** `session.mtw` is present with exactly one entry per
+   `session.pairs` entry (#221); a v1 or v2 file must not carry it.
 
 Presence and shape of `stream_sha256` are checked with the metadata: a v2
-entry must carry it as 64 lowercase hex characters; a v1 entry must not
-carry it at all.
+or v3 entry must carry it as 64 lowercase hex characters; a v1 entry must
+not carry it at all.
 
-The reader checks `format_version` first (1 and 2 are accepted), then
-rules 2–6, the metadata half of rule 1 and the digest's presence and shape
-before it decodes the audio, then the stream count, then rule 7. An error
+Whether a `session.mtw` entry describes a ladder this reader builds is
+**not** a read-time rule: such a file still opens, and `derive_pair`
+refuses to replay it (see *Offline derivation*), so the reason is stated
+where the replay would have happened.
+
+The reader checks `format_version` first (1, 2 and 3 are accepted), then
+rules 2–6 and 8, the metadata half of rule 1 and the digest's presence and
+shape before it decodes the audio, then the stream count, then rule 7. An error
 names the fields and indices that disagree and never states a cause. Rule 7
 names the entry, its input, and which stream its digest does match:
 
@@ -196,7 +226,53 @@ This calls the exact same low-level functions the live daemon path calls
 (`h1_estimate_with_delay`, `spectrum_to_columns_wire`,
 `weighted_broadband_dbfs`) — see `ac_core::visualize::pair_derivation`.
 
-**I-B parity — what's actually verified, honestly.** Exact per-frame H1
+**Ladder replay (format v3, #221).** The live transfer view draws the
+multi-time-window ladder's columns, not the Welch arrays. For a pair with
+a `session.mtw` entry, and only when `sample_range` is `None`,
+`derive_pair` also returns those columns (`PairDerivation::mtw`) by
+replaying the ladder over the whole stored ring
+(`ac_core::visualize::mtw::replay`). A sub-window has no defined relation
+to the live block grid, so a `sample_range` derivation is Welch only.
+
+The replay is exact, not statistical. The ladder holds no state that
+recent input does not determine: the aligner, each decimator's phase and
+each stage's block grid are anchored to its first input sample, the FIR
+line is overwritten within the warmup skip, and the average sums the last
+N blocks fresh. A fresh ladder started at the first stored index `s0 ≥
+max(0, origin)` with `(s0 − origin) mod L = 0`, where `L = HOP ·
+lcm(stage decims)` (0.512 s at 48/96/192 kHz, 2.043 s at 44.1 kHz),
+therefore averages the same last N blocks per stage as the live one did —
+bit for bit on identical samples.
+
+The ring must hold `L` + the decimator transient + the deepest rung's
+settling `W + hop·(N−1)` + `|offset|` for every rung to settle: ≈ 3.1 s +
+|offset| at 48/96/192 kHz, ≈ 4.7 s + |offset| at 44.1 kHz. The default
+30 s `snapshot_ring_s` clears it. A shorter ring settles fewer rungs,
+reported through `settled_stages` exactly as a warming live frame reports
+it; no rung is drawn over fewer than N blocks.
+
+A stored `nfft`/`hop`/`stages` that differs from what the running code
+builds at `sr` makes `derive_pair` error: refuse, don't misread, as with
+an unknown `format_version`. A future ladder change must version the
+replay rather than orphan v3 files.
+
+A pair without ladder provenance — a v1/v2 file, a pair that never locked,
+a rate with no ladder — derives the Welch H₁ only. `ac-scene` labels such
+a stored trace `H₁ Welch {Δf} Hz flat — not the live ladder`, with `Δf =
+sr / PairDerivation::welch_nperseg`; a replayed trace carries no such
+label, because it is the live measurement.
+
+`snapshot_replays_the_live_ladder_columns_under_a_two_source_stimulus`
+(`it_snapshot.rs`) checks the replay against the live frames published
+around the capture: column set exact (to JSON parse precision), and per
+column within 0.01 dB / 0.1° / 1e-4 coherence. It also checks that a
+stored `origin` one stage-0 hop off, or an `offset` 48 samples off, matches
+no frame.
+
+**I-B parity — what's actually verified, honestly.** The rest of this
+section covers the **Welch arrays** — H1, spectra, SPL — which IR,
+`meas_spectrum`/`ref_spectrum` and `spl` still use on both the live and
+the snapshot side. Exact per-frame H1
 parity (magnitude, phase, coherence — not just `meas_spectrum`) *is*
 tested, under a correlated stimulus: `full_ib_parity_under_correlated_stimulus`
 (`it_snapshot.rs`, handoff: parity-completion M1.5) drives
@@ -228,17 +304,23 @@ verified.
 
 ## Fixture
 
-`tests/fixtures/snapshot-fixture-v2.acsnap` (repo root) is a checked-in,
-synthetic format-v2 `.acsnap` used by `ac-core`'s self-containment test
+`tests/fixtures/snapshot-fixture-v3.acsnap` (repo root) is a checked-in,
+synthetic format-v3 `.acsnap` used by `ac-core`'s self-containment test
 (`snapshot::tests::t3_checked_in_fixture_reprocesses_with_no_daemon`) and
-by `ac-scene`'s display-truth fixtures. Regenerate via:
+by `ac-scene`'s display-truth fixtures. Its one pair records a ladder
+(`session.mtw`) that starts with the ring, so its derivation also replays
+the ladder. Regenerate via:
 
 ```
 cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored
 ```
 
-`tests/fixtures/snapshot-fixture-v1.acsnap` holds the same samples as a
-format-v1 file. It is **byte-frozen**: nothing regenerates it, since
-`write_acsnap` writes only v2, and `snapshot::tests::v1_fixture_is_byte_frozen`
-pins its sha256. It is the v1 read path's real archive
-(`v1_and_v2_fixtures_derive_bit_identical_h1`).
+`tests/fixtures/snapshot-fixture-v1.acsnap` and
+`tests/fixtures/snapshot-fixture-v2.acsnap` hold the same samples as
+format-v1 and format-v2 files. Both are **byte-frozen**: nothing
+regenerates them, since `write_acsnap` writes only v3, and
+`snapshot::tests::v1_fixture_is_byte_frozen` /
+`v2_fixture_is_byte_frozen` pin their sha256. They are the v1 and v2 read
+paths' real archives: `v1_and_v2_fixtures_derive_bit_identical_h1` checks
+that all three fixtures derive bit-identical Welch H1, and that only the
+v3 one replays a ladder.

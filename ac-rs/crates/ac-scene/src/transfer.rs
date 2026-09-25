@@ -281,6 +281,24 @@ fn band_figure(v: f64) -> String {
     }
 }
 
+/// `"H₁ Welch {Δf} Hz flat — not the live ladder"` (#221 UX): the statement
+/// a trace carries when it was derived by the full-rate Welch H₁ rather than
+/// the ladder the live view runs. `Δf = sr / nperseg`, to [`band_figure`]'s
+/// precision so it reads in the same register as the live band labels
+/// (`1.00`, not `1`). `nperseg` is the segment length the derivation used,
+/// never an assumed `sr`. A zero `sr` or `nperseg` has no resolution to state
+/// and prints none.
+pub fn format_estimator_readout(sr: u32, nperseg: usize) -> String {
+    if sr == 0 || nperseg == 0 {
+        return "H\u{2081} Welch \u{2014} not the live ladder".to_string();
+    }
+    let df = f64::from(sr) / nperseg as f64;
+    format!(
+        "H\u{2081} Welch {} Hz flat \u{2014} not the live ladder",
+        band_figure(df)
+    )
+}
+
 /// The per-band labels for one ladder, over the caller's frequency axis.
 ///
 /// A stage serves from its own validity edge up to the shallower stage's:
@@ -445,6 +463,13 @@ pub struct TransferScene {
     /// The renderer places the two adjacently so they are read as one
     /// statement.
     pub band_labels: Vec<BandLabel>,
+    /// `"H₁ Welch 1.00 Hz flat — not the live ladder"` when this trace was
+    /// derived by a different estimator than the live view (#221), `None`
+    /// when it is the live ladder's. Keyed on [`TransferInput::estimator`],
+    /// not on [`Source`]: a snapshot whose ladder was replayed carries
+    /// `None`, one without recorded ladder provenance carries the string.
+    /// The renderer draws it verbatim.
+    pub estimator_readout: Option<String>,
     pub meas_meter: Meter,
     pub ref_meter: Meter,
     /// The fault indicator (#228), or `None` for "show nothing" — which is
@@ -535,6 +560,17 @@ impl CalibrationReadout {
     }
 }
 
+/// Which estimator produced a [`TransferInput`]'s arrays (#221).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Estimator {
+    /// The multi-time-window ladder — what the live view draws, whether
+    /// from a live frame or replayed from a snapshot.
+    Ladder,
+    /// The full-rate Welch H₁ at one flat resolution, with the segment
+    /// length it used. A snapshot without recorded ladder provenance.
+    Welch { nperseg: usize },
+}
+
 /// The transfer-view analogue of [`crate::scene::SceneInput`]: the
 /// canonical intermediate both a live frame and a snapshot derivation
 /// funnel through, so the two paths cannot drift.
@@ -559,8 +595,10 @@ pub struct TransferInput {
     pub channel_role: String,
     pub source: Source,
     pub sr: u32,
-    /// Per-column provenance, present only on the live three-stage path.
-    /// Empty for a snapshot derivation, which is still Welch-derived (#221).
+    /// Per-column provenance, present on the three-stage ladder path — a
+    /// live frame, or a snapshot whose ladder was replayed. Empty for a
+    /// Welch derivation (a pre-v3 snapshot, or a pair with no recorded
+    /// ladder; #221), which has one resolution across the axis.
     pub column_df: Vec<f64>,
     pub column_window_s: Vec<f64>,
     /// Blocks averaged behind each column, and the source bins each column
@@ -574,9 +612,12 @@ pub struct TransferInput {
     ///
     /// Session-static: it derives from `sr`, which does not change
     /// mid-session, so everything built from it is fixed for the session's
-    /// lifetime and cannot shift frame to frame. Empty for a snapshot
-    /// derivation, which is Welch-derived and has no ladder (#221).
+    /// lifetime and cannot shift frame to frame. Empty for a Welch
+    /// derivation, which has no ladder (#221).
     pub stages: Vec<MtwStage>,
+    /// Which estimator produced these arrays (#221). Decides
+    /// [`TransferScene::estimator_readout`].
+    pub estimator: Estimator,
     /// The fault indicator's frame-derived inputs (#228). `None` disables
     /// the indicator: a snapshot derivation has no live drive or lock state
     /// to report, and neither does a daemon predating the field.
@@ -602,6 +643,56 @@ pub fn displayed_mtw(frame: &TransferFrame) -> Option<&MtwColumns> {
     frame.mtw.as_ref().filter(|m| m.lengths_agree())
 }
 
+/// A ladder's columns as the transfer input's parallel arrays, plus its
+/// stage description. Shared by the live and the replayed-snapshot adapters
+/// (#221), so the two draw the same columns the same way.
+struct LadderArrays {
+    freqs: Vec<f64>,
+    magnitude_db: Vec<f64>,
+    phase_deg: Vec<f64>,
+    coherence: Vec<f64>,
+    column_df: Vec<f64>,
+    column_window_s: Vec<f64>,
+    column_n: Vec<f64>,
+    column_bins: Vec<usize>,
+    stages: Vec<MtwStage>,
+}
+
+impl LadderArrays {
+    /// `None` input (no columns, or columns whose lengths disagree) yields
+    /// empty arrays and no stages: a mismatched ladder draws nothing, and
+    /// labelling the resolution of a curve that is not on screen would
+    /// describe a measurement the operator cannot see.
+    fn from_columns(mtw: Option<&MtwColumns>) -> LadderArrays {
+        match mtw.filter(|m| m.lengths_agree()) {
+            Some(m) => LadderArrays {
+                freqs: m.freqs.clone(),
+                magnitude_db: m.magnitude_db.clone(),
+                phase_deg: m.phase_deg.clone(),
+                coherence: m.coherence.clone(),
+                column_df: m.df.clone(),
+                column_window_s: m.window_s.clone(),
+                // An integer on the wire; the display's per-column inputs
+                // are uniformly `f64`.
+                column_n: m.n.iter().map(|&n| n as f64).collect(),
+                column_bins: m.bins.clone(),
+                stages: m.stages.clone(),
+            },
+            None => LadderArrays {
+                freqs: Vec::new(),
+                magnitude_db: Vec::new(),
+                phase_deg: Vec::new(),
+                coherence: Vec::new(),
+                column_df: Vec::new(),
+                column_window_s: Vec::new(),
+                column_n: Vec::new(),
+                column_bins: Vec::new(),
+                stages: Vec::new(),
+            },
+        }
+    }
+}
+
 impl TransferInput {
     /// Adapt a live `transfer_stream` frame. `phase_deg` is carried
     /// through as-is — it is already session-compensated (see the module
@@ -616,8 +707,10 @@ impl TransferInput {
         // saying so. No trace is the honest state for the ~2.56 s the bottom
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
-        let mtw = displayed_mtw(frame);
-        let (
+        //
+        // The stages are carried from the same filtered `mtw`
+        // (`displayed_mtw`, the selection `FaultFrame::settled` shares).
+        let LadderArrays {
             freqs,
             magnitude_db,
             phase_deg,
@@ -626,26 +719,8 @@ impl TransferInput {
             column_window_s,
             column_n,
             column_bins,
-        ) = match mtw {
-            Some(m) => (
-                m.freqs.clone(),
-                m.magnitude_db.clone(),
-                m.phase_deg.clone(),
-                m.coherence.clone(),
-                m.df.clone(),
-                m.window_s.clone(),
-                // An integer on the wire; the display's per-column inputs
-                // are uniformly `f64`.
-                m.n.iter().map(|&n| n as f64).collect(),
-                m.bins.clone(),
-            ),
-            None => Default::default(),
-        };
-        // Carried from the same filtered `mtw`: a length-mismatched frame
-        // draws no trace, and labelling the resolution of a curve that is
-        // not on screen would describe a measurement the operator cannot
-        // see.
-        let stages = mtw.map(|m| m.stages.clone()).unwrap_or_default();
+            stages,
+        } = LadderArrays::from_columns(displayed_mtw(frame));
         TransferInput {
             freqs,
             magnitude_db,
@@ -665,6 +740,9 @@ impl TransferInput {
             column_n,
             column_bins,
             stages,
+            // A live frame is the ladder by definition; while it warms it
+            // draws nothing rather than falling back to Welch.
+            estimator: Estimator::Ladder,
             fault: FaultFrame::from_wire_frame(frame),
             calibration: CalibrationReadout::from_cal_tags(frame.cal_tags.as_ref()),
         }
@@ -678,12 +756,54 @@ impl TransferInput {
     /// common reference (F2′). A snapshot has no input-level meters (it
     /// is a static capture, not a live gain-staging aid), so its peaks
     /// are `None`.
+    ///
+    /// When the derivation replayed the live ladder (`d.mtw`, #221) the
+    /// trace is the ladder's columns, drawn exactly as a live frame's, with
+    /// its per-column provenance and stages. Otherwise — a pre-v3 file, a
+    /// pair with no recorded ladder, a sub-window derivation — it is the
+    /// Welch H₁ arrays, tagged with the segment length the derivation used,
+    /// and the scene states that it is not the live ladder.
     pub fn from_pair_derivation(d: &PairDerivation, channel_role: &str, sr: u32) -> TransferInput {
+        let ladder = d.mtw.as_ref().filter(|m| m.lengths_agree());
+        let (arrays, estimator) = match ladder {
+            Some(m) => (LadderArrays::from_columns(Some(m)), Estimator::Ladder),
+            None => (
+                // A Welch derivation has one resolution and one settling
+                // time across the whole axis: no per-column provenance and
+                // no ladder, so no per-band labels — three labels claiming
+                // otherwise would misdescribe the trace.
+                LadderArrays {
+                    freqs: d.h1.freqs.clone(),
+                    magnitude_db: d.h1.magnitude_db.clone(),
+                    phase_deg: d.h1.phase_deg.clone(),
+                    coherence: d.h1.coherence.clone(),
+                    column_df: Vec::new(),
+                    column_window_s: Vec::new(),
+                    column_n: Vec::new(),
+                    column_bins: Vec::new(),
+                    stages: Vec::new(),
+                },
+                Estimator::Welch {
+                    nperseg: d.welch_nperseg,
+                },
+            ),
+        };
+        let LadderArrays {
+            freqs,
+            magnitude_db,
+            phase_deg,
+            coherence,
+            column_df,
+            column_window_s,
+            column_n,
+            column_bins,
+            stages,
+        } = arrays;
         TransferInput {
-            freqs: d.h1.freqs.clone(),
-            magnitude_db: d.h1.magnitude_db.clone(),
-            phase_deg: d.h1.phase_deg.clone(),
-            coherence: d.h1.coherence.clone(),
+            freqs,
+            magnitude_db,
+            phase_deg,
+            coherence,
             delay_ms: d.h1.delay_ms,
             // A `PairDerivation` records no lock verdict — `derive_pair`
             // takes a `delay_samples` it is handed and asks no questions, so
@@ -702,19 +822,12 @@ impl TransferInput {
             channel_role: channel_role.to_string(),
             source: Source::Snapshot,
             sr,
-            // A snapshot is still derived by the full-rate Welch path, so it
-            // has no per-column resolution or averaging depth to report. That
-            // divergence from the live view is #221; this slice makes it
-            // visible rather than fixing it.
-            column_df: Vec::new(),
-            column_window_s: Vec::new(),
-            column_n: Vec::new(),
-            column_bins: Vec::new(),
-            // No ladder either, for the same reason — and so no per-band
-            // labels: a Welch derivation has one resolution and one settling
-            // time across the whole axis, and three labels claiming otherwise
-            // would be the divergence in #221 dressed as a feature.
-            stages: Vec::new(),
+            column_df,
+            column_window_s,
+            column_n,
+            column_bins,
+            stages,
+            estimator,
             // A snapshot is a static capture. There is no drive to observe
             // and no lock being maintained, so there is nothing for the
             // indicator to say — the same reason its meters are `None`.
@@ -860,6 +973,10 @@ impl TransferScene {
             // the same session yields the same labels on every frame, so
             // they sit still while the curve moves.
             band_labels: band_labels(&input.stages, f_min, f_max),
+            estimator_readout: match input.estimator {
+                Estimator::Ladder => None,
+                Estimator::Welch { nperseg } => Some(format_estimator_readout(input.sr, nperseg)),
+            },
             meas_meter: meters.0.update(input.meas_peak_dbfs, now_s),
             ref_meter: meters.1.update(input.ref_peak_dbfs, now_s),
             // Reads `input.coherence` — the same columns the mask above
@@ -1166,6 +1283,7 @@ mod tests {
                 column_n: Vec::new(),
                 column_bins: Vec::new(),
                 stages: stages.clone(),
+                estimator: Estimator::Ladder,
                 fault: None,
                 calibration: None,
             };
@@ -1328,6 +1446,7 @@ mod tests {
             column_n: Vec::new(),
             column_bins: Vec::new(),
             stages: Vec::new(),
+            estimator: Estimator::Ladder,
             fault: None,
             calibration: None,
         };
@@ -1380,6 +1499,7 @@ mod tests {
             column_n: Vec::new(),
             column_bins: Vec::new(),
             stages: Vec::new(),
+            estimator: Estimator::Ladder,
             fault: None,
             calibration: None,
         };
@@ -1417,6 +1537,142 @@ mod tests {
         assert_eq!(seg[0][1].0, 2.0);
     }
 
+    // ---- #221: which estimator a trace came from ----
+
+    fn scene_of(inp: &TransferInput) -> TransferScene {
+        let mut meters = (MeterState::default(), MeterState::default());
+        TransferScene::from_input(
+            inp,
+            DisplayModes::new(DerotMode::Session, Smoothing::Off),
+            (20.0, 20_000.0),
+            (-80.0, 20.0),
+            &mut meters,
+            &mut FaultState::default(),
+            0.0,
+        )
+    }
+
+    /// A Welch derivation of `sr` Hz audio, as `derive_pair` returns it for
+    /// a file with no recorded ladder.
+    fn welch_derivation(sr: u32) -> PairDerivation {
+        let sig: Vec<f32> = (0..sr as usize * 2)
+            .map(|i| ((i as f64 * 0.37).sin() * 0.3) as f32)
+            .collect();
+        ac_core::visualize::pair_derivation::derive_pair(
+            &sig,
+            &sig,
+            sr,
+            0,
+            None,
+            None,
+            ac_core::visualize::weighting_curves::WeightingCurve::Z,
+        )
+    }
+
+    /// Three ladder columns at 48 kHz, lengths agreeing, with the stages.
+    fn ladder_columns() -> MtwColumns {
+        MtwColumns {
+            freqs: vec![100.0, 1_000.0, 10_000.0],
+            f_lo: vec![95.0, 950.0, 9_500.0],
+            f_hi: vec![105.0, 1_050.0, 10_500.0],
+            magnitude_db: vec![-6.0; 3],
+            phase_deg: vec![0.0; 3],
+            coherence: vec![0.9; 3],
+            df: vec![0.98, 2.93, 11.7],
+            window_s: vec![1.02, 0.34, 0.085],
+            n: vec![4; 3],
+            stage: vec![2, 1, 0],
+            blend: vec![0.0; 3],
+            bins: vec![1; 3],
+            ppo: 48.0,
+            n_blocks: 4,
+            settled_stages: vec![true; 3],
+            stages: wire_stages(48_000),
+        }
+    }
+
+    /// ux's test bullet: the statement is present and verbatim on a Welch
+    /// snapshot scene and absent on a live one. Asserting the exact `Some`
+    /// fails on a dropped field as well as a misspelt one.
+    #[test]
+    fn a_welch_snapshot_states_it_is_not_the_live_ladder_and_a_live_frame_does_not() {
+        let d = welch_derivation(48_000);
+        assert!(d.mtw.is_none());
+        let inp = TransferInput::from_pair_derivation(&d, "meas_0", 48_000);
+        assert_eq!(inp.estimator, Estimator::Welch { nperseg: 48_000 });
+        assert_eq!(
+            scene_of(&inp).estimator_readout.as_deref(),
+            Some("H\u{2081} Welch 1.00 Hz flat \u{2014} not the live ladder")
+        );
+
+        let frame: TransferFrame = serde_json::from_value(serde_json::json!({
+            "type": "transfer_stream",
+            "cmd": "transfer_stream",
+            "sr": 48_000,
+            "meas_channel": 0,
+            "ref_channel": 1,
+            "spec_freqs": [],
+            "meas_spectrum": [],
+            "ref_spectrum": [],
+            "spl": null,
+            "spl_weighting": "Z",
+            "spl_integration": "fast",
+            "mtw": ladder_columns(),
+        }))
+        .expect("minimal live frame");
+        let live = TransferInput::from_wire_frame(&frame);
+        assert_eq!(live.estimator, Estimator::Ladder);
+        assert_eq!(scene_of(&live).estimator_readout, None);
+    }
+
+    /// The figure is `sr / nperseg` from the derivation, not an assumed 1 Hz.
+    #[test]
+    fn the_readout_figure_is_the_segment_the_derivation_used() {
+        assert_eq!(
+            format_estimator_readout(48_000, 96_000),
+            "H\u{2081} Welch 0.50 Hz flat \u{2014} not the live ladder"
+        );
+        assert_eq!(
+            format_estimator_readout(96_000, 4_096),
+            "H\u{2081} Welch 23.4 Hz flat \u{2014} not the live ladder"
+        );
+        let mut d = welch_derivation(48_000);
+        d.welch_nperseg = 24_000;
+        let inp = TransferInput::from_pair_derivation(&d, "meas_0", 48_000);
+        assert_eq!(
+            scene_of(&inp).estimator_readout.as_deref(),
+            Some("H\u{2081} Welch 2.00 Hz flat \u{2014} not the live ladder")
+        );
+    }
+
+    /// A snapshot whose ladder was replayed draws the ladder: its columns,
+    /// their provenance and the stages, and no "not the live ladder"
+    /// statement — the estimator decides, not the source.
+    #[test]
+    fn a_replayed_snapshot_draws_the_ladder_with_no_statement() {
+        let mut d = welch_derivation(48_000);
+        d.mtw = Some(ladder_columns());
+        let inp = TransferInput::from_pair_derivation(&d, "meas_0", 48_000);
+        assert_eq!(inp.source, Source::Snapshot);
+        assert_eq!(inp.estimator, Estimator::Ladder);
+        assert_eq!(inp.freqs, ladder_columns().freqs);
+        assert!(!inp.stages.is_empty());
+        assert!(!inp.column_df.is_empty() && !inp.column_window_s.is_empty());
+        assert!(!inp.column_n.is_empty() && !inp.column_bins.is_empty());
+        let scene = scene_of(&inp);
+        assert_eq!(scene.estimator_readout, None);
+        assert!(!scene.band_labels.is_empty());
+
+        // Columns whose lengths disagree draw nothing as a ladder; the
+        // derivation falls back to its Welch arrays and says so.
+        let mut bad = ladder_columns();
+        bad.coherence.pop();
+        d.mtw = Some(bad);
+        let inp = TransferInput::from_pair_derivation(&d, "meas_0", 48_000);
+        assert_eq!(inp.estimator, Estimator::Welch { nperseg: 48_000 });
+        assert!(scene_of(&inp).estimator_readout.is_some());
+    }
+
     // Deliverable 3: a snapshot derivation's stored delay is readable and
     // is exactly what a live frame de-rotates by to overlay it.
     #[test]
@@ -1436,6 +1692,8 @@ mod tests {
             ref_spectrum: vec![],
             spl: None,
             spl_weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+            mtw: None,
+            welch_nperseg: ac_core::visualize::transfer::h1_nperseg(sr),
         };
         let tau_snap = TransferInput::stored_delay_ms(&d);
         assert!((tau_snap - 3.0).abs() < 1e-9, "stored delay {tau_snap}");

@@ -45,6 +45,9 @@ fn scene(smoothing: Smoothing) -> TransferScene {
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Welch {
+            nperseg: ac_core::visualize::transfer::h1_nperseg(48_000),
+        },
         fault: None,
         calibration: None,
     };
@@ -177,5 +180,57 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
     assert_ne!(
         row_a, row_b,
         "same-named runs painted identical legend rows — no way to tell them apart"
+    );
+}
+
+/// #221: a stored run derived by the Welch H₁ carries the scene's "not the
+/// live ladder" statement in its legend row, drawn verbatim as its own span —
+/// not folded into the identity text — and a stored run whose ladder was
+/// replayed draws none.
+#[test]
+fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
+    let welch = scene(Smoothing::Off);
+    let readout = welch
+        .estimator_readout
+        .clone()
+        .expect("a Welch-tagged snapshot scene carries the statement");
+    assert_eq!(readout, "H₁ Welch 1.00 Hz flat — not the live ladder");
+
+    let paint = |scene: &TransferScene| {
+        let mut state = TransferViewState::new(-10.0, -30.0);
+        state.focus = Focus::Stored(0);
+        let view = ViewKind::Transfer(state);
+        let stored = vec![StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-09-24T13:02:11Z",
+            scene,
+            focused: true,
+        }];
+        let mut harness = Harness::new_ui(|ui| {
+            ui.set_min_size(egui::vec2(900.0, 300.0));
+            draw_view(&view, ui, None, None, &stored, None);
+        });
+        harness.run();
+        extract_texts(&harness.output().shapes)
+    };
+
+    let texts = paint(&welch);
+    assert!(
+        texts.contains(&readout),
+        "the estimator statement must paint as its own span; painted texts: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("run.acsnap") && !t.contains("not the live ladder")),
+        "the identity span must not carry the statement; painted texts: {texts:?}"
+    );
+
+    let mut ladder = welch.clone();
+    ladder.estimator_readout = None;
+    let texts = paint(&ladder);
+    assert!(
+        !texts.iter().any(|t| t.contains("not the live ladder")),
+        "a replayed-ladder run must not claim to differ from the live view; painted texts: {texts:?}"
     );
 }

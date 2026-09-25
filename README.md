@@ -296,7 +296,11 @@ provenance) plus `audio.flac` (24-bit multichannel).
 Snapshots are self-contained by design: reprocessing one needs no daemon,
 no audio backend, and no external config. Every calibrated quantity the
 live path streams — H1, calibrated spectra, SPL — is re-derivable
-offline through the same `ac-core` functions the daemon calls live.
+offline through the same `ac-core` functions the daemon calls live. So are
+the multi-time-window ladder columns the transfer view draws: for a format
+v3 file, a pair whose live view ran the ladder, and a whole-ring
+derivation, the ladder is replayed over the stored samples. Otherwise the
+stored trace is the Welch H₁ and is labelled as not the live ladder.
 Weighting and integration are session properties, editable after capture.
 
 Format spec: [`ac-rs/SNAPSHOT.md`](ac-rs/SNAPSHOT.md). Wire commands

@@ -333,6 +333,8 @@ mod tests {
             ref_spectrum: vec![],
             spl: None,
             spl_weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+            mtw: None,
+            welch_nperseg: ac_core::visualize::transfer::h1_nperseg(sr),
         };
         let input = IrInput::from_pair_derivation(&d, "meas_0", sr);
         assert_eq!(input.source, Source::Snapshot);
@@ -410,6 +412,8 @@ mod tests {
             ref_spectrum: vec![],
             spl: None,
             spl_weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+            mtw: None,
+            welch_nperseg: ac_core::visualize::transfer::h1_nperseg(sr),
         };
 
         let live_scene = IrScene::from_input(&IrInput::from_wire_frame(&wire));
