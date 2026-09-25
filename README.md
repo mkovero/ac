@@ -237,7 +237,7 @@ not judged: only an arrival earlier than d/c allows is refused. See `ac-rs/ZMQ.m
 | `transfer` | Launch the `ac-view` transfer view — H1 magnitude, phase, coherence |
 | `monitor` | Live spectrum in `ac-view`; `--tui` for the terminal readout. `monitor cwt` / `cqt` / `reassigned` switch the daemon analysis mode and use the terminal readout |
 | `test` | Built-in self-tests — `test software`, `test hardware [dmm]`, `test dut [compare] [level]` |
-| `report` | Render a `MeasurementReport` JSON to HTML or PDF |
+| `report` | Render a `MeasurementReport` JSON to HTML or PDF; `report verify <a.json> <b.json> … [mic-curve <path>] [html\|pdf]` checks a set of `plot ir` runs (gain spread, tonal stability, harmonic drive-tracking, excluded runs) in the terminal and writes one `verify-<timestamp>` document beside run 1 |
 | `probe` | Auto-detect analog ports and loopback pairs (DMM + capture scan) |
 | `dmm` | One-off AC Vrms reading from SCPI multimeter |
 | `gpio` | GPIO status; `gpio log` streams button events |

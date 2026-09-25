@@ -41,6 +41,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::measurement::sweep::TailDecayCheck;
 use crate::shared::calibration::EnumerationCheck;
 
 #[cfg(test)]
@@ -164,7 +165,13 @@ pub use provenance::{
 ///   and a refused `interface_latency.session_check` no longer withholds
 ///   the flight time. Absent on v1-v11 reports, whose re-derived flight
 ///   time is withheld as predating v12.
-pub const SCHEMA_VERSION: u32 = 12;
+/// - v13: optional top-level `tail_decay: TailDecayRecord` on `plot_ir`
+///   reports (#398) — the ISO 18233 §6.3.2 tail-decay verdict as data, so a
+///   multi-run verification can exclude a run whose captured tail never
+///   decayed. The same verdict is still written to `notes` as prose. Absent
+///   on v1-v12 reports, which readers treat as not recorded, never as
+///   passed.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /
 /// [`MeasurementReport::from_value`] still read (#429). Everything from
@@ -272,6 +279,12 @@ pub struct MeasurementReport {
     /// before v12 and on producers that are not `plot_ir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_pair_offset: Option<InterPairOffset>,
+    /// The ISO 18233 §6.3.2 tail-decay verdict of the capture (#398, schema
+    /// v13), the structured form of the sentence `plot_ir` writes to
+    /// `notes`. `None` on reports written before v13 and on producers that
+    /// are not `plot_ir`: not recorded, never passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_decay: Option<TailDecayRecord>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,6 +351,19 @@ pub struct MeasuredInterPairOffset {
     /// How the offset's device-enumeration epoch relates to this capture's,
     /// frozen at capture. A flag, never a gate (#461's rule).
     pub enumeration: EnumerationCheck,
+}
+
+/// The tail-decay verdict a `plot_ir` capture recorded (#398, schema v13).
+///
+/// `Checked` carries [`TailDecayCheck`] flattened, including whether it
+/// passed; `NotEvaluated` names why the check could not run (a capture
+/// with no usable tail, say). A reader must treat `NotEvaluated` as
+/// unverified, not as passed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TailDecayRecord {
+    Checked(TailDecayCheck),
+    NotEvaluated { reason: String },
 }
 
 /// Accepts either the v4 shape (`data` is a JSON array of
@@ -432,7 +458,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 12"));
+        assert!(json.contains("\"schema_version\": 13"));
     }
 
     #[test]
@@ -456,7 +482,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 12"));
+            assert!(json.contains("\"schema_version\": 13"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
@@ -582,6 +608,41 @@ mod tests {
         v11["schema_version"] = serde_json::json!(11);
         let r = MeasurementReport::from_value(v11).unwrap();
         assert_eq!(r.inter_pair_offset, None);
+    }
+
+    /// #398: v13's `tail_decay` round-trips in every state, including a
+    /// worst decay of `+inf` (a tail that read back digital silence), and a
+    /// v12 report decodes without it.
+    #[test]
+    fn v13_tail_decay_round_trips_and_v12_decodes_without_it() {
+        let check = |worst_decay_db: f64, passed: bool| TailDecayCheck {
+            bpo: 3,
+            worst_band_hz: 12_500.0,
+            worst_decay_db,
+            required_db: 30.0,
+            passed,
+            bands_settled: 30,
+            bands_total: 31,
+        };
+        let states = [
+            TailDecayRecord::Checked(check(41.2, true)),
+            TailDecayRecord::Checked(check(11.6, false)),
+            TailDecayRecord::Checked(check(f64::INFINITY, true)),
+            TailDecayRecord::NotEvaluated {
+                reason: "captured tail too short to evaluate decay".into(),
+            },
+        ];
+        for state in states {
+            let mut r = sample_impulse_response_report();
+            r.tail_decay = Some(state);
+            let json = r.to_json().unwrap();
+            assert!(json.contains("\"tail_decay\""), "{json}");
+            assert_eq!(MeasurementReport::from_json(&json).unwrap(), r);
+        }
+        let mut v12 = serde_json::to_value(sample_impulse_response_report()).unwrap();
+        v12["schema_version"] = serde_json::json!(12);
+        let r = MeasurementReport::from_value(v12).unwrap();
+        assert_eq!(r.tail_decay, None);
     }
 
     #[test]

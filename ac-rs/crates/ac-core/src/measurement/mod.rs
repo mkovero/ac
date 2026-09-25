@@ -13,4 +13,5 @@ pub mod report_layout;
 pub mod report_pdf;
 pub mod sweep;
 pub mod thd;
+pub mod verification;
 pub mod weighting;

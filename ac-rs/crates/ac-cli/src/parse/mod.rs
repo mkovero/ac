@@ -533,6 +533,13 @@ pub enum CommandKind {
         path: String,
         format: ReportFormat,
     },
+    /// `ac report verify` (#398): a set of `plot ir` reports rendered as
+    /// one verification document.
+    ReportVerify {
+        paths: Vec<String>,
+        mic_curve: Option<String>,
+        format: ReportFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,27 +712,7 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
                 show_plot: false,
             })
         }
-        "report" => {
-            if args.is_empty() || args.len() > 2 {
-                return Err("report: requires <path.json> [html|pdf]".into());
-            }
-            let format = match args.get(1).map(String::as_str) {
-                None | Some("html") => ReportFormat::Html,
-                Some("pdf") => ReportFormat::Pdf,
-                Some(other) => {
-                    return Err(format!(
-                        "report: unknown format {other:?} (expected html or pdf)"
-                    ));
-                }
-            };
-            Ok(ParsedCommand {
-                cmd: CommandKind::Report {
-                    path: args[0].clone(),
-                    format,
-                },
-                show_plot: false,
-            })
-        }
+        "report" => report::parse_report(&args),
         other => Err(format!(
             "unknown command: {other:?}  \
              (sweep | monitor | plot | transfer | generate | calibrate | \
@@ -742,6 +729,7 @@ mod calibrate;
 mod generate;
 mod monitor;
 mod plot;
+mod report;
 mod server;
 mod setup;
 mod sweep;
@@ -791,6 +779,8 @@ Commands:
   dmm                                                                 read AC Vrms from configured DMM over SCPI
   gpio            [log]                                               USB2GPIO status (log = stream frames)
   report          <path.json> [html|pdf]                              render MeasurementReport JSON (default html, sibling file)
+  report verify   <a.json> <b.json> [...]                             verify a set of plot ir runs (verify-<ts> beside run 1)
+                  [mic-curve <path>] [html|pdf]                       (mic-curve: correct the response post-hoc)
 
   levels    dBFS, dBu or Vrms — a typed level plays exactly as typed
             maximum 0 dBFS (full scale); above it is refused, not reduced

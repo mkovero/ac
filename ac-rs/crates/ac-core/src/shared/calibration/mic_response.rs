@@ -74,6 +74,20 @@ impl MicResponse {
         let t = ((log_f - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0);
         g_lo + (g_hi - g_lo) * t
     }
+
+    /// Remove the curve from one dB magnitude read at `freq_hz`:
+    /// `db - correction_at(freq_hz)`. The one sign rule every dB-domain
+    /// correction goes through — the capture-time path in `ac-daemon` and
+    /// the post-hoc path in `measurement::verification` (#398) — so a
+    /// response corrected at capture and one corrected afterwards agree. A
+    /// non-finite `db` (an unmeasurable bin) is returned unchanged.
+    pub fn corrected_db(&self, freq_hz: f64, db: f64) -> f64 {
+        if db.is_finite() {
+            db - self.correction_at(freq_hz as f32) as f64
+        } else {
+            db
+        }
+    }
 }
 
 /// Parse the two-column ASCII format used by Behringer / Dayton / miniDSP
@@ -250,6 +264,20 @@ mod tests {
             (g - 2.0).abs() < 0.1,
             "got {g} dB at f={mid}, expected ≈ 2.0"
         );
+    }
+
+    #[test]
+    fn corrected_db_subtracts_the_curve_and_passes_non_finite_through() {
+        let r = parse_mic_curve(&dummy_curve_text(50), None).unwrap();
+        let want = -20.0 - r.correction_at(20_000.0) as f64;
+        assert!((r.corrected_db(20_000.0, -20.0) - want).abs() < 1e-12);
+        // The mic over-reads by +4 dB at the top: correcting lowers the level.
+        assert!(r.corrected_db(20_000.0, -20.0) < -23.9);
+        assert_eq!(
+            r.corrected_db(1_000.0, f64::NEG_INFINITY),
+            f64::NEG_INFINITY
+        );
+        assert!(r.corrected_db(1_000.0, f64::NAN).is_nan());
     }
 
     #[test]

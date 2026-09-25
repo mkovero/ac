@@ -13,8 +13,10 @@
 //! way out; nothing in here may emit markup.
 
 pub mod axis;
+pub mod chart;
 mod payload;
 mod sections;
+pub mod verification;
 
 pub use payload::{
     fmt_f, frequency_response_cells, frequency_response_columns, frequency_response_series,
@@ -125,6 +127,7 @@ pub(crate) mod tests_support {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            tail_decay: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points: vec![] },
                 standard: vec![],
