@@ -25,6 +25,8 @@ pub fn run(
         } => (*start, *stop, level, *level_defaulted, *ppd, *bpo, *verbose),
         _ => unreachable!(),
     };
+    io::print_run_header("plot");
+    println!();
 
     let mut cal = get_cal(client);
     if cal.is_some() {
@@ -38,7 +40,7 @@ pub fn run(
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
-    println!("\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
+    println!("\n  band       {start_hz:.0} Hz \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
 
     let mut cmd_json = serde_json::json!({
         "cmd": "plot",
@@ -106,6 +108,8 @@ pub fn run_level(
         } => (start, stop, *level_defaulted, *freq, *steps, *verbose),
         _ => unreachable!(),
     };
+    io::print_run_header("plot level");
+    println!();
 
     let mut cal = get_cal(client);
     if cal.is_some() {
@@ -122,7 +126,7 @@ pub fn run_level(
     };
     let consumes = consumes_voltage(cal.as_ref(), Some(typed));
 
-    println!("\n  Plot level: {freq:.0} Hz  |  {steps} steps");
+    println!("\n  frequency  {freq:.0} Hz  {steps} steps");
 
     let ack = check_ack(
         client.send_cmd(
@@ -203,6 +207,8 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             ),
             _ => unreachable!(),
         };
+    io::print_run_header("plot ir");
+    println!();
 
     let mut cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -365,7 +371,7 @@ fn origin_tag(typed: bool) -> &'static str {
     }
 }
 
-/// The `IR sweep` block printed before emission (#501 UX): band, length,
+/// The stimulus block printed before emission (#501 UX): band, length,
 /// window, harmonics and tail, each read from the `plot_ir` ack's echo and
 /// tagged `typed` or `default`. Decimal points sit on `level`'s column.
 /// A defaulted window is shown in seconds, the quantity the daemon holds
@@ -403,7 +409,6 @@ fn ir_stimulus_lines(ack: &serde_json::Value, typed: IrTyped) -> Vec<String> {
     let tail = f64_of("tail_s").map(|t| format!("{t:>7.2} s  {}", origin_tag(typed.tail)));
 
     vec![
-        "  IR sweep".to_string(),
         row("band", band),
         row("length", length),
         row("window", window),
@@ -3730,7 +3735,7 @@ mod tests {
         }
     }
 
-    // ── #501: the `IR sweep` block, `captured`, banner and SNR rows ──────
+    // ── #501: the stimulus block, `captured`, banner and SNR rows ────────
 
     /// The ack a current daemon sends for a bare `plot ir`.
     fn default_ack() -> serde_json::Value {
@@ -3748,7 +3753,6 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "  IR sweep",
                 "  band       20 Hz \u{2192} 20000 Hz  (default)",
                 "  length        4.00 s  (default)",
                 "  window        0.40 s  (default)",
@@ -3757,7 +3761,7 @@ mod tests {
             ]
         );
         let level = "  level       -40.0 dBFS  (typed)";
-        for line in &lines[2..] {
+        for line in &lines[1..] {
             if let Some(dot) = line.find('.') {
                 assert_eq!(dot, level.find('.').unwrap(), "{line:?}");
             }
@@ -3780,7 +3784,7 @@ mod tests {
             tail: true,
         };
         assert_eq!(
-            ir_stimulus_lines(&ack, typed)[1..],
+            ir_stimulus_lines(&ack, typed),
             [
                 "  band       200 Hz \u{2192} 8000 Hz  (typed)",
                 "  length        4.00 s  (typed)",
@@ -3796,10 +3800,9 @@ mod tests {
     #[test]
     fn ir_stimulus_lines_fall_back_for_an_older_daemon() {
         let lines = ir_stimulus_lines(&serde_json::json!({"ok": true}), IrTyped::default());
-        for (line, label) in
-            lines[1..]
-                .iter()
-                .zip(["band", "length", "window", "harmonics", "tail"])
+        for (line, label) in lines
+            .iter()
+            .zip(["band", "length", "window", "harmonics", "tail"])
         {
             assert_eq!(*line, format!("  {label:<11}(not reported by this daemon)"));
         }
@@ -3812,7 +3815,7 @@ mod tests {
             ..IrTyped::default()
         };
         assert!(
-            ir_stimulus_lines(&default_ack(), typed)[1].ends_with("(start typed, stop default)")
+            ir_stimulus_lines(&default_ack(), typed)[0].ends_with("(start typed, stop default)")
         );
     }
 
