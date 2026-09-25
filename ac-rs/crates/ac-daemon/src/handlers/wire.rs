@@ -321,6 +321,124 @@ pub(crate) fn bounded_distinct_u32s(
     Ok(())
 }
 
+/// Column the values of an unrecognised-field refusal's `fields` / `reads`
+/// lines start at: [`TRAILER_INDENT`] plus a 6-character label plus two
+/// spaces. `ac-cli` appends its `daemon` line at the same column.
+const FIELD_LABEL_WIDTH: usize = 6;
+
+/// Width an unrecognised-field refusal's `fields` / `reads` lines wrap at.
+const FIELD_LINE_MAX_COLS: usize = 80;
+
+/// Most names the `fields` line of an unrecognised-field refusal lists
+/// before `+<N> more`. The `unrecognised_fields` array carries every name.
+const FIELD_LINE_MAX_NAMES: usize = 8;
+
+/// The top-level keys of `request` that are neither `cmd` nor in
+/// `accepted`, alphabetical (#628). Empty for a non-object request.
+pub(crate) fn unrecognised_fields(request: &Value, accepted: &[&str]) -> Vec<String> {
+    let Some(obj) = request.as_object() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = obj
+        .keys()
+        .filter(|k| k.as_str() != "cmd" && !accepted.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
+/// A request field name as echoed in refusal text: control characters
+/// escaped, then cut at [`RECEIVED_MAX_CHARS`] characters with `…`.
+fn field_name_text(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    if escaped.chars().count() <= RECEIVED_MAX_CHARS {
+        return escaped;
+    }
+    let mut cut: String = escaped.chars().take(RECEIVED_MAX_CHARS).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+/// One `label  value  value …` trailer line, values at column 17 and
+/// separated by two spaces, wrapped at [`FIELD_LINE_MAX_COLS`] with the
+/// continuation aligned under the first value.
+fn push_field_line(out: &mut String, label: &str, values: &[String]) {
+    let prefix = format!("{TRAILER_INDENT}{label:<FIELD_LABEL_WIDTH$}  ");
+    let hang = " ".repeat(prefix.chars().count());
+    out.push('\n');
+    out.push_str(&prefix);
+    let mut col = prefix.chars().count();
+    for (i, v) in values.iter().enumerate() {
+        let w = v.chars().count();
+        if i > 0 {
+            if col + 2 + w > FIELD_LINE_MAX_COLS {
+                out.push('\n');
+                out.push_str(&hang);
+                col = hang.len();
+            } else {
+                out.push_str("  ");
+                col += 2;
+            }
+        }
+        out.push_str(v);
+        col += w;
+    }
+}
+
+/// The refusal of a request carrying top-level fields its command does not
+/// read (#628). `unrecognised` is non-empty and alphabetical, as from
+/// [`unrecognised_fields`]. One field is named inline; two or more are
+/// counted on the headline and listed on a `fields` line (at most
+/// [`FIELD_LINE_MAX_NAMES`], then `+<N> more`). A `reads` line lists
+/// `accepted`, alphabetical, and is omitted when the command reads nothing.
+pub(crate) fn unrecognised_refusal(cmd: &str, unrecognised: &[String], accepted: &[&str]) -> Value {
+    let mut accepted_sorted: Vec<&str> = accepted.to_vec();
+    accepted_sorted.sort_unstable();
+    let mut text = if let [only] = unrecognised {
+        format!(
+            "{cmd}: field '{}' not recognised \u{2014} command not run",
+            field_name_text(only)
+        )
+    } else {
+        format!(
+            "{cmd}: {} fields not recognised \u{2014} command not run",
+            unrecognised.len()
+        )
+    };
+    if unrecognised.len() > 1 {
+        let mut names: Vec<String> = unrecognised
+            .iter()
+            .take(FIELD_LINE_MAX_NAMES)
+            .map(|n| field_name_text(n))
+            .collect();
+        if unrecognised.len() > FIELD_LINE_MAX_NAMES {
+            names.push(format!(
+                "+{} more",
+                unrecognised.len() - FIELD_LINE_MAX_NAMES
+            ));
+        }
+        push_field_line(&mut text, "fields", &names);
+    }
+    if !accepted_sorted.is_empty() {
+        let reads: Vec<String> = accepted_sorted.iter().map(|s| s.to_string()).collect();
+        push_field_line(&mut text, "reads", &reads);
+    }
+    serde_json::json!({
+        "ok": false,
+        "error": text,
+        "unrecognised_fields": unrecognised,
+        "accepted_fields": accepted_sorted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +707,146 @@ mod tests {
              \x20        received  1e+300\n\
              \x20        config    unchanged"
         );
+    }
+
+    /// #628: `interval_ms` sent to `monitor_spectrum`. `freq_hz` would end
+    /// the first `reads` line at column 81, so it wraps.
+    #[test]
+    fn unrecognised_one_field_is_named_inline() {
+        let accepted = [
+            "freq_hz",
+            "amplitude",
+            "fake_tones",
+            "fake_noise_dbfs",
+            "interval",
+            "fft_n",
+            "channels",
+        ];
+        let req = json!({"cmd": "monitor_spectrum", "interval_ms": 100, "freq_hz": 1000.0});
+        let bad = unrecognised_fields(&req, &accepted);
+        assert_eq!(bad, vec!["interval_ms".to_string()]);
+        let r = unrecognised_refusal("monitor_spectrum", &bad, &accepted);
+        assert_eq!(r["ok"], json!(false));
+        assert_eq!(
+            r["error"],
+            json!(
+                "monitor_spectrum: field 'interval_ms' not recognised \u{2014} command not run\n\
+                 \x20        reads   amplitude  channels  fake_noise_dbfs  fake_tones  fft_n\n\
+                 \x20                freq_hz  interval"
+            )
+        );
+        assert_eq!(r["unrecognised_fields"], json!(["interval_ms"]));
+        assert_eq!(
+            r["accepted_fields"],
+            json!([
+                "amplitude",
+                "channels",
+                "fake_noise_dbfs",
+                "fake_tones",
+                "fft_n",
+                "freq_hz",
+                "interval"
+            ])
+        );
+    }
+
+    #[test]
+    fn unrecognised_many_fields_use_the_count_form() {
+        let req = json!({"cmd": "monitor_spectrum", "interval_ms": 1, "chan": 0, "interval": 0.1});
+        let bad = unrecognised_fields(&req, &["interval", "freq_hz"]);
+        assert_eq!(bad, vec!["chan".to_string(), "interval_ms".to_string()]);
+        let r = unrecognised_refusal("monitor_spectrum", &bad, &["interval", "freq_hz"]);
+        assert_eq!(
+            r["error"],
+            json!(
+                "monitor_spectrum: 2 fields not recognised \u{2014} command not run\n\
+                 \x20        fields  chan  interval_ms\n\
+                 \x20        reads   freq_hz  interval"
+            )
+        );
+    }
+
+    #[test]
+    fn unrecognised_fields_line_caps_names() {
+        let names: Vec<String> = (0..11).map(|i| format!("f{i:02}")).collect();
+        let r = unrecognised_refusal("status", &names, &[]);
+        let text = r["error"].as_str().unwrap();
+        assert!(
+            text.ends_with("\n         fields  f00  f01  f02  f03  f04  f05  f06  f07  +3 more"),
+            "{text}"
+        );
+        assert_eq!(r["unrecognised_fields"].as_array().unwrap().len(), 11);
+    }
+
+    #[test]
+    fn unrecognised_lines_wrap_at_80_columns() {
+        let accepted: Vec<String> = (0..30).map(|i| format!("field_{i:02}")).collect();
+        let accepted: Vec<&str> = accepted.iter().map(String::as_str).collect();
+        let r = unrecognised_refusal("transfer_stream", &["zz".to_string()], &accepted);
+        let text = r["error"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() > 2, "{text}");
+        for l in &lines[1..] {
+            assert!(l.chars().count() <= 80, "line over 80 columns: {l:?}");
+        }
+        assert!(
+            lines[1].starts_with("         reads   field_00  "),
+            "{text}"
+        );
+        for l in &lines[2..] {
+            assert!(l.starts_with(&" ".repeat(17)), "{l:?}");
+            assert!(!l[17..].starts_with(' '), "{l:?}");
+        }
+        let listed: Vec<&str> = lines[1..]
+            .iter()
+            .flat_map(|l| l[17..].split("  "))
+            .collect();
+        assert_eq!(listed, accepted);
+    }
+
+    #[test]
+    fn unrecognised_on_a_command_reading_nothing_has_no_reads_line() {
+        let req = json!({"cmd": "status", "verbose": true});
+        let bad = unrecognised_fields(&req, &[]);
+        let r = unrecognised_refusal("status", &bad, &[]);
+        assert_eq!(
+            r["error"],
+            json!("status: field 'verbose' not recognised \u{2014} command not run")
+        );
+        assert_eq!(r["accepted_fields"], json!([]));
+    }
+
+    #[test]
+    fn unrecognised_name_is_cut_at_64_characters() {
+        let long = "a".repeat(65);
+        let r = unrecognised_refusal("status", std::slice::from_ref(&long), &[]);
+        let text = r["error"].as_str().unwrap();
+        assert!(
+            text.contains(&format!("field '{}\u{2026}' not", "a".repeat(64))),
+            "{text}"
+        );
+        assert_eq!(r["unrecognised_fields"], json!([long]));
+        let exact = "b".repeat(64);
+        let r = unrecognised_refusal("status", std::slice::from_ref(&exact), &[]);
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("field '{exact}' not")));
+    }
+
+    #[test]
+    fn unrecognised_name_control_characters_are_escaped() {
+        let r = unrecognised_refusal("status", &["a\nb\u{7}".to_string()], &[]);
+        let text = r["error"].as_str().unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("field 'a\\nb\\u{7}' not"), "{text}");
+    }
+
+    #[test]
+    fn recognised_only_request_has_no_unrecognised_fields() {
+        let req = json!({"cmd": "generate", "freq_hz": 1000.0, "level_dbfs": -40.0});
+        assert!(unrecognised_fields(&req, &["freq_hz", "level_dbfs"]).is_empty());
+        assert!(unrecognised_fields(&json!([1, 2]), &[]).is_empty());
     }
 
     #[test]
