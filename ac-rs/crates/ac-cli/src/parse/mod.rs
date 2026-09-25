@@ -412,7 +412,9 @@ pub enum CommandKind {
         /// IEC 61260-1 filterbank at this bands-per-octave resolution
         /// and emit an additional `SpectrumBands` report.
         bpo: Option<u32>,
-        /// `--verbose` adds the per-point `noise` column to the table.
+        /// `--verbose` / `-v` adds the per-point `fund` and `noise`
+        /// columns to the table, and the harmonic table (H2–H11 re
+        /// fundamental) after a completed run.
         verbose: bool,
     },
     PlotLevel {
@@ -421,7 +423,9 @@ pub enum CommandKind {
         level_defaulted: bool,
         freq: f64,
         steps: u32,
-        /// `--verbose` adds the per-point `noise` column to the table.
+        /// `--verbose` / `-v` adds the per-point `fund` and `noise`
+        /// columns to the table, and the harmonic table (H2–H11 re
+        /// fundamental) after a completed run.
         verbose: bool,
     },
     #[allow(dead_code)]
@@ -774,8 +778,8 @@ Commands:
   generate level  <start> <stop> [freq] [duration]                    level sweep at fixed frequency (output-only)
   generate frequency [freqStart freqStop] [level] [duration]          frequency sweep at fixed level (output-only)
   plot            [freqStart freqStop] [level] [ppd] [<N>bpo] [show]  per-point THD vs freq (+ optional IEC 61260-1 bands)
-                  [--verbose]                                         (--verbose: per-point noise floor column)
-  plot level      <start> <stop> [freq] [steps] [show] [--verbose]    per-point THD vs level
+                  [--verbose|-v]                                      (-v: fund + noise columns, harmonic table)
+  plot level      <start> <stop> [freq] [steps] [show] [-v]           per-point THD vs level
   plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
                   [<N>harm] [<N>win] [<N>s tail]                      (gate params: harmonics, window, tail capture)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
