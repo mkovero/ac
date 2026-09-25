@@ -2064,10 +2064,34 @@ changes.
 Resolution / trade-off the user gets:
 
 - **Below `crossover_hz`:** `Δf = sr / lf_fft_n` (≈ 0.73 Hz at 48 kHz),
-  enough to separate 5 Hz-spaced tones under 100 Hz. The LF band inherently
-  refreshes at the long-block rate (`lf_fft_n / sr` ≈ 1.4 s) — acceptable
-  because LF content is slow-moving. The long FFT is recomputed at most once
-  per block duration to bound CPU.
+  enough to separate 5 Hz-spaced tones under 100 Hz. The daemon currently
+  keeps three LF quantities apart (#630):
+  - *Window:* each LF spectrum still spans one `lf_fft_n`-sample block
+    (65536 / 48 kHz ≈ 1.37 s). This sets Δf and the LF latency.
+  - *Hop:* the target recompute spacing is
+    `(1 − LF_OVERLAP) · lf_fft_n / sr` with `LF_OVERLAP` = 0.9 (#173), ≈ 136 ms
+    at 65536 / 48 kHz. This is not the frame cadence.
+  - *Effective period:* recomputes land on whole monitor ticks. The daemon
+    recomputes once every `lf_recompute_every` =
+    `clamp(round(hop / max(interval, 1e-6)), 1, 4096)` ticks (#616), so the
+    LF band changes every `lf_recompute_every · interval` seconds: every tick
+    (200 ms) at the default 0.2 s `interval`, every 9 ticks (144 ms) at
+    16 ms. The 4096-tick ceiling applies once `interval` drops below about
+    33 µs at 65536 / 48 kHz. No recompute happens until the capture ring
+    holds a full block. On ticks without a recompute the LF columns repeat
+    the cached spectrum.
+
+  Consecutive LF frames are **not** independent estimates. Successive
+  recomputes share most of their samples, and each recompute passes through a
+  power-domain EMA (τ = `LF_AVG_TAU_S`, 0.25 s) before it is cached. How much
+  they share depends on the channel count: each channel's nominal capture
+  budget per tick is `interval / n_channels` (floored at 2 ms). For a
+  single-channel monitor at the default interval, 9600 of 65536 samples
+  advance per tick (≈ 85 % shared); with two channels it is
+  4800 (≈ 93 % shared), and more channels share more. For a single channel,
+  roughly one independent LF estimate arrives per window length; with
+  `n_channels` channels a full window of new samples per channel takes about
+  `n_channels` times as long.
 - **Above `crossover_hz`:** unchanged — `Δf = sr / fft_n` at the live refresh
   rate, so mid/high responsiveness is not degraded.
 
