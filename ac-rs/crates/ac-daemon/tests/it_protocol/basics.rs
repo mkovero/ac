@@ -366,6 +366,86 @@ fn plot_frames_carry_processing_context_envelope() {
     assert!(mr["imported_at"].is_string());
 }
 
+/// Collect every `measurement/frequency_response/point` frame of one sweep,
+/// stopping at its `done`.
+fn collect_point_frames(c: &Client, secs: u64) -> Vec<Value> {
+    let mut frames = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" => {
+                if v["type"] == json!("measurement/frequency_response/point") {
+                    frames.push(v);
+                }
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    frames
+}
+
+#[test]
+fn point_frames_carry_the_captured_length() {
+    // #116: `capture_s` is the block each point was analysed from. `plot`
+    // stretches a low-frequency point to 3/freq, so a frame that echoed the
+    // nominal `duration` would read 0.1 s for a point that captured 0.15 s.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let duration = 0.1;
+    let start_hz = 20.0; // 3 / 20 Hz = 0.15 s > duration
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   start_hz,
+        "stop_hz":    2000.0,
+        "level_dbfs": -20.0,
+        "ppd":        1,
+        "duration":   duration,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let frames = collect_point_frames(&c, 15);
+    let first = frames.first().expect("no plot point frames");
+    let last = frames.last().expect("no plot point frames");
+    assert_eq!(first["freq_hz"], json!(start_hz), "{first}");
+    let first_s = first["capture_s"]
+        .as_f64()
+        .expect("capture_s on plot frame");
+    assert!(
+        (first_s - 3.0 / start_hz).abs() < 1e-12,
+        "low-frequency point must report 3/freq, got {first_s}"
+    );
+    assert!(
+        (first_s - duration).abs() > 0.01,
+        "capture_s echoed the nominal duration"
+    );
+    let hi_hz = last["freq_hz"].as_f64().expect("freq_hz on plot frame");
+    assert!(3.0 / hi_hz < duration, "{last}");
+    let last_s = last["capture_s"].as_f64().expect("capture_s on plot frame");
+    assert!(
+        (last_s - duration).abs() < 1e-12,
+        "high-frequency point must report duration, got {last_s}"
+    );
+
+    let r = c.call(json!({
+        "cmd": "plot_level", "freq_hz": 1000.0,
+        "start_dbfs": -40.0, "stop_dbfs": -30.0, "steps": 2, "duration": 0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let frames = collect_point_frames(&c, 10);
+    assert!(!frames.is_empty(), "no plot_level point frames");
+    for f in &frames {
+        let s = f["capture_s"]
+            .as_f64()
+            .expect("capture_s on plot_level frame");
+        assert!((s - 0.05).abs() < 1e-12, "plot_level capture_s {s}");
+    }
+}
+
 /// First array stored under key `key` anywhere in `v`, depth-first.
 fn find_array<'a>(v: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
     match v {

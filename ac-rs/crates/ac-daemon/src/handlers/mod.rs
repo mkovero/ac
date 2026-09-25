@@ -696,6 +696,11 @@ impl Default for Tier1Ctx<'_> {
 
 /// `cal` is the gated calibration; `voltage_check` rides the frame (#466),
 /// and a refused scale leaves every `*_vrms`/`*_dbu`/`gain_db` null.
+/// `capture_s` is the length, in seconds, of the block handed to
+/// `capture_block` for this point's analysis — the settle discard before it
+/// is not counted. The caller passes the value it actually captured, so for
+/// `plot` that is the per-point `max(duration, 3/freq)`, not the nominal
+/// `duration`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sweep_point_frame(
     r: &ac_core::shared::types::AnalysisResult,
@@ -705,6 +710,7 @@ pub(super) fn sweep_point_frame(
     cmd_name: &str,
     level_dbfs: f64,
     freq_hz: Option<f64>,
+    capture_s: f64,
     ctx: &Tier1Ctx<'_>,
 ) -> Value {
     let out_vrms = cal.and_then(|c| c.out_vrms(level_dbfs));
@@ -737,6 +743,7 @@ pub(super) fn sweep_point_frame(
         "linear_rms":        r.linear_rms,
         "harmonic_levels":   harmonic_levels,
         "noise_floor_dbfs":  r.noise_floor_dbfs,
+        "capture_s":         capture_s,
         "spectrum":          spec_ds,
         "freqs":             freqs_ds,
         "clipping":          r.clipping,

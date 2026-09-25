@@ -482,6 +482,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                         "plot",
                         level_dbfs,
                         Some(*freq),
+                        dur,
                         &ctx,
                     );
                     let mut frame = frame;
@@ -785,6 +786,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                         "plot_level",
                         level_dbfs,
                         Some(freq_hz),
+                        duration,
                         &ctx,
                     );
                     let mut frame = frame;

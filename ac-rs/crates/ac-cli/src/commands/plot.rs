@@ -13,7 +13,7 @@ pub fn run(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, level, level_defaulted, ppd, bpo) = match cmd {
+    let (start, stop, level, level_defaulted, ppd, bpo, verbose) = match cmd {
         CommandKind::Plot {
             start,
             stop,
@@ -21,7 +21,8 @@ pub fn run(
             level_defaulted,
             ppd,
             bpo,
-        } => (*start, *stop, level, *level_defaulted, *ppd, *bpo),
+            verbose,
+        } => (*start, *stop, level, *level_defaulted, *ppd, *bpo, *verbose),
         _ => unreachable!(),
     };
 
@@ -58,7 +59,7 @@ pub fn run(
         std::process::exit(1);
     }
     let have_cal = matches!(voltage_scale(cal.as_ref()), Some(Scale::Usable(..)));
-    io::print_freq_header(have_cal);
+    io::print_freq_header(have_cal, verbose);
     print_level(
         ack.get("level_dbfs").and_then(|v| v.as_f64()),
         level_defaulted,
@@ -80,7 +81,7 @@ pub fn run(
         launch_ui(LaunchKind::SweepFreq, cfg, None);
     }
 
-    let (results, outcome) = collect_sweep(client, "plot");
+    let (results, outcome) = collect_sweep(client, "plot", have_cal, verbose);
     if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
@@ -94,14 +95,15 @@ pub fn run_level(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, level_defaulted, freq, steps) = match cmd {
+    let (start, stop, level_defaulted, freq, steps, verbose) = match cmd {
         CommandKind::PlotLevel {
             start,
             stop,
             level_defaulted,
             freq,
             steps,
-        } => (start, stop, *level_defaulted, *freq, *steps),
+            verbose,
+        } => (start, stop, *level_defaulted, *freq, *steps, *verbose),
         _ => unreachable!(),
     };
 
@@ -141,7 +143,7 @@ pub fn run_level(
         std::process::exit(1);
     }
     let have_cal = matches!(voltage_scale(cal.as_ref()), Some(Scale::Usable(..)));
-    io::print_freq_header(have_cal);
+    io::print_freq_header(have_cal, verbose);
     print_level_range(
         ack.get("start_dbfs").and_then(|v| v.as_f64()),
         ack.get("stop_dbfs").and_then(|v| v.as_f64()),
@@ -160,7 +162,7 @@ pub fn run_level(
         launch_ui(LaunchKind::SweepLevel, cfg, None);
     }
 
-    let (results, outcome) = collect_sweep(client, "plot_level");
+    let (results, outcome) = collect_sweep(client, "plot_level", have_cal, verbose);
     if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
@@ -351,9 +353,9 @@ struct IrTyped {
     tail: bool,
 }
 
-/// The `level` block's fallback for an ack field an older daemon does not
-/// send, verbatim.
-const NOT_REPORTED: &str = "(not reported by this daemon)";
+// The `level` block's fallback for an ack field an older daemon does not
+// send, verbatim — shared with the sweep summary's `captured` row.
+use crate::io::NOT_REPORTED;
 
 fn origin_tag(typed: bool) -> &'static str {
     if typed {
@@ -1995,8 +1997,13 @@ enum SweepOutcome {
     Failed,
 }
 
-fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> (Vec<serde_json::Value>, SweepOutcome) {
-    collect_sweep_frames(|| client.recv_data(300_000), cmd_name)
+fn collect_sweep(
+    client: &mut AcClient,
+    cmd_name: &str,
+    have_cal: bool,
+    verbose: bool,
+) -> (Vec<serde_json::Value>, SweepOutcome) {
+    collect_sweep_frames(|| client.recv_data(300_000), cmd_name, have_cal, verbose)
 }
 
 /// Core of `collect_sweep`, generic over the frame source so the
@@ -2007,6 +2014,8 @@ fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> (Vec<serde_json::Valu
 fn collect_sweep_frames(
     mut next_frame: impl FnMut() -> Option<(String, serde_json::Value)>,
     cmd_name: &str,
+    have_cal: bool,
+    verbose: bool,
 ) -> (Vec<serde_json::Value>, SweepOutcome) {
     let mut results = Vec::new();
     let mut outcome = SweepOutcome::Failed;
@@ -2025,7 +2034,7 @@ fn collect_sweep_frames(
             if data.get("type").and_then(|v| v.as_str())
                 == Some("measurement/frequency_response/point")
             {
-                io::print_freq_row(&data);
+                io::print_freq_row(&data, have_cal, verbose);
                 results.push(data);
             }
         } else if topic == "done" {
@@ -2276,7 +2285,7 @@ mod tests {
             ("done".to_string(), serde_json::json!({"xruns": 0})),
         ]);
 
-        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot", false, false);
 
         assert_eq!(outcome, SweepOutcome::Failed);
         assert_eq!(
@@ -2294,7 +2303,7 @@ mod tests {
             ("done".to_string(), serde_json::json!({"xruns": 0})),
         ]);
 
-        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot", false, false);
 
         assert_eq!(outcome, SweepOutcome::Done);
         assert_eq!(results.len(), 2);
