@@ -5,6 +5,28 @@ use std::time::Instant;
 
 use crate::common::{Client, Daemon};
 
+/// Cadence (seconds) the value-correctness monitor tests request. The
+/// send and the readback in [`assert_monitor_interval`] share this so
+/// they cannot drift apart.
+const MONITOR_TEST_INTERVAL_S: f64 = 0.1;
+
+/// Read back the running monitor's stored parameters and assert the
+/// `interval` the test sent was honoured. The request deliberately
+/// carries no fields: with none present `set_monitor_params` changes
+/// nothing and echoes what `monitor_spectrum` parsed, so a dropped or
+/// renamed request field shows up here as the 0.2 s default. Sending
+/// `interval` here would store the value itself and make the check
+/// unable to fail.
+fn assert_monitor_interval(c: &Client) {
+    let r = c.call(json!({"cmd": "set_monitor_params"}));
+    assert_eq!(r["ok"], json!(true), "set_monitor_params readback: {r}");
+    assert_eq!(
+        r["interval"],
+        json!(MONITOR_TEST_INTERVAL_S),
+        "monitor_spectrum did not honour the requested interval: {r}"
+    );
+}
+
 #[test]
 fn set_monitor_params_rejects_when_idle() {
     let d = Daemon::spawn();
@@ -80,10 +102,11 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
     let r = c.call(json!({
         "cmd": "monitor_spectrum",
         "channels": [0],
-        "interval_ms": 100,
+        "interval": MONITOR_TEST_INTERVAL_S,
         "fft_n": 8192,
     }));
     assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+    assert_monitor_interval(&c);
 
     // Skip the first frame or two — the FFT ring is still filling and
     // the first analyze() may include partial-window edge artefacts.
@@ -192,7 +215,7 @@ fn monitor_spectrum_fake_tones_produce_two_distinct_peaks() {
     let r = c.call(json!({
         "cmd": "monitor_spectrum",
         "channels": [0],
-        "interval_ms": 100,
+        "interval": MONITOR_TEST_INTERVAL_S,
         "fft_n": 8192,
         "fake_tones": [
             {"freq_hz": 2000.0, "level_dbfs": -6.0},
@@ -200,6 +223,7 @@ fn monitor_spectrum_fake_tones_produce_two_distinct_peaks() {
         ],
     }));
     assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+    assert_monitor_interval(&c);
 
     let mut frame: Option<Value> = None;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -263,11 +287,12 @@ fn monitor_spectrum_fake_noise_stays_bounded() {
     let r = c.call(json!({
         "cmd": "monitor_spectrum",
         "channels": [0],
-        "interval_ms": 100,
+        "interval": MONITOR_TEST_INTERVAL_S,
         "fft_n": 8192,
         "fake_noise_dbfs": -20.0,
     }));
     assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+    assert_monitor_interval(&c);
 
     let mut frame: Option<Value> = None;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -330,10 +355,11 @@ fn monitor_spectrum_emits_scope_frames() {
     let r = c.call(json!({
         "cmd":         "monitor_spectrum",
         "channels":    [0, 1],
-        "interval_ms": 100,
+        "interval":    MONITOR_TEST_INTERVAL_S,
         "fft_n":       8192,
     }));
     assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+    assert_monitor_interval(&c);
 
     // Collect scope frames for ~3 s, in the order the daemon's single
     // PUB socket delivered them — that is the emission order.
