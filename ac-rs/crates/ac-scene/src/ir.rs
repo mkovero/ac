@@ -18,7 +18,7 @@ use ac_core::visualize::transfer::impulse_response_from_h;
 
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{time_axis, time_to_x, Axis};
-use crate::wire::IrWireFrame;
+use ac_core::wire::IrFrame;
 
 /// The header line every IR panel draws verbatim, top of the pane.
 ///
@@ -54,7 +54,7 @@ pub struct IrInput {
     /// The first sample's time, ms (negative).
     pub t_origin_ms: f64,
     pub delay_ms: f64,
-    /// [`crate::wire::WireFrame::delay_locked`]'s three-way meaning.
+    /// [`ac_core::wire::TransferFrame::delay_locked`]'s three-way meaning.
     pub delay_locked: Option<bool>,
     pub channel_role: String,
     pub source: Source,
@@ -63,7 +63,7 @@ pub struct IrInput {
 
 impl IrInput {
     /// Adapt a live `visualize/ir` wire frame.
-    pub fn from_wire_frame(frame: &IrWireFrame) -> IrInput {
+    pub fn from_wire_frame(frame: &IrFrame) -> IrInput {
         IrInput {
             samples: frame.samples.clone(),
             dt_ms: frame.dt_ms,
@@ -353,7 +353,7 @@ mod tests {
     // formula (this module's doc on `IR_MAX_SAMPLES` claims byte-for-byte
     // identity with `ac-daemon/src/handlers/transfer.rs`'s `ir_msg` block —
     // this test is what pins that claim down instead of leaving it as
-    // prose). A synthetic `IrWireFrame` is built here by hand, running the
+    // prose). A synthetic `IrFrame` is built here by hand, running the
     // daemon's own downsample arithmetic verbatim, so it stands in for a
     // live wire frame carrying the identical H1 a `.acsnap`'s
     // `PairDerivation` also stores — the two `IrScene`s built from it must
@@ -380,7 +380,12 @@ mod tests {
         let dt_ms = 1000.0 / sr as f64 * stride as f64;
         let t_origin_ms = -((samples.len() / 2) as f64) * dt_ms;
 
-        let wire = IrWireFrame {
+        let wire = IrFrame {
+            frame_type: "visualize/ir".to_string(),
+            cmd: "transfer_stream".to_string(),
+            wire_version: None,
+            analysis_seq: 0,
+            backend: String::new(),
             samples,
             sr,
             stride,

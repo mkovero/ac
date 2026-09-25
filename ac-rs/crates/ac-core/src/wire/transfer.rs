@@ -1,21 +1,13 @@
-//! Deserialization types for the `transfer_stream` v2 DATA frame
-//! (`ZMQ.md`, `### transfer_stream`) and its `visualize/ir` sidecar
-//! (`ZMQ.md`, `#### visualize/ir sidecar`). Cite those sections by name,
-//! never by line: the line numbers this comment used to carry drifted ~230
-//! lines out of date as the document grew above them, and pointed at a
-//! different command with nothing to signal it.
+//! The `transfer_stream` v2 DATA frame (`ZMQ.md`, `### transfer_stream`)
+//! and its `visualize/ir` sidecar (`ZMQ.md`, `#### visualize/ir sidecar`).
+//! Cite those sections by name, never by line: line numbers drift as the
+//! document grows above them, and point at a different command with nothing
+//! to signal it.
 //!
-//! `serde` ignores JSON fields a struct
-//! doesn't name, so a real wire frame deserializes fine even though
-//! each struct here is a subset of its schema.
-//!
-//! The spectrum-view fields (M2, architect review decision 1) and the
-//! transfer-view fields (M4a, §4.1/§4.2) both live here. The transfer
-//! fields carry `#[serde(default)]` so a frame without H1 content still
-//! parses into an (empty-trace) spectrum scene rather than failing the
-//! whole deserialize — `ac-view` drops unparseable frames silently
-//! (`app.rs`), so a hard requirement here would show up as a blank view,
-//! not as an error.
+//! The Welch-derived H1 arrays and the three-stage `mtw` columns carry
+//! `#[serde(default)]` so a frame without H1 content still parses rather
+//! than failing the whole deserialize — `ac-view` would otherwise drop it as
+//! malformed and show a blank view.
 //!
 //! # `phase_deg` is NOT raw phase
 //!
@@ -29,13 +21,14 @@
 //! φ_wire(f) = φ_raw(f) + 360·f·τ_sess
 //! ```
 //!
-//! already de-rotated by the session's own delay. [`crate::transfer`]
+//! already de-rotated by the session's own delay. `ac_scene::transfer`
 //! owns the mapping from a display mode to the τ_derot that must be
 //! applied on top of it; see that module's doc for the table. Treating
 //! this field as raw phase double-compensates — the failure #180's
 //! architect pass exists to have caught.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Observed stimulus state (#228) — what the daemon applied to its engine
 /// on this frame's tick, after the `set_drive` dead-man expired a stale
@@ -45,7 +38,7 @@ use serde::Deserialize;
 /// `set_drive` instead would believe the drive was live while the daemon
 /// had already silenced it — which is precisely the belief-versus-
 /// observation gap the fault indicator exists to close.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WireDrive {
     /// Applied on this tick.
     #[serde(default)]
@@ -63,7 +56,7 @@ pub struct WireDrive {
 
 /// One ladder rung's parameters, echoed in every frame so a saved frame stays
 /// interpretable without knowing the daemon's layout rules.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MtwStage {
     #[serde(default)]
     pub decim: usize,
@@ -74,11 +67,22 @@ pub struct MtwStage {
     #[serde(default)]
     pub window_s: f64,
     /// Segment hop. `window_s / 2` for the 50% overlap the estimator uses —
-    /// checked rather than assumed, see [`MtwColumns::variance_equivalent_n`].
+    /// checked rather than assumed.
     #[serde(default)]
     pub hop_s: f64,
     #[serde(default)]
     pub f_valid: f64,
+    /// Where this rung begins handing over to the rung above it, in Hz
+    /// (`ladder::Stage::f_top`).
+    #[serde(default)]
+    pub f_top: f64,
+    /// Top of the blend region, in Hz; above it the shallower rung is used
+    /// alone (`ladder::Stage::blend_top`).
+    #[serde(default)]
+    pub blend_top: f64,
+    /// `W + hop·(N−1)` — how long this rung takes to fill its average, so a
+    /// viewer can say how stale a band is without deriving it from the frame
+    /// rate.
     #[serde(default)]
     pub settling_s: f64,
 }
@@ -88,8 +92,8 @@ pub struct MtwStage {
 /// Column spacing is **not uniform** in log frequency: where the requested
 /// density exceeds what a rung resolves, the grid widens instead of
 /// interpolating. Anything consuming this must map each column by its own
-/// `freqs[i]` rather than by index (which `freq_to_x` already does).
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `freqs[i]` rather than by index.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MtwColumns {
     pub freqs: Vec<f64>,
     #[serde(default)]
@@ -105,7 +109,7 @@ pub struct MtwColumns {
     /// Analysis window behind each column, in seconds.
     #[serde(default)]
     pub window_s: Vec<f64>,
-    /// Blocks actually averaged behind each column.
+    /// Blocks actually averaged behind each column. An integer on the wire.
     ///
     /// This is a raw input, not a depth. The effective averaging depth is set
     /// by blocks **and** by [`Self::bins`], and no validated model combines
@@ -113,7 +117,7 @@ pub struct MtwColumns {
     /// from this field; the last two attempts were both further from the
     /// truth than the uncorrected value.
     #[serde(default)]
-    pub n: Vec<f64>,
+    pub n: Vec<usize>,
     #[serde(default)]
     pub stage: Vec<usize>,
     #[serde(default)]
@@ -126,12 +130,46 @@ pub struct MtwColumns {
     pub ppo: f64,
     #[serde(default)]
     pub n_blocks: usize,
+    /// Which rungs have settled, shallowest first. Distinguishes "still
+    /// warming, more band coming" from "this is all there is" — a short
+    /// column list looks the same either way.
+    #[serde(default)]
+    pub settled_stages: Vec<bool>,
     #[serde(default)]
     pub stages: Vec<MtwStage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct WireFrame {
+impl MtwColumns {
+    /// Every parallel array is the same length as `freqs`.
+    ///
+    /// The arrays are independent JSON fields, so nothing guarantees a short
+    /// one is a truncation rather than a misalignment. Same argument as the
+    /// Welch path's length check: a mismatched frame draws nothing rather than
+    /// drawing a guess.
+    pub fn lengths_agree(&self) -> bool {
+        let n = self.freqs.len();
+        self.magnitude_db.len() == n
+            && self.phase_deg.len() == n
+            && self.coherence.len() == n
+            && (self.df.is_empty() || self.df.len() == n)
+            && (self.window_s.is_empty() || self.window_s.len() == n)
+            && (self.bins.is_empty() || self.bins.len() == n)
+    }
+}
+
+/// The `transfer_stream` DATA frame (`ZMQ.md`, `### transfer_stream`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransferFrame {
+    /// Always `"transfer_stream"` on this frame.
+    #[serde(rename = "type", default)]
+    pub frame_type: String,
+    /// Always `"transfer_stream"`.
+    #[serde(default)]
+    pub cmd: String,
+    /// Stamped at the daemon's publish seam, not by the builder; absent on a
+    /// daemon predating it. See [`crate::wire::check_wire_version`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u32>,
     pub sr: u32,
     pub meas_channel: i64,
     pub ref_channel: i64,
@@ -139,7 +177,7 @@ pub struct WireFrame {
     /// session (D18).
     pub spec_freqs: Vec<f64>,
     /// LINEAR amplitude, band-power aggregated, calibrated. NOT dB —
-    /// see [`crate::dbfs::linear_to_dbfs`], the crate's one conversion
+    /// `ac_scene::dbfs::linear_to_dbfs` is the consumer's one conversion
     /// site.
     pub meas_spectrum: Vec<f64>,
     /// Same, reference channel (no mic curve).
@@ -152,10 +190,10 @@ pub struct WireFrame {
     pub spl_integration: String,
     /// `{meas, ref}` calibration tags (#466 reads `voltage` and
     /// `voltage_check`). Held as a raw value so a malformed tag can never
-    /// drop the frame; [`crate::transfer::CalibrationReadout::from_cal_tags`]
+    /// drop the frame; `ac_scene::transfer::CalibrationReadout::from_cal_tags`
     /// converts it leniently.
     #[serde(default)]
-    pub cal_tags: Option<serde_json::Value>,
+    pub cal_tags: Option<Value>,
 
     // ---- transfer view (§4.1) — the H grid, DISTINCT from `spec_freqs` ----
     /// H1 column centre frequencies. Not `spec_freqs`: that is the
@@ -187,7 +225,7 @@ pub struct WireFrame {
     /// distinct from `Some(false)`, which is a positive statement that the
     /// pair is measured UNALIGNED, either because it is still warming up or
     /// because the estimator refused to lock. The three-way distinction is
-    /// load-bearing: [`crate::fault`] may only report a lock fault on
+    /// load-bearing: `ac_scene::fault` may only report a lock fault on
     /// `Some(false)`, never on absence, and `delay_ms == 0.0` cannot stand
     /// in for it (a digital loopback legitimately reads 0.0 — #216).
     #[serde(default)]
@@ -200,17 +238,22 @@ pub struct WireFrame {
     /// This is what separates warmup from refusal: [`Self::delay_locked`] is
     /// `Some(false)` for both, and before the first attempt the pair has not
     /// been asked the question yet. A count only — nothing here says how close
-    /// the estimate came, which is `delay_evidence`'s business and gates
-    /// nothing.
+    /// the estimate came, which is [`Self::delay_evidence`]'s business and
+    /// gates nothing.
     ///
     /// **Monotone for the life of the pair, and it must stay that way.** A
     /// re-lock (#226) adds attempts; it must never reset the count. If it
-    /// did, [`crate::fault::FaultFrame::estimator_attempted`] would go back to
-    /// false and a pair that locked and then started refusing would read as a
-    /// pair that has not been asked yet — silence, exactly the blank window
-    /// #238 fixed, and reachable only in the sessions #226 exists for.
+    /// did, `ac_scene::fault::FaultFrame::estimator_attempted` would go back
+    /// to false and a pair that locked and then started refusing would read
+    /// as a pair that has not been asked yet — silence, exactly the blank
+    /// window #238 fixed, and reachable only in the sessions #226 exists for.
     #[serde(default)]
     pub delay_attempts: u32,
+    /// The evidence the lock decision was made on (#227); `null` before the
+    /// first attempt. DIAGNOSTIC ONLY — nothing downstream may gate on it.
+    /// Held as a raw value; typing it is a #112 follow-up.
+    #[serde(default)]
+    pub delay_evidence: Option<Value>,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's
@@ -227,6 +270,24 @@ pub struct WireFrame {
     /// Same, reference channel.
     #[serde(default)]
     pub ref_peak_dbfs: Option<f64>,
+
+    // ---- estimate provenance ----
+    /// Welch blocks averaged into THIS frame (#208): 0 on a settling frame,
+    /// then rising to the session's depth. Coherence carries a `1/N` bias,
+    /// so a coherence figure without N is not interpretable.
+    #[serde(default)]
+    pub n_averages: usize,
+    /// Which estimate the Welch arrays are; increments once per
+    /// recomputation. `null` on a settling frame, which has no estimate to
+    /// number.
+    #[serde(default)]
+    pub analysis_seq: Option<u64>,
+    /// `"on"` | `"off"` | `"none"` — the meas channel's mic-curve state.
+    #[serde(default)]
+    pub mic_correction: String,
+    /// The engine that produced the frame (`"jack"` | `"cpal"` | `"fake"`).
+    #[serde(default)]
+    pub backend: String,
 
     // ---- three-stage transfer columns — the display's source ----
     /// `None` until every ladder rung holds a full N blocks (2.56 s at the
@@ -252,50 +313,24 @@ pub struct WireFrame {
     pub drive: Option<WireDrive>,
 }
 
-impl MtwColumns {
-    /// Every parallel array is the same length as `freqs`.
-    ///
-    /// The arrays are independent JSON fields, so nothing guarantees a short
-    /// one is a truncation rather than a misalignment. Same argument as the
-    /// Welch path's length check: a mismatched frame draws nothing rather than
-    /// drawing a guess.
-    pub fn lengths_agree(&self) -> bool {
-        let n = self.freqs.len();
-        self.magnitude_db.len() == n
-            && self.phase_deg.len() == n
-            && self.coherence.len() == n
-            && (self.df.is_empty() || self.df.len() == n)
-            && (self.window_s.is_empty() || self.window_s.len() == n)
-            && (self.bins.is_empty() || self.bins.len() == n)
-    }
-}
-
-impl WireFrame {
-    /// The ladder columns **as the display uses them**: present only when
-    /// [`MtwColumns::lengths_agree`], because a mismatched frame draws
-    /// nothing.
-    ///
-    /// One accessor rather than the same `filter` at each call site. The
-    /// selection is an invariant shared across modules, not a local
-    /// convenience: [`crate::fault::FaultFrame::settled`] means "there are
-    /// columns on screen", and it can only mean that while it and
-    /// [`crate::TransferInput::from_wire_frame`] make the identical choice.
-    /// Duplicating the filter let the two drift apart with nothing failing.
-    pub fn displayed_mtw(&self) -> Option<&MtwColumns> {
-        self.mtw.as_ref().filter(|m| m.lengths_agree())
-    }
-}
-
 /// The `visualize/ir` sidecar DATA frame (`ZMQ.md`, `#### visualize/ir
-/// sidecar`) — daemon-side
-/// IFFT of the full-resolution H₁(ω) into a time-domain h(t), published
-/// alongside each `transfer_stream` frame for the same pair on the same
-/// tick. A separate top-level shape (`"type": "visualize/ir"`), not a
-/// variant of [`WireFrame`] — see that struct's fields for the ones this
-/// omits (`spec_freqs`, `spl`, the H1 grid, …), which this frame carries
-/// none of.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IrWireFrame {
+/// sidecar`) — daemon-side IFFT of the full-resolution H₁(ω) into a
+/// time-domain h(t), published alongside each `transfer_stream` frame for
+/// the same pair on the same tick. A separate top-level shape
+/// (`"type": "visualize/ir"`), not a variant of [`TransferFrame`] — see that
+/// struct's fields for the ones this omits (`spec_freqs`, `spl`, the H1
+/// grid, …), which this frame carries none of.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrFrame {
+    /// Always `"visualize/ir"` on this frame.
+    #[serde(rename = "type", default)]
+    pub frame_type: String,
+    /// Always `"transfer_stream"`.
+    #[serde(default)]
+    pub cmd: String,
+    /// Stamped at the daemon's publish seam; see [`TransferFrame::wire_version`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u32>,
     /// h(t), `fftshift`-centred and downsampled to ≤2000 samples
     /// (stride-picked, not interpolated).
     #[serde(default)]
@@ -317,10 +352,16 @@ pub struct IrWireFrame {
     pub delay_samples: i64,
     #[serde(default)]
     pub delay_ms: f64,
-    /// #227 lock verdict for this tick — see [`WireFrame::delay_locked`]
+    /// #227 lock verdict for this tick — see [`TransferFrame::delay_locked`]
     /// for the three-way meaning this field shares.
     #[serde(default)]
     pub delay_locked: Option<bool>,
+    /// Same value as the `transfer_stream` frame this was derived from.
+    #[serde(default)]
+    pub analysis_seq: u64,
+    /// The engine that produced the frame.
+    #[serde(default)]
+    pub backend: String,
 }
 
 #[cfg(test)]
@@ -348,12 +389,13 @@ mod tests {
             "spl": -6.75,
             "spl_weighting": "Z",
             "spl_integration": "fast",
+            "unknown_future_key": 7,
             "cal_tags": {
                 "meas": {"voltage": "on", "spl": "on", "mic_curve": "none"},
                 "ref": {"voltage": "on", "spl": "none", "mic_curve": "none"}
             }
         }"#;
-        let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+        let frame: TransferFrame = serde_json::from_str(json).expect("deserialize");
         assert_eq!(frame.sr, 48000);
         assert_eq!(frame.spec_freqs, vec![100.0, 1000.0]);
         assert_eq!(frame.spl, Some(-6.75));
@@ -372,7 +414,7 @@ mod tests {
             "delay_ms": 4.08,
             "delay_locked": true
         }"#;
-        let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+        let frame: TransferFrame = serde_json::from_str(json).expect("deserialize");
         assert_eq!(frame.delay_locked, Some(true));
     }
 
@@ -392,7 +434,7 @@ mod tests {
             "delay_ms":      4.82,
             "delay_locked":  true
         }"#;
-        let frame: IrWireFrame = serde_json::from_str(json).expect("deserialize");
+        let frame: IrFrame = serde_json::from_str(json).expect("deserialize");
         assert_eq!(frame.samples, vec![0.0, 0.5, -0.25, 0.0]);
         assert_eq!(frame.sr, 48000);
         assert_eq!(frame.stride, 24);
@@ -407,11 +449,24 @@ mod tests {
     #[test]
     fn ir_wire_frame_missing_lock_field_is_none_not_false() {
         // A daemon predating #227 names no delay_locked field — the
-        // three-way meaning `WireFrame::delay_locked` documents applies
+        // three-way meaning `TransferFrame::delay_locked` documents applies
         // here too: absence must not read as "measured unaligned".
         let json = r#"{"sr": 48000, "ref_channel": 1, "meas_channel": 0}"#;
-        let frame: IrWireFrame = serde_json::from_str(json).expect("deserialize");
+        let frame: IrFrame = serde_json::from_str(json).expect("deserialize");
         assert_eq!(frame.delay_locked, None);
         assert!(frame.samples.is_empty());
+    }
+
+    /// `mtw.n` is an integer on the wire (`splice::Column::n: usize`). A float
+    /// type here would re-serialise `4` as `4.0`, a formatting change on
+    /// every frame.
+    #[test]
+    fn mtw_n_round_trips_as_an_integer() {
+        let v = serde_json::json!({
+            "freqs": [1.0], "magnitude_db": [0.0], "phase_deg": [0.0],
+            "coherence": [1.0], "n": [4]
+        });
+        let m: MtwColumns = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(serde_json::to_value(&m).unwrap()["n"], serde_json::json!([4]));
     }
 }

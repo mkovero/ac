@@ -15,7 +15,7 @@
 //! `visualize::transfer::h1_estimate_core` multiplies `Gxy` by
 //! `exp(+j·2π·f·delay_samples/sr)` before forming H1, and takes
 //! `phase_deg = h1.arg()` after that; the streaming worker estimates
-//! `delay_samples` once and freezes it (D4). So [`crate::wire::WireFrame`]'s
+//! `delay_samples` once and freezes it (D4). So [`ac_core::wire::TransferFrame`]'s
 //! `phase_deg` is
 //!
 //! ```text
@@ -54,7 +54,7 @@ use ac_core::visualize::smoothing::{smooth_db, smooth_unwrapped_phase_deg};
 use crate::fault::{Fault, FaultFrame, FaultInput, FaultState};
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
-use crate::wire::{MtwStage, WireFrame};
+use ac_core::wire::{MtwColumns, MtwStage, TransferFrame};
 
 /// Columns below this coherence are masked out of both panes (D5 —
 /// fixed threshold, no tuning UI).
@@ -547,7 +547,7 @@ pub struct TransferInput {
     /// τ_sess, this session's frozen estimate.
     pub delay_ms: f64,
     /// Whether [`Self::delay_ms`] is a measured lock, with
-    /// [`WireFrame::delay_locked`]'s three-way meaning. Consumed by
+    /// [`TransferFrame::delay_locked`]'s three-way meaning. Consumed by
     /// [`crate::fault`], not by the delay readout itself (#391).
     pub delay_locked: Option<bool>,
     /// This pair's channel numbers — distinct from [`Self::channel_role`],
@@ -586,11 +586,27 @@ pub struct TransferInput {
     pub calibration: Option<CalibrationReadout>,
 }
 
+/// The ladder columns **as the display uses them**: present only when
+/// [`MtwColumns::lengths_agree`], because a mismatched frame draws nothing.
+///
+/// One function rather than the same `filter` at each call site. The
+/// selection is an invariant shared across modules, not a local
+/// convenience: [`crate::fault::FaultFrame::settled`] means "there are
+/// columns on screen", and it can only mean that while it and
+/// [`TransferInput::from_wire_frame`] make the identical choice. Duplicating
+/// the filter let the two drift apart with nothing failing.
+///
+/// A display-selection rule, so it lives here beside its callers rather than
+/// on the shared wire type (#112).
+pub fn displayed_mtw(frame: &TransferFrame) -> Option<&MtwColumns> {
+    frame.mtw.as_ref().filter(|m| m.lengths_agree())
+}
+
 impl TransferInput {
     /// Adapt a live `transfer_stream` frame. `phase_deg` is carried
     /// through as-is — it is already session-compensated (see the module
     /// doc), and `delay_ms` is τ_sess for this session.
-    pub fn from_wire_frame(frame: &WireFrame) -> TransferInput {
+    pub fn from_wire_frame(frame: &TransferFrame) -> TransferInput {
         // The three-stage columns are the display's source. The frame still
         // carries the full-rate Welch arrays, and this deliberately does not
         // read them: they are a different measurement (1 Hz flat, sliding
@@ -600,7 +616,7 @@ impl TransferInput {
         // saying so. No trace is the honest state for the ~2.56 s the bottom
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
-        let mtw = frame.displayed_mtw();
+        let mtw = displayed_mtw(frame);
         let (
             freqs,
             magnitude_db,
@@ -618,7 +634,9 @@ impl TransferInput {
                 m.coherence.clone(),
                 m.df.clone(),
                 m.window_s.clone(),
-                m.n.clone(),
+                // An integer on the wire; the display's per-column inputs
+                // are uniformly `f64`.
+                m.n.iter().map(|&n| n as f64).collect(),
                 m.bins.clone(),
             ),
             None => Default::default(),
@@ -746,7 +764,7 @@ impl TransferScene {
         // that rules out clamping. So a mismatched frame contributes NO
         // transfer traces (empty segments); the render path stays alive
         // and draws the next good frame. `ac-view` parses partial frames
-        // by design (WireFrame is `#[serde(default)]`-lenient), so this
+        // by design (TransferFrame is `#[serde(default)]`-lenient), so this
         // must never panic.
         let lengths_agree = input.freqs.len() == input.magnitude_db.len()
             && input.freqs.len() == input.phase_deg.len()
@@ -1004,7 +1022,7 @@ mod tests {
             "spl": null, "spl_weighting": "Z", "spl_integration": "fast",
             "cal_tags": {"meas": {"voltage": 7, "voltage_check": [1]}},
         });
-        let wire: WireFrame = serde_json::from_value(frame).expect("frame still parses");
+        let wire: TransferFrame = serde_json::from_value(frame).expect("frame still parses");
         let input = TransferInput::from_wire_frame(&wire);
         assert_eq!(
             input.calibration.map(|c| c.state),
@@ -1033,6 +1051,8 @@ mod tests {
                 window_s: s.window_s,
                 hop_s: s.hop_s,
                 f_valid: s.f_valid,
+                f_top: s.f_top,
+                blend_top: s.blend_top,
                 settling_s: settling_seconds(s, 4),
             })
             .collect()
@@ -1336,7 +1356,7 @@ mod tests {
     // guarantee, so drawing a common prefix would fabricate data from a
     // known-malformed producer. Absence is asserted, not truncated
     // presence. Must not panic — the render path is live and
-    // keypress-adjacent, and WireFrame parses partial frames by design.
+    // keypress-adjacent, and TransferFrame parses partial frames by design.
     #[test]
     fn length_mismatch_omits_transfer_traces_entirely() {
         let inp = TransferInput {

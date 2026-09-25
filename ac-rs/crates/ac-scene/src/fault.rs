@@ -38,7 +38,7 @@
 //! collapsed, LF fine" — stage 0 coherence at 0.05 against 0.715-0.755 for a
 //! good lock. That was designed when a refusal did not exist and the only
 //! evidence of a bad lock was its downstream effect. #227 makes the estimator
-//! say so itself, so this module reads [`WireFrame::delay_locked`]: coherence
+//! say so itself, so this module reads [`TransferFrame::delay_locked`]: coherence
 //! is the symptom, the flag is the cause.
 //!
 //! Dropping the coherence discriminator also removes the hardest threshold in
@@ -62,7 +62,7 @@
 //! the estimator owns — including reading its null-versus-present to separate
 //! warmup from refusal — is how the two ends drift apart.
 //!
-//! [`WireFrame::delay_attempts`] is the field this module reads instead, and
+//! [`TransferFrame::delay_attempts`] is the field this module reads instead, and
 //! the distinction is worth stating because it is not self-evident. A count
 //! of completed estimates carries no threshold: it says the estimator has
 //! answered, not how close the answer came. The estimator can change
@@ -143,7 +143,9 @@
 //! window under a `NO LOCK` banner is the honest alternative.
 
 use crate::transfer::COHERENCE_THRESHOLD;
-use crate::wire::WireFrame;
+use ac_core::wire::TransferFrame;
+
+use crate::transfer::displayed_mtw;
 
 /// "At the floor", in dBFS. Absolute and generous: far below any usable
 /// measurement, so it will not fire on a quiet but valid session.
@@ -179,7 +181,7 @@ pub const LADDER_SETTLE_S: f64 = 2.560;
 /// settle was the only observable that stood in for "a lock was possible by
 /// now".
 ///
-/// [`WireFrame::delay_attempts`] observes that directly, so the clock is now
+/// [`TransferFrame::delay_attempts`] observes that directly, so the clock is now
 /// anchored on the first refused attempt. The consequences, both accepted:
 ///
 /// - **A pair that never locks** reaches [`Fault::NoLock`] at 10 s from its
@@ -375,7 +377,7 @@ impl Fault {
     }
 }
 
-/// The [`crate::wire::WireDrive`] fields this module actually uses.
+/// The [`ac_core::wire::WireDrive`] fields this module actually uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriveState {
     pub on: bool,
@@ -436,8 +438,8 @@ impl FaultFrame {
     }
 
     /// `None` when the daemon does not report its drive state — see
-    /// [`WireFrame::drive`].
-    pub fn from_wire_frame(frame: &WireFrame) -> Option<FaultFrame> {
+    /// [`TransferFrame::drive`].
+    pub fn from_wire_frame(frame: &TransferFrame) -> Option<FaultFrame> {
         let drive = frame.drive.as_ref()?;
         Some(FaultFrame {
             drive: DriveState {
@@ -447,8 +449,8 @@ impl FaultFrame {
             delay_locked: frame.delay_locked,
             // The display's own selection, so "settled" and "there are
             // columns on screen" cannot disagree — see
-            // [`WireFrame::displayed_mtw`].
-            settled: frame.displayed_mtw().is_some(),
+            // [`displayed_mtw`].
+            settled: displayed_mtw(frame).is_some(),
             delay_attempts: frame.delay_attempts,
         })
     }
@@ -463,7 +465,7 @@ pub struct FaultInput<'a> {
     /// The display's own columns — the ladder's, and **only** the ladder's.
     /// Empty before it settles, and empty for a pair that never locks.
     ///
-    /// Do not fall back to [`WireFrame::coherence`] to fill it. See the
+    /// Do not fall back to [`TransferFrame::coherence`] to fill it. See the
     /// module's `CHECK ROUTING` section: the Welch array is a different
     /// measurement with a different bin count and bias floor, and
     /// [`coherence_dead`]'s threshold was measured against the ladder's 504
@@ -479,13 +481,12 @@ impl<'a> FaultInput<'a> {
     ///
     /// `mtw` absent means no columns, full stop. The frame's own `coherence`
     /// is deliberately not consulted here — see [`Self::coherence`].
-    pub fn from_wire_frame(frame: &'a WireFrame) -> FaultInput<'a> {
+    pub fn from_wire_frame(frame: &'a TransferFrame) -> FaultInput<'a> {
         FaultInput {
             frame: FaultFrame::from_wire_frame(frame),
             meas_peak_dbfs: frame.meas_peak_dbfs,
             ref_peak_dbfs: frame.ref_peak_dbfs,
-            coherence: frame
-                .displayed_mtw()
+            coherence: displayed_mtw(frame)
                 .map(|m| m.coherence.as_slice())
                 .unwrap_or(&[]),
         }

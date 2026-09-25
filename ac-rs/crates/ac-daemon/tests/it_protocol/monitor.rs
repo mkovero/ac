@@ -645,7 +645,8 @@ fn monitor_spectrum_bounds_channel_list() {
 // ---- key-set characterisation (#112 D4.1) ----
 //
 // The exact key set of each monitor frame `ac_core::wire` types, as the
-// daemon publishes it. The spectrum frame has two shapes: the THD branch
+// daemon publishes it — `wire_version` included, the one key the move onto
+// those types added, stamped at the publish seam. The spectrum frame has two shapes: the THD branch
 // carries the tone readouts, and the branch with no resolvable fundamental
 // omits them entirely — absent, not null. The two are characterised apart
 // because turning an absent key into a present `null` is a wire change a
@@ -697,6 +698,7 @@ const SPECTRUM_ENVELOPE_KEYS: &[&str] = &[
     "sr",
     "type",
     "voltage_check",
+    "wire_version",
     "xruns",
 ];
 
@@ -727,6 +729,7 @@ const LOUDNESS_KEYS: &[&str] = &[
     "timestamp",
     "true_peak_dbtp",
     "type",
+    "wire_version",
     "xruns",
 ];
 
@@ -797,4 +800,70 @@ fn monitor_frame_key_sets_are_characterised() {
         key_set(SPECTRUM_ENVELOPE_KEYS),
         "no-THD branch: {spectrum}"
     );
+}
+
+/// `to_value(from_value::<T>(v)) == v`: the shared type names every key the
+/// daemon published and changes no value's type or formatting on the way
+/// through (#112 D4.2/D4.4). A key the type forgot is dropped, so it shows
+/// here as a difference.
+///
+/// `f32_keys` names top-level arrays the type holds as `f32`. Those compare
+/// at `f32` precision: serde_json's default float parser is not correctly
+/// rounded (no `float_roundtrip` feature), so the `f64` it reads for an
+/// `f32`-origin number can sit an ULP off the exact widening the type
+/// re-serialises. The daemon's bytes are unchanged; only this side's parse
+/// of them is inexact. Integer-versus-float formatting is still compared
+/// exactly.
+pub(crate) fn assert_lossless<T>(v: &Value, f32_keys: &[&str])
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let typed: T = serde_json::from_value(v.clone())
+        .unwrap_or_else(|e| panic!("does not parse as the shared type: {e}\n{v}"));
+    let back = serde_json::to_value(&typed).expect("serialise");
+    let (Some(want), Some(got)) = (v.as_object(), back.as_object()) else {
+        panic!("frame is not an object: {v}");
+    };
+    let same = |k: &str, a: Option<&Value>, b: Option<&Value>| -> bool {
+        match (a, b) {
+            (Some(Value::Array(a)), Some(Value::Array(b))) if f32_keys.contains(&k) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| {
+                        x.is_f64() == y.is_f64()
+                            && match (x.as_f64(), y.as_f64()) {
+                                (Some(p), Some(q)) => p as f32 == q as f32,
+                                _ => x == y,
+                            }
+                    })
+            }
+            _ => a == b,
+        }
+    };
+    let mut changed: Vec<&String> = want
+        .keys()
+        .chain(got.keys())
+        .filter(|k| !same(k, want.get(*k), got.get(*k)))
+        .collect();
+    changed.dedup();
+    assert!(
+        changed.is_empty(),
+        "round trip through the shared type changed keys {changed:?} of a `{}` frame",
+        v["type"]
+    );
+}
+
+#[test]
+fn live_monitor_frames_round_trip_through_the_shared_types() {
+    use ac_core::wire::{LoudnessFrame, SpectrumFrame, WIRE_VERSION};
+
+    for extra in [
+        json!({}),
+        json!({"fake_tones": [{"freq_hz": 1000.0, "level_dbfs": -300.0}]}),
+    ] {
+        let (spectrum, loudness) = capture_monitor_frames(extra);
+        assert_eq!(spectrum["wire_version"], json!(WIRE_VERSION), "{spectrum}");
+        assert_eq!(loudness["wire_version"], json!(WIRE_VERSION), "{loudness}");
+        assert_lossless::<SpectrumFrame>(&spectrum, &[]);
+        assert_lossless::<LoudnessFrame>(&loudness, &[]);
+    }
 }

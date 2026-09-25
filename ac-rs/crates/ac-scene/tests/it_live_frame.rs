@@ -1,7 +1,7 @@
 //! QA follow-up item 2: `tests/fixtures/transfer-frame-v2.json` (used by
 //! `it_fixtures.rs`'s AC4 test) is derived from the checked-in `.acsnap`
 //! via `derive_pair`, not captured off a real socket — sound for
-//! numeric equivalence, but it never proves `WireFrame` can parse what
+//! numeric equivalence, but it never proves `TransferFrame` can parse what
 //! a real daemon actually emits. This file's fixture
 //! (`transfer-frame-v2-live.json`, `ac-daemon`'s
 //! `it_scene_fixture::generate_live_captured_frame_fixture`) is the
@@ -11,8 +11,8 @@
 //!
 //! **This is the only test that joins the two halves, and that is the whole
 //! reason it exists.** `ac-daemon`'s `it_protocol.rs` asserts the daemon
-//! *emits* given fields; `wire.rs`'s unit tests and the other `ac-scene`
-//! tests assert `WireFrame` *parses* them — from hand-built JSON. Both halves
+//! *emits* given fields; `ac_core::wire`'s unit tests and the `ac-scene`
+//! tests assert `TransferFrame` *parses* them — from hand-built JSON. Both halves
 //! can pass while the pair is broken: a field the daemon emits as
 //! `speed_of_sound_ms` and a hand-written fixture that misspells it the same
 //! way satisfies each side and fails only here.
@@ -21,14 +21,15 @@
 //! one **eight wire fields out of date** — `mtw`, `delay_evidence`,
 //! `delay_locked`, `delay_attempts`, `drive`, `meas_peak_dbfs`,
 //! `ref_peak_dbfs`, `speed_of_sound_m_s` — so for a long stretch this file
-//! proved `WireFrame` could parse a frame from before the ladder existed, and
+//! proved `TransferFrame` could parse a frame from before the ladder existed, and
 //! every consumer stayed green because none of them was sensitive to those
 //! fields. The check that keeps it honest is
 //! `live_fixture_on_disk_has_the_shape_the_daemon_still_produces` in
 //! `ac-daemon/tests/it_scene_fixture.rs`; if it goes red, this file's claim is
 //! what is at stake.
 
-use ac_scene::{Scene, WireFrame};
+use ac_core::wire::TransferFrame;
+use ac_scene::Scene;
 use std::path::PathBuf;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -49,10 +50,10 @@ fn wire_frame_deserializes_a_real_daemon_emitted_frame() {
     );
 
     // First check the *full* schema as a bag of keys, independent of
-    // WireFrame's narrow field list — this is the check that would
-    // catch a field-name rename WireFrame's own deserialize wouldn't
-    // notice (serde silently ignores unknown/missing-but-optional
-    // fields; a raw key check doesn't).
+    // TransferFrame's field list — this is the check that would catch a
+    // field-name rename TransferFrame's own deserialize wouldn't notice
+    // (serde silently ignores unknown/missing-but-optional fields; a raw
+    // key check doesn't).
     let raw: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     for key in [
         "type",
@@ -95,7 +96,7 @@ fn wire_frame_deserializes_a_real_daemon_emitted_frame() {
     );
 
     // Now the actual deserializer under test.
-    let frame: WireFrame = serde_json::from_str(&text).expect("WireFrame::deserialize");
+    let frame: TransferFrame = serde_json::from_str(&text).expect("TransferFrame::deserialize");
     assert!(["A", "C", "Z"].contains(&frame.spl_weighting.as_str()));
     assert!(["fast", "slow"].contains(&frame.spl_integration.as_str()));
     assert!(

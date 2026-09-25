@@ -817,7 +817,35 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     let analyze_result =
                         ac_core::measurement::thd::analyze(samples, sr, ch.current_freq, 10);
                     let mc_tag = mc.tag();
-                    let mut frame = match analyze_result {
+                    // The envelope both branches share; the THD branch
+                    // fills the tone readouts on top. Built as the shared
+                    // `ac_core::wire::SpectrumFrame` (#112): the no-THD
+                    // branch leaves those readouts `None`, which the type
+                    // omits from the wire rather than writing `null`.
+                    let mut frame = ac_core::wire::SpectrumFrame {
+                        frame_type: "visualize/spectrum".to_string(),
+                        cmd: "monitor_spectrum".to_string(),
+                        wire_version: None,
+                        channel,
+                        n_channels,
+                        sr,
+                        freqs: Vec::new(),
+                        spectrum: Vec::new(),
+                        dbu_offset_db: dbu_offset,
+                        voltage_check,
+                        spl_offset_db: spl_offset,
+                        mic_correction: mc_tag.to_string(),
+                        xruns: xruns_total,
+                        backend: backend.to_string(),
+                        freq_hz: None,
+                        peaks: None,
+                        fundamental_dbfs: None,
+                        thd_pct: None,
+                        thdn_pct: None,
+                        in_dbu: None,
+                        clipping: None,
+                    };
+                    match analyze_result {
                         Ok(r) => {
                             ch.current_freq = r.fundamental_hz;
                             let in_dbu = ch
@@ -867,8 +895,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 });
                                 peaks.truncate(64);
                             }
-                            let peaks_json: Vec<serde_json::Value> =
-                                peaks.iter().map(|p| json!([p.freq_hz, p.dbfs])).collect();
                             let (spec, freqs) = spectrum_columns(
                                 &r.spectrum,
                                 lf_spec_for_merge,
@@ -877,19 +903,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 &ctx,
                             );
                             // THD analysis succeeded, so the frame carries
-                            // the tone readouts on top of the common
-                            // envelope built below.
-                            json!({
-                                "freqs":            freqs,
-                                "spectrum":         spec,
-                                "freq_hz":          r.fundamental_hz,
-                                "peaks":            peaks_json,
-                                "fundamental_dbfs": r.fundamental_dbfs,
-                                "thd_pct":          r.thd_pct,
-                                "thdn_pct":         r.thdn_pct,
-                                "in_dbu":           in_dbu,
-                                "clipping":         r.clipping,
-                            })
+                            // the tone readouts on top of the envelope.
+                            frame.freqs = freqs;
+                            frame.spectrum = spec;
+                            frame.freq_hz = Some(r.fundamental_hz);
+                            frame.peaks = Some(
+                                peaks
+                                    .iter()
+                                    .map(|p| [f64::from(p.freq_hz), f64::from(p.dbfs)])
+                                    .collect(),
+                            );
+                            frame.fundamental_dbfs = Some(r.fundamental_dbfs);
+                            frame.thd_pct = Some(r.thd_pct);
+                            frame.thdn_pct = Some(r.thdn_pct);
+                            frame.in_dbu = Some(in_dbu);
+                            frame.clipping = Some(r.clipping);
                         }
                         // No resolvable fundamental — emit the plain
                         // spectrum with none of the tone readouts.
@@ -902,34 +930,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 mc,
                                 &ctx,
                             );
-                            json!({
-                                "freqs":    freqs,
-                                "spectrum": spec,
-                            })
-                        }
-                    };
-                    // Envelope common to both paths. `serde_json`'s Map is
-                    // a BTreeMap here (no `preserve_order` feature), so the
-                    // wire key order is sorted either way and merging the
-                    // two halves cannot reorder the frame.
-                    if let Some(obj) = frame.as_object_mut() {
-                        for (k, v) in [
-                            ("type", json!("visualize/spectrum")),
-                            ("cmd", json!("monitor_spectrum")),
-                            ("channel", json!(channel)),
-                            ("n_channels", json!(n_channels)),
-                            ("sr", json!(sr)),
-                            ("dbu_offset_db", json!(dbu_offset)),
-                            ("voltage_check", json!(voltage_check)),
-                            ("spl_offset_db", json!(spl_offset)),
-                            ("mic_correction", json!(mc_tag)),
-                            ("xruns", json!(xruns_total)),
-                            ("backend", json!(backend)),
-                        ] {
-                            obj.insert(k.to_string(), v);
+                            frame.freqs = freqs;
+                            frame.spectrum = spec;
                         }
                     }
-                    send_pub(&pub_tx, "data", &frame);
+                    if let Ok(frame) = serde_json::to_value(&frame) {
+                        send_pub(&pub_tx, "data", &frame);
+                    }
                     emit_loudness_frame(ch, &ctx, mc_tag, now_ns(), xruns_total);
                 }
             }

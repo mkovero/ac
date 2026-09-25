@@ -843,7 +843,7 @@ fn no_welch_fallback_fills_the_coherence_columns() {
         "spl_integration": "fast",
         "drive": {"on": true, "level_dbfs": -30.0, "drivable": true}
     }"#;
-    let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+    let frame: TransferFrame = serde_json::from_str(json).expect("deserialize");
     assert_eq!(frame.coherence.len(), 4, "the Welch array is on the frame");
     let inp = FaultInput::from_wire_frame(&frame);
     assert!(
@@ -949,7 +949,7 @@ fn reads_a_live_frame_end_to_end() {
             "coherence": [0.93, 0.77, 0.054]
         }
     }"#;
-    let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+    let frame: TransferFrame = serde_json::from_str(json).expect("deserialize");
     let inp = FaultInput::from_wire_frame(&frame);
     let f = inp.frame.expect("drive state present");
     assert!(f.settled, "mtw columns present means settled");
@@ -983,7 +983,7 @@ fn a_pre_228_frame_leaves_the_indicator_silent() {
         "spl_weighting": "Z",
         "spl_integration": "fast"
     }"#;
-    let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+    let frame: TransferFrame = serde_json::from_str(json).expect("deserialize");
     assert!(frame.drive.is_none());
     assert!(frame.delay_locked.is_none());
     let inp = FaultInput::from_wire_frame(&frame);

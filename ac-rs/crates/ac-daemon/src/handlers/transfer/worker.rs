@@ -528,11 +528,11 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         // (the indicator's idle row) from "this session never drives" —
         // an external-DUT session, where silence from the daemon says
         // nothing about whether signal is present.
-        let drive_msg = json!({
-            "on":         engine_on,
-            "level_dbfs": if engine_on { json!(engine_level) } else { Value::Null },
-            "drivable":   plan.drivable,
-        });
+        let drive_msg = ac_core::wire::WireDrive {
+            on: engine_on,
+            level_dbfs: engine_on.then_some(engine_level),
+            drivable: plan.drivable,
+        };
 
         // Feed the snapshot ring the same raw, pre-processing `bufs`
         // the H1 sliding window derives from — same capture, second

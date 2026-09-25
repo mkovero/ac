@@ -252,7 +252,7 @@ fn configured_channels_resolve_to_input_and_reference() {
     assert_eq!(resolve_transfer_channels(&cfg).unwrap(), (2, 5));
 }
 
-fn transfer_frame() -> ac_scene::WireFrame {
+fn transfer_frame() -> ac_core::wire::TransferFrame {
     serde_json::from_value(transfer_frame_json()).expect("wire frame")
 }
 
@@ -381,7 +381,7 @@ fn cycling_derot_leaves_the_magnitude_pane_unchanged() {
 /// window to hold more than one of them (#229). `transfer_frame`'s three
 /// decade-apart columns cannot exercise smoothing: at 1/24 octave each is
 /// alone in its own window, so a real bug would pass.
-fn dense_transfer_frame() -> ac_scene::WireFrame {
+fn dense_transfer_frame() -> ac_core::wire::TransferFrame {
     let n = 24;
     // 1/48-octave spacing, stepped by repeated multiplication with the
     // ratio written out as a literal. Raising two to a fractional power
@@ -553,16 +553,16 @@ fn cycle_focus_and_close_focused_run_reach_transfer_view_state_through_dispatch(
 
 /// A refusing frame, built from the healthy fixture so only the fields
 /// the indicator reads differ.
-fn refusing_frame() -> ac_scene::WireFrame {
+fn refusing_frame() -> ac_core::wire::TransferFrame {
     refusing_frame_at_attempt(3)
 }
 
 /// The same, with the attempt count set: escalation is the later of
 /// `PERSISTENT_REFUSAL_S` and `PERSISTENT_REFUSAL_ATTEMPTS` (#247), so a
 /// test that advances the clock has to advance the count with it.
-fn refusing_frame_at_attempt(attempts: u32) -> ac_scene::WireFrame {
+fn refusing_frame_at_attempt(attempts: u32) -> ac_core::wire::TransferFrame {
     let mut f = transfer_frame();
-    f.drive = Some(ac_scene::WireDrive {
+    f.drive = Some(ac_core::wire::WireDrive {
         on: true,
         level_dbfs: Some(-30.0),
         drivable: true,
@@ -689,7 +689,7 @@ fn a_frame_without_drive_state_shows_no_indicator() {
 }
 
 // #193: the status line must say `malformed`, with a count, once a run
-// of frames that fail the `WireFrame` schema clears the grace window —
+// of frames that fail the `TransferFrame` schema clears the grace window —
 // driven through `ingest_raw_frame` (the raw-JSON boundary), not
 // `ingest_frame_for_test`, so the test exercises the same
 // `serde_json::from_value` failure #192's blank-but-"live" view hid.
@@ -702,7 +702,7 @@ fn a_sustained_run_of_malformed_frames_flips_status_to_malformed_with_a_count() 
     });
     let t0 = Instant::now();
     // Missing `sr`, a required field — fails to deserialize into
-    // `WireFrame` rather than being silently dropped and forgotten.
+    // `TransferFrame` rather than being silently dropped and forgotten.
     let mut bad = transfer_frame_json();
     bad.as_object_mut().unwrap().remove("sr");
 
@@ -866,10 +866,142 @@ fn a_streak_does_not_survive_a_real_disconnect() {
 }
 
 // ---------------------------------------------------------------
+// Wire-version refusal (#112)
+// ---------------------------------------------------------------
+
+fn with_wire_version(mut v: serde_json::Value, version: u64) -> serde_json::Value {
+    v["wire_version"] = serde_json::json!(version);
+    v
+}
+
+fn localhost_transfer_app() -> AcViewApp {
+    AcViewApp::new_transfer(
+        Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        },
+        0.0,
+    )
+}
+
+// The state, both versions and the count, in the sibling states' shape. The
+// range collapses to `v1` while MIN_WIRE_VERSION == WIRE_VERSION.
+#[test]
+fn a_refused_frame_reports_version_mismatch_naming_both_versions() {
+    let mut app = localhost_transfer_app();
+    let t0 = Instant::now();
+    assert!(!app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0));
+    assert_eq!(
+        app.status_for_state(ConnectionState::Live, t0),
+        "version mismatch — localhost:5556 — daemon sends wire v2, ac-view reads v1 \
+         — 1 frames refused, not rendering"
+    );
+}
+
+// The count is what separates "wrong version, alive" from a dead stream, so
+// it has to move with every refused frame — sidecars included.
+#[test]
+fn the_refused_count_rises_with_every_refused_frame() {
+    let mut app = localhost_transfer_app();
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0);
+    }
+    app.ingest_raw_ir_frame(with_wire_version(ir_frame_json(), 2));
+    assert!(app
+        .status_for_state(ConnectionState::Live, t0)
+        .ends_with("— 4 frames refused, not rendering"));
+}
+
+// A refusal is not a parse failure: no malformed streak, no grace window, and
+// the refusal wins the status line even once the grace window has passed.
+#[test]
+fn a_refused_frame_does_not_advance_the_malformed_streak() {
+    let mut app = localhost_transfer_app();
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 0), t0);
+    }
+    assert_eq!(app.frame_parse_failures, 0);
+    assert!(app.first_malformed_since.is_none());
+    assert!(app
+        .status_for_state(ConnectionState::Live, t0 + MALFORMED_GRACE)
+        .starts_with("version mismatch — localhost:5556 — daemon sends wire v0, ac-view reads v1"));
+}
+
+// Nothing drawn from before the refusal may stay up: those frames came from
+// a daemon build this client no longer reads, and would look current.
+#[test]
+fn a_refusal_clears_the_held_frames_and_their_scenes() {
+    let mut app = localhost_transfer_app();
+    app.handle_action(Action::ToggleIrPanel, false);
+    let t0 = Instant::now();
+    assert!(app.ingest_raw_frame(transfer_frame_json(), t0));
+    app.ingest_raw_ir_frame(ir_frame_json());
+    app.rebuild_scenes(true, 0.0);
+    assert!(app.current_transfer_scene().is_some());
+    assert!(app.current_ir_scene().is_some());
+
+    assert!(!app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0));
+    app.rebuild_scenes(true, 0.1);
+    assert!(app.last_frame.is_none());
+    assert!(app.current_transfer_scene().is_none());
+    assert!(app.last_ir_frame.is_none());
+    assert!(app.current_ir_scene().is_none());
+}
+
+// A refused sidecar alone also drops the IR panel's held frame.
+#[test]
+fn a_refused_ir_frame_is_not_held() {
+    let mut app = localhost_transfer_app();
+    app.ingest_raw_ir_frame(with_wire_version(ir_frame_json(), 2));
+    assert!(app.last_ir_frame.is_none());
+}
+
+// An accepted frame — the daemon restarted on a matching build — ends the
+// state and resets the count; so does a real disconnect.
+#[test]
+fn an_accepted_frame_or_a_disconnect_ends_the_refusal() {
+    let mut app = localhost_transfer_app();
+    let t0 = Instant::now();
+    app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0);
+    assert!(app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 1), t0));
+    assert_eq!(
+        app.status_for_state(ConnectionState::Live, t0),
+        "live — localhost:5556"
+    );
+
+    app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0);
+    assert_eq!(
+        app.status_for_state(ConnectionState::Disconnected, t0),
+        "disconnected — localhost:5556 not responding"
+    );
+    assert_eq!(
+        app.status_for_state(ConnectionState::Live, t0),
+        "live — localhost:5556"
+    );
+    // A new refusal after that counts from one again.
+    app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0);
+    assert!(app
+        .status_for_state(ConnectionState::Live, t0)
+        .ends_with("— 1 frames refused, not rendering"));
+}
+
+// A frame without the field is a daemon predating it: accepted as v1.
+#[test]
+fn an_absent_wire_version_is_accepted() {
+    let mut app = localhost_transfer_app();
+    let v = transfer_frame_json();
+    assert!(v.get("wire_version").is_none());
+    assert!(app.ingest_raw_frame(v, Instant::now()));
+}
+
+// ---------------------------------------------------------------
 // IR panel (#286)
 // ---------------------------------------------------------------
 
-fn ir_frame() -> ac_scene::IrWireFrame {
+fn ir_frame() -> ac_core::wire::IrFrame {
     serde_json::from_value(ir_frame_json()).expect("ir wire frame")
 }
 

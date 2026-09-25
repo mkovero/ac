@@ -11,7 +11,8 @@ use ac_core::visualize::mtw::ladder;
 use ac_scene::transfer::{
     DerotMode, DisplayModes, MeterState, Smoothing, TransferScene, COHERENCE_THRESHOLD,
 };
-use ac_scene::{FaultState, TransferInput, WireFrame};
+use ac_core::wire::TransferFrame;
+use ac_scene::{FaultState, TransferInput};
 use serde_json::json;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 24_000.0);
@@ -57,7 +58,7 @@ fn stages_json(sr: u32) -> serde_json::Value {
 }
 
 /// A daemon-shaped frame carrying three-stage columns for `sr`.
-fn frame_with_mtw(sr: u32, coherence: f64) -> WireFrame {
+fn frame_with_mtw(sr: u32, coherence: f64) -> TransferFrame {
     let (freqs, df, window, stage) = columns_for(sr);
     let n = freqs.len();
     let mtw = json!({
@@ -78,7 +79,7 @@ fn frame_with_mtw(sr: u32, coherence: f64) -> WireFrame {
     frame_from(sr, Some(mtw))
 }
 
-fn frame_from(sr: u32, mtw: Option<serde_json::Value>) -> WireFrame {
+fn frame_from(sr: u32, mtw: Option<serde_json::Value>) -> TransferFrame {
     let mut v = json!({
         "type": "transfer_stream",
         "sr": sr,
@@ -107,7 +108,7 @@ fn frame_from(sr: u32, mtw: Option<serde_json::Value>) -> WireFrame {
     serde_json::from_value(v).expect("wire frame")
 }
 
-fn scene(frame: &WireFrame) -> TransferScene {
+fn scene(frame: &TransferFrame) -> TransferScene {
     let input = TransferInput::from_wire_frame(frame);
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
@@ -185,7 +186,7 @@ fn non_uniform_spacing_is_mapped_by_frequency_not_index() {
     }
 }
 
-fn sc_points(frame: &WireFrame) -> Vec<(f64, f64)> {
+fn sc_points(frame: &TransferFrame) -> Vec<(f64, f64)> {
     scene(frame).magnitude.segments.concat()
 }
 

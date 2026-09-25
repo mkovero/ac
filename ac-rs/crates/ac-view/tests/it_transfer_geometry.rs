@@ -415,13 +415,15 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         .expect("layout")
         .stages
         .iter()
-        .map(|s| ac_scene::MtwStage {
+        .map(|s| ac_core::wire::MtwStage {
             decim: s.decim,
             rate: s.rate,
             df: s.df,
             window_s: s.window_s,
             hop_s: s.hop_s,
             f_valid: s.f_valid,
+            f_top: s.f_top,
+            blend_top: s.blend_top,
             settling_s: ac_core::visualize::mtw::settling_seconds(s, 4),
         })
         .collect();

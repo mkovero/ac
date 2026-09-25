@@ -29,7 +29,7 @@ fn test_statics() -> FrameStatics {
         integration_tag: "fast".to_string(),
         mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
         mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
-        mtw_stages: Value::Null,
+        mtw_stages: Vec::new(),
     }
 }
 
@@ -105,6 +105,18 @@ fn test_rings() -> Vec<Vec<f32>> {
     vec![meas, refb]
 }
 
+/// The published form of one pair's tick: the frame, then the sidecar when
+/// there is one — the order `Session::tick` publishes them in.
+fn published(
+    built: Option<(usize, TransferFrame, Option<IrFrame>, Option<f64>)>,
+) -> Option<(usize, Vec<Value>, Option<f64>)> {
+    built.map(|(pos, frame, ir, spl_raw)| {
+        let mut batch = vec![serde_json::to_value(&frame).expect("frame serialises")];
+        batch.extend(ir.map(|ir| serde_json::to_value(&ir).expect("sidecar serialises")));
+        (pos, batch, spl_raw)
+    })
+}
+
 fn call(
     ctx: &PairCtx,
     st: &PairState,
@@ -112,7 +124,7 @@ fn call(
     rings: &[Vec<f32>],
     peaks: &[Option<f64>],
 ) -> Option<(usize, Vec<Value>, Option<f64>)> {
-    let drive_msg = json!({"on": false, "level_dbfs": Value::Null, "drivable": false});
+    let drive_msg = WireDrive::default();
     let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
     let settled: Vec<Vec<bool>> = vec![Vec::new()];
     // Assembly reads a held estimate, so the estimate is computed
@@ -134,7 +146,7 @@ fn call(
         analysis: &analysis,
         n_channels: rings.len(),
     };
-    build_pair_messages(ctx, st, statics, &tick)
+    published(build_pair_messages(ctx, st, statics, &tick))
 }
 
 #[test]
@@ -425,10 +437,21 @@ fn test_column() -> ac_core::visualize::mtw::splice::Column {
 /// Build one tick with a ladder present, from the same held estimate
 /// [`call`] computes.
 fn call_with_mtw(statics: &FrameStatics) -> (usize, Vec<Value>, Option<f64>) {
+    published(Some(build_with_mtw(statics).0)).expect("frame")
+}
+
+type Built = (usize, TransferFrame, Option<IrFrame>, Option<f64>);
+
+/// [`call_with_mtw`]'s typed build, plus the held estimate it read.
+fn build_with_mtw(statics: &FrameStatics) -> (Built, PairAnalysis) {
     let rings = test_rings();
     let ctx = test_ctx();
     let st = PairState::new(None);
-    let drive_msg = json!({"on": true, "level_dbfs": -30.0, "drivable": true});
+    let drive_msg = WireDrive {
+        on: true,
+        level_dbfs: Some(-30.0),
+        drivable: true,
+    };
     let cols = vec![Some(vec![test_column(), test_column()])];
     let settled = vec![vec![true, false]];
     let key = AnalysisKey {
@@ -437,7 +460,7 @@ fn call_with_mtw(statics: &FrameStatics) -> (usize, Vec<Value>, Option<f64>) {
         delay: 0,
         mc_enabled: false,
     };
-    let analysis = vec![analyse_pair(&ctx, &st, statics, &rings, key, 0)];
+    let mut analysis = vec![analyse_pair(&ctx, &st, statics, &rings, key, 0)];
     let tick = TickInputs {
         tick_peaks_dbfs: &[Some(-6.0), Some(-3.0)],
         mc_enabled: false,
@@ -447,29 +470,30 @@ fn call_with_mtw(statics: &FrameStatics) -> (usize, Vec<Value>, Option<f64>) {
         analysis: &analysis,
         n_channels: rings.len(),
     };
-    build_pair_messages(&ctx, &st, statics, &tick).expect("frame")
+    let built = build_pair_messages(&ctx, &st, statics, &tick).expect("frame");
+    (built, analysis.remove(0).expect("estimate"))
 }
 
 /// Statics with the ladder description `plan.rs` builds for `sr`.
 fn statics_with_stages() -> FrameStatics {
     let mut statics = test_statics();
     let n_blocks = statics.mtw_n_blocks;
-    statics.mtw_stages = json!(ac_core::visualize::mtw::ladder::layout(TEST_SR)
+    statics.mtw_stages = ac_core::visualize::mtw::ladder::layout(TEST_SR)
         .expect("ladder layout")
         .stages
         .iter()
-        .map(|s| json!({
-            "settling_s": ac_core::visualize::mtw::settling_seconds(s, n_blocks),
-            "decim": s.decim,
-            "rate": s.rate,
-            "df": s.df,
-            "window_s": s.window_s,
-            "hop_s": s.hop_s,
-            "f_valid": s.f_valid,
-            "f_top": s.f_top,
-            "blend_top": s.blend_top,
-        }))
-        .collect::<Vec<_>>());
+        .map(|s| MtwStage {
+            settling_s: ac_core::visualize::mtw::settling_seconds(s, n_blocks),
+            decim: s.decim,
+            rate: s.rate,
+            df: s.df,
+            window_s: s.window_s,
+            hop_s: s.hop_s,
+            f_valid: s.f_valid,
+            f_top: s.f_top,
+            blend_top: s.blend_top,
+        })
+        .collect();
     statics
 }
 
@@ -499,7 +523,7 @@ fn analysis_frame_with_ladder_key_set_is_characterised() {
 fn settling_frame_key_set_is_characterised() {
     let rings = test_rings();
     let statics = test_statics();
-    let drive_msg = json!({"on": false, "level_dbfs": Value::Null, "drivable": false});
+    let drive_msg = WireDrive::default();
     let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
     let settled: Vec<Vec<bool>> = vec![Vec::new()];
     let analysis: Vec<Option<PairAnalysis>> = vec![None];
@@ -512,8 +536,13 @@ fn settling_frame_key_set_is_characterised() {
         analysis: &analysis,
         n_channels: rings.len(),
     };
-    let (_, batch, _) =
-        build_pair_messages(&test_ctx(), &PairState::new(None), &statics, &tick).unwrap();
+    let (_, batch, _) = published(build_pair_messages(
+        &test_ctx(),
+        &PairState::new(None),
+        &statics,
+        &tick,
+    ))
+    .unwrap();
     assert_eq!(batch.len(), 1, "a settling tick publishes no IR sidecar");
     assert_eq!(key_paths(&batch[0]), paths(TRANSFER_KEYS));
 }
@@ -522,6 +551,91 @@ fn settling_frame_key_set_is_characterised() {
 fn ir_sidecar_key_set_is_characterised() {
     let (_, batch, _) = call_with_mtw(&statics_with_stages());
     assert_eq!(key_paths(&batch[1]), paths(IR_KEYS));
+}
+
+// ---- round trip through the shared type and the consumers (#112) ----
+
+/// `to_value(from_value::<T>(v)) == v` for a builder output `v` (D4.2): the
+/// shared type reads back everything it wrote, so skip-versus-null and
+/// integer-versus-float survive the trip.
+fn assert_lossless<T: serde::Serialize + serde::de::DeserializeOwned>(v: &Value) {
+    let typed: T = serde_json::from_value(v.clone()).expect("parses as the shared type");
+    assert_eq!(&serde_json::to_value(&typed).unwrap(), v);
+}
+
+#[test]
+fn builder_outputs_round_trip_losslessly() {
+    let (_, batch, _) = call_with_mtw(&statics_with_stages());
+    assert_lossless::<TransferFrame>(&batch[0]);
+    assert_lossless::<IrFrame>(&batch[1]);
+
+    let rings = test_rings();
+    let drive_msg = WireDrive::default();
+    let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
+    let settled: Vec<Vec<bool>> = vec![Vec::new()];
+    let analysis: Vec<Option<PairAnalysis>> = vec![None];
+    let tick = TickInputs {
+        tick_peaks_dbfs: &[None, None],
+        mc_enabled: false,
+        drive_msg: &drive_msg,
+        mtw_columns: &cols,
+        mtw_settled: &settled,
+        analysis: &analysis,
+        n_channels: rings.len(),
+    };
+    let (_, settling, _) = published(build_pair_messages(
+        &test_ctx(),
+        &PairState::new(None),
+        &test_statics(),
+        &tick,
+    ))
+    .unwrap();
+    assert_lossless::<TransferFrame>(&settling[0]);
+}
+
+/// D4.3: the published frame, read through `ac-scene`'s own adapters, gives
+/// back what the builder was handed.
+#[test]
+fn consumers_read_back_what_the_builder_was_given() {
+    let statics = statics_with_stages();
+    let (built, estimate) = build_with_mtw(&statics);
+    let (_, batch, _) = published(Some(built)).unwrap();
+    let frame: TransferFrame = serde_json::from_value(batch[0].clone()).unwrap();
+    let ir: IrFrame = serde_json::from_value(batch[1].clone()).unwrap();
+
+    let input = ac_scene::TransferInput::from_wire_frame(&frame);
+    assert_eq!((input.meas_channel, input.ref_channel), (2, 5));
+    assert_eq!(input.sr, TEST_SR);
+    assert_eq!(input.meas_peak_dbfs, Some(-6.0));
+    assert_eq!(input.ref_peak_dbfs, Some(-3.0));
+    assert_eq!(input.delay_ms, estimate.delay_ms);
+    assert_eq!(input.delay_locked, Some(false));
+    let col = test_column();
+    assert_eq!(input.freqs, vec![col.freq; 2]);
+    assert_eq!(input.coherence, vec![col.coherence; 2]);
+    assert_eq!(input.column_df, vec![col.df; 2]);
+    assert_eq!(input.column_window_s, vec![col.window_s; 2]);
+    assert_eq!(input.column_n, vec![col.n as f64; 2]);
+    assert_eq!(input.column_bins, vec![col.bins; 2]);
+    assert_eq!(input.stages, statics.mtw_stages);
+    let fault = input.fault.as_ref().expect("drive state present");
+    assert!(fault.drive.on && fault.drive.drivable);
+    assert!(fault.settled);
+    assert_eq!(fault.delay_attempts, 0);
+
+    let fault_input = ac_scene::FaultInput::from_wire_frame(&frame);
+    assert_eq!(fault_input.coherence, [col.coherence; 2].as_slice());
+    assert_eq!(fault_input.meas_peak_dbfs, Some(-6.0));
+
+    let payload = estimate.ir.as_ref().expect("IR payload");
+    let ir_input = ac_scene::IrInput::from_wire_frame(&ir);
+    assert_eq!(ir_input.samples, payload.samples);
+    assert_eq!(ir_input.dt_ms, payload.dt_ms);
+    assert_eq!(ir_input.t_origin_ms, payload.t_origin_ms);
+    assert_eq!(ir_input.delay_ms, estimate.delay_ms);
+    assert_eq!(ir_input.delay_locked, Some(false));
+    assert_eq!(ir_input.sr, TEST_SR);
+    assert_eq!(ir_input.channel_role, "meas_2");
 }
 
 // A pair whose channels are not in this tick's rings is dropped, not

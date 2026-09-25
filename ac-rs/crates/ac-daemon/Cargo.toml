@@ -35,3 +35,6 @@ tau-window-override = []
 
 [dev-dependencies]
 sha2 = "0.11.0"
+# #112 D4.3: frames the builders emit are read back through the consumer's
+# own adapters (`TransferInput`, `FaultInput`, `IrInput`) in unit tests.
+ac-scene = { path = "../ac-scene" }

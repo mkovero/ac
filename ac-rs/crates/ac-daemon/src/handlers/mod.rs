@@ -563,10 +563,19 @@ pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> Result<St
 // PUB frame helper
 // ---------------------------------------------------------------------------
 
+/// Publish one PUB payload on `topic`.
+///
+/// The single seam every worker frame goes through, which is why the wire
+/// contract version is stamped here rather than by each builder: a future
+/// frame cannot forget it (#112, `ac_core::wire::WIRE_VERSION`). The copy is
+/// one clone per frame — negligible at the ~17 frames/s per pair the busiest
+/// stream publishes.
 pub(super) fn send_pub(tx: &crossbeam_channel::Sender<Vec<u8>>, topic: &str, frame: &Value) {
+    let mut frame = frame.clone();
+    ac_core::wire::stamp_wire_version(&mut frame);
     let mut msg = topic.as_bytes().to_vec();
     msg.push(b' ');
-    msg.extend_from_slice(serde_json::to_vec(frame).unwrap_or_default().as_slice());
+    msg.extend_from_slice(serde_json::to_vec(&frame).unwrap_or_default().as_slice());
     let _ = tx.send(msg);
 }
 

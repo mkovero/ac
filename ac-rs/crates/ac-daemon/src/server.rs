@@ -319,13 +319,16 @@ pub fn run(
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
             let busy = !state.workers.lock().unwrap().is_empty();
-            let payload = serde_json::to_string(&json!({
+            // Published straight to the socket, not through `send_pub`, so
+            // the wire version is stamped here too (#112).
+            let mut payload = json!({
                 "type":      "keepalive",
                 "seq":       keepalive_seq,
                 "timestamp": ts_ns,
                 "busy":      busy,
-            }))
-            .unwrap_or_else(|_| "{}".to_string());
+            });
+            ac_core::wire::stamp_wire_version(&mut payload);
+            let payload = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
             let frame = format!("keepalive {payload}").into_bytes();
             data.send(frame, 0).ok();
 
