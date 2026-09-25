@@ -130,6 +130,21 @@ at the number harder: nothing about a millisecond figure alone says how
 much of it is wiring, DUT, or air. Correcting the wiring dropped it to
 1.0615 ms (rig session, 2026-08-18) — but did not zero it.
 
+**The instrument cannot flag this residual from one pair's correlation
+(#249).** A reference that skips the stimulus converter adds a pure delay
+to the acoustic leg, and a pure delay is also what extra air adds: the
+correlation has one causal peak either way, so the prediction is that no
+statistic the estimator publishes separates the two (pre-registered on
+#249; a rig record comparing both wirings is what tests it). `delay_evidence`'s non-causal peak points the
+other way — it rises when the *reference* leg is the longer one, the
+opposite mismatch — and stays at ripple on this case
+(`an_unshared_positive_residual_raises_no_noncausal_evidence` in
+`ac-core`). The measurement that could separate them is a second pair in
+the same session: the stimulus converter's analogue output looped into a
+spare input and correlated against the reference. Its lag is the unshared
+residual, measured rather than inferred. Until something like that exists,
+wiring is the only defence.
+
 **Wiring alone does not make the delay equal to the arrival time.** What
 survived the cable fix decomposed into 46.0 samples of converter-channel
 asymmetry (a second, smaller wiring artifact) and 55.9 samples — 0.58 ms —

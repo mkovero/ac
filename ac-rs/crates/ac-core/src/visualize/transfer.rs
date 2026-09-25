@@ -1326,6 +1326,85 @@ mod tests {
         );
     }
 
+    /// #249: a reference leg that does not share the stimulus converter adds
+    /// a **positive, causal** residual, and the non-causal peak cannot see it.
+    ///
+    /// On the #243 wiring the reference leaves through the interface's own
+    /// DAC and the stimulus goes over ADAT through an external converter, so
+    /// the *acoustic* leg is the longer one and the lock reads long — by
+    /// 1.1931 ms on that rig (README "Reference wiring"). A pure delay added
+    /// to the measurement leg is exactly what extra air adds, so the
+    /// correlation this estimator sees is the same shape either way: one
+    /// causal peak, and ripple below zero lag. `noncausal_peak_value` only
+    /// rises when the *reference* is the longer leg — the opposite mismatch.
+    ///
+    /// This measures the rejected statistic, `S = noncausal_peak_value /
+    /// peak_value`, on the named case: the lock moves by the residual, and
+    /// `S` stays inside the range the correctly wired pair spans over the
+    /// same noise seeds. A reference-leg verdict built on `S` would never
+    /// fire on the over-read it was specified for, which is the #243 floor's
+    /// failure again.
+    ///
+    /// What makes this go red: put the residual on the reference leg instead,
+    /// larger than the flight lag. That is the reverse mismatch, the
+    /// correlation peak moves below zero lag, and `S` leaves the baseline
+    /// range by a wide margin — asserted below, so the range check is shown
+    /// to be capable of failing.
+    #[test]
+    fn an_unshared_positive_residual_raises_no_noncausal_evidence() {
+        let flight = 217usize;
+        // 1.1931 ms at SR, the #243 residual.
+        let residual = (1.1931e-3 * SR as f64).round() as usize;
+        let seeds = [11u64, 23, 37, 41, 53, 67, 79, 97];
+
+        // Stimulus through `meas_extra` more samples on the acoustic leg and
+        // `ref_extra` more on the reference, plus an uncorrelated floor on
+        // the microphone so the ripple is not a single realisation.
+        let capture = |seed: u64, meas_extra: usize, ref_extra: usize| {
+            let sig = white_noise(N, 0.5, seed);
+            let mut meas = white_noise(N, 0.05, seed + 1_000);
+            add_delayed(&mut meas, &sig, flight + meas_extra, 0.6);
+            let mut ref_sig = vec![0.0f32; N];
+            add_delayed(&mut ref_sig, &sig, ref_extra, 1.0);
+            estimate_delay_detailed(&ref_sig, &meas, SR)
+        };
+        let s_of = |e: &DelayEstimate| e.noncausal_peak_value / e.peak_value;
+
+        let baseline: Vec<DelayEstimate> = seeds.iter().map(|&s| capture(s, 0, 0)).collect();
+        let s_min = baseline.iter().map(s_of).fold(f64::INFINITY, f64::min);
+        let s_max = baseline.iter().map(s_of).fold(f64::NEG_INFINITY, f64::max);
+
+        for (seed, base) in seeds.iter().zip(&baseline) {
+            let base_lag = base.lag.expect("the correctly wired pair locks");
+            let miswired = capture(*seed, residual, 0);
+            let lag = miswired.lag.expect("the mis-wired pair locks too");
+            assert!(
+                (lag - base_lag - residual as i64).abs() < SUB_MS,
+                "seed {seed}: the lock should move by the residual {residual}, \
+                 moved from {base_lag} to {lag}"
+            );
+            let s = s_of(&miswired);
+            assert!(
+                (s_min..=s_max).contains(&s),
+                "seed {seed}: S = {s:.4} left the correctly wired range \
+                 [{s_min:.4}, {s_max:.4}] — the non-causal peak saw a positive \
+                 residual, which is the case this test says it cannot see"
+            );
+        }
+
+        // The reverse mismatch: the reference leg longer than the flight.
+        for &seed in &seeds {
+            let reverse = capture(seed, 0, flight + residual);
+            let s = s_of(&reverse);
+            assert!(
+                s > 2.0 * s_max,
+                "seed {seed}: a reference leg longer than the acoustic one \
+                 should dominate the non-causal range — S = {s:.4} against a \
+                 correctly wired ceiling of {s_max:.4}"
+            );
+        }
+    }
+
     /// The two guaranteed entries are not independent of the ranked 32: the
     /// accepted lag is usually already among them, and on a clean single-peak
     /// capture it *is* the peak. A duplicate would double-count in any
