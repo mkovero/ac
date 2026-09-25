@@ -274,6 +274,256 @@ fn ir_sidecar_accompanies_the_frame() {
         .is_some_and(|a| !a.is_empty()));
 }
 
+// ---- key-set characterisation (#112 D4.1) ----
+//
+// The exact key set, nested keys included, of each frame these builders
+// emit. Recorded before the builders moved onto `ac_core::wire` types so
+// that move is provably key-preserving: a key the shared type forgets
+// disappears from the wire, and nothing else in this file would notice.
+
+/// Every key path in `v`: `a`, `a.b`, and `a[].b` for objects inside
+/// arrays. Array elements that are not objects contribute nothing, so a
+/// numeric array is one path however long it is.
+fn key_paths(v: &Value) -> std::collections::BTreeSet<String> {
+    fn walk(v: &Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                for (k, child) in m {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    out.insert(path.clone());
+                    walk(child, &path, out);
+                }
+            }
+            Value::Array(a) => {
+                for child in a {
+                    walk(child, &format!("{prefix}[]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(v, "", &mut out);
+    out
+}
+
+fn paths(list: &[&str]) -> std::collections::BTreeSet<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Keys every `transfer_stream` frame carries, settling or analysing, with
+/// `mtw` null and no voltage verdict in `cal_tags`.
+const TRANSFER_KEYS: &[&str] = &[
+    "analysis_seq",
+    "backend",
+    "cal_tags",
+    "cal_tags.meas",
+    "cal_tags.meas.mic_curve",
+    "cal_tags.meas.spl",
+    "cal_tags.meas.voltage",
+    "cal_tags.ref",
+    "cal_tags.ref.mic_curve",
+    "cal_tags.ref.spl",
+    "cal_tags.ref.voltage",
+    "cmd",
+    "coherence",
+    "delay_attempts",
+    "delay_evidence",
+    "delay_locked",
+    "delay_ms",
+    "delay_samples",
+    "drive",
+    "drive.drivable",
+    "drive.level_dbfs",
+    "drive.on",
+    "freqs",
+    "magnitude_db",
+    "meas_channel",
+    "meas_peak_dbfs",
+    "meas_spectrum",
+    "mic_correction",
+    "mtw",
+    "n_averages",
+    "phase_deg",
+    "ref_channel",
+    "ref_peak_dbfs",
+    "ref_spectrum",
+    "spec_freqs",
+    "spl",
+    "spl_integration",
+    "spl_weighting",
+    "sr",
+    "type",
+];
+
+/// The nested keys a present `mtw` adds.
+const MTW_KEYS: &[&str] = &[
+    "mtw.bins",
+    "mtw.blend",
+    "mtw.coherence",
+    "mtw.df",
+    "mtw.f_hi",
+    "mtw.f_lo",
+    "mtw.freqs",
+    "mtw.magnitude_db",
+    "mtw.n",
+    "mtw.n_blocks",
+    "mtw.phase_deg",
+    "mtw.ppo",
+    "mtw.settled_stages",
+    "mtw.stage",
+    "mtw.stages",
+    "mtw.stages[].blend_top",
+    "mtw.stages[].decim",
+    "mtw.stages[].df",
+    "mtw.stages[].f_top",
+    "mtw.stages[].f_valid",
+    "mtw.stages[].hop_s",
+    "mtw.stages[].rate",
+    "mtw.stages[].settling_s",
+    "mtw.stages[].window_s",
+    "mtw.window_s",
+];
+
+const IR_KEYS: &[&str] = &[
+    "analysis_seq",
+    "backend",
+    "cmd",
+    "delay_locked",
+    "delay_ms",
+    "delay_samples",
+    "dt_ms",
+    "meas_channel",
+    "ref_channel",
+    "samples",
+    "sr",
+    "stride",
+    "t_origin_ms",
+    "type",
+];
+
+fn test_column() -> ac_core::visualize::mtw::splice::Column {
+    ac_core::visualize::mtw::splice::Column {
+        freq: 100.0,
+        lo: 90.0,
+        hi: 110.0,
+        h1: Default::default(),
+        coherence: 0.5,
+        df: 1.0,
+        window_s: 1.0,
+        n: 4,
+        stage: 0,
+        blend: 0.0,
+        bins: 3,
+    }
+}
+
+/// Build one tick with a ladder present, from the same held estimate
+/// [`call`] computes.
+fn call_with_mtw(statics: &FrameStatics) -> (usize, Vec<Value>, Option<f64>) {
+    let rings = test_rings();
+    let ctx = test_ctx();
+    let st = PairState::new(None);
+    let drive_msg = json!({"on": true, "level_dbfs": -30.0, "drivable": true});
+    let cols = vec![Some(vec![test_column(), test_column()])];
+    let settled = vec![vec![true, false]];
+    let key = AnalysisKey {
+        dropped: 0,
+        n_blocks: 4,
+        delay: 0,
+        mc_enabled: false,
+    };
+    let analysis = vec![analyse_pair(&ctx, &st, statics, &rings, key, 0)];
+    let tick = TickInputs {
+        tick_peaks_dbfs: &[Some(-6.0), Some(-3.0)],
+        mc_enabled: false,
+        drive_msg: &drive_msg,
+        mtw_columns: &cols,
+        mtw_settled: &settled,
+        analysis: &analysis,
+        n_channels: rings.len(),
+    };
+    build_pair_messages(&ctx, &st, statics, &tick).expect("frame")
+}
+
+/// Statics with the ladder description `plan.rs` builds for `sr`.
+fn statics_with_stages() -> FrameStatics {
+    let mut statics = test_statics();
+    let n_blocks = statics.mtw_n_blocks;
+    statics.mtw_stages = json!(ac_core::visualize::mtw::ladder::layout(TEST_SR)
+        .expect("ladder layout")
+        .stages
+        .iter()
+        .map(|s| json!({
+            "settling_s": ac_core::visualize::mtw::settling_seconds(s, n_blocks),
+            "decim": s.decim,
+            "rate": s.rate,
+            "df": s.df,
+            "window_s": s.window_s,
+            "hop_s": s.hop_s,
+            "f_valid": s.f_valid,
+            "f_top": s.f_top,
+            "blend_top": s.blend_top,
+        }))
+        .collect::<Vec<_>>());
+    statics
+}
+
+#[test]
+fn analysis_frame_key_set_is_characterised() {
+    let rings = test_rings();
+    let (_, batch, _) = call(
+        &test_ctx(),
+        &PairState::new(None),
+        &test_statics(),
+        &rings,
+        &[None, None],
+    )
+    .unwrap();
+    assert_eq!(key_paths(&batch[0]), paths(TRANSFER_KEYS));
+}
+
+#[test]
+fn analysis_frame_with_ladder_key_set_is_characterised() {
+    let (_, batch, _) = call_with_mtw(&statics_with_stages());
+    let mut want = paths(TRANSFER_KEYS);
+    want.extend(paths(MTW_KEYS));
+    assert_eq!(key_paths(&batch[0]), want);
+}
+
+#[test]
+fn settling_frame_key_set_is_characterised() {
+    let rings = test_rings();
+    let statics = test_statics();
+    let drive_msg = json!({"on": false, "level_dbfs": Value::Null, "drivable": false});
+    let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
+    let settled: Vec<Vec<bool>> = vec![Vec::new()];
+    let analysis: Vec<Option<PairAnalysis>> = vec![None];
+    let tick = TickInputs {
+        tick_peaks_dbfs: &[None, None],
+        mc_enabled: false,
+        drive_msg: &drive_msg,
+        mtw_columns: &cols,
+        mtw_settled: &settled,
+        analysis: &analysis,
+        n_channels: rings.len(),
+    };
+    let (_, batch, _) =
+        build_pair_messages(&test_ctx(), &PairState::new(None), &statics, &tick).unwrap();
+    assert_eq!(batch.len(), 1, "a settling tick publishes no IR sidecar");
+    assert_eq!(key_paths(&batch[0]), paths(TRANSFER_KEYS));
+}
+
+#[test]
+fn ir_sidecar_key_set_is_characterised() {
+    let (_, batch, _) = call_with_mtw(&statics_with_stages());
+    assert_eq!(key_paths(&batch[1]), paths(IR_KEYS));
+}
+
 // A pair whose channels are not in this tick's rings is dropped, not
 // published half-built.
 #[test]

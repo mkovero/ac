@@ -641,3 +641,160 @@ fn monitor_spectrum_bounds_channel_list() {
     assert_eq!(r["ok"], json!(true), "{r}");
     let _ = c.call(json!({"cmd": "stop"}));
 }
+
+// ---- key-set characterisation (#112 D4.1) ----
+//
+// The exact key set of each monitor frame `ac_core::wire` types, as the
+// daemon publishes it. The spectrum frame has two shapes: the THD branch
+// carries the tone readouts, and the branch with no resolvable fundamental
+// omits them entirely — absent, not null. The two are characterised apart
+// because turning an absent key into a present `null` is a wire change a
+// lenient consumer never notices.
+
+/// Every key path in `v`: `a`, `a.b`, and `a[].b` for objects inside arrays.
+pub(crate) fn key_paths(v: &Value) -> std::collections::BTreeSet<String> {
+    fn walk(v: &Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                for (k, child) in m {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    out.insert(path.clone());
+                    walk(child, &path, out);
+                }
+            }
+            Value::Array(a) => {
+                for child in a {
+                    walk(child, &format!("{prefix}[]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(v, "", &mut out);
+    out
+}
+
+fn key_set(list: &[&str]) -> std::collections::BTreeSet<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Keys on every `visualize/spectrum` frame, whichever branch built it.
+const SPECTRUM_ENVELOPE_KEYS: &[&str] = &[
+    "backend",
+    "channel",
+    "cmd",
+    "dbu_offset_db",
+    "freqs",
+    "mic_correction",
+    "n_channels",
+    "spectrum",
+    "spl_offset_db",
+    "sr",
+    "type",
+    "voltage_check",
+    "xruns",
+];
+
+/// Keys only the THD branch adds.
+const SPECTRUM_THD_KEYS: &[&str] = &[
+    "clipping",
+    "freq_hz",
+    "fundamental_dbfs",
+    "in_dbu",
+    "peaks",
+    "thd_pct",
+    "thdn_pct",
+];
+
+const LOUDNESS_KEYS: &[&str] = &[
+    "backend",
+    "channel",
+    "cmd",
+    "gated_duration_s",
+    "integrated_lkfs",
+    "lra_lu",
+    "mic_correction",
+    "momentary_lkfs",
+    "n_channels",
+    "short_term_lkfs",
+    "spl_offset_db",
+    "sr",
+    "timestamp",
+    "true_peak_dbtp",
+    "type",
+    "xruns",
+];
+
+/// Start a one-channel monitor with `extra` request fields and return the
+/// second `visualize/spectrum` frame and a `measurement/loudness` frame.
+pub(crate) fn capture_monitor_frames(extra: Value) -> (Value, Value) {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let mut req = json!({
+        "cmd": "monitor_spectrum",
+        "channels": [0],
+        "interval": MONITOR_TEST_INTERVAL_S,
+        "fft_n": 8192,
+    });
+    if let (Some(obj), Some(more)) = (req.as_object_mut(), extra.as_object()) {
+        for (k, v) in more {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let r = c.call(req);
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+
+    let mut spectrum: Option<Value> = None;
+    let mut loudness: Option<Value> = None;
+    let mut spectra_seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (spectrum.is_none() || loudness.is_none()) {
+        let Some((topic, payload)) = c.recv_pub(2_000) else {
+            break;
+        };
+        if topic != "data" {
+            continue;
+        }
+        match payload.get("type").and_then(Value::as_str) {
+            Some("visualize/spectrum") => {
+                spectra_seen += 1;
+                if spectra_seen >= 2 {
+                    spectrum = Some(payload);
+                }
+            }
+            Some("measurement/loudness") => loudness = Some(payload),
+            _ => {}
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    (
+        spectrum.expect("no spectrum frame within 5 s"),
+        loudness.expect("no loudness frame within 5 s"),
+    )
+}
+
+#[test]
+fn monitor_frame_key_sets_are_characterised() {
+    // The fake engine's default 1 kHz tone: THD analysis succeeds.
+    let (spectrum, loudness) = capture_monitor_frames(json!({}));
+    let mut want = key_set(SPECTRUM_ENVELOPE_KEYS);
+    want.extend(key_set(SPECTRUM_THD_KEYS));
+    assert_eq!(key_paths(&spectrum), want, "THD branch: {spectrum}");
+    assert_eq!(key_paths(&loudness), key_set(LOUDNESS_KEYS), "{loudness}");
+
+    // A tone far below the analyser's "No signal" floor: no fundamental,
+    // so the tone readouts must be absent, not null.
+    let (spectrum, _) = capture_monitor_frames(json!({
+        "fake_tones": [{"freq_hz": 1000.0, "level_dbfs": -300.0}],
+    }));
+    assert_eq!(
+        key_paths(&spectrum),
+        key_set(SPECTRUM_ENVELOPE_KEYS),
+        "no-THD branch: {spectrum}"
+    );
+}
