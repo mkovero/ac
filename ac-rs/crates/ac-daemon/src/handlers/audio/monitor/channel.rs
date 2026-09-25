@@ -45,16 +45,17 @@ pub(super) fn lf_band_enabled(lf_fft_n: u32, fft_n: u32) -> bool {
     lf_fft_n > fft_n
 }
 
-/// Ticks between LF recomputes, for a given LF FFT length, sample rate
-/// and refresh interval (#173).
+/// LF recompute period in monitor ticks: one recompute every N ticks, for
+/// a given LF FFT length, sample rate and refresh interval (#173, #616).
 ///
 /// The LF spectrum advances one overlap-hop at a time —
 /// `(1 - LF_OVERLAP) * lf_fft_n / sr` seconds — rather than once per full
-/// block. The result is clamped to at least 1: a hop shorter than a tick
-/// means recompute on every tick, and a zero here would make the
-/// `counter >= recompute_every` test always true *and* leave the counter
-/// pinned at zero, which reads the same but is one bad rounding away from
-/// meaning "never". The 4096 ceiling bounds the other direction.
+/// block, so N is that hop divided by the tick interval. The result is
+/// clamped to at least 1, which keeps the period at one tick or more: a hop
+/// shorter than a tick means recompute on every tick. `LfState` counts the
+/// current tick before comparing, so a 0 would behave like 1 there, but the
+/// value would no longer state a period. The 4096 ceiling bounds the other
+/// direction.
 pub(super) fn lf_recompute_every(lf_fft_n: u32, sr: u32, interval_s: f64) -> u32 {
     ((lf_fft_n as f64 * (1.0 - LF_OVERLAP) / sr as f64) / interval_s.max(1e-6))
         .round()
@@ -183,6 +184,9 @@ impl Integrator {
 /// The five members are only ever read and written together — the long
 /// ring, the smoothed spectrum it produces, the overlap-hop counter, and
 /// the EMA plus the timestamp its `dt` is measured from.
+///
+/// Once the ring is full the band recomputes exactly once every
+/// `recompute_every` ticks (#616); the first full ring recomputes at once.
 pub(super) struct LfState {
     pub(super) ring: std::collections::VecDeque<f32>,
     /// Most recent smoothed LF linear half-spectrum; `None` until the
@@ -229,7 +233,12 @@ impl LfState {
 
     /// Append `new` to the long ring, trimmed to `lf_fft_n` from the
     /// front, and recompute the cached LF half-spectrum when the ring is
-    /// full and the overlap hop has elapsed.
+    /// full and the overlap hop has elapsed: one recompute every
+    /// `recompute_every` ticks once the ring is full (#616). The tick is
+    /// counted before the comparison, so after a recompute resets the
+    /// counter to 0 the next recompute lands on the `recompute_every`-th
+    /// tick. The `u32::MAX` sentinel set by `new()` / `clear()` saturates,
+    /// so the first full ring recomputes immediately.
     ///
     /// `now` is passed in rather than read here so the EMA's `dt` is
     /// testable. On the first recompute after a rebuild there is no
@@ -249,8 +258,8 @@ impl LfState {
         if self.ring.len() < lf_fft_n as usize {
             return;
         }
+        self.ticks_since_recompute = self.ticks_since_recompute.saturating_add(1);
         if self.ticks_since_recompute < recompute_every {
-            self.ticks_since_recompute = self.ticks_since_recompute.saturating_add(1);
             return;
         }
         let buf = self.ring.make_contiguous();
@@ -412,11 +421,10 @@ impl ChannelState {
 mod lf_band_tests {
     use super::{lf_band_enabled, lf_recompute_every, LfState, LF_OVERLAP};
 
-    /// A zero here would pin `ticks_since_recompute` at zero forever: the
-    /// `counter >= every` test would always fire, which happens to look
-    /// like "recompute every tick" but is one rounding away from a
-    /// division that never advances. Swept over every rate the daemon
-    /// runs and the full legal interval range.
+    /// The value is a period in ticks (#616), so it must be at least one
+    /// tick: a 0 would recompute every tick like a 1 does, but it would no
+    /// longer state the period it is meant to. Swept over every rate the
+    /// daemon runs and the full legal interval range.
     #[test]
     fn recompute_cadence_is_never_zero() {
         for sr in [44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000] {
@@ -501,22 +509,47 @@ mod lf_band_tests {
         assert!(lf.spec_cache.is_some(), "a full ring must produce a column");
     }
 
-    /// With a cadence of N ticks, a full ring recomputes once and then
-    /// waits N ticks before the next one.
+    /// With a period of N ticks, a full ring recomputes on its first tick
+    /// and then exactly once every N ticks (#616). Recomputes are observed
+    /// through `ema_last_ts`, which each one sets to that tick's `now`, not
+    /// through the counter. The spacing is asserted exactly, so the test
+    /// fails for a period of N + 1 (the pre-#616 counter, which checked
+    /// before counting) and for N - 1 (a counter that recomputes one tick
+    /// early). N = 1 and 9 are `lf_recompute_every` at 0.2 s and 16 ms; 4 is
+    /// the #189 soak's `hop_ticks`.
     #[test]
-    fn the_cadence_counter_paces_recomputes() {
+    fn the_recompute_period_is_exactly_recompute_every_ticks() {
         let (sr, n) = (48_000u32, 256u32);
-        let mut lf = LfState::new();
-        let now = std::time::Instant::now();
         let chunk = vec![0.25f32; 256];
-        lf.push_and_maybe_recompute(&chunk, n, sr, 3, now);
-        assert_eq!(lf.ticks_since_recompute, 0, "first full ring recomputes");
-        for expected in 1..=3 {
-            lf.push_and_maybe_recompute(&chunk, n, sr, 3, now);
-            assert_eq!(lf.ticks_since_recompute, expected);
+        let t0 = std::time::Instant::now();
+        let tick_at = |i: u64| t0 + std::time::Duration::from_millis(i);
+        for every in [1u32, 4, 9] {
+            let mut lf = LfState::new();
+            let mut recomputed_at = Vec::new();
+            for i in 0..(every as u64 * 5 + 1) {
+                lf.push_and_maybe_recompute(&chunk, n, sr, every, tick_at(i));
+                if lf.ema_last_ts == Some(tick_at(i)) {
+                    recomputed_at.push(i);
+                }
+            }
+            assert_eq!(
+                recomputed_at.first(),
+                Some(&0),
+                "every={every}: first full ring must recompute"
+            );
+            assert_eq!(
+                recomputed_at.len(),
+                6,
+                "every={every}: recomputes at {recomputed_at:?}"
+            );
+            for w in recomputed_at.windows(2) {
+                assert_eq!(
+                    w[1] - w[0],
+                    every as u64,
+                    "every={every}: recomputes at {recomputed_at:?}"
+                );
+            }
         }
-        lf.push_and_maybe_recompute(&chunk, n, sr, 3, now);
-        assert_eq!(lf.ticks_since_recompute, 0, "counter reaching 3 recomputes");
     }
 
     /// Disabling the band drops every piece of state together. A partial
