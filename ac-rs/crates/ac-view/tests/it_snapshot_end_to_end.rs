@@ -106,6 +106,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
                 integration: "fast".to_string(),
                 calibration: Some(meas_cal),
                 voltage_check: None,
+                stream_sha256: None,
             },
             ChannelMeta {
                 role: "ref".to_string(),
@@ -114,6 +115,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
                 integration: "fast".to_string(),
                 calibration: None,
                 voltage_check: None,
+                stream_sha256: None,
             },
         ],
         session: SessionMeta {

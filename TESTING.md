@@ -85,12 +85,13 @@ cargo test --workspace            # all five crates — the only check that catc
 
 ## Checked-in fixtures — and which comparison each one earns
 
-Three fixtures are committed, each written by an `#[ignore]`d regenerator and
-read by tests in the default suite:
+Four fixtures are committed: three written by an `#[ignore]`d regenerator and
+one byte-frozen. All four are read by tests in the default suite:
 
 | fixture | regenerator | currency check |
 |---|---|---|
-| `tests/fixtures/snapshot-fixture-v1.acsnap` | `ac-core` `snapshot::tests::generate_snapshot_fixture` | sha256, exact |
+| `tests/fixtures/snapshot-fixture-v2.acsnap` | `ac-core` `snapshot::tests::generate_snapshot_fixture` | sha256, exact |
+| `tests/fixtures/snapshot-fixture-v1.acsnap` | none, byte-frozen (#637) | sha256 pin (`v1_fixture_is_byte_frozen`) |
 | `tests/fixtures/transfer-frame-v2.json` | `ac-scene` `regenerate_fixture` | numeric, 1e-9 relative |
 | `tests/fixtures/transfer-frame-v2-live.json` | `ac-daemon` `it_scene_fixture` | key set, types, `cal_tags` |
 
