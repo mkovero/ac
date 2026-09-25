@@ -8,6 +8,7 @@ pub mod monitor_tui;
 pub mod plot;
 pub mod probe;
 pub mod report;
+pub mod report_verify;
 pub mod server;
 pub mod session;
 pub mod setup;
@@ -103,7 +104,8 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         | CommandKind::SessionUse { .. }
         | CommandKind::SessionRm { .. }
         | CommandKind::SessionDiff { .. }
-        | CommandKind::Report { .. } => unreachable!(),
+        | CommandKind::Report { .. }
+        | CommandKind::ReportVerify { .. } => unreachable!(),
     }
 }
 

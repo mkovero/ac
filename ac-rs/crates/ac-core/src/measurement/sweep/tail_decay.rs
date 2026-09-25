@@ -2,12 +2,14 @@
 //! enough for every in-range fractional-octave band to decay 30 dB?
 
 use anyhow::{bail, Result};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::SweepParams;
 use crate::measurement::filterbank::Filterbank;
 
-/// Outcome of [`check_tail_decay`].
-#[derive(Debug, Clone, PartialEq)]
+/// Outcome of [`check_tail_decay`]. Serialisable since schema v13, where
+/// `plot_ir` records it as `MeasurementReport::tail_decay` (#398).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TailDecayCheck {
     /// Bands-per-octave the check ran at (fixed at 1/3-octave — the
     /// resolution ISO 18233 §6.3.2's "each fractional-octave band"
@@ -16,7 +18,10 @@ pub struct TailDecayCheck {
     /// Centre frequency of the worst-margin band, Hz.
     pub worst_band_hz: f64,
     /// Smallest per-band decay observed from the linear-IR peak to the
-    /// end of the captured tail, dB.
+    /// end of the captured tail, dB. `+inf` when that band's tail read back
+    /// digital silence; JSON has no infinity, so that value is written as
+    /// `null` and read back as `+inf`.
+    #[serde(deserialize_with = "null_as_infinity")]
     pub worst_decay_db: f64,
     /// ISO 18233 §6.3.2's required decay, dB (30).
     pub required_db: f64,
@@ -30,6 +35,12 @@ pub struct TailDecayCheck {
     pub bands_settled: usize,
     /// Count of 1/3-octave bands in `[f1_hz, f2_hz]` this check considered.
     pub bands_total: usize,
+}
+
+/// `serde_json` writes a non-finite `f64` as `null`; the only non-finite
+/// value [`check_tail_decay`] produces is `+inf`, so `null` reads back as it.
+fn null_as_infinity<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::INFINITY))
 }
 
 impl TailDecayCheck {

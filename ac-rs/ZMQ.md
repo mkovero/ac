@@ -156,14 +156,16 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 12`); the
+configured. Schema is versioned (currently `schema_version: 13`); the
 capture backend is archived at report top level. v11 (#466) adds
 `calibration.voltage_check` — the session check's verdict on the voltage
 scale, frozen at capture (a `LayerVerdict`, see [`session_check`](#session_check));
 when it is `refused`, the snapshot's `vrms_at_0dbfs_*` are `null`. v12
 (#544) adds `inter_pair_offset` on `plot_ir` reports and changes what the
 flight time is measured against — see [`plot_ir`](#plot_ir). A reader built
-before v12 refuses v12 reports.
+before v12 refuses v12 reports. v13 (#398) adds `tail_decay` on `plot_ir`
+reports — the ISO 18233 §6.3.2 verdict as data (see [`plot_ir`](#plot_ir));
+a reader built before v13 refuses v13 reports.
 
 Consumers accept `schema_version` 1 through the current version and refuse
 anything else — including 0, a missing field, or a non-integer — before
@@ -1386,6 +1388,22 @@ reverberation isn't known ahead of a real capture, so `tail_s`'s adequacy
 is checked after the fact against the room actually measured, not
 guessed beforehand (`ac_core::measurement::sweep::check_tail_decay`).
 
+From schema v13 (#398) the same verdict is also carried as data, in the
+top-level `report.tail_decay`, tagged by `state`:
+
+- `checked` — the flattened `TailDecayCheck`: `bpo`, `worst_band_hz`,
+  `worst_decay_db` (`null` when the tail read back digital silence, which
+  decodes as `+inf`), `required_db`, `passed`, `bands_settled`,
+  `bands_total`.
+- `not_evaluated` — `reason`, the error the check returned (a capture with
+  no usable tail). Unverified, never passed.
+
+Absent on reports written before v13 and on producers other than
+`plot_ir`: not recorded, never passed. `ac report verify` excludes a
+`checked` run with `passed: false` and a `not_evaluated` run from every
+set figure, and marks a run without the field `unchecked`. The `notes`
+sentence is still written.
+
 Fake, JACK, and CPAL backends all implement the required
 `play_and_capture` engine path (`jack_backend.rs`, `cpal_backend.rs`) —
 only the default trait impl bails. Capturing a same-capture reference leg
@@ -1633,7 +1651,7 @@ positive excess over `d/c` on the `distance` block.
   "window_len_requested": 38400, "window_len_used": [38400, 22540, 15992, 12404, 12404] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 12, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, "inter_pair_offset": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 13, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, "inter_pair_offset": { ... }, "tail_decay": { "state": "checked", ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir", "backend": "jack",

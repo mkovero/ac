@@ -19,6 +19,7 @@
 mod cursor;
 mod metrics;
 mod plot;
+mod verification;
 
 use anyhow::{Context, Result};
 use printpdf::{BuiltinFont, Mm, PdfDocument};
@@ -27,6 +28,8 @@ use cursor::{Cursor, Fonts, PAGE_H_MM, PAGE_W_MM};
 
 use crate::measurement::report::{MeasurementData, MeasurementPayload, MeasurementReport};
 use crate::measurement::report_layout::{self as layout, Body};
+
+pub use verification::render_verification_pdf;
 
 /// Render `report` as a PDF byte stream.
 pub fn render_pdf(report: &MeasurementReport) -> Result<Vec<u8>> {
@@ -230,6 +233,7 @@ mod tests {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            tail_decay: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse {
                     points: (0..3)

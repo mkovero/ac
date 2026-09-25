@@ -14,11 +14,14 @@
 
 mod emit;
 mod plot;
+mod verification;
 
 use std::fmt::Write as _;
 
 use crate::measurement::report::{MeasurementData, MeasurementPayload, MeasurementReport};
 use crate::measurement::report_layout::{self as layout, Body};
+
+pub use verification::render_verification_html;
 
 const CSS: &str = r#"
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -222,6 +225,7 @@ mod tests {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            tail_decay: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse {
                     points: vec![
