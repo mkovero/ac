@@ -7,7 +7,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use crate::dbfs::linear_to_dbfs;
 use crate::readout::{format_cursor_readout, format_spl_readout};
 use crate::ticks::{db_axis, db_to_y, freq_axis, freq_to_x, Axis};
-use crate::wire::WireFrame;
+use ac_core::wire::TransferFrame;
 
 /// Where a scene's underlying data came from — part of a trace's
 /// provenance (D15: a trace is data-with-provenance, never "the live
@@ -170,7 +170,7 @@ impl Scene {
 
     /// Build a scene from a deserialized live `transfer_stream` v2 frame.
     pub fn from_wire_frame(
-        frame: &WireFrame,
+        frame: &TransferFrame,
         freq_range: (f64, f64),
         db_range: (f64, f64),
     ) -> Scene {

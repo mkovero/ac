@@ -354,31 +354,33 @@ impl SessionPlan {
         // interpret the per-column `stage` index without knowing the layout
         // rules, and so a saved frame stays interpretable if those rules
         // change later.
-        let mtw_stages: Value = match ac_core::visualize::mtw::ladder::layout(sr) {
-    Ok(l) => Value::Array(
-        l.stages
-            .iter()
-            .map(|s| {
-                json!({
-                    // `W + hop·(N−1)` — how long this rung takes to
-                    // fill its average. Shipped so a viewer can say
-                    // how stale a band is without deriving it from
-                    // the frame rate.
-                    "settling_s": ac_core::visualize::mtw::settling_seconds(s, self.mtw_n_blocks),
-                    "decim":     s.decim,
-                    "rate":      s.rate,
-                    "df":        s.df,
-                    "window_s":  s.window_s,
-                    "hop_s":     s.hop_s,
-                    "f_valid":   s.f_valid,
-                    "f_top":     s.f_top,
-                    "blend_top": s.blend_top,
-                })
-            })
-            .collect(),
-    ),
-    Err(_) => Value::Null,
-};
+        //
+        // A layout error yields no stages. That cannot reach the wire: `mtw`
+        // is serialised only when a ladder exists, and `MtwPair::new` builds
+        // its ladder from the same `layout(sr)`.
+        let mtw_stages: Vec<ac_core::wire::MtwStage> =
+            match ac_core::visualize::mtw::ladder::layout(sr) {
+                Ok(l) => l
+                    .stages
+                    .iter()
+                    .map(|s| ac_core::wire::MtwStage {
+                        // `W + hop·(N−1)` — how long this rung takes to
+                        // fill its average. Shipped so a viewer can say
+                        // how stale a band is without deriving it from
+                        // the frame rate.
+                        settling_s: ac_core::visualize::mtw::settling_seconds(s, self.mtw_n_blocks),
+                        decim: s.decim,
+                        rate: s.rate,
+                        df: s.df,
+                        window_s: s.window_s,
+                        hop_s: s.hop_s,
+                        f_valid: s.f_valid,
+                        f_top: s.f_top,
+                        blend_top: s.blend_top,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
 
         // Every frame input that is fixed for this worker's life, gathered
         // once. `mtw_stages` is moved in rather than cloned per frame.

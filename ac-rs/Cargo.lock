@@ -44,6 +44,7 @@ name = "ac-daemon"
 version = "0.2.0"
 dependencies = [
  "ac-core",
+ "ac-scene",
  "anyhow",
  "arc-swap",
  "chrono",

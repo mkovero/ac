@@ -39,7 +39,6 @@ pub mod scene;
 pub mod sweep_ir;
 pub mod ticks;
 pub mod transfer;
-pub mod wire;
 
 pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use ir::{ArrivalMarker, IrInput, IrScene, IR_HEADER};
@@ -50,4 +49,3 @@ pub use transfer::{
     BandLabel, CalibrationReadout, CalibrationState, DerotMode, DisplayModes, Meter, MeterState,
     Smoothing, TransferInput, TransferScene,
 };
-pub use wire::{IrWireFrame, MtwStage, WireDrive, WireFrame};

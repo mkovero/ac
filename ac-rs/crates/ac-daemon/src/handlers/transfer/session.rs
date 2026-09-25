@@ -439,7 +439,7 @@ impl SessionState {
         &mut self,
         bufs: &[Vec<f32>],
         ev: TickEvents,
-        drive_msg: &Value,
+        drive_msg: &ac_core::wire::WireDrive,
         now: std::time::Instant,
     ) -> Vec<Value> {
         // Consumed before this tick's own estimate, so a re-lock request
@@ -491,7 +491,7 @@ impl SessionState {
         let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
 
         // Assembly, not analysis: the expensive work happened above and
-        // only when the ring moved. What is left is building JSON from the
+        // only when the ring moved. What is left is building frames from the
         // held estimate plus this tick's live scalars, fanned out across
         // the rayon pool so multi-pair sessions (e.g. 4 mic positions
         // against one reference) scale with core count. Published back in
@@ -506,7 +506,12 @@ impl SessionState {
             n_channels: self.rings.len(),
         };
         let statics = &self.statics;
-        let built: Vec<(usize, Vec<Value>, Option<f64>)> = self
+        let built: Vec<(
+            usize,
+            ac_core::wire::TransferFrame,
+            Option<ac_core::wire::IrFrame>,
+            Option<f64>,
+        )> = self
             .ctx
             .par_iter()
             .zip(self.pairs.par_iter())
@@ -514,7 +519,7 @@ impl SessionState {
             .collect();
 
         let mut out = Vec::with_capacity(built.len() * 2);
-        for (pos, mut batch, spl_raw) in built {
+        for (pos, mut frame, ir, spl_raw) in built {
             // Sequential, indexed by `PairCtx::pos` — the EMA integrator
             // is `&mut` per pair and cannot be advanced inside the
             // parallel closure above. `pos` is the pair's position in the
@@ -528,12 +533,13 @@ impl SessionState {
                     .unwrap_or(self.chunk_secs)
                     .max(1e-6);
                 st.spl_last = Some(now);
-                let integrated = integ.update(&[raw], dt)[0];
-                if let Some(first) = batch.first_mut() {
-                    first["spl"] = json!(integrated);
-                }
+                frame.spl = Some(integ.update(&[raw], dt)[0]);
             }
-            out.extend(batch);
+            // Serialised here, once the frame is complete. A shared type
+            // that fails to serialise is a daemon bug, and publishing
+            // nothing for it beats publishing a half-built frame.
+            out.extend(serde_json::to_value(&frame).ok());
+            out.extend(ir.and_then(|ir| serde_json::to_value(&ir).ok()));
         }
         out
     }

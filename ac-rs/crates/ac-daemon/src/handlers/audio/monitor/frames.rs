@@ -27,25 +27,28 @@ pub(super) fn emit_loudness_frame(
     xruns: u32,
 ) {
     let loudness = &ch.loudness;
-    let frame = json!({
-        "type":             "measurement/loudness",
-        "cmd":              "monitor_spectrum",
-        "channel":          ch.channel,
-        "n_channels":       ctx.n_channels,
-        "sr":               ctx.sr,
-        "momentary_lkfs":   json_finite(loudness.momentary()),
-        "short_term_lkfs":  json_finite(loudness.short_term()),
-        "integrated_lkfs":  json_finite(loudness.integrated()),
-        "lra_lu":           loudness.loudness_range(),
-        "true_peak_dbtp":   json_finite(loudness.true_peak_dbtp()),
-        "gated_duration_s": loudness.gated_duration_s(),
-        "spl_offset_db":    ch.spl_offset,
-        "mic_correction":   mic_correction,
-        "timestamp":        ts_ns,
-        "xruns":            xruns,
-        "backend":          ctx.backend,
-    });
-    send_pub(ctx.pub_tx, "data", &frame);
+    let frame = ac_core::wire::LoudnessFrame {
+        frame_type: "measurement/loudness".to_string(),
+        cmd: "monitor_spectrum".to_string(),
+        wire_version: None,
+        channel: ch.channel,
+        n_channels: ctx.n_channels,
+        sr: ctx.sr,
+        momentary_lkfs: finite(loudness.momentary()),
+        short_term_lkfs: finite(loudness.short_term()),
+        integrated_lkfs: finite(loudness.integrated()),
+        lra_lu: loudness.loudness_range(),
+        true_peak_dbtp: finite(loudness.true_peak_dbtp()),
+        gated_duration_s: loudness.gated_duration_s(),
+        spl_offset_db: ch.spl_offset,
+        mic_correction: mic_correction.to_string(),
+        timestamp: ts_ns,
+        xruns,
+        backend: ctx.backend.to_string(),
+    };
+    if let Ok(frame) = serde_json::to_value(&frame) {
+        send_pub(ctx.pub_tx, "data", &frame);
+    }
 }
 
 /// Cap on `samples` per scope frame so the wire payload stays bounded
@@ -221,13 +224,9 @@ pub(super) fn spectrum_columns(
     (columns, freqs)
 }
 
-/// Convert a possibly-infinite `f64` to JSON — `null` when not finite,
-/// real number otherwise. Keeps the sidecar frame JSON-parseable; `-inf`
-/// would otherwise fail `serde_json`'s finite-value check.
-pub(super) fn json_finite(v: f64) -> Value {
-    if v.is_finite() {
-        json!(v)
-    } else {
-        Value::Null
-    }
+/// `None` when not finite, the value otherwise. A loudness reading is `-inf`
+/// before its gate opens, and JSON cannot carry that; the frame says `null`
+/// on purpose rather than leaving it to the serialiser.
+pub(super) fn finite(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
 }

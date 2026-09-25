@@ -40,7 +40,7 @@ fn statics() -> FrameStatics {
         integration_tag: "fast".to_string(),
         mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
         mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
-        mtw_stages: Value::Null,
+        mtw_stages: Vec::new(),
     }
 }
 
@@ -78,8 +78,12 @@ fn events(engine_on: bool) -> TickEvents {
     }
 }
 
-fn drive_msg(on: bool) -> Value {
-    json!({"on": on, "level_dbfs": if on { json!(-20.0) } else { Value::Null }, "drivable": true})
+fn drive_msg(on: bool) -> ac_core::wire::WireDrive {
+    ac_core::wire::WireDrive {
+        on,
+        level_dbfs: on.then_some(-20.0),
+        drivable: true,
+    }
 }
 
 /// Feed `n` ticks of a correlated pair — measurement is the reference
@@ -255,11 +259,12 @@ fn a_held_estimate_equals_one_computed_from_the_ring_as_it_stands() {
     let fresh = analyse_pair(&s.ctx[0], &s.pairs[0], &s.statics, &s.rings, key, 0)
         .expect("rings hold both channels");
     assert_eq!(
-        held["magnitude_db"], fresh.magnitude_db,
+        held["magnitude_db"],
+        json!(fresh.magnitude_db),
         "the frame's magnitude is not what the ring says now"
     );
-    assert_eq!(held["coherence"], fresh.coherence);
-    assert_eq!(held["meas_spectrum"], fresh.meas_spectrum);
+    assert_eq!(held["coherence"], json!(fresh.coherence));
+    assert_eq!(held["meas_spectrum"], json!(fresh.meas_spectrum));
 }
 
 /// A lock arriving mid-hop must invalidate the estimate. The held one

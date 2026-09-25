@@ -11,7 +11,7 @@
 //! 1. **Determinism check** (exact equality): the identical frame
 //!    bytes, parsed twice independently (once "as the app would",
 //!    once as a fresh standalone call) — proves the daemon → ac-view
-//!    client → `WireFrame` → `Scene` chain doesn't corrupt or lose
+//!    client → `TransferFrame` → `Scene` chain doesn't corrupt or lose
 //!    data anywhere, and that the conversion is a pure function of the
 //!    bytes (no hidden state).
 //! 2. **Live-app paint check** (small tolerance): drives the *actual*
@@ -107,8 +107,8 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         found.expect("no transfer_stream frame within 10s")
     };
     let frame_text = serde_json::to_string(&raw_frame).unwrap();
-    let parse_a: ac_scene::WireFrame = serde_json::from_str(&frame_text).unwrap();
-    let parse_b: ac_scene::WireFrame = serde_json::from_str(&frame_text).unwrap();
+    let parse_a: ac_core::wire::TransferFrame = serde_json::from_str(&frame_text).unwrap();
+    let parse_b: ac_core::wire::TransferFrame = serde_json::from_str(&frame_text).unwrap();
     let scene_a = Scene::from_wire_frame(&parse_a, (20.0, 20_000.0), (-140.0, 0.0));
     let scene_b = Scene::from_wire_frame(&parse_b, (20.0, 20_000.0), (-140.0, 0.0));
     assert!(
@@ -181,7 +181,7 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
 /// 1. **Determinism check**: the identical sidecar frame bytes, parsed
 ///    twice independently, must produce byte-identical `IrScene`s
 ///    (trace included, not just the header/arrival strings) — proves
-///    the sidecar → `IrWireFrame` → `IrInput` → `IrScene` chain is a
+///    the sidecar → `IrFrame` → `IrInput` → `IrScene` chain is a
 ///    pure function of the bytes.
 /// 2. **Live-app paint check**: the real `AcViewApp`, driven through a
 ///    real eframe harness with an actual `H` keypress (not
@@ -219,8 +219,8 @@ fn ir_panel_header_and_arrival_match_ac_scene_for_the_same_sidecar_frame() {
         found.expect("no visualize/ir frame within 10s")
     };
     let frame_text = serde_json::to_string(&raw_ir_frame).unwrap();
-    let parse_a: ac_scene::IrWireFrame = serde_json::from_str(&frame_text).unwrap();
-    let parse_b: ac_scene::IrWireFrame = serde_json::from_str(&frame_text).unwrap();
+    let parse_a: ac_core::wire::IrFrame = serde_json::from_str(&frame_text).unwrap();
+    let parse_b: ac_core::wire::IrFrame = serde_json::from_str(&frame_text).unwrap();
     let scene_a = IrScene::from_input(&IrInput::from_wire_frame(&parse_a));
     let scene_b = IrScene::from_input(&IrInput::from_wire_frame(&parse_b));
     assert_eq!(

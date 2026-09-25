@@ -75,6 +75,37 @@ Every DATA frame published on the PUB socket is prefixed with a topic word.
 The JSON payload always includes `"cmd"` (which command produced it) and
 `"type"` (the frame subtype) where applicable.
 
+**`wire_version`** — every PUB payload, on every topic (`keepalive`,
+`done` and `error` included), carries `"wire_version": <int>` at its top
+level: the version of the wire contract this document states. The daemon
+stamps it at its single publish seam, so no frame can omit it. The current
+version is **1** (`ac_core::wire::WIRE_VERSION`).
+
+- **Bump rule.** The version goes up for any change to any PUB payload that
+  would make a consumer built against the previous version draw a wrong
+  value or drop a frame: a removed or renamed key, or a changed unit, type
+  or meaning. A new optional key does **not** bump it.
+- **Supported range.** Consumers read `MIN_WIRE_VERSION` through
+  `WIRE_VERSION` (both 1 today). The minimum goes up only when consumers
+  drop support for an old version.
+- **Absent is v1.** A payload without the key comes from a daemon that
+  predates it and is read as v1 — absence is not version-sniffed.
+- **Refusal.** A consumer that meets a present version outside its range
+  refuses the frame and says so, naming both versions; it does not parse
+  the frame or draw defaults from it. The check runs on the raw payload
+  before typed parsing, so a frame too far off the schema to parse still
+  reads as a version mismatch rather than as malformed. `ac-view` and
+  `ac monitor` show `version mismatch` in their status line.
+- The `measurement/report` body keeps its own `schema_version`, which
+  governs the report body only.
+
+The typed first cut — `transfer_stream`, `visualize/ir`,
+`visualize/spectrum`, `measurement/loudness` — is defined once, in
+`ac_core::wire`, and serialised by the daemon and deserialised by its
+consumers from those same types. `it_zmq_doc_parity` holds each of those
+four frame blocks below to the key set its type serialises, nested keys
+included. The other frames are still built as untyped JSON.
+
 **Terminal topics** — a client waiting for a measurement to finish should
 stop consuming frames when it receives either of these:
 
@@ -286,24 +317,31 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
 {
   "type":             "visualize/spectrum",
   "cmd":              "monitor_spectrum",
+  "wire_version":     <int>,          // see DATA frame envelope
   "channel":          <int>,          // input channel index this frame describes
   "n_channels":       <int>,          // total channels being monitored (frame count per cycle)
-  "freq_hz":          <float>,        // auto-detected dominant frequency
   "sr":               <int>,          // sample rate (Hz)
   "freqs":            [<float>, ...], // downsampled, DC removed
   "spectrum":         [<float>, ...], // linear amplitude, one-sided, [0, 1] for bounded input — NOT dB
-  "fundamental_dbfs": <float>,
-  "thd_pct":          <float>,        // harmonic residual / total output, percent
-  "thdn_pct":         <float>,        // notched residual / total output, percent
-  "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
   "dbu_offset_db":    <float> | null, // dBFS → dBu offset; null when uncalibrated or refused
   "voltage_check":    <LayerVerdict> | null, // #466: recorded verdict on the channel's stored
                                       // scale, taken once at monitor start; null when none
                                       // is stored. "refused" withholds the scale
   "spl_offset_db":    <float> | null, // additive dBFS → dB SPL offset (calibration §)
   "mic_correction":   "on" | "off" | "none",   // mic frequency-response state
-  "clipping":         <bool>,
-  "xruns":            <int>
+  "xruns":            <int>,
+  "backend":          "jack" | "cpal" | "fake",
+
+  // THD branch only. When THD analysis resolves no fundamental these seven
+  // keys are ABSENT — not null — and the frame carries the plain spectrum.
+  "freq_hz":          <float>,        // auto-detected dominant frequency
+  "peaks":            [[<float>, <float>], ...], // [freq_hz, dBFS], parabolic-interpolated,
+                                      // strongest first, at most 64
+  "fundamental_dbfs": <float>,
+  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thdn_pct":         <float>,        // notched residual / total output, percent
+  "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
+  "clipping":         <bool>
 }
 ```
 
@@ -510,6 +548,7 @@ suitable for delivery-loudness checks (R128 ±0.5 LU integrated target).
 {
   "type":             "measurement/loudness",
   "cmd":              "monitor_spectrum",
+  "wire_version":     <int>,            // see DATA frame envelope
   "channel":          <int>,
   "n_channels":       <int>,
   "sr":               <int>,
@@ -520,8 +559,11 @@ suitable for delivery-loudness checks (R128 ±0.5 LU integrated target).
   "true_peak_dbtp":   <float> | null,   // 4× polyphase oversampled peak
   "gated_duration_s": <float>,          // wall-clock since gate first opened
   "spl_offset_db":    <float> | null,   // when set, UI renders LKFS as K-weighted dB SPL
+  "mic_correction":   "on" | "off" | "none", // "on": LKFS / LRA / dBTP were computed
+                                        // on mic-corrected samples
   "timestamp":        <int>,
-  "xruns":            <int>
+  "xruns":            <int>,
+  "backend":          "jack" | "cpal" | "fake"
 }
 ```
 
@@ -539,6 +581,7 @@ to 1 as a daemon restart.
 ```json
 {
   "type":      "keepalive",
+  "wire_version": <int>,                 // see DATA frame envelope
   "seq":       <int>,                    // monotonic, resets to 1 on daemon start
   "timestamp": <int>,                    // UNIX-epoch nanoseconds
   "busy":      <bool>                    // any worker currently running?
@@ -2914,6 +2957,7 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 {
   "type":            "transfer_stream",
   "cmd":             "transfer_stream",
+  "wire_version":    <int>,              // see DATA frame envelope
   "freqs":           [<float>, ...],     // up to 2000 points
   "magnitude_db":    [<float>, ...],
   "phase_deg":       [<float>, ...],
@@ -3162,6 +3206,49 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // tick, after the dead-man
     "level_dbfs": <float> | null,        // accepted level; null while off
     "drivable":   <bool>                 // session opened output ports at launch
+  },
+  "backend":         "jack" | "cpal" | "fake",
+
+  // The three-stage transfer columns — the display's source. `null` until
+  // every ladder rung holds a full `n_blocks` (2.56 s at the bottom rung),
+  // and on a settling frame. Recomputed every tick. Absent is not a reason
+  // to fall back to the Welch arrays above: they are a different
+  // measurement. Column spacing is NOT uniform in log frequency — map each
+  // column by its own `freqs[i]`, never by index. dB is applied daemon-side.
+  "mtw": {
+    "freqs":          [<float>, ...],    // column centres, Hz
+    "f_lo":           [<float>, ...],    // column lower edges, Hz
+    "f_hi":           [<float>, ...],    // column upper edges, Hz
+    "magnitude_db":   [<float>, ...],    // |H| in dB
+    "phase_deg":      [<float>, ...],    // arg(H), delay-compensated as above
+    "coherence":      [<float>, ...],
+    "df":             [<float>, ...],    // bin width behind each column, Hz
+    "window_s":       [<float>, ...],    // analysis window behind each column, s
+    "n":              [<int>, ...],      // blocks averaged behind each column — a raw
+                                          // input, not an effective depth
+    "stage":          [<int>, ...],      // index of the deeper contributing rung
+    "blend":          [<float>, ...],    // weight of the shallower rung; 0 outside
+                                          // a crossover
+    "bins":           [<int>, ...],      // source bins behind each column; never 0
+    "ppo":            <float>,           // requested columns per octave
+    "n_blocks":       <int>,             // blocks each rung averages once settled
+    "settled_stages": [<bool>, ...],     // which rungs have settled, shallowest
+                                          // first: "more band coming" versus
+                                          // "this is all there is"
+    "stages": [                          // the ladder, shallowest (full rate) first;
+      {                                  // session-static, so a saved frame stays
+                                          // interpretable without the layout rules
+        "decim":      <int>,             // decimation from full rate
+        "rate":       <float>,           // decimated sample rate, Hz
+        "df":         <float>,           // bin width, Hz
+        "window_s":   <float>,           // analysis window, s
+        "hop_s":      <float>,           // segment hop, s
+        "f_valid":    <float>,           // validity edge, Hz
+        "f_top":      <float>,           // where it hands over to the rung above, Hz
+        "blend_top":  <float>,           // top of the blend region, Hz
+        "settling_s": <float>            // W + hop·(N−1): time to fill its average
+      }
+    ]
   }
 }
 ```
@@ -3278,6 +3365,7 @@ toggled on/off in the UI without re-issuing the transfer command.
 {
   "type":          "visualize/ir",
   "cmd":           "transfer_stream",
+  "wire_version":  <int>,            // see DATA frame envelope
   "samples":       [<float>, ...],   // h(t) downsampled to ≤2000 samples
   "sr":            <int>,            // capture sample rate
   "stride":        <int>,            // downsample factor (ir_full / samples)
@@ -3289,10 +3377,11 @@ toggled on/off in the UI without re-issuing the transfer command.
   "meas_channel":  <int>,
   "delay_samples": <int>,
   "delay_ms":      <float>,
-  "delay_locked":  <bool>            // #227 — see transfer_stream above. When
+  "delay_locked":  <bool>,           // #227 — see transfer_stream above. When
                                      // false the IR is UNALIGNED, so the peak
                                      // sits at the true path delay rather than
                                      // at t=0.
+  "backend":       "jack" | "cpal" | "fake"
 }
 ```
 

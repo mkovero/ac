@@ -6,9 +6,9 @@
 //! is derived directly from the checked-in `.acsnap` via
 //! `Snapshot::derive_pair`, deliberately — that's what makes the
 //! wire-vs-snapshot equivalence test (AC4) sound, since both scenes
-//! come from the same underlying data. But it means `ac-scene`'s
-//! `WireFrame` deserializer has never actually parsed a frame that came
-//! off a real ZMQ socket: field-name drift, JSON number formatting,
+//! come from the same underlying data. But it means the
+//! `ac_core::wire::TransferFrame` deserializer `ac-scene` reads through
+//! would never parse a frame that came off a real ZMQ socket: field-name drift, JSON number formatting,
 //! null handling, and tag-string vocabulary all go untested by a
 //! fixture built from Rust struct literals. This regenerator captures
 //! **one real DATA frame's raw bytes, verbatim**, from an actual
@@ -183,7 +183,24 @@ fn live_fixture_on_disk_has_the_shape_the_daemon_still_produces() {
         "tests/fixtures/transfer-frame-v2-live.json must exist — regenerate with \
          `cargo test -p ac-daemon --test it_scene_fixture -- --ignored`",
     );
-    let fixture: Value = serde_json::from_str(&text).expect("committed live fixture parses");
+    let mut fixture: Value = serde_json::from_str(&text).expect("committed live fixture parses");
+
+    // `wire_version` is envelope, stamped at the publish seam on every PUB
+    // payload (#112), not part of the `transfer_stream` shape this fixture
+    // pins. Asserted here, then set aside on both sides, so a fixture
+    // captured before or after the field existed compares on the frame
+    // alone. `it_protocol`'s round-trip tests own the envelope.
+    let mut live = live;
+    assert_eq!(
+        live["wire_version"],
+        json!(ac_core::wire::WIRE_VERSION),
+        "the daemon's frame must carry the wire version"
+    );
+    for v in [&mut live, &mut fixture] {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove(ac_core::wire::WIRE_VERSION_KEY);
+        }
+    }
 
     let keys = |v: &Value| -> Vec<String> {
         let mut k: Vec<String> = v

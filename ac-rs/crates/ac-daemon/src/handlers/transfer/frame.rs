@@ -2,13 +2,19 @@
 //! precedes it, and the `visualize/ir` sidecar.
 //!
 //! Nothing here computes an estimate. Everything expensive happened in
-//! [`super::analysis`]; what is left is building JSON from a held estimate
-//! plus this tick's live scalars, which is what lets a frame ship on every
-//! capture tick while the estimate behind it advances at the ring's rate.
+//! [`super::analysis`]; what is left is building the frame from a held
+//! estimate plus this tick's live scalars, which is what lets a frame ship on
+//! every capture tick while the estimate behind it advances at the ring's
+//! rate.
+//!
+//! The frames are the shared `ac_core::wire` types the consumers deserialise
+//! (#112), so a key this module stops setting is a compile error here rather
+//! than a missing readout in `ac-view`.
 
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::{Calibration, LayerVerdict};
+use ac_core::wire::{IrFrame, MtwColumns, MtwStage, TransferFrame, WireDrive};
 
 use crate::handlers::mic;
 
@@ -48,7 +54,7 @@ pub(super) struct FrameStatics {
     /// Ladder description, shipped whole with every frame so a consumer
     /// can interpret a column's `stage` without knowing the layout rules,
     /// and so a saved frame stays interpretable if those rules change.
-    pub(super) mtw_stages: Value,
+    pub(super) mtw_stages: Vec<MtwStage>,
 }
 
 /// Frame inputs that change every capture tick.
@@ -64,7 +70,7 @@ pub(super) struct TickInputs<'a> {
     /// a frame agrees about it.
     pub(super) mc_enabled: bool,
     /// Observed drive state (#228), identical for every pair in the tick.
-    pub(super) drive_msg: &'a Value,
+    pub(super) drive_msg: &'a WireDrive,
     /// Ladder columns and settled-rung flags, indexed by `PairCtx::pos`.
     /// Recomputed every tick — the ladder is a push pipeline.
     pub(super) mtw_columns: &'a [Option<Vec<ac_core::visualize::mtw::splice::Column>>],
@@ -144,63 +150,65 @@ pub(super) fn settling_frame(
     ctx: &PairCtx,
     st: &PairState,
     statics: &FrameStatics,
-    meas_peak: Value,
-    ref_peak: Value,
+    meas_peak: Option<f64>,
+    ref_peak: Option<f64>,
     mc_tag: &str,
     mc_enabled: bool,
-    drive_msg: &Value,
-) -> Value {
-    json!({
-        "type":            "transfer_stream",
-        "cmd":             "transfer_stream",
-        "mtw":             Value::Null,
-        "freqs":           Vec::<f64>::new(),
-        "magnitude_db":    Vec::<f64>::new(),
-        "phase_deg":       Vec::<f64>::new(),
-        "coherence":       Vec::<f64>::new(),
-        "delay_samples":   0,
-        "delay_ms":        0.0,
-        "delay_locked":    false,
-        "delay_attempts":  st.attempts,
-        "delay_evidence":  st.prominence,
-        "meas_peak_dbfs":  meas_peak,
-        "ref_peak_dbfs":   ref_peak,
-        "ref_channel":     ctx.ref_ch,
-        "meas_channel":    ctx.meas_ch,
-        "sr":              statics.sr,
+    drive_msg: &WireDrive,
+) -> TransferFrame {
+    TransferFrame {
+        frame_type: "transfer_stream".to_string(),
+        cmd: "transfer_stream".to_string(),
+        wire_version: None,
+        mtw: None,
+        freqs: Vec::new(),
+        magnitude_db: Vec::new(),
+        phase_deg: Vec::new(),
+        coherence: Vec::new(),
+        delay_samples: 0,
+        delay_ms: 0.0,
+        delay_locked: Some(false),
+        delay_attempts: st.attempts,
+        delay_evidence: st.prominence.clone(),
+        meas_peak_dbfs: meas_peak,
+        ref_peak_dbfs: ref_peak,
+        ref_channel: ctx.ref_ch.into(),
+        meas_channel: ctx.meas_ch.into(),
+        sr: statics.sr,
         // Zero blocks: this frame carries no Welch estimate at all, which
         // is a different statement from the `1` a first-segment frame
         // makes. A consumer reading coherence's `1/N` bias needs the
         // difference, and so does anyone deciding whether an empty
         // magnitude array is a fault or a start.
-        "n_averages":      0,
+        n_averages: 0,
         // No estimate exists to number. `null` rather than 0, so the
         // first real estimate's `0` cannot be mistaken for a repeat of
         // something that was never sent.
-        "analysis_seq":    Value::Null,
-        "mic_correction":  mc_tag,
-        "spec_freqs":      Vec::<f64>::new(),
-        "meas_spectrum":   Vec::<f64>::new(),
-        "ref_spectrum":    Vec::<f64>::new(),
-        "spl":             Value::Null,
-        "spl_weighting":   statics.weighting.tag(),
-        "spl_integration": statics.integration_tag.as_str(),
-        "cal_tags":        cal_tags_value(
+        analysis_seq: None,
+        mic_correction: mc_tag.to_string(),
+        spec_freqs: Vec::new(),
+        meas_spectrum: Vec::new(),
+        ref_spectrum: Vec::new(),
+        spl: None,
+        spl_weighting: statics.weighting.tag().to_string(),
+        spl_integration: statics.integration_tag.clone(),
+        cal_tags: Some(cal_tags_value(
             ctx.meas_cal.as_ref(),
             ctx.ref_cal.as_ref(),
             ctx.meas_voltage_check.as_ref(),
             ctx.ref_voltage_check.as_ref(),
             mc_tag,
             mc_enabled,
-        ),
-        "drive":           drive_msg.clone(),
-        "backend":         statics.backend.as_str(),
-    })
+        )),
+        drive: Some(drive_msg.clone()),
+        backend: statics.backend.clone(),
+    }
 }
 
 /// Build one pair's wire messages for this tick: the `transfer_stream`
 /// frame, plus a Phase 4b `visualize/ir` sidecar when there is an
-/// estimate to derive one from. Returns the pair's launch position
+/// estimate to derive one from. The frame's `spl` is left `None`; the
+/// caller fills it once integrated. Returns the pair's launch position
 /// alongside them, and the **un-integrated** broadband SPL — integration
 /// holds `&mut` per-pair state and so happens on the worker thread, after
 /// the fan-out.
@@ -214,7 +222,7 @@ pub(super) fn build_pair_messages(
     st: &PairState,
     statics: &FrameStatics,
     tick: &TickInputs<'_>,
-) -> Option<(usize, Vec<Value>, Option<f64>)> {
+) -> Option<(usize, TransferFrame, Option<IrFrame>, Option<f64>)> {
     let &PairCtx {
         pos,
         meas_ch,
@@ -241,21 +249,11 @@ pub(super) fn build_pair_messages(
         mtw_n_blocks,
         ..
     } = statics;
-    // `-inf` (digital silence) travels as JSON null: serde_json cannot
-    // serialise a non-finite float, so the conversion is explicit here
-    // rather than left to the `json!` site.
-    let meas_peak: Value = tick_peaks_dbfs
-        .get(mi)
-        .copied()
-        .flatten()
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    let ref_peak: Value = tick_peaks_dbfs
-        .get(ri)
-        .copied()
-        .flatten()
-        .map(Value::from)
-        .unwrap_or(Value::Null);
+    // `-inf` (digital silence) travels as JSON null: `raw_peak_dbfs`
+    // already maps it to `None`, so no non-finite float reaches the
+    // serialiser.
+    let meas_peak: Option<f64> = tick_peaks_dbfs.get(mi).copied().flatten();
+    let ref_peak: Option<f64> = tick_peaks_dbfs.get(ri).copied().flatten();
     let mc_tag = mic::mic_correction_tag(ctx.meas_curve.is_some(), mc_enabled);
 
     let Some(Some(a)) = analysis.get(pos) else {
@@ -263,9 +261,10 @@ pub(super) fn build_pair_messages(
         // Publish anyway; see `settling_frame`.
         return Some((
             pos,
-            vec![settling_frame(
+            settling_frame(
                 ctx, st, statics, meas_peak, ref_peak, mc_tag, mc_enabled, drive_msg,
-            )],
+            ),
+            None,
             None,
         ));
     };
@@ -295,103 +294,98 @@ pub(super) fn build_pair_messages(
     //
     // dB is applied here, daemon-side, per the display-truth rule:
     // `ac-view` plots what it is given and does no `log10` of its own.
-    let mtw_msg = match mtw_columns.get(pos).and_then(|c| c.as_ref()) {
-        None => Value::Null,
-        Some(cols) => json!({
-            "freqs":        cols.iter().map(|c| c.freq).collect::<Vec<_>>(),
-            "f_lo":         cols.iter().map(|c| c.lo).collect::<Vec<_>>(),
-            "f_hi":         cols.iter().map(|c| c.hi).collect::<Vec<_>>(),
-            "magnitude_db": cols.iter()
+    let mtw = mtw_columns
+        .get(pos)
+        .and_then(|c| c.as_ref())
+        .map(|cols| MtwColumns {
+            freqs: cols.iter().map(|c| c.freq).collect(),
+            f_lo: cols.iter().map(|c| c.lo).collect(),
+            f_hi: cols.iter().map(|c| c.hi).collect(),
+            magnitude_db: cols
+                .iter()
                 .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
-                .collect::<Vec<_>>(),
-            "phase_deg":    cols.iter()
-                .map(|c| c.h1.arg().to_degrees())
-                .collect::<Vec<_>>(),
-            "coherence":    cols.iter().map(|c| c.coherence).collect::<Vec<_>>(),
-            "df":           cols.iter().map(|c| c.df).collect::<Vec<_>>(),
-            "window_s":     cols.iter().map(|c| c.window_s).collect::<Vec<_>>(),
-            "n":            cols.iter().map(|c| c.n).collect::<Vec<_>>(),
-            "stage":        cols.iter().map(|c| c.stage).collect::<Vec<_>>(),
-            "blend":        cols.iter().map(|c| c.blend).collect::<Vec<_>>(),
-            "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
-            "ppo":          mtw_ppo,
-            "n_blocks":     mtw_n_blocks,
+                .collect(),
+            phase_deg: cols.iter().map(|c| c.h1.arg().to_degrees()).collect(),
+            coherence: cols.iter().map(|c| c.coherence).collect(),
+            df: cols.iter().map(|c| c.df).collect(),
+            window_s: cols.iter().map(|c| c.window_s).collect(),
+            n: cols.iter().map(|c| c.n).collect(),
+            stage: cols.iter().map(|c| c.stage).collect(),
+            blend: cols.iter().map(|c| c.blend).collect(),
+            bins: cols.iter().map(|c| c.bins).collect(),
+            ppo: mtw_ppo,
+            n_blocks: mtw_n_blocks,
             // Which rungs have settled, shallowest first. Shipped so a
             // consumer can distinguish "still warming, more band coming"
             // from "this is all there is" — a short column list looks the
             // same either way, and the difference decides whether a blank
             // low end is a fault.
-            "settled_stages": mtw_settled
-                .get(pos)
-                .cloned()
-                .unwrap_or_default(),
-            "stages":       &statics.mtw_stages,
-        }),
-    };
+            settled_stages: mtw_settled.get(pos).cloned().unwrap_or_default(),
+            stages: statics.mtw_stages.clone(),
+        });
 
-    let transfer_msg = json!({
-        "type":            "transfer_stream",
-        "cmd":             "transfer_stream",
-        "mtw":             mtw_msg,
-        "freqs":           a.freqs,
-        "magnitude_db":    a.magnitude_db,
-        "phase_deg":       a.phase_deg,
-        "coherence":       a.coherence,
-        "delay_samples":   a.delay_samples,
-        "delay_ms":        a.delay_ms,
-        "delay_locked":    st.delay.is_some(),
-        "delay_attempts":  st.attempts,
-        "delay_evidence":  st.prominence,
-        "meas_peak_dbfs":  meas_peak,
-        "ref_peak_dbfs":   ref_peak,
-        "ref_channel":     ref_ch,
-        "meas_channel":    meas_ch,
-        "sr":              sr,
+    let transfer = TransferFrame {
+        frame_type: "transfer_stream".to_string(),
+        cmd: "transfer_stream".to_string(),
+        wire_version: None,
+        mtw,
+        freqs: a.freqs.clone(),
+        magnitude_db: a.magnitude_db.clone(),
+        phase_deg: a.phase_deg.clone(),
+        coherence: a.coherence.clone(),
+        delay_samples: a.delay_samples,
+        delay_ms: a.delay_ms,
+        delay_locked: Some(st.delay.is_some()),
+        delay_attempts: st.attempts,
+        delay_evidence: st.prominence.clone(),
+        meas_peak_dbfs: meas_peak,
+        ref_peak_dbfs: ref_peak,
+        ref_channel: ref_ch.into(),
+        meas_channel: meas_ch.into(),
+        sr,
         // Welch blocks actually averaged into THIS frame (#208) — 1 while
         // the window fills, then `n_averages` for the rest of the session,
         // and 0 on a settling frame. Shipped because coherence carries a
         // `1/N` bias, so a coherence figure without N is not
         // interpretable: a consumer that saw N move silently could not
         // tell a settling display from a DUT that changed.
-        "n_averages":      a.n_blocks,
+        n_averages: a.n_blocks,
         // Which estimate these arrays are. Increments when the analysis is
         // recomputed, which is once per Welch hop — slower than the frame
         // rate, so consecutive frames repeat the same arrays by design.
         // Without this the repetition is invisible and a stalled estimator
         // looks exactly like a stationary DUT.
-        "analysis_seq":    a.seq,
-        "mic_correction":  mc_tag,
-        "spec_freqs":      a.spec_freqs,
-        "meas_spectrum":   a.meas_spectrum,
-        "ref_spectrum":    a.ref_spectrum,
-        "spl":             Value::Null,
-        "spl_weighting":   statics.weighting.tag(),
-        "spl_integration": statics.integration_tag.as_str(),
-        "cal_tags":        cal_tags,
-        "drive":           drive_msg.clone(),
-        "backend":         statics.backend.as_str(),
-    });
+        analysis_seq: Some(a.seq),
+        mic_correction: mc_tag.to_string(),
+        spec_freqs: a.spec_freqs.clone(),
+        meas_spectrum: a.meas_spectrum.clone(),
+        ref_spectrum: a.ref_spectrum.clone(),
+        spl: None,
+        spl_weighting: statics.weighting.tag().to_string(),
+        spl_integration: statics.integration_tag.clone(),
+        cal_tags: Some(cal_tags),
+        drive: Some(drive_msg.clone()),
+        backend: statics.backend.clone(),
+    };
 
-    let mut out = vec![transfer_msg];
-    if let Some(ir) = a.ir.as_ref() {
-        out.push(json!({
-            "type":          "visualize/ir",
-            "cmd":           "transfer_stream",
-            "samples":       ir.samples,
-            "sr":            sr,
-            "stride":        ir.stride,
-            "dt_ms":         ir.dt_ms,
-            "t_origin_ms":   ir.t_origin_ms,
-            "ref_channel":   ref_ch,
-            "meas_channel":  meas_ch,
-            "delay_samples": a.delay_samples,
-            "delay_ms":      a.delay_ms,
-            "delay_locked":  st.delay.is_some(),
-            "analysis_seq":  a.seq,
-            "backend":       statics.backend.as_str(),
-        }));
-    }
-    Some((pos, out, a.spl_raw))
+    let ir = a.ir.as_ref().map(|ir| IrFrame {
+        frame_type: "visualize/ir".to_string(),
+        cmd: "transfer_stream".to_string(),
+        wire_version: None,
+        samples: ir.samples.clone(),
+        sr,
+        stride: ir.stride,
+        dt_ms: ir.dt_ms,
+        t_origin_ms: ir.t_origin_ms,
+        ref_channel: ref_ch.into(),
+        meas_channel: meas_ch.into(),
+        delay_samples: a.delay_samples,
+        delay_ms: a.delay_ms,
+        delay_locked: Some(st.delay.is_some()),
+        analysis_seq: a.seq,
+        backend: statics.backend.clone(),
+    });
+    Some((pos, transfer, ir, a.spl_raw))
 }
 
 #[cfg(test)]

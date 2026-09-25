@@ -5,8 +5,6 @@
 //! drain moves that start only in whole `step` units (#208), so the estimate
 //! is a function of far less than "the ring right now" — see [`AnalysisKey`].
 
-use serde_json::{json, Value};
-
 use ac_core::shared::calibration::Calibration;
 
 use crate::handlers::mic;
@@ -67,8 +65,10 @@ pub(super) struct AnalysisKey {
 /// it producing bytes identical to the previous tick's. #419 named the
 /// waste and left it; this is the part of the loop that pays for it.
 ///
-/// Arrays are stored already as `Value` because the only thing left to do
-/// with them is serialize them.
+/// Arrays are held typed, as the `ac_core::wire` fields they become, so the
+/// frame's schema has one definition from here to the consumer: assembly
+/// moves or clones them into a `TransferFrame` rather than re-reading an
+/// untyped copy of the same fields (#112).
 pub(super) struct PairAnalysis {
     pub(super) key: AnalysisKey,
     /// Increments once per recomputation, published as `analysis_seq`.
@@ -79,13 +79,13 @@ pub(super) struct PairAnalysis {
     pub(super) n_blocks: usize,
     pub(super) delay_samples: i64,
     pub(super) delay_ms: f64,
-    pub(super) freqs: Value,
-    pub(super) magnitude_db: Value,
-    pub(super) phase_deg: Value,
-    pub(super) coherence: Value,
-    pub(super) spec_freqs: Value,
-    pub(super) meas_spectrum: Value,
-    pub(super) ref_spectrum: Value,
+    pub(super) freqs: Vec<f64>,
+    pub(super) magnitude_db: Vec<f64>,
+    pub(super) phase_deg: Vec<f64>,
+    pub(super) coherence: Vec<f64>,
+    pub(super) spec_freqs: Vec<f64>,
+    pub(super) meas_spectrum: Vec<f64>,
+    pub(super) ref_spectrum: Vec<f64>,
     /// Broadband weighted level before time integration. The EMA that
     /// consumes it still steps every tick with that tick's `dt`, so
     /// holding the raw value here changes no `spl` number: it was
@@ -98,7 +98,7 @@ pub(super) struct PairAnalysis {
 /// The `visualize/ir` sidecar's per-analysis content. The channel and
 /// lock fields are added at assembly, from live state.
 pub(super) struct IrPayload {
-    pub(super) samples: Value,
+    pub(super) samples: Vec<f32>,
     pub(super) stride: usize,
     pub(super) dt_ms: f64,
     pub(super) t_origin_ms: f64,
@@ -255,7 +255,7 @@ pub(super) fn analyse_pair(
         let dt_ms = 1000.0 / sr as f64 * stride as f64;
         let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
         Some(IrPayload {
-            samples: json!(ir_ds),
+            samples: ir_ds,
             stride,
             dt_ms,
             t_origin_ms,
@@ -269,13 +269,13 @@ pub(super) fn analyse_pair(
         n_blocks: key.n_blocks,
         delay_samples: result.delay_samples,
         delay_ms: result.delay_ms,
-        freqs: json!(freqs),
-        magnitude_db: json!(mag),
-        phase_deg: json!(phase),
-        coherence: json!(coh),
-        spec_freqs: json!(spec_freqs),
-        meas_spectrum: json!(meas_spectrum),
-        ref_spectrum: json!(ref_spectrum),
+        freqs,
+        magnitude_db: mag,
+        phase_deg: phase,
+        coherence: coh,
+        spec_freqs,
+        meas_spectrum,
+        ref_spectrum,
         spl_raw,
         ir,
     })

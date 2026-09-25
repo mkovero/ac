@@ -1,12 +1,11 @@
 //! `ZMQ.md` ↔ daemon parity.
 //!
-//! `ZMQ.md` is the only place the wire contract is stated. The daemon emits
-//! frames inline with `json!(`, `ac-scene` parses them with typed serde,
-//! `ac-cli` parses them untyped, and nothing links those three to each other
-//! or to the document at compile time. The document can therefore drift from
-//! the code freely, and has — six commands the daemon dispatched had no
-//! section in it when this file was written. These tests are the first thing
-//! in the repo that can make the document go red.
+//! `ZMQ.md` states the wire contract in prose. For the first-cut DATA frames
+//! (#112) the code states it once, in `ac_core::wire`, which the daemon
+//! serialises and `ac-scene` / `ac-cli` deserialise; everything else is
+//! still built as untyped JSON. Nothing but these tests links the document
+//! to either. It has drifted before — six commands the daemon dispatched had
+//! no section in it when this file was written.
 //!
 //! What is checked, and on what evidence:
 //!
@@ -21,14 +20,22 @@
 //!   section's JSON blocks must equal that section's heading. Catches a
 //!   section copy-pasted from its neighbour.
 //! * **Reply keys of the read-only commands** — against a live `--fake-audio`
-//!   daemon. This is the only check here that compares the document to
-//!   behaviour rather than to source text.
+//!   daemon.
+//! * **Key sets of the four typed DATA frames** (#112) — `transfer_stream`
+//!   (with its ladder settled), `visualize/ir`, `visualize/spectrum` (THD
+//!   branch) and `measurement/loudness`, captured live, read through their
+//!   `ac_core::wire` type and written back out. The key set, nested keys
+//!   included, must equal the one in the frame's `ZMQ.md` block. A field
+//!   renamed on the type changes what it writes, so this goes red even for a
+//!   field no consumer reads and no compiler would flag.
 //!
 //! What is **not** checked, so that a green run is not read as more than it
-//! is: DATA frame payloads, field *types*, field *values*, and the reply of
-//! every command whose handler spawns a worker or drives an output. Those need
-//! a driven measurement. A green run here says the roster agrees and the
-//! read-only replies agree — nothing about whether the prose is true.
+//! is: the payloads of the untyped DATA frames, field *types*, field
+//! *values*, the keys inside `cal_tags` and `delay_evidence` (raw subtrees,
+//! typing them is a follow-up), and the reply of every command whose handler
+//! spawns a worker or drives an output. A green run here says the roster, the
+//! read-only replies and the typed frames' keys agree — nothing about whether
+//! the prose is true.
 //!
 //! The reply check has no notion of an optional field: it asserts set
 //! equality. If one of [`READ_ONLY_COMMANDS`] ever gains a reply field that is
@@ -418,4 +425,276 @@ fn every_dispatched_command_refuses_an_unrecognised_field() {
     );
     let status = client.call(json!({"cmd": "status"}));
     assert_eq!(status["busy"], json!(false), "{status}");
+}
+
+// ---- typed DATA frame key parity (#112 D4.5) ----
+
+/// Nested keys under these are not compared: the subtrees are held as raw
+/// `serde_json::Value` on the shared type, so their keys are not the type's
+/// statement. The top-level key itself still is.
+const RAW_SUBTREES: &[&str] = &["cal_tags", "delay_evidence"];
+
+/// The first fenced block after the first line starting with `marker`.
+fn block_after(md: &str, marker: &str) -> String {
+    let mut lines = md.lines().skip_while(|l| !l.starts_with(marker));
+    assert!(
+        lines.next().is_some(),
+        "ZMQ.md has no line starting with {marker:?}"
+    );
+    let mut block = String::new();
+    let mut inside = false;
+    for line in lines {
+        if line.starts_with("```") {
+            if inside {
+                return block;
+            }
+            inside = true;
+            continue;
+        }
+        if inside {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    panic!("no fenced block after {marker:?} in ZMQ.md");
+}
+
+/// Every key path in a JSON-ish `ZMQ.md` block: `a`, `a.b`, and `a[].b` for
+/// objects inside an array. Walks text for the same reason
+/// [`top_level_keys`] does — the blocks carry placeholders and comments.
+fn doc_key_paths(block: &str) -> BTreeSet<String> {
+    let b: Vec<char> = block.chars().collect();
+    // One entry per open bracket: the path segment it contributes, if any.
+    let mut stack: Vec<Option<String>> = Vec::new();
+    let mut paths = BTreeSet::new();
+    let skip_ws = |mut j: usize| {
+        while j < b.len() && b[j].is_whitespace() {
+            j += 1;
+        }
+        j
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            '/' if b.get(i + 1) == Some(&'/') => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '{' | '[' => {
+                stack.push(None);
+                i += 1;
+            }
+            '}' | ']' => {
+                stack.pop();
+                i += 1;
+            }
+            '"' => {
+                let start = i + 1;
+                i = start;
+                while i < b.len() && b[i] != '"' {
+                    i += 1;
+                }
+                let key: String = b[start..i.min(b.len())].iter().collect();
+                i += 1;
+                let j = skip_ws(i);
+                if b.get(j) != Some(&':') {
+                    continue;
+                }
+                let prefix: Vec<&str> = stack.iter().flatten().map(String::as_str).collect();
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{key}", prefix.join("."))
+                };
+                paths.insert(path);
+                let k = skip_ws(j + 1);
+                match b.get(k) {
+                    Some('{') => {
+                        stack.push(Some(key));
+                        i = k + 1;
+                    }
+                    Some('[') => {
+                        stack.push(Some(format!("{key}[]")));
+                        i = k + 1;
+                    }
+                    _ => i = j + 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    paths
+}
+
+/// Every key path in a real value, with the same `a[].b` convention.
+fn value_key_paths(v: &serde_json::Value) -> BTreeSet<String> {
+    fn walk(v: &serde_json::Value, prefix: &str, out: &mut BTreeSet<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, child) in m {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    out.insert(path.clone());
+                    walk(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for child in a {
+                    walk(child, &format!("{prefix}[]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(v, "", &mut out);
+    out
+}
+
+/// The key set the shared type `T` serialises for a live frame: the frame
+/// read through `T` and written back out, so a key `T` does not name (or
+/// names differently) shows up here the way it would on the wire.
+fn typed_key_paths<T>(live: &serde_json::Value) -> BTreeSet<String>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let typed: T = serde_json::from_value(live.clone())
+        .unwrap_or_else(|e| panic!("live frame does not parse as its shared type: {e}"));
+    value_key_paths(&serde_json::to_value(&typed).expect("serialise"))
+}
+
+fn without_raw_subtrees(paths: BTreeSet<String>) -> BTreeSet<String> {
+    paths
+        .into_iter()
+        .filter(|p| !RAW_SUBTREES.iter().any(|r| p.starts_with(&format!("{r}."))))
+        .collect()
+}
+
+/// Receive DATA frames until `want` has matched one of each predicate, or the
+/// deadline passes.
+fn capture(
+    c: &Client,
+    secs: u64,
+    want: &[&dyn Fn(&serde_json::Value) -> bool],
+) -> Vec<Option<serde_json::Value>> {
+    let mut got: Vec<Option<serde_json::Value>> = vec![None; want.len()];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline && got.iter().any(Option::is_none) {
+        let Some((topic, v)) = c.recv_pub(1_000) else {
+            continue;
+        };
+        if topic != "data" {
+            continue;
+        }
+        for (slot, pred) in got.iter_mut().zip(want) {
+            if slot.is_none() && pred(&v) {
+                *slot = Some(v.clone());
+            }
+        }
+    }
+    got
+}
+
+#[test]
+fn typed_data_frame_blocks_match_the_shared_types() {
+    use ac_core::wire::{IrFrame, LoudnessFrame, SpectrumFrame, TransferFrame};
+
+    let md = zmq_md();
+    let daemon = Daemon::spawn();
+    let c = Client::new(&daemon);
+
+    // Monitor: the fake engine's default tone, so the THD branch — the
+    // spectrum block documents that branch, with its keys marked as such.
+    let r = c.call(json!({"cmd": "monitor_spectrum", "channels": [0], "interval": 0.1}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let thd_spectrum = |v: &serde_json::Value| {
+        v["type"] == json!("visualize/spectrum") && v.get("freq_hz").is_some()
+    };
+    let loudness = |v: &serde_json::Value| v["type"] == json!("measurement/loudness");
+    let monitor = capture(&c, 10, &[&thd_spectrum, &loudness]);
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", std::time::Duration::from_secs(5));
+
+    // Transfer: wait for the ladder to settle so `mtw` and its nested keys
+    // are present.
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "fake_correlated_pair": {"gain": 0.5, "delay_samples": 200},
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let with_ladder =
+        |v: &serde_json::Value| v["type"] == json!("transfer_stream") && v["mtw"].is_object();
+    let ir = |v: &serde_json::Value| v["type"] == json!("visualize/ir");
+    let transfer = capture(&c, 15, &[&with_ladder, &ir]);
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    let frame = |slot: &Option<serde_json::Value>, what: &str| -> serde_json::Value {
+        slot.clone()
+            .unwrap_or_else(|| panic!("no live {what} frame captured"))
+    };
+    let cases: [(&str, &str, BTreeSet<String>); 4] = [
+        (
+            "visualize/spectrum",
+            "### `spectrum` frame",
+            typed_key_paths::<SpectrumFrame>(&frame(&monitor[0], "visualize/spectrum")),
+        ),
+        (
+            "measurement/loudness",
+            "### `measurement/loudness` frame",
+            typed_key_paths::<LoudnessFrame>(&frame(&monitor[1], "measurement/loudness")),
+        ),
+        (
+            "transfer_stream",
+            "**DATA** — one frame per pair per iteration",
+            typed_key_paths::<TransferFrame>(&frame(&transfer[0], "transfer_stream")),
+        ),
+        (
+            "visualize/ir",
+            "#### `visualize/ir` sidecar",
+            typed_key_paths::<IrFrame>(&frame(&transfer[1], "visualize/ir")),
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (name, marker, typed) in cases {
+        let typed = without_raw_subtrees(typed);
+        let documented = without_raw_subtrees(doc_key_paths(&block_after(&md, marker)));
+        let undocumented: Vec<&String> = typed.difference(&documented).collect();
+        let unwritten: Vec<&String> = documented.difference(&typed).collect();
+        if !undocumented.is_empty() {
+            failures.push(format!(
+                "{name}: the shared type writes {undocumented:?}, ZMQ.md does not document them"
+            ));
+        }
+        if !unwritten.is_empty() {
+            failures.push(format!(
+                "{name}: ZMQ.md documents {unwritten:?}, the shared type does not write them"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ZMQ.md DATA blocks disagree with ac_core::wire:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+#[test]
+fn doc_key_paths_reads_nested_objects_and_arrays_of_objects() {
+    let block = r#"// topic: data
+{
+  "a": <int>,            // "not": a key
+  "b": { "c": "x" | "y" },
+  "d": [ { "e": <float> } ],
+  "f": [[<float>, <float>], ...]
+}"#;
+    let want: BTreeSet<String> = ["a", "b", "b.c", "d", "d[].e", "f"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(doc_key_paths(block), want);
 }

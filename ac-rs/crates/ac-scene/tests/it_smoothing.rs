@@ -7,10 +7,11 @@
 //! density. A uniform hand-written grid would let an index-based window pass.
 
 use ac_core::visualize::mtw::ladder;
+use ac_core::wire::TransferFrame;
 use ac_scene::transfer::{
     DerotMode, DisplayModes, MeterState, Smoothing, TransferScene, COHERENCE_THRESHOLD,
 };
-use ac_scene::{FaultState, TransferInput, WireFrame};
+use ac_scene::{FaultState, TransferInput};
 use serde_json::json;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 24_000.0);
@@ -36,7 +37,7 @@ fn column_freqs() -> Vec<f64> {
 
 /// A daemon-shaped frame over the real column grid, with per-column
 /// magnitude, phase and coherence supplied by the caller.
-fn frame(magnitude_db: Vec<f64>, phase_deg: Vec<f64>, coherence: Vec<f64>) -> WireFrame {
+fn frame(magnitude_db: Vec<f64>, phase_deg: Vec<f64>, coherence: Vec<f64>) -> TransferFrame {
     let freqs = column_freqs();
     let n = freqs.len();
     assert_eq!(magnitude_db.len(), n);
@@ -79,7 +80,7 @@ fn frame(magnitude_db: Vec<f64>, phase_deg: Vec<f64>, coherence: Vec<f64>) -> Wi
     serde_json::from_value(v).expect("wire frame")
 }
 
-fn scene(f: &WireFrame, smoothing: Smoothing) -> TransferScene {
+fn scene(f: &TransferFrame, smoothing: Smoothing) -> TransferScene {
     let input = TransferInput::from_wire_frame(f);
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
@@ -105,7 +106,7 @@ fn ripple_db(s: &TransferScene) -> f64 {
 
 /// A ±6 dB column-to-column ripple on a −20 dB curve — the readability
 /// problem smoothing exists for.
-fn ripple_fixture(coherence: Vec<f64>) -> WireFrame {
+fn ripple_fixture(coherence: Vec<f64>) -> TransferFrame {
     let n = column_freqs().len();
     let mag: Vec<f64> = (0..n)
         .map(|i| if i % 2 == 0 { -14.0 } else { -26.0 })

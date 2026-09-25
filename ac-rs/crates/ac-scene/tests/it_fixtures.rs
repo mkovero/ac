@@ -6,7 +6,8 @@
 
 use ac_core::snapshot::read_acsnap;
 use ac_core::visualize::weighting_curves::WeightingCurve;
-use ac_scene::{Scene, Source, WireFrame};
+use ac_core::wire::TransferFrame;
+use ac_scene::{Scene, Source};
 use std::path::PathBuf;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -26,7 +27,7 @@ fn wire_fixture_path() -> PathBuf {
     ))
 }
 
-fn load_wire_frame() -> WireFrame {
+fn load_wire_frame() -> TransferFrame {
     let text = std::fs::read_to_string(wire_fixture_path()).expect(
         "tests/fixtures/transfer-frame-v2.json must exist — regenerate via \
          `cargo test -p ac-scene --test regenerate_fixture -- --ignored`",

@@ -686,3 +686,62 @@ fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
         "spl={spl} outside a plausible dB SPL range"
     );
 }
+
+/// #112 D4.4: live `transfer_stream` frames — a settling frame, an analysing
+/// frame with the ladder settled — and their `visualize/ir` sidecar survive a
+/// round trip through the shared `ac_core::wire` types unchanged, and carry
+/// the wire version stamped at the publish seam.
+#[test]
+fn live_transfer_frames_round_trip_through_the_shared_types() {
+    use crate::monitor::assert_lossless;
+    use ac_core::wire::{IrFrame, TransferFrame, WIRE_VERSION};
+
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+        "fake_correlated_pair": {"gain": 0.5, "delay_samples": 200},
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut settling: Option<Value> = None;
+    let mut with_ladder: Option<Value> = None;
+    let mut ir: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && (settling.is_none() || with_ladder.is_none() || ir.is_none())
+    {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" => match v["type"].as_str() {
+                Some("transfer_stream") if v["n_averages"] == json!(0) => {
+                    settling.get_or_insert(v);
+                }
+                Some("transfer_stream") if v["mtw"].is_object() => {
+                    with_ladder.get_or_insert(v);
+                }
+                Some("visualize/ir") => {
+                    ir.get_or_insert(v);
+                }
+                _ => {}
+            },
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+
+    let settling = settling.expect("no settling frame");
+    let with_ladder = with_ladder.expect("no frame with a settled ladder within 15 s");
+    let ir = ir.expect("no visualize/ir sidecar");
+    for v in [&settling, &with_ladder, &ir] {
+        assert_eq!(v["wire_version"], json!(WIRE_VERSION), "{v}");
+    }
+    assert_lossless::<TransferFrame>(&settling, &[]);
+    assert_lossless::<TransferFrame>(&with_ladder, &[]);
+    assert_lossless::<IrFrame>(&ir, &["samples"]);
+}

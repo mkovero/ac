@@ -13,13 +13,13 @@ use crate::session::{ConnectionState, PolledFrame, Session};
 use crate::view::{draw_view, SpectrumViewState, StoredTrace, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
 
-/// Grace window a run of `WireFrame`-parse failures must clear before the
+/// Grace window a run of `TransferFrame`-parse failures must clear before the
 /// status line flips from `live` to `malformed` (#193) — a single bad
 /// frame in an otherwise-healthy stream must not flicker the status.
 /// Same magnitude as `Session`'s `DISCONNECT_AFTER`, by the UX design's
 /// reasoning (no second unexplained number); tracked as its own constant
 /// because the two gate different failure classes — this one is the
-/// `WireFrame` schema boundary, that one is raw socket silence.
+/// `TransferFrame` schema boundary, that one is raw socket silence.
 const MALFORMED_GRACE: Duration = Duration::from_secs(10);
 
 /// The app's state, in four groups: what it is connected to, what it
@@ -41,7 +41,7 @@ pub struct AcViewApp {
     /// The last frame received, kept so the scene can be rebuilt on a
     /// zoom/pan (range change) without waiting for the next frame —
     /// otherwise zoom appears frozen on a paused or slow stream.
-    last_frame: Option<ac_scene::WireFrame>,
+    last_frame: Option<ac_core::wire::TransferFrame>,
     /// The ranges the current `scene` was last built with, so a
     /// range change alone (no new frame) is detected and triggers a
     /// rebuild from `last_frame`.
@@ -62,7 +62,7 @@ pub struct AcViewApp {
     /// is: today the IR panel has no zoom/pan of its own, but rebuilding
     /// from the held frame rather than only on arrival keeps the two
     /// frame types symmetric instead of one being a special case.
-    last_ir_frame: Option<ac_scene::IrWireFrame>,
+    last_ir_frame: Option<ac_core::wire::IrFrame>,
     /// Built only when the Transfer view is active AND its IR panel is
     /// open (`H`) — the accessory-panel cost should not be paid every
     /// frame just because a sidecar frame arrived.
@@ -76,15 +76,24 @@ pub struct AcViewApp {
 
     // --- stream health, backing the status line's `malformed` state ---
     /// Consecutive DATA frames since the last one that parsed into a
-    /// `WireFrame` — resets to 0 on every successful parse (#193). Distinct
+    /// `TransferFrame` — resets to 0 on every successful parse (#193). Distinct
     /// from `Session::malformed_frames`, which counts a different failure
     /// class one layer down (wire/topic-level decode, `Recv::Malformed`) —
     /// this counts frames that decoded fine off the wire but failed the
-    /// `WireFrame` schema.
+    /// `TransferFrame` schema.
     frame_parse_failures: u32,
     /// When the current parse-failure streak started, so `MALFORMED_GRACE`
     /// can be measured from it. `None` while the streak is 0.
     first_malformed_since: Option<Instant>,
+    /// The daemon's frames are being refused for their `wire_version`
+    /// (#112): the last refused frame's error, and how many DATA frames have
+    /// been refused since the state began. `None` while every frame's version
+    /// is one this build reads.
+    ///
+    /// Beside the malformed streak, not inside it: a refused frame is never
+    /// counted as malformed, and there is no grace window, because a version
+    /// mismatch is a property of the daemon build rather than a transient.
+    version_refusal: Option<VersionRefusal>,
     // --- UI chrome ---
     help_open: bool,
     /// The settings overlay (`G`, transfer view). `None` = closed.
@@ -130,6 +139,7 @@ impl AcViewApp {
             fault: ac_scene::FaultState::default(),
             frame_parse_failures: 0,
             first_malformed_since: None,
+            version_refusal: None,
             help_open: false,
             settings: None,
             weighting: WeightingCurve::Z,
@@ -189,16 +199,65 @@ impl AcViewApp {
     }
 
     /// Parse one raw DATA-topic `visualize/ir` value into an
-    /// `IrWireFrame`. A parse failure is dropped silently rather than
+    /// `IrFrame`. A parse failure is dropped silently rather than
     /// feeding `frame_parse_failures` (#193): that streak is specifically
-    /// the `WireFrame` schema boundary for the status line's `malformed`
+    /// the `TransferFrame` schema boundary for the status line's `malformed`
     /// state, and the IR panel is an on-demand accessory with no status
     /// line of its own — losing one sidecar frame does not stop the
     /// transfer view from rendering.
+    ///
+    /// A version refusal is not dropped silently: it enters the same
+    /// `version mismatch` state a refused `transfer_stream` frame does.
     fn ingest_raw_ir_frame(&mut self, frame: serde_json::Value) {
-        if let Ok(ir_frame) = serde_json::from_value::<ac_scene::IrWireFrame>(frame) {
+        if !self.admit_wire_version(&frame) {
+            return;
+        }
+        if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
             self.last_ir_frame = Some(ir_frame);
         }
+    }
+
+    /// Check one raw DATA frame's `wire_version` before it is parsed
+    /// (#112). Returns `false` when the frame is refused.
+    ///
+    /// On a refusal everything drawn from earlier frames goes too: the held
+    /// frames **and** the scenes built from them, because `rebuild_scenes`
+    /// leaves a scene standing when its frame is `None`. Those frames came
+    /// from a daemon build this client no longer reads, and a trace, banner
+    /// or meter left up from them would look current under the new state.
+    ///
+    /// An accepted version ends the state and resets the count.
+    fn admit_wire_version(&mut self, frame: &serde_json::Value) -> bool {
+        let error = match ac_core::wire::check_wire_version(frame) {
+            Ok(()) => {
+                self.version_refusal = None;
+                return true;
+            }
+            Err(error) => error,
+        };
+        match &mut self.version_refusal {
+            Some(r) => {
+                r.refused += 1;
+                r.error = error;
+            }
+            None => {
+                // Once per transition into the state, not once per frame.
+                eprintln!(
+                    "ac-view: refusing DATA frames from {}:{}: {}",
+                    self.endpoint.host,
+                    self.endpoint.ctrl_port,
+                    version_detail(&error)
+                );
+                self.version_refusal = Some(VersionRefusal { error, refused: 1 });
+            }
+        }
+        self.last_frame = None;
+        self.scene = None;
+        self.last_scene_ranges = None;
+        self.transfer_scene = None;
+        self.last_ir_frame = None;
+        self.ir_scene = None;
+        false
     }
 
     /// Rebuild `ir_scene` from `last_ir_frame` if the Transfer view's IR
@@ -275,15 +334,22 @@ impl AcViewApp {
         self.rebuild_ir_scene();
     }
 
-    /// Parse one raw DATA-topic value into a `WireFrame`, updating the
+    /// Parse one raw DATA-topic value into a `TransferFrame`, updating the
     /// consecutive-failure streak that backs the `malformed` status state
     /// (#193). This is the actual ingest boundary — both the live drain
     /// loop in `ui()` and the headless test below go through it, so a
     /// test exercises the same `serde_json::from_value` failure path a
     /// real malformed frame hits. Returns `true` if the frame was
     /// accepted (`self.last_frame` updated).
+    ///
+    /// The version check runs first, on the raw value: a frame whose schema
+    /// moved too far to parse is still reported as a version mismatch, and a
+    /// refused frame never feeds the malformed streak.
     fn ingest_raw_frame(&mut self, frame: serde_json::Value, now: Instant) -> bool {
-        match serde_json::from_value::<ac_scene::WireFrame>(frame) {
+        if !self.admit_wire_version(&frame) {
+            return false;
+        }
+        match serde_json::from_value::<ac_core::wire::TransferFrame>(frame) {
             Ok(wire_frame) => {
                 self.last_frame = Some(wire_frame);
                 self.frame_parse_failures = 0;
@@ -329,13 +395,26 @@ impl AcViewApp {
             ConnectionState::Disconnected => {
                 self.frame_parse_failures = 0;
                 self.first_malformed_since = None;
+                // Same reasoning for a refusal: a reconnect may reach a
+                // different daemon, and it starts clean.
+                self.version_refusal = None;
                 format!(
                     "disconnected — {}:{} not responding",
                     self.endpoint.host, self.endpoint.ctrl_port
                 )
             }
             ConnectionState::Live => {
-                if self.malformed_active(now) {
+                // Precedence: a refusal explains the empty plot better than
+                // a malformed streak, and refused frames never feed one.
+                if let Some(r) = &self.version_refusal {
+                    format!(
+                        "version mismatch — {}:{} — {} — {} frames refused, not rendering",
+                        self.endpoint.host,
+                        self.endpoint.ctrl_port,
+                        version_detail(&r.error),
+                        r.refused
+                    )
+                } else if self.malformed_active(now) {
                     format!(
                         "malformed — {}:{} — {} consecutive frames dropped, not rendering",
                         self.endpoint.host, self.endpoint.ctrl_port, self.frame_parse_failures
@@ -352,7 +431,11 @@ impl AcViewApp {
     /// `current_transfer_scene` without a live daemon. Rebuilds the
     /// active view's scene the same way the paint pass does.
     #[cfg(test)]
-    pub(crate) fn ingest_frame_for_test(&mut self, frame: ac_scene::WireFrame, now_s: f64) {
+    pub(crate) fn ingest_frame_for_test(
+        &mut self,
+        frame: ac_core::wire::TransferFrame,
+        now_s: f64,
+    ) {
         self.last_frame = Some(frame);
         self.rebuild_scenes(true, now_s);
     }
@@ -360,7 +443,7 @@ impl AcViewApp {
     /// Feed one `visualize/ir` sidecar frame directly, bypassing the ZMQ
     /// session — the IR-panel analogue of [`Self::ingest_frame_for_test`].
     #[cfg(test)]
-    pub(crate) fn ingest_ir_frame_for_test(&mut self, frame: ac_scene::IrWireFrame) {
+    pub(crate) fn ingest_ir_frame_for_test(&mut self, frame: ac_core::wire::IrFrame) {
         self.last_ir_frame = Some(frame);
         self.rebuild_ir_scene();
     }
@@ -1017,6 +1100,25 @@ fn connect_and_launch_view(
     app.weighting = weighting;
     app.integration = integration;
     Ok(app)
+}
+
+/// The version-mismatch state's cross-frame record (#112).
+struct VersionRefusal {
+    /// The most recent refused frame's version.
+    error: ac_core::wire::WireVersionError,
+    /// DATA frames refused since the state began. Its rise is what says the
+    /// daemon is still publishing and only the version is wrong.
+    refused: u64,
+}
+
+/// `daemon sends wire v2, ac-view reads v1` — the two versions side by side,
+/// which says which build is older without the text asserting a cause.
+fn version_detail(error: &ac_core::wire::WireVersionError) -> String {
+    format!(
+        "daemon sends wire {}, ac-view reads {}",
+        error.found_label(),
+        ac_core::wire::WireVersionError::supported_label()
+    )
 }
 
 /// Pull frames from `poll` until it reports empty, split by the tagged

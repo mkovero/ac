@@ -98,7 +98,20 @@ ac-core/src/
   tuner.rs                 # Tier 2 (stays at root for now, can move later)
   visualize/transfer.rs    # Tier 2 — live H1 estimator, display-first
   config.rs                # orthogonal
+  wire/                    # orthogonal — the PUB DATA frame types (#112)
+    mod.rs                 #   WIRE_VERSION / MIN_WIRE_VERSION, check_wire_version
+    transfer.rs            #   TransferFrame, IrFrame, MtwColumns, MtwStage, WireDrive
+    monitor.rs             #   SpectrumFrame, LoudnessFrame
 ```
+
+`wire/` is neither tier: it is protocol plumbing, serde only, no sockets. It
+holds the one definition of the first-cut DATA frames — `ac-daemon` builds and
+serialises these structs, and `ac-scene` / `ac-cli` deserialise the same
+structs — so a field renamed on either side is a build error, not a blank
+readout. The envelope's `wire_version` and its bump rule are in `ac-rs/ZMQ.md`
+(DATA frame envelope). Frames outside the first cut are still built as JSON.
+Display selection (which columns the view draws) stays in `ac-scene`; the
+types here carry wire semantics only.
 
 ### The display-truth boundary — `ac-scene` vs `ac-view`
 
