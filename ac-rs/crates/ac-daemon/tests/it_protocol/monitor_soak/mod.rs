@@ -107,10 +107,20 @@ struct Received {
     frame: SoakFrame,
 }
 
-/// Next channel-0 `visualize/spectrum` frame, whatever its payload holds, or
-/// `None` if none arrives within [`FRAME_TIMEOUT_MS`]. Nothing is filtered on
-/// content: a missing, non-array or empty `spectrum` is still a published
-/// frame, and it reaches [`soak_frame`] and I4-t to be judged `malformed`.
+/// The receive boundary's whole routing rule: `Some(payload)` for a
+/// channel-0 `visualize/spectrum` data frame, whatever its payload holds.
+/// Nothing is filtered on content: a missing, non-array or empty `spectrum`
+/// is still a published frame, and it reaches [`soak_frame`] and I4-t to be
+/// judged `malformed`.
+fn select_spectrum(topic: &str, payload: Value) -> Option<Value> {
+    (topic == "data"
+        && payload.get("type").and_then(Value::as_str) == Some("visualize/spectrum")
+        && payload.get("channel").and_then(Value::as_u64) == Some(0))
+    .then_some(payload)
+}
+
+/// Next frame [`select_spectrum`] keeps, or `None` if none arrives within
+/// [`FRAME_TIMEOUT_MS`].
 fn next_spectrum(c: &Client) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_millis(FRAME_TIMEOUT_MS as u64);
     loop {
@@ -119,10 +129,7 @@ fn next_spectrum(c: &Client) -> Option<Value> {
             return None;
         }
         let (topic, payload) = c.recv_pub(remaining.as_millis().max(1) as i32)?;
-        if topic == "data"
-            && payload.get("type").and_then(Value::as_str) == Some("visualize/spectrum")
-            && payload.get("channel").and_then(Value::as_u64) == Some(0)
-        {
+        if let Some(payload) = select_spectrum(&topic, payload) {
             return Some(payload);
         }
     }
@@ -434,8 +441,11 @@ fn monitor_spectrum_soak_holds_every_frame() {
 }
 
 /// A published frame whose `spectrum` is missing, not an array, or empty
-/// goes through the same parse and checker as the soak, and is red at its own
-/// tick instead of disappearing. A well-formed wire frame parses clean.
+/// goes through the soak's own receive boundary ([`select_spectrum`]), parse
+/// and checker, and is red at its own tick instead of disappearing. Putting a
+/// content filter back into [`select_spectrum`] drops the bad frame before
+/// the checker and turns this red. Frames on another topic, type or channel
+/// are routed away and take no tick. A well-formed wire frame parses clean.
 #[test]
 fn malformed_wire_frame_is_judged_not_dropped() {
     let freqs = json!([100.0, 200.0, 800.0, 900.0]);
@@ -444,6 +454,17 @@ fn malformed_wire_frame_is_judged_not_dropped() {
     let good_frame = soak_frame(&good);
     assert!(good_frame.wire_defect.is_none(), "{good_frame:?}");
     assert!(check_bounded(&good_frame, 0).is_none());
+
+    let other_channel = json!({"type": "visualize/spectrum", "channel": 1,
+                               "freqs": freqs, "spectrum": []});
+    let other_type = json!({"type": "visualize/cwt", "channel": 0, "spectrum": []});
+    for (topic, p) in [
+        ("data", &other_channel),
+        ("data", &other_type),
+        ("status", &good),
+    ] {
+        assert!(select_spectrum(topic, p.clone()).is_none(), "{topic} {p}");
+    }
 
     for (case, bad) in [
         (
@@ -461,10 +482,24 @@ fn malformed_wire_frame_is_judged_not_dropped() {
     ] {
         const BAD_AT: usize = 3;
         let mut checker = SoakChecker::new(500.0, lf_only_edge_hz(500.0), 4.0, 0);
-        let mut verdict = None;
+        // Wire order: the published channel-0 frames, with frames the soak
+        // must route away interleaved before the bad one.
+        let mut wire: Vec<(&str, Value)> = Vec::new();
         for i in 0..6 {
-            let p = if i == BAD_AT { &bad } else { &good };
-            verdict = checker.check_frame(&soak_frame(p));
+            if i == BAD_AT {
+                wire.push(("data", other_channel.clone()));
+                wire.push(("data", other_type.clone()));
+                wire.push(("data", bad.clone()));
+            } else {
+                wire.push(("data", good.clone()));
+            }
+        }
+        let mut verdict = None;
+        for payload in wire
+            .into_iter()
+            .filter_map(|(topic, p)| select_spectrum(topic, p))
+        {
+            verdict = checker.check_frame(&soak_frame(&payload));
             if verdict.is_some() {
                 break;
             }
