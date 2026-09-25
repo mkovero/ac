@@ -487,6 +487,14 @@ pub fn verify(
             .then_with(|| ra.timestamp_utc.cmp(&rb.timestamp_utc))
     });
 
+    // The frequencies the sweep and the gate resolve; the set is one sweep
+    // and one gate, so run 1's hold for all. Bins outside never reach the
+    // grid: a band clipped at the sweep stop would otherwise admit an edge
+    // cell whose mean reaches up to 1/12 octave past `f2_hz`.
+    let lo_hz = all[0].f1_hz.max(all[0].gate.map_or(0.0, |g| g.f_low_hz));
+    let hi_hz = all[0].f2_hz;
+    let resolved = |f: f64| f >= lo_hz && f <= hi_hz;
+
     let mut runs = Vec::with_capacity(order.len());
     let mut grids: Vec<Option<Grid>> = Vec::with_capacity(order.len());
     for (n, &i) in order.iter().enumerate() {
@@ -509,13 +517,12 @@ pub fn verify(
             RunMic::NotApplied
         };
         let grid = status.is_used().then(|| {
+            let inside = p.gated.iter().filter(|&&(f, _)| resolved(f));
             let points: Vec<(f64, f64)> = match (&mic, curve) {
-                (RunMic::PostHoc, Some(c)) => p
-                    .gated
-                    .iter()
-                    .map(|&(f, db)| (f, c.corrected_db(f, db)))
-                    .collect(),
-                _ => p.gated.clone(),
+                (RunMic::PostHoc, Some(c)) => {
+                    inside.map(|&(f, db)| (f, c.corrected_db(f, db))).collect()
+                }
+                _ => inside.copied().collect(),
             };
             stats::sixth_octave_means(&points)
         });
@@ -883,6 +890,37 @@ mod tests {
         );
         assert_eq!(set.tonal_stability[1].band, Band::new(5_000.0, 16_000.0));
         assert_eq!(set.tonal_stability[0].band, Band::new(1_500.0, 4_000.0));
+    }
+
+    /// A band clipped at the sweep stop reads no bin above it: flooding every
+    /// bin above f2 with +40 dB must not move any statistic.
+    #[test]
+    fn a_clipped_band_reads_no_bin_above_the_sweep_stop() {
+        let f2 = 11_500.0;
+        let with_stop = |mut v: Vec<RunInput>| {
+            for i in &mut v {
+                if let MeasurementData::ImpulseResponse { f2_hz, .. } = &mut i.report.data[0].data {
+                    *f2_hz = f2;
+                }
+            }
+            v
+        };
+        let clean = verify(with_stop(three_runs()), None).unwrap();
+        let mut dirty = with_stop(three_runs());
+        for (n, i) in dirty.iter_mut().enumerate() {
+            if let MeasurementData::GatedFrequencyResponse { points } = &mut i.report.data[1].data {
+                for p in points.iter_mut().filter(|p| p.freq_hz > f2) {
+                    // Differs per run, so spreads would move.
+                    p.magnitude_db += 40.0 + n as f64;
+                }
+            }
+        }
+        let dirty = verify(dirty, None).unwrap();
+        assert_eq!(clean.tonal_stability[1].band, Band::new(5_000.0, f2));
+        assert!(clean.gain_spread.value.value().is_some());
+        assert_eq!(clean.gain_spread, dirty.gain_spread);
+        assert_eq!(clean.tonal_stability, dirty.tonal_stability);
+        assert_eq!(clean.flatness, dirty.flatness);
     }
 
     fn curve() -> MicResponse {
