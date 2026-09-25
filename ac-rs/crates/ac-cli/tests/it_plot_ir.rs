@@ -14,6 +14,7 @@
 
 mod support;
 
+use chrono::Timelike;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -272,7 +273,6 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // floor's end and this sweep's scope print under it; every scoped
     // parameter here is off its default.
     for want in [
-        "  IR sweep\n",
         "  band       200 Hz \u{2192} 8000 Hz  (typed)",
         "  length        0.50 s  (typed)",
         "  window     4096 samples  (typed)",
@@ -288,7 +288,12 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "passing run missing {want:?}:\n{stdout}"
         );
     }
-    for gone in ["  IR: ", "-sample window, ", "threshold set from rig data"] {
+    for gone in [
+        "  IR: ",
+        "-sample window, ",
+        "threshold set from rig data",
+        "  IR sweep",
+    ] {
         assert!(
             !stdout.contains(gone),
             "pre-#501 line {gone:?} must not print:\n{stdout}"
@@ -440,6 +445,44 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "ac report produced nothing for {}",
         jsons[0].display()
     );
+}
+
+/// #127: the run prints exactly one header line, first, stamped with the
+/// client's start instant in UTC ISO 8601. The stamp must fall inside the
+/// wall-clock window read around the run (truncated to seconds, inclusive),
+/// which a hard-coded or cached stamp does not.
+#[test]
+fn plot_ir_prints_one_dated_run_header_first() {
+    let rig = Rig::start();
+    let t_before = chrono::Utc::now().naive_utc().with_nanosecond(0).unwrap();
+    let stdout = rig.run_ac(&["plot", "ir", "0.5s", "4096win"]);
+    let t_after = chrono::Utc::now().naive_utc().with_nanosecond(0).unwrap();
+
+    let headers: Vec<&str> = stdout.lines().filter(|l| l.starts_with("ac  ")).collect();
+    assert_eq!(headers.len(), 1, "want exactly one run header:\n{stdout}");
+    let header = headers[0];
+    assert_eq!(
+        stdout.lines().next(),
+        Some(header),
+        "the header must be the first line printed:\n{stdout}"
+    );
+    assert!(
+        header.starts_with("ac  plot ir         "),
+        "verb padded so the stamp starts in column 21: {header:?}"
+    );
+    let stamp = &header[20..];
+    let started = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%SZ")
+        .unwrap_or_else(|e| panic!("stamp {stamp:?} is not UTC ISO 8601: {e}"));
+    assert!(
+        t_before <= started && started <= t_after,
+        "stamp {started} outside the run window [{t_before}, {t_after}]"
+    );
+    assert_eq!(
+        stdout.lines().nth(1),
+        Some(""),
+        "exactly one blank line under the header:\n{stdout}"
+    );
+    assert_ne!(stdout.lines().nth(2), Some(""), "{stdout}");
 }
 
 /// #501 through the real binary: `ac plot ir` with no arguments runs the

@@ -70,6 +70,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
         CommandKind::TestHardware { dmm } => *dmm,
         _ => unreachable!(),
     };
+    io::print_run_header("test hardware");
 
     let mut cal = get_cal(client);
     let consumes = consumes_voltage(cal.as_ref(), None);
@@ -79,13 +80,11 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
     }
 
     let ack = check_ack(client.send_cmd(&json, None), "test_hardware");
-    println!("\n  Hardware test");
     // #466: the stored output scale feeds the DMM rows; its check prints first.
     let wait = await_session_check(client, "test_hardware", &ack, 30_000);
     if print_consumer_check(wait, &mut cal, None, consumes).is_err() {
         std::process::exit(1);
     }
-    println!();
 
     io::print_freq_header(false, false);
 
@@ -133,6 +132,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         } => (*compare, level, *level_defaulted),
         _ => unreachable!(),
     };
+    io::print_run_header("test dut");
     // Provenance remains part of parsing and its default tests, but the
     // operator's final #459 ruling exempts self-test level rows.
     let _ = level_defaulted;
@@ -152,12 +152,10 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     }
 
     let ack = check_ack(client.send_cmd(&json, None), "test_dut");
-    println!("\n  DUT test");
     let wait = await_session_check(client, "test_dut", &ack, 30_000);
     if print_consumer_check(wait, &mut cal, Some(level), consumes).is_err() {
         std::process::exit(1);
     }
-    println!();
 
     io::print_freq_header(have_cal, false);
 

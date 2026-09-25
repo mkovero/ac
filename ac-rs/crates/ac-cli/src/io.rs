@@ -79,6 +79,30 @@ fn label(l: &str) -> String {
     format!("  {l:<14}")
 }
 
+/// Width the verb pads to in the run header: the longest measuring verb,
+/// `test hardware`. Keeps every header's stamp in one column (#127 UX).
+const RUN_HEADER_VERB_WIDTH: usize = 13;
+
+/// The run header (#127): `ac`, the verb as typed padded to
+/// [`RUN_HEADER_VERB_WIDTH`], then the run's start stamp. Column 0, so it
+/// is the one line above the body's two-space indent.
+pub fn run_header_line(verb: &str, ts: &str) -> String {
+    format!("ac  {verb:<RUN_HEADER_VERB_WIDTH$}   {ts}")
+}
+
+/// Print the run header, stamped now with
+/// [`ac_core::shared::time::now_utc_iso8601`] — the display format, never
+/// the filename stamp [`timestamp`] — and return the stamp printed. The
+/// stamp is the client's start instant, not the report's `timestamp_utc`.
+/// Only the header line prints: `plot*` follow it with a blank line of
+/// their own, while `test *` go straight into a block that already opens
+/// with one, so either way exactly one blank line sits under it.
+pub fn print_run_header(verb: &str) -> String {
+    let ts = ac_core::shared::time::now_utc_iso8601();
+    println!("{}", run_header_line(verb, &ts));
+    ts
+}
+
 fn f64_of(r: &serde_json::Value, key: &str) -> Option<f64> {
     r.get(key).and_then(|v| v.as_f64())
 }
@@ -740,6 +764,57 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.starts_with("  output        +24.0 dBu")));
+    }
+
+    const MEASURING_VERBS: [&str; 5] =
+        ["plot", "plot level", "plot ir", "test dut", "test hardware"];
+
+    /// The stamp is UTC ISO 8601 at one-second resolution. The filename
+    /// stamp (`io::timestamp()`, `%Y%m%dT%H%M%SZ`) and any local-time
+    /// format fail this parse.
+    #[test]
+    fn run_header_stamp_parses_as_utc_iso8601() {
+        let ts = ac_core::shared::time::now_utc_iso8601();
+        let line = run_header_line("plot ir", &ts);
+        let stamp = line.rsplit(' ').next().unwrap();
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%SZ").is_ok(),
+            "{line:?}"
+        );
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(&timestamp(), "%Y-%m-%dT%H:%M:%SZ").is_err(),
+            "the filename stamp must not pass as the display stamp"
+        );
+    }
+
+    #[test]
+    fn run_header_fits_80_columns_for_every_verb() {
+        let ts = ac_core::shared::time::now_utc_iso8601();
+        for verb in MEASURING_VERBS {
+            let line = run_header_line(verb, &ts);
+            assert!(cols(&line) <= 80, "{line:?}");
+            assert!(line.starts_with("ac  "), "{line:?}");
+        }
+    }
+
+    /// Every verb's stamp starts in the same column (21), so a run of
+    /// headers reads down one column. An unpadded `ac  {verb}   {ts}`
+    /// fails this.
+    #[test]
+    fn run_header_stamp_sits_in_one_column_for_every_verb() {
+        let ts = "2026-09-25T09:41:18Z";
+        for verb in MEASURING_VERBS {
+            let line = run_header_line(verb, ts);
+            assert_eq!(line.find(ts), Some(20), "{line:?}");
+        }
+        assert_eq!(
+            run_header_line("test hardware", ts),
+            "ac  test hardware   2026-09-25T09:41:18Z"
+        );
+        assert_eq!(
+            run_header_line("plot", ts),
+            "ac  plot            2026-09-25T09:41:18Z"
+        );
     }
 
     #[test]
