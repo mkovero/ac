@@ -24,7 +24,7 @@ pub(super) const CHANNEL_OFFSET_HZ: f64 = 100.0;
 
 /// What `capture_block` / `capture_stereo` synthesize. `Tones` covers both
 /// the historical single-tone `set_tone` path and the multi-tone
-/// `set_tone_pair` path added for the display-truth harness (#170) — a
+/// `set_external_tones` path used by the display-truth harness (#170) — a
 /// single-element vec reproduces the old behaviour exactly. `Noise` is a
 /// deterministic pseudo-random broadband signal for the I2 flat-noise
 /// continuity invariant; deterministic (fixed LCG per channel offset) so

@@ -196,9 +196,7 @@ fn tone_pair_synthesizes_both_frequencies() {
     // just the first (the old `set_tone` single-tone behaviour).
     let sr = 48_000;
     let mut eng = FakeEngine::new();
-    // `set_tone_pair` drives the generator, which needs an open output.
-    eng.start(&["fake:playback_0".into()], None).unwrap();
-    eng.set_tone_pair(&[(1_000.0, 0.5), (5_000.0, 0.1)]);
+    eng.set_external_tones(&[(1_000.0, 0.5), (5_000.0, 0.1)]);
     let s = eng.capture_block(0.5).unwrap();
     let m1 = goertzel_mag(&s, sr as f64, 1_000.0);
     let m2 = goertzel_mag(&s, sr as f64, 5_000.0);

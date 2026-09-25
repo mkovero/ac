@@ -315,30 +315,6 @@ pub trait AudioEngine: Send + 'static {
         None
     }
 
-    /// Set continuous output as the sum of several simultaneous sine tones,
-    /// each `(freq_hz, amplitude)`. Used by the display-truth harness (#170)
-    /// to drive the I3 orientation invariant (two tones at distinct levels,
-    /// check the louder one renders higher). Default delegates to
-    /// `set_tone` with the first tone and drops the rest — only the fake
-    /// backend (test/`--fake-audio` use) needs true multi-tone synthesis;
-    /// real backends generating a single physical output tone is an
-    /// acceptable degradation since routing-dependent commands already gate
-    /// on `supports_routing`.
-    fn set_tone_pair(&mut self, tones: &[(f64, f64)]) {
-        if let Some(&(freq, amp)) = tones.first() {
-            self.set_tone(freq, amp);
-        }
-    }
-
-    /// Set continuous calibrated broadband noise at the given peak
-    /// amplitude (0..1 full-scale). Used by the display-truth harness
-    /// (#170) to drive the I2 flat-noise continuity invariant, which needs
-    /// genuine spectral content (not a single tone) to check for
-    /// band-boundary steps. Default delegates to `set_pink`.
-    fn set_broadband_noise(&mut self, amplitude: f64) {
-        self.set_pink(amplitude);
-    }
-
     /// Set a correlated-pair stimulus (handoff: parity-completion M1.5):
     /// the reference-role port carries a seeded deterministic broadband
     /// source; the measurement-role port carries the *same* source scaled
@@ -350,13 +326,16 @@ pub trait AudioEngine: Send + 'static {
 
     /// Put the sum of `(freq_hz, amplitude)` tones at the fake's inputs as a
     /// signal the daemon does not emit (#204): heard on every capture channel
-    /// whether or not any output port is open, unlike `set_tone_pair`, which
-    /// drives the generator. Default no-op — on hardware the outside world
-    /// supplies the input, and callers reach this only inside a fake branch.
+    /// whether or not any output port is open, unlike `set_tone`, which
+    /// drives the generator. The display-truth harness (#170) uses it for the
+    /// I3 orientation invariant (two tones at distinct levels). Default
+    /// no-op — on hardware the outside world supplies the input, and callers
+    /// reach this only inside a fake branch.
     fn set_external_tones(&mut self, _tones: &[(f64, f64)]) {}
 
     /// Broadband-noise counterpart of [`Self::set_external_tones`], at peak
-    /// `amplitude` (0..1 full-scale). Default no-op for the same reason.
+    /// `amplitude` (0..1 full-scale) — the display-truth harness's I2
+    /// flat-noise stimulus (#170). Default no-op for the same reason.
     fn set_external_noise(&mut self, _amplitude: f64) {}
 
     /// Route fake capture through a real ring driven by a synthetic clock,

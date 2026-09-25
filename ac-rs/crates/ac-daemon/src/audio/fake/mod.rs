@@ -6,11 +6,10 @@
 //! routing can gate one without silencing the other:
 //!
 //! - the **generator** — what the daemon drives out (`set_tone`, `set_pink`,
-//!   `set_tone_pair`, `set_silence`). It reaches the capture channels only
-//!   while at least one output port is open (`start`, `connect_output`,
-//!   `disconnect_output`). A drive with no output open captures **zeros**, so
-//!   a generator connected to nothing (#203) is visible to every fake-only
-//!   peak test;
+//!   `set_silence`). It reaches the capture channels only while at least one
+//!   output port is open (`start`, `connect_output`, `disconnect_output`). A
+//!   drive with no output open captures **zeros**, so a generator connected
+//!   to nothing (#203) is visible to every fake-only peak test;
 //! - the **external** source — a signal at the input the daemon does not
 //!   emit, set by the harness knobs (`set_external_tones`,
 //!   `set_external_noise`, `set_correlated_pair`). It reaches the capture
@@ -290,20 +289,14 @@ impl AudioEngine for FakeEngine {
         self.gen.set(Stimulus::Tones(vec![(freq_hz, amplitude)]));
     }
 
-    /// The fake's pink noise *is* its broadband noise — there is no spectral
-    /// shaping here (see `Stimulus::Noise`), so the trait's default
-    /// `set_broadband_noise`, which delegates to this, is already correct and
-    /// the fake does not override it.
+    /// The fake's pink noise is plain broadband noise — there is no spectral
+    /// shaping here (see `Stimulus::Noise`).
     fn set_pink(&mut self, amplitude: f64) {
         self.gen.set(Stimulus::Noise(amplitude));
     }
 
     fn set_silence(&mut self) {
         self.gen.set(Stimulus::Tones(vec![(1_000.0, 0.0)]));
-    }
-
-    fn set_tone_pair(&mut self, tones: &[(f64, f64)]) {
-        self.gen.set(Stimulus::Tones(tones.to_vec()));
     }
 
     fn set_correlated_pair(&mut self, gain: f64, delay_samples: usize) {
