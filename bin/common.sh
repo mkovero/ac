@@ -618,9 +618,16 @@ ARCH_MANIFEST_JQ='[.comments[] | select((.body | test("<!-- agent: architect -->
 #
 # stdout is the whole manifest or nothing (#548). Exit 0 with empty output
 # means no manifest field, or one declared `none`. Any line that is neither a
-# path nor that declaration refuses the manifest: non-zero, the issue and the
-# lines on stderr. The old section parser kept only lines containing a `/`, so
-# a root-level README.md vanished without a word, three times on #537/#544.
+# path nor that declaration refuses the manifest: the issue and the lines on
+# stderr. The old section parser kept only lines containing a `/`, so a
+# root-level README.md vanished without a word, three times on #537/#544.
+#
+# Exit status (#638):
+#   0  a manifest on stdout, or none (empty stdout)
+#   1  the issue could not be read, or anything else failed
+#   3  the manifest was refused — stderr names the rejected lines
+# master.sh hands a 3 back to the architect; a 1 must never read as a 3, or a
+# GitHub outage would post a handback about a manifest nobody has seen.
 #
 # Candidate lines come from a ```files fence if the comment has one (its end
 # marker is unambiguous), else from the `**file manifest**` section up to the
@@ -684,7 +691,7 @@ manifest_of() {
       if (!npath && !nbad) bad[++nbad] = "(the field has no entries)"
       if (nbad) refuse()
       for (i = 1; i <= npath; i++) print P[i]
-    }') || return 1
+    }') || { (( $? == 3 )) && return 3; return 1; }
   [[ -z $out ]] || printf '%s\n' "$out"
 }
 

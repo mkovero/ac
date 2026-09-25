@@ -708,8 +708,32 @@ design_pass_voids() {
   force=full
 }
 
+# Write a refused manifest back onto the issue and route it to the architect
+# (#638). $2 is manifest_of's stderr, quoted verbatim. The comment must never
+# carry the architect or triage marker: ARCH_MANIFEST_JQ's marker test is not
+# anchored, so a quoted marker would make this comment the manifest source.
+# A rejected line holding one is refused here rather than rewritten.
+manifest_handback() {
+  local n="$1" err_file="$2" err
+  err="$(cat "$err_file")"
+  if grep -qE 'agent: (architect|triage)' <<<"$err"; then
+    echo "  #$n: a rejected manifest line carries an agent marker — not quoting it" >&2
+    return 1
+  fi
+  gh_retry gh issue comment "$n" -R "$AC_REPO" --body "<!-- agent: runner -->
+The file manifest in the design comment was refused, so implementation did not start. Nothing was inferred from the rejected line(s):
+
+~~~text
+$err
+~~~
+
+The **file manifest** block holds repo-relative paths only (\`.agents/architect.md\` step 3). Move the line(s) above out of the block — above it, or into the implementation notes — and edit the existing design comment in place. The rest of the design stands unless you find another reason to change it." >/dev/null \
+    || return 1
+  gh_retry gh issue edit "$n" -R "$AC_REPO" --add-label needs-design >/dev/null
+}
+
 drive() {
-  local n="$1" step=0 ls pr tc st force="" continue_arg="" mf=""
+  local n="$1" step=0 ls pr tc st force="" continue_arg="" mf="" mf_err mf_rc
   local ran_design=0 ran_ux=0 ran_triage=0 preflight_ran=0
   local design_passes=0 ux_passes=0
   qa_round=0
@@ -843,8 +867,33 @@ drive() {
     # straight to ready-to-implement have no architect comment, so create that
     # boundary before opening a worktree instead of asking dev to implement
     # from triage's non-exhaustive "files likely affected" list.
-    mf="$(manifest_of "$n")" \
-      || { echo "  #$n: cannot read architect manifest — stopping"; return 1; }
+    #
+    # A refused manifest (status 3) goes back to the architect with the
+    # rejected lines written on the issue (#638). Refusing stays right — no
+    # path is inferred from a rejected line — but a bare abort told nobody what
+    # to move: #612 re-ran design twice and kept the same aside in the block.
+    # The handback is a needs-design label, so it takes the same gate as a QA
+    # request-changes: design. Only when no architect pass has run in this
+    # drive() call: an architect that has just written a manifest it cannot
+    # write correctly is stopped, not asked again, and because the handback
+    # itself causes a pass, this also caps handbacks at one per run.
+    mf_rc=0; mf_err="$(mktemp)"
+    mf="$(manifest_of "$n" 2>"$mf_err")" || mf_rc=$?
+    if (( mf_rc == 3 && design_passes == 0 && preflight_ran == 0 )); then
+      echo "  #$n: manifest refused — handed back to architect"
+      cat "$mf_err" >&2
+      if ! manifest_handback "$n" "$mf_err"; then
+        rm -f "$mf_err"
+        echo "  #$n: cannot hand the refused manifest back — stopping"; return 1
+      fi
+      rm -f "$mf_err"
+      continue
+    fi
+    if (( mf_rc != 0 )); then
+      cat "$mf_err" >&2; rm -f "$mf_err"
+      echo "  #$n: cannot read architect manifest — stopping"; return 1
+    fi
+    rm -f "$mf_err"
     if [[ -z $mf ]]; then
       # One preflight. An architect can finish with an empty manifest on
       # purpose (#400: "none", verification only); re-running design on that

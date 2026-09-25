@@ -12,6 +12,9 @@
 #   8. rig verdicts, including decline-site, parse whole.
 #   7. nothing reads FETCH_HEAD, which concurrent fetches in the shared
 #      checkout overwrite.
+#   5c-5e. a refused manifest is handed back to the architect once, with the
+#      rejected line quoted (#638); refused again after that pass, it aborts;
+#      a failed read is never taken for a refusal.
 #  10. the architect manifest survives a newer architect note without one.
 #  11. a section manifest keeps its repo-root entries (README.md, #548).
 #  12. an in-place edit adding a root-level entry reaches the next dispatch.
@@ -181,10 +184,17 @@ cat > "$T/stub/gh" <<'EOF'
 a="$*"
 case "$a" in
   "auth status"*|"api user"*|"api rate_limit"*) echo ok ;;
+  "issue comment"*)
+    [[ -n ${GH_POSTS:-} ]] && printf '=== comment\n%s\n' "$a" >> "$GH_POSTS" ;;
+  "issue edit"*)
+    [[ -n ${GH_POSTS:-} ]] && printf '=== edit\n%s\n' "$a" >> "$GH_POSTS"
+    [[ $a == *"--add-label needs-design"* ]] && echo needs-design >> "$GH_LABELS" ;;
   *"--json labels"*) cat "$GH_LABELS" 2>/dev/null ;;
   *"--json state"*) echo OPEN ;;
   *"--json comments"*"length"*) echo "${GH_TRIAGE_COUNT:-0}" ;;
-  *"--json comments"*) cat "$GH_ARCH" 2>/dev/null ;;
+  *"--json comments"*)
+    [[ -n ${GH_COMMENTS_FAIL:-} ]] && { echo "HTTP 404: Not Found" >&2; exit 1; }
+    cat "$GH_ARCH" 2>/dev/null ;;
   *sub_issues*) echo "" ;;
   *"--json body"*) echo "" ;;
   "pr list"*) echo "" ;;
@@ -224,6 +234,63 @@ printf '%s\n' requires-rig site-visit > "$T/labels5b"
 ( cd "$REPO" && GH_LABELS="$T/labels5b" GH_TRIAGE_COUNT=0 bash "$M/master.sh" 7 > "$T/m5b.out" 2>&1 )
 check '[[ ! -s $T/calls ]] && grep -q "site-visit" $T/m5b.out' "master.sh drives no role on a site-visit issue"
 
+# 5c-5e: a refused manifest goes back to the architect (#638). The fixture is
+# #612's: valid paths plus one parenthetical aside inside the files fence.
+# shellcheck disable=SC2016  # the backticks are the fixture, not expansions
+line5c='(Path note: the triage spec says `ac-rs/ac-core/...`. The crate lives under `ac-rs/crates/`.)'
+arch5c() {  # $1 = file; $2 = 1 to put the aside inside the fence
+  { printf '%s\n' '<!-- agent: architect -->' '**file manifest**' '```files' 'ac-rs/crates/ac-core/src/lib.rs'
+    [[ $2 == 1 ]] && printf '%s\n' "$line5c"
+    printf '%s\n' 'README.md' '```' '' '**interface changes**' 'none'; } > "$1"
+}
+arch5c "$T/arch5c_bad" 1; arch5c "$T/arch5c_good" 0
+# The architect stub edits its comment in place to $ARCH_NEXT and clears
+# needs-design, as architect.md step 5 tells it to.
+mk5c() {
+  mk_master "$1"
+  cat > "$1/design.sh" <<EOF
+#!/usr/bin/env bash
+echo "design \$*" >> "$T/calls"
+cp "\$ARCH_NEXT" "\$GH_ARCH"
+{ grep -vx needs-design "\$GH_LABELS" || true; } > "\$GH_LABELS.new"; mv "\$GH_LABELS.new" "\$GH_LABELS"
+EOF
+  chmod +x "$1/design.sh"
+}
+run5c() {  # $1 = tag; $2 = ARCH_NEXT; rest = extra env
+  local tag="$1" next="$2"; shift 2
+  mk5c "$T/m$tag"
+  printf '%s\n' ready-to-implement > "$T/labels$tag"
+  cp "$T/arch5c_bad" "$T/arch$tag"; : > "$T/posts$tag"; : > "$T/calls"
+  ( cd "$REPO" && env GH_LABELS="$T/labels$tag" GH_ARCH="$T/arch$tag" GH_POSTS="$T/posts$tag" \
+      ARCH_NEXT="$next" GH_TRIAGE_COUNT=1 "$@" bash "$T/m$tag/master.sh" 6380 > "$T/m$tag.out" 2>&1 )
+  cp "$T/calls" "$T/calls$tag"
+}
+
+# 5c: handback. Armed: with the handback branch removed from drive(), the
+# refusal aborts before any design pass, so the runner-comment and the
+# design-then-implement checks below go red.
+run5c 5c "$T/arch5c_good"
+check '[[ $(grep -c "<!-- agent: runner -->" $T/posts5c) == 1 ]] && grep -qF -- "$line5c" $T/posts5c' \
+  "5c: a refused manifest posts one runner comment quoting the rejected line verbatim"
+check '! grep -qE "agent: (architect|triage)" $T/posts5c' \
+  "5c: the handback comment carries no architect or triage marker"
+check 'grep -q -- "--add-label needs-design" $T/posts5c' "5c: the handback applies needs-design on the issue"
+check '[[ $(grep -c "^design" $T/calls5c) == 1 && $(grep -c "^implement" $T/calls5c) == 1 && $(sed -n 1p $T/calls5c) == design* ]]' \
+  "5c: the architect runs once, then implementation starts on the repaired manifest"
+check '! grep -q "cannot read architect manifest" $T/m5c.out' "5c: the refusal is not a bare abort"
+
+# 5d: loop guard. The architect keeps the aside; the second refusal follows an
+# architect pass in the same run and aborts instead of handing back again.
+run5c 5d "$T/arch5c_bad"
+check '[[ $(grep -c "<!-- agent: runner -->" $T/posts5d) == 1 && $(grep -c "^design" $T/calls5d) == 1 ]]' \
+  "5d: one handback and one architect pass, not a loop"
+check '[[ $(grep -c "^implement" $T/calls5d) == 0 ]] && grep -q "cannot read architect manifest — stopping" $T/m5d.out' \
+  "5d: a manifest still refused after the architect pass aborts, and nothing is implemented"
+
+# 5e: a failed read is not a refusal: no comment, no label, no design pass.
+run5c 5e "$T/arch5c_good" GH_COMMENTS_FAIL=1
+check '[[ ! -s $T/posts5e && ! -s $T/calls5e ]] && grep -q "cannot read architect manifest — stopping" $T/m5e.out' \
+  "5e: a failed comments read aborts without posting a handback"
 # --- 4: triage evidence filter ------------------------------------------------
 # shellcheck disable=SC2034  # used inside the eval'd checks below
 filter="$(sed -n '/^triage_evidence()/,/^}/p' "$BIN/master.sh" | grep -o "\[\.comments.*length")"

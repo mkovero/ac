@@ -46,7 +46,7 @@ Always human-only:
 
 | label | set by | meaning |
 |---|---|---|
-| `needs-design` | triage, **qa or developer** | architect must review — see `qa.md` → sending it back, and approvals below (a design revision voids them) |
+| `needs-design` | triage, **qa or developer**, runner (`master.sh`, on a refused manifest) | architect must review — see `qa.md` → sending it back, and approvals below (a design revision voids them) |
 | `needs-ux` | triage, architect, **qa or developer** | output surface must be specified before implementation — see `qa.md` → sending it back, and approvals below (a design revision voids them) |
 | `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |

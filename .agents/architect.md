@@ -155,7 +155,7 @@ if not apply `ready-to-implement`
   together with `needs-design`. The reasoning held, but the gate is the point:
   the reviewer who clears it is not the author who argued it away.
 
-### 5. re-entry — `needs-design` arrived from qa or developer
+### 5. re-entry — `needs-design` arrived from qa, developer or the runner
 
 An issue can reach you a second time, with an open PR against it, because qa or
 developer concluded the design is what is wrong. Same job, three differences:
@@ -172,6 +172,12 @@ developer concluded the design is what is wrong. Same job, three differences:
   an open PR means *revise that PR*, not *start again*. Where your decision
   invalidates work already on the branch, name what comes out — otherwise the
   revision layer the new design on top of the old one and both ship.
+
+A runner manifest refusal is narrower. A `<!-- agent: runner -->` comment on
+the issue says the file manifest was refused and quotes the line(s) the parser
+could not read as paths. There is no PR. Move those lines out of the manifest
+block and edit the design comment in place. The rest of the design stands
+unless you find another reason to change it.
 
 Labels as in step 4: remove `needs-design`, apply `needs-ux` or `ready-to-implement` when the
 decision is complete, `needs-discussion` when it is genuinely yours to escalate.
