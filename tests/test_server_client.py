@@ -4,9 +4,13 @@ All tests share one session-scoped server (FakeJackEngine, no JACK daemon).
 Each test that starts a worker must drain to a done/error frame before returning
 so the server is idle for the next test.
 """
+import os
+import re
 import time
 import numpy as np
 import pytest
+
+from .conftest import _find_daemon
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +29,32 @@ def recv_until(client, done_topics=("done", "error"), max_frames=200, timeout_ms
         if topic in done_topics:
             break
     return frames
+
+
+REPORT_MOD_RS = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "ac-rs", "crates", "ac-core", "src", "measurement", "report", "mod.rs"))
+SCHEMA_VERSION_RE = re.compile(r"^pub const SCHEMA_VERSION: u32 = (\d+);$",
+                               re.MULTILINE)
+
+
+def _schema_version_from_source(text, path=REPORT_MOD_RS):
+    """Return the report schema version declared in ac-core's source text.
+
+    ac_core::measurement::report::SCHEMA_VERSION is the only owner of this
+    value; Python cannot import it, so it is read from the source rather
+    than copied here. Anything but exactly one match fails the test.
+    """
+    matches = SCHEMA_VERSION_RE.findall(text)
+    if len(matches) != 1:
+        pytest.fail(f"expected exactly one match of {SCHEMA_VERSION_RE.pattern!r} "
+                    f"in {path}, found {len(matches)}")
+    return int(matches[0])
+
+
+def _ac_core_schema_version():
+    with open(REPORT_MOD_RS, encoding="utf-8") as fh:
+        return _schema_version_from_source(fh.read())
 
 
 SWEEP_POINT_TYPE = "measurement/frequency_response/point"
@@ -179,11 +209,17 @@ def test_plot_emits_measurement_report(server_client):
     assert len(reports) == 1, "expected exactly one measurement/report frame"
 
     r = reports[0]["report"]
-    assert r["schema_version"] == 1
+    expected = _ac_core_schema_version()
+    got = r.get("schema_version")
+    assert got == expected, (
+        f"report schema_version {got} != ac-core SCHEMA_VERSION {expected} "
+        f"({REPORT_MOD_RS}); daemon: {_find_daemon()}")
     assert "ac_version" in r
     assert r["method"]["kind"] == "stepped_sine"
-    assert r["data"]["kind"]   == "frequency_response"
-    assert len(r["data"]["points"]) == r["stimulus"]["n_points"]
+    assert len(r["data"]) == 1, "expected exactly one payload"
+    payload = r["data"][0]["data"]
+    assert payload["kind"] == "frequency_response"
+    assert len(payload["points"]) == r["stimulus"]["n_points"]
 
 
 # ---------------------------------------------------------------------------
