@@ -248,6 +248,40 @@ fn mic_curve_names_gain_with_its_frequency_partner() {
     );
 }
 
+/// #640: the widest label in use (`paired field`) with a value longer than
+/// the cut still renders `received` within 80 columns. The line carries
+/// the 9-column indent that lines up under `ac`'s `  error: ` prefix, so
+/// its length is its rendered width.
+#[test]
+fn mic_curve_long_value_under_paired_field_fits_80_columns() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let (mut freqs, gains) = curve_points();
+    freqs[12] = json!("x".repeat(500));
+    let r = c.call(json!({
+        "cmd": "calibrate_mic_curve", "op": "set", "input_channel": 1,
+        "freqs_hz": freqs, "gain_db": gains,
+    }));
+    assert_refused(
+        &r,
+        "long freqs_hz element",
+        &[
+            "freqs_hz[12] must be a finite number",
+            "paired field  gain_db[12] = ",
+        ],
+    );
+    let err = r["error"].as_str().unwrap_or_default();
+    let line = err
+        .lines()
+        .find(|l| l.starts_with("         received      "))
+        .unwrap_or_else(|| panic!("no received line: {err:?}"));
+    assert!(
+        line.chars().count() <= 80,
+        "received line over 80 columns: {line:?}"
+    );
+    assert!(line.ends_with('\u{2026}'), "{line:?}");
+}
+
 #[test]
 fn mic_curve_mismatched_lengths_name_both() {
     let d = Daemon::spawn();

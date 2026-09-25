@@ -592,9 +592,12 @@ fn monitor_spectrum_bounds_channel_list() {
         "64 entries must pass the bound and reach port resolution: {err:?}"
     );
 
+    // #640: the echo gets the 61 columns left after the indent and the
+    // 8-wide label column, `…` included, and is cut after the last
+    // complete element: `[0,1,…,22,` is 60 characters.
     let over: Vec<u32> = (0..65).collect();
-    let echo = serde_json::to_string(&over).unwrap();
-    let echo: String = echo.chars().take(64).collect();
+    let echo = format!("[{}", (0..=22).map(|i| format!("{i},")).collect::<String>());
+    assert_eq!(echo.chars().count(), 60);
     assert_monitor_refused_idle(
         &c,
         json!(over),
@@ -611,9 +614,9 @@ fn monitor_spectrum_bounds_channel_list() {
         json!(vec![0u32; 100_000]),
         &format!(
             "monitor not started \u{2014} channels must list at most 64 entries\n\
-             \x20        received  [{}0\u{2026}\n\
+             \x20        received  [{}\u{2026}\n\
              \x20        entries   100000",
-            "0,".repeat(31)
+            "0,".repeat(29)
         ),
     );
 

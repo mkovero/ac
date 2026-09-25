@@ -31,13 +31,44 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-/// Longest `received` echo, in characters, before it is cut with `…` — a
-/// hostile array must not be copied back into the reply in full.
+/// Storage cap on [`WireError::received`], in characters, before it is cut
+/// with `…` — a hostile array must not be kept or copied back into the
+/// reply in full. `set_ioct_bpo` echoes this stored text in its own
+/// headline. It is not the on-screen cut: since #640 a refusal's `received`
+/// line is re-cut when rendered, to fit [`REFUSAL_LINE_MAX_COLS`] (see
+/// [`received_line_text`]); this cap (cut at 64) only has to stay above
+/// the widest render budget, which the `const` assertion below enforces.
 const RECEIVED_MAX_CHARS: usize = 64;
 
 /// Continuation indent of a refusal's trailer lines. Matches the layout
 /// `ac-cli`'s `check_ack` prints under its `  error: ` prefix.
 const TRAILER_INDENT: &str = "         ";
+
+/// Width every refusal trailer line must fit in, counted as `ac-cli`
+/// prints it: its `  error: ` prefix is as wide as [`TRAILER_INDENT`], so a
+/// line's own length is its rendered width.
+const REFUSAL_LINE_MAX_COLS: usize = 80;
+
+/// Fewest columns the `received` value is ever given, `…` included (#640).
+const RECEIVED_MIN_COLS: usize = 21;
+
+/// Widest trailer label a [`WireError::refusal`] may carry: wider, and the
+/// `received` value would get fewer than [`RECEIVED_MIN_COLS`] columns.
+const MAX_TRAILER_LABEL_CHARS: usize =
+    REFUSAL_LINE_MAX_COLS - TRAILER_INDENT.len() - 2 - RECEIVED_MIN_COLS;
+
+/// Columns the `received` value gets on a line whose labels are padded to
+/// `label_width`: the rest of the line after the indent, the label column
+/// and its two-space gap. Includes the `…` of a cut value.
+const fn received_budget(label_width: usize) -> usize {
+    REFUSAL_LINE_MAX_COLS.saturating_sub(TRAILER_INDENT.len() + label_width + 2)
+}
+
+// The narrowest label column is `received` itself, so that is the widest
+// render budget. A storage-cut value (RECEIVED_MAX_CHARS + `…`) must never
+// fit it, or a storage `…` would reach the screen as if it were the end of
+// the value rather than a cut.
+const _: () = assert!(received_budget("received".len()) - 1 < RECEIVED_MAX_CHARS);
 
 /// What was wrong with a supplied value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,15 +137,22 @@ impl WireError {
 
     /// The refusal text: `<headline> — <field> <problem>`, then a
     /// `received` line and each `(label, value)` trailer, labels padded to
-    /// one column.
+    /// one column. The `received` value is cut to fit the line
+    /// ([`received_line_text`]); trailer values are shown as given.
     pub(crate) fn refusal(&self, headline: &str, trailers: &[(&str, &str)]) -> String {
         let width = trailers
             .iter()
             .map(|(label, _)| label.chars().count())
             .fold("received".len(), usize::max);
+        debug_assert!(
+            width <= MAX_TRAILER_LABEL_CHARS,
+            "refusal label column {width} is wider than {MAX_TRAILER_LABEL_CHARS}: \
+             `received` would not fit {REFUSAL_LINE_MAX_COLS} columns"
+        );
+        let received = received_line_text(&self.received, received_budget(width));
         let mut out = format!("{headline} \u{2014} {} {}", self.field, self.problem.text());
-        let lines = std::iter::once(("received", self.received.as_str()))
-            .chain(trailers.iter().map(|&(l, v)| (l, v)));
+        let lines =
+            std::iter::once(("received", &*received)).chain(trailers.iter().map(|&(l, v)| (l, v)));
         for (label, value) in lines {
             out.push('\n');
             out.push_str(TRAILER_INDENT);
@@ -132,6 +170,25 @@ fn received_text(v: &Value) -> String {
     let mut cut: String = text.chars().take(RECEIVED_MAX_CHARS).collect();
     cut.push('\u{2026}');
     cut
+}
+
+/// The stored `received` text as shown on a refusal line with `budget`
+/// columns for the value (#640). Text that fits is returned unchanged.
+/// Otherwise it is cut to `budget − 1` characters plus `…`; a JSON array
+/// (text starting with `[`) is further cut back to just after the last `,`
+/// kept, so no partial element is shown.
+fn received_line_text(stored: &str, budget: usize) -> Cow<'_, str> {
+    if stored.chars().count() <= budget {
+        return Cow::Borrowed(stored);
+    }
+    let mut cut: String = stored.chars().take(budget.saturating_sub(1)).collect();
+    if cut.starts_with('[') {
+        if let Some(i) = cut.rfind(',') {
+            cut.truncate(i + 1);
+        }
+    }
+    cut.push('\u{2026}');
+    Cow::Owned(cut)
 }
 
 /// A present value that must be an integer in `0..=u32::MAX`. `field` is
@@ -267,7 +324,7 @@ pub(crate) fn opt_u32_array(obj: &Value, field: &str) -> Result<Option<Vec<u32>>
 
 /// A refused list, plus the one trailer line that locates the problem in
 /// it: `entries N` for a list over its ceiling (the `received` echo is cut
-/// at 64 characters, so it cannot be counted from that), `channel N` for a
+/// to fit the line, so it cannot be counted from that), `channel N` for a
 /// repeat (still readable when the echo is cut before the repeat).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ListRefusal {
@@ -326,8 +383,12 @@ pub(crate) fn bounded_distinct_u32s(
 /// spaces. `ac-cli` appends its `daemon` line at the same column.
 const FIELD_LABEL_WIDTH: usize = 6;
 
-/// Width an unrecognised-field refusal's `fields` / `reads` lines wrap at.
-const FIELD_LINE_MAX_COLS: usize = 80;
+/// Longest request field name echoed in an unrecognised-field refusal
+/// before it is cut with `…`: one cut name then ends the `fields` line on
+/// column [`REFUSAL_LINE_MAX_COLS`] (#640). The inline headline name uses
+/// the same cut.
+const FIELD_NAME_MAX_CHARS: usize =
+    REFUSAL_LINE_MAX_COLS - (TRAILER_INDENT.len() + FIELD_LABEL_WIDTH + 2) - 1;
 
 /// Most names the `fields` line of an unrecognised-field refusal lists
 /// before `+<N> more`. The `unrecognised_fields` array carries every name.
@@ -349,7 +410,7 @@ pub(crate) fn unrecognised_fields(request: &Value, accepted: &[&str]) -> Vec<Str
 }
 
 /// A request field name as echoed in refusal text: control characters
-/// escaped, then cut at [`RECEIVED_MAX_CHARS`] characters with `…`.
+/// escaped, then cut at [`FIELD_NAME_MAX_CHARS`] characters with `…`.
 fn field_name_text(name: &str) -> String {
     let mut escaped = String::with_capacity(name.len());
     for c in name.chars() {
@@ -359,16 +420,16 @@ fn field_name_text(name: &str) -> String {
             escaped.push(c);
         }
     }
-    if escaped.chars().count() <= RECEIVED_MAX_CHARS {
+    if escaped.chars().count() <= FIELD_NAME_MAX_CHARS {
         return escaped;
     }
-    let mut cut: String = escaped.chars().take(RECEIVED_MAX_CHARS).collect();
+    let mut cut: String = escaped.chars().take(FIELD_NAME_MAX_CHARS).collect();
     cut.push('\u{2026}');
     cut
 }
 
 /// One `label  value  value …` trailer line, values at column 17 and
-/// separated by two spaces, wrapped at [`FIELD_LINE_MAX_COLS`] with the
+/// separated by two spaces, wrapped at [`REFUSAL_LINE_MAX_COLS`] with the
 /// continuation aligned under the first value.
 fn push_field_line(out: &mut String, label: &str, values: &[String]) {
     let prefix = format!("{TRAILER_INDENT}{label:<FIELD_LABEL_WIDTH$}  ");
@@ -379,7 +440,7 @@ fn push_field_line(out: &mut String, label: &str, values: &[String]) {
     for (i, v) in values.iter().enumerate() {
         let w = v.chars().count();
         if i > 0 {
-            if col + 2 + w > FIELD_LINE_MAX_COLS {
+            if col + 2 + w > REFUSAL_LINE_MAX_COLS {
                 out.push('\n');
                 out.push_str(&hang);
                 col = hang.len();
@@ -654,11 +715,129 @@ mod tests {
             e.refusal("monitor not started"),
             format!(
                 "monitor not started \u{2014} channels must list at most 64 entries\n\
-                 \x20        received  [{}0\u{2026}\n\
+                 \x20        received  [{}\u{2026}\n\
                  \x20        entries   100000",
-                "0,".repeat(31)
+                "0,".repeat(29)
             )
         );
+    }
+
+    /// #640: the `received` line of a refusal. It carries the 9-column
+    /// trailer indent, which lines up under `ac`'s `  error: ` prefix, so
+    /// its length is its rendered width.
+    fn received_line(text: &str) -> &str {
+        text.lines()
+            .find(|l| l.starts_with("         received  "))
+            .unwrap_or_else(|| panic!("no received line: {text:?}"))
+    }
+
+    /// #640, ux example: multi-digit elements are cut at an element
+    /// boundary, never inside a number.
+    #[test]
+    fn received_array_is_cut_after_last_complete_element() {
+        let chans: Vec<u32> = (1000..1100).collect();
+        let mut sent = chans.clone();
+        sent[31] = 1000;
+        let e = bounded_distinct_u32s("channels", &json!(sent), &sent, 200).unwrap_err();
+        let text = e.refusal("monitor not started");
+        assert_eq!(
+            text,
+            "monitor not started \u{2014} channels[31] repeats channels[0]\n\
+             \x20        received  [1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,\u{2026}\n\
+             \x20        channel   1000"
+        );
+        assert_eq!(received_line(&text).chars().count(), 76);
+    }
+
+    /// #640, ux example: the widest label in use today (`paired field`)
+    /// with a long non-array value ends exactly on column 80.
+    #[test]
+    fn received_under_paired_field_fits_80_columns() {
+        let e = finite_f32(&json!("x".repeat(200)), "freqs_hz[12]").unwrap_err();
+        let text = e.refusal(
+            "mic curve not saved",
+            &[
+                ("paired field", "gain_db[12] = -3.250 dB"),
+                ("data", "existing curve unchanged"),
+            ],
+        );
+        assert_eq!(
+            text,
+            format!(
+                "mic curve not saved \u{2014} freqs_hz[12] must be a finite number\n\
+                 \x20        received      \"{}\u{2026}\n\
+                 \x20        paired field  gain_db[12] = -3.250 dB\n\
+                 \x20        data          existing curve unchanged",
+                "x".repeat(55)
+            )
+        );
+        assert_eq!(received_line(&text).chars().count(), 80);
+    }
+
+    /// #640, ux example: a long string at label width 8 is cut plainly and
+    /// ends exactly on column 80.
+    #[test]
+    fn received_string_is_cut_to_fit_80_columns() {
+        let digits: String = "0123456789".repeat(20);
+        let e = WireError::new("pairs", Problem::NotArray, &json!(digits));
+        let text = e.refusal("transfer not started", &[("source", "config.json")]);
+        assert_eq!(
+            text,
+            "transfer not started \u{2014} pairs must be an array\n\
+             \x20        received  \"01234567890123456789012345678901234567890123456789012345678\u{2026}\n\
+             \x20        source    config.json"
+        );
+        assert_eq!(received_line(&text).chars().count(), 80);
+    }
+
+    /// #640: a value that fits is echoed in full, even when it fills the
+    /// budget exactly.
+    #[test]
+    fn received_that_fits_is_unchanged() {
+        assert_eq!(received_line_text("\"bad\"", 61), "\"bad\"");
+        let exact = format!("[{}0]", "0,".repeat(29));
+        assert_eq!(exact.chars().count(), 61);
+        assert_eq!(received_line_text(&exact, 61), exact);
+        // A single huge element has no `,` to back off to: plain cut.
+        let one = format!("[\"{}\"]", "y".repeat(100));
+        let cut = received_line_text(&one, 21);
+        assert_eq!(cut, format!("[\"{}\u{2026}", "y".repeat(18)));
+    }
+
+    /// #640, triage AC 3: the budget rule holds at every label width a
+    /// refusal may carry, so a wider label added later cannot bring back
+    /// an over-80 line; the value never gets fewer than 21 columns.
+    #[test]
+    fn received_fits_80_columns_at_every_allowed_label_width() {
+        assert_eq!(MAX_TRAILER_LABEL_CHARS, 48);
+        let long_array: Vec<u32> = (0..10_000).collect();
+        let long_string = "s".repeat(10_000);
+        for w in 1..=MAX_TRAILER_LABEL_CHARS {
+            let label = "l".repeat(w);
+            let label_col = w.max("received".len());
+            assert!(received_budget(label_col) >= RECEIVED_MIN_COLS, "width {w}");
+            for v in [json!(long_array), json!(long_string)] {
+                let e = WireError::new("x", Problem::NotInteger, &v);
+                let text = e.refusal("h", &[(label.as_str(), "v")]);
+                let line = received_line(&text);
+                assert!(
+                    line.chars().count() <= REFUSAL_LINE_MAX_COLS,
+                    "width {w}: {line:?}"
+                );
+                assert!(line.ends_with('\u{2026}'), "width {w}: {line:?}");
+            }
+        }
+    }
+
+    /// #640: a label wider than the rule accounts for fails a test, not a
+    /// terminal.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "wider than 48")]
+    fn refusal_refuses_a_label_wider_than_the_rule() {
+        let e = WireError::new("x", Problem::NotInteger, &json!(1.5));
+        let label = "l".repeat(MAX_TRAILER_LABEL_CHARS + 1);
+        let _ = e.refusal("h", &[(label.as_str(), "v")]);
     }
 
     /// #635: the first repeat in list order is reported, with both indices
@@ -817,16 +996,28 @@ mod tests {
     }
 
     #[test]
-    fn unrecognised_name_is_cut_at_64_characters() {
+    fn unrecognised_name_is_cut_at_62_characters() {
         let long = "a".repeat(65);
         let r = unrecognised_refusal("status", std::slice::from_ref(&long), &[]);
         let text = r["error"].as_str().unwrap();
         assert!(
-            text.contains(&format!("field '{}\u{2026}' not", "a".repeat(64))),
+            text.contains(&format!("field '{}\u{2026}' not", "a".repeat(62))),
             "{text}"
         );
         assert_eq!(r["unrecognised_fields"], json!([long]));
-        let exact = "b".repeat(64);
+        // Two long names: the `fields` line carries the cut, one name per
+        // line, each ending on or before column 80.
+        let names = vec!["c".repeat(65), "d".repeat(65)];
+        let r = unrecognised_refusal("status", &names, &[]);
+        let text = r["error"].as_str().unwrap();
+        assert!(
+            text.contains(&format!("\n         fields  {}\u{2026}\n", "c".repeat(62))),
+            "{text}"
+        );
+        for l in text.lines().skip(1) {
+            assert!(l.chars().count() <= 80, "line over 80 columns: {l:?}");
+        }
+        let exact = "b".repeat(62);
         let r = unrecognised_refusal("status", std::slice::from_ref(&exact), &[]);
         assert!(r["error"]
             .as_str()
