@@ -138,11 +138,8 @@ pub fn render_snapshot(
     interval_ms: u32,
     xruns: u64,
 ) -> String {
-    let bar = "─".repeat(69);
     let mut out = String::new();
     out.push_str(title);
-    out.push('\n');
-    out.push_str(&bar);
     out.push('\n');
     if channels.is_empty() {
         out.push_str("waiting for first frame…\n");
@@ -152,7 +149,6 @@ pub fn render_snapshot(
             out.push('\n');
         }
     }
-    out.push_str(&bar);
     out.push('\n');
     out.push_str(&format!(
         "fft N={fft_n}   interval={interval_ms} ms   xruns={xruns}\n",
@@ -328,7 +324,25 @@ mod tests {
         assert!((s.floor_db + 85.0).abs() < 1e-3);
     }
 
-    /// Render layout invariants: title + dashed bars + xrun footer must
+    /// Layout invariants shared by the populated and empty renders: no
+    /// rule anywhere, the footer sits after exactly one blank line, and no
+    /// two blank lines ever follow each other (#116 layout, #129).
+    fn assert_rule_free_layout(out: &str) {
+        assert!(!out.contains('─'), "rule in snapshot:\n{out}");
+        let lines: Vec<&str> = out.lines().collect();
+        let footer = lines
+            .iter()
+            .position(|l| l.starts_with("fft N="))
+            .expect("footer");
+        assert!(footer >= 2);
+        assert!(lines[footer - 1].is_empty(), "no blank before footer");
+        assert!(!lines[footer - 2].is_empty(), "two blanks before footer");
+        assert!(lines
+            .windows(2)
+            .all(|w| !(w[0].is_empty() && w[1].is_empty())));
+    }
+
+    /// Render layout invariants: title, channel row and xrun footer must
     /// all be present; the channel row uses the formatted stats.
     #[test]
     fn render_snapshot_includes_required_lines() {
@@ -347,13 +361,15 @@ mod tests {
         assert!(out.contains("fft N=8192"));
         assert!(out.contains("interval=100 ms"));
         assert!(out.contains("xruns=0"));
+        assert_rule_free_layout(&out);
     }
 
     /// Empty channel list (no frame yet received) must render a
-    /// placeholder rather than a bare bar-bar-footer.
+    /// placeholder between title and footer rather than nothing.
     #[test]
     fn render_snapshot_handles_empty_channels() {
         let out = render_snapshot("title", &[], 8192, 100, 0);
         assert!(out.contains("waiting for first frame"));
+        assert_rule_free_layout(&out);
     }
 }
