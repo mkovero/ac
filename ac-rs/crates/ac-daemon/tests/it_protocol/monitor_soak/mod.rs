@@ -107,8 +107,10 @@ struct Received {
     frame: SoakFrame,
 }
 
-/// Next channel-0 `visualize/spectrum` frame with a non-empty spectrum, or
-/// `None` if none arrives within [`FRAME_TIMEOUT_MS`].
+/// Next channel-0 `visualize/spectrum` frame, whatever its payload holds, or
+/// `None` if none arrives within [`FRAME_TIMEOUT_MS`]. Nothing is filtered on
+/// content: a missing, non-array or empty `spectrum` is still a published
+/// frame, and it reaches [`soak_frame`] and I4-t to be judged `malformed`.
 fn next_spectrum(c: &Client) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_millis(FRAME_TIMEOUT_MS as u64);
     loop {
@@ -117,16 +119,9 @@ fn next_spectrum(c: &Client) -> Option<Value> {
             return None;
         }
         let (topic, payload) = c.recv_pub(remaining.as_millis().max(1) as i32)?;
-        if topic != "data"
-            || payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum")
-            || payload.get("channel").and_then(Value::as_u64) != Some(0)
-        {
-            continue;
-        }
-        if payload
-            .get("spectrum")
-            .and_then(Value::as_array)
-            .is_some_and(|s| !s.is_empty())
+        if topic == "data"
+            && payload.get("type").and_then(Value::as_str) == Some("visualize/spectrum")
+            && payload.get("channel").and_then(Value::as_u64) == Some(0)
         {
             return Some(payload);
         }
@@ -136,27 +131,35 @@ fn next_spectrum(c: &Client) -> Option<Value> {
 /// Wire frame → checker input. `spectrum` is linear amplitude on the wire
 /// (ZMQ.md → `visualize/spectrum`); the checker judges dBFS, so each value
 /// becomes `20·log10(amplitude)`. Non-numeric entries become NaN so I4-t
-/// reports them as garbage instead of the parse hiding them.
+/// reports them as garbage instead of the parse hiding them. A missing or
+/// non-array `freqs`/`spectrum` becomes an empty column list with
+/// `wire_defect` set, and a length mismatch is left as received — I4-t
+/// judges both `malformed`, so the parse never panics past the dump.
 fn soak_frame(payload: &Value) -> SoakFrame {
-    let col = |key: &str| -> Vec<f64> {
-        payload[key]
-            .as_array()
-            .unwrap_or_else(|| panic!("spectrum frame lacks `{key}` array: {payload}"))
-            .iter()
-            .map(|v| v.as_f64().unwrap_or(f64::NAN))
-            .collect()
+    let mut defects = Vec::new();
+    let mut col = |key: &str| -> Vec<f64> {
+        match payload.get(key) {
+            Some(Value::Array(a)) => a.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect(),
+            None => {
+                defects.push(format!("`{key}` missing"));
+                Vec::new()
+            }
+            Some(other) => {
+                defects.push(format!("`{key}` is not an array: {other}"));
+                Vec::new()
+            }
+        }
     };
     let freqs = col("freqs");
     let spectrum: Vec<f64> = col("spectrum")
         .into_iter()
         .map(|a| 20.0 * a.log10())
         .collect();
-    assert_eq!(
-        freqs.len(),
-        spectrum.len(),
-        "`freqs` and `spectrum` lengths differ"
-    );
-    SoakFrame { freqs, spectrum }
+    SoakFrame {
+        freqs,
+        spectrum,
+        wire_defect: (!defects.is_empty()).then(|| defects.join("; ")),
+    }
 }
 
 /// Where a failing soak writes its dump, under `CARGO_TARGET_TMPDIR`.
@@ -430,6 +433,53 @@ fn monitor_spectrum_soak_holds_every_frame() {
     );
 }
 
+/// A published frame whose `spectrum` is missing, not an array, or empty
+/// goes through the same parse and checker as the soak, and is red at its own
+/// tick instead of disappearing. A well-formed wire frame parses clean.
+#[test]
+fn malformed_wire_frame_is_judged_not_dropped() {
+    let freqs = json!([100.0, 200.0, 800.0, 900.0]);
+    let good = json!({"type": "visualize/spectrum", "channel": 0,
+                      "freqs": freqs, "spectrum": [0.01, 0.01, 0.01, 0.01]});
+    let good_frame = soak_frame(&good);
+    assert!(good_frame.wire_defect.is_none(), "{good_frame:?}");
+    assert!(check_bounded(&good_frame, 0).is_none());
+
+    for (case, bad) in [
+        (
+            "missing",
+            json!({"type": "visualize/spectrum", "channel": 0, "freqs": freqs}),
+        ),
+        (
+            "non-array",
+            json!({"type": "visualize/spectrum", "channel": 0, "freqs": freqs, "spectrum": 0.01}),
+        ),
+        (
+            "empty",
+            json!({"type": "visualize/spectrum", "channel": 0, "freqs": [], "spectrum": []}),
+        ),
+    ] {
+        const BAD_AT: usize = 3;
+        let mut checker = SoakChecker::new(500.0, lf_only_edge_hz(500.0), 4.0, 0);
+        let mut verdict = None;
+        for i in 0..6 {
+            let p = if i == BAD_AT { &bad } else { &good };
+            verdict = checker.check_frame(&soak_frame(p));
+            if verdict.is_some() {
+                break;
+            }
+        }
+        let v = verdict.unwrap_or_else(|| panic!("{case} `spectrum` frame not caught"));
+        assert_eq!(v.invariant, checker::Invariant::Bounded, "{case}: {v:?}");
+        assert_eq!(
+            (v.class, v.frame_idx),
+            ("malformed", BAD_AT),
+            "{case}: {v:?}"
+        );
+        assert_eq!(checker.counts().bounded, BAD_AT + 1, "{case}");
+    }
+}
+
 /// The dump path runs only when the soak fails, which is exactly when it is
 /// needed, so it is exercised here on synthetic frames.
 #[test]
@@ -440,6 +490,7 @@ fn dump_violation_writes_n_minus_1_n_n_plus_1_and_sidecar() {
         frame: SoakFrame {
             freqs: vec![100.0, 200.0],
             spectrum: vec![v, v - 1.0],
+            wire_defect: None,
         },
     };
     let (a, b, c) = (mk(Some(9), -40.0), mk(Some(10), -41.0), mk(Some(11), -42.0));

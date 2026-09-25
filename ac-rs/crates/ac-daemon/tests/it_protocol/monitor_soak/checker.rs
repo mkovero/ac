@@ -14,7 +14,8 @@
 //!
 //! Invariants, judged on every frame, first violation wins, in priority
 //! order bounded > continuity > liveness > rate > plausibility:
-//! - **I4-t** (bounded), from frame 0: no NaN, no `+inf`, no value above
+//! - **I4-t** (bounded), from frame 0: a well-shaped, non-empty frame
+//!   (else `malformed`), no NaN, no `+inf`, no value above
 //!   0 dBFS + [`BOUNDED_TOL_DB`]. `-inf` (an exact-zero amplitude on the
 //!   wire) is legal here; a collapsed LF band is I5b's to catch.
 //! - **I2-t** (continuity), post-settle, split at `crossover_hz`: LF/HF
@@ -134,6 +135,10 @@ pub fn lf_only_edge_hz(crossover_hz: f64) -> f64 {
 pub struct SoakFrame {
     pub freqs: Vec<f64>,
     pub spectrum: Vec<f64>,
+    /// A shape defect the wire parse found (a missing or non-array
+    /// `freqs`/`spectrum`), which the parse turned into an empty column
+    /// list. I4-t reports it as `malformed`; the frame still takes its tick.
+    pub wire_defect: Option<String>,
 }
 
 /// Which invariant tripped.
@@ -166,8 +171,8 @@ impl Invariant {
 #[derive(Clone, Debug)]
 pub struct Violation {
     pub invariant: Invariant,
-    /// Failure-mode word for the dump: garbage / level-jump / frozen /
-    /// wrong-rate / drift.
+    /// Failure-mode word for the dump: malformed / garbage / level-jump /
+    /// frozen / wrong-rate / drift.
     pub class: &'static str,
     /// Index of the frame that tripped it (0-based, in checker order).
     pub frame_idx: usize,
@@ -248,10 +253,34 @@ pub fn power_mean_db(vals: &[f64]) -> f64 {
     10.0 * mean_pow.log10()
 }
 
-/// I4-t on one frame, independent of any checker state. `-inf` is legal: it
+/// I4-t on one frame, independent of any checker state. A frame with no
+/// columns, a wire shape defect, or `freqs`/`spectrum` of different lengths
+/// is `malformed`: every published frame is judged, so one that carries
+/// nothing to judge is a violation, not a frame to skip. `-inf` is legal: it
 /// is an exact-zero amplitude, which the wire can carry. NaN (a negative or
 /// non-numeric amplitude) and `+inf` are garbage.
 pub fn check_bounded(sf: &SoakFrame, frame_idx: usize) -> Option<Violation> {
+    let malformed = |detail: String| {
+        Some(Violation {
+            invariant: Invariant::Bounded,
+            class: "malformed",
+            frame_idx,
+            detail,
+        })
+    };
+    if let Some(d) = &sf.wire_defect {
+        return malformed(d.clone());
+    }
+    if sf.spectrum.is_empty() {
+        return malformed("empty `spectrum`: no columns to judge".into());
+    }
+    if sf.freqs.len() != sf.spectrum.len() {
+        return malformed(format!(
+            "`freqs` has {} columns, `spectrum` has {}",
+            sf.freqs.len(),
+            sf.spectrum.len()
+        ));
+    }
     for (i, &v) in sf.spectrum.iter().enumerate() {
         if v.is_nan() || v == f64::INFINITY {
             return Some(Violation {
@@ -511,7 +540,11 @@ mod tests {
             freqs.push(800.0 + i as f64 * 100.0);
             spectrum.push(v);
         }
-        SoakFrame { freqs, spectrum }
+        SoakFrame {
+            freqs,
+            spectrum,
+            wire_defect: None,
+        }
     }
 
     /// LF content for the recompute numbered `k`: varies with `k`, like
@@ -787,6 +820,49 @@ mod tests {
         let v = v.expect("NaN not caught");
         assert_eq!(v.invariant, Invariant::Bounded);
         assert_eq!(v.class, "garbage");
+    }
+
+    #[test]
+    fn one_empty_frame_mid_soak_is_malformed_and_takes_its_tick() {
+        // A lone empty frame in an otherwise healthy post-settle stream. If
+        // it were skipped instead of judged, the stream would stay green.
+        const EMPTY_AT: usize = 150;
+        let make = |i: usize| {
+            if i == EMPTY_AT {
+                SoakFrame {
+                    freqs: vec![],
+                    spectrum: vec![],
+                    wire_defect: None,
+                }
+            } else {
+                healthy(i, 5)
+            }
+        };
+        let (v, counts) = run(4.0, 20, 400, make);
+        let v = v.expect("empty frame not caught");
+        assert_eq!(v.invariant, Invariant::Bounded, "{v:?}");
+        assert_eq!(v.class, "malformed");
+        assert_eq!(v.frame_idx, EMPTY_AT);
+        assert_eq!(counts.bounded, EMPTY_AT + 1, "{counts:?}");
+
+        // The rejected behaviour, computed here: drop the frame before the
+        // checker sees it, and nothing goes red.
+        let (skipped, _) = run(4.0, 20, 399, |i| make(if i < EMPTY_AT { i } else { i + 1 }));
+        assert!(skipped.is_none(), "{skipped:?}");
+    }
+
+    #[test]
+    fn wire_defect_and_length_mismatch_are_malformed() {
+        let mut f = healthy(0, 5);
+        f.wire_defect = Some("`spectrum` missing".into());
+        let v = check_bounded(&f, 3).expect("wire defect not caught");
+        assert_eq!((v.class, v.frame_idx), ("malformed", 3));
+        assert!(v.detail.contains("`spectrum` missing"), "{v:?}");
+
+        let mut f = healthy(0, 5);
+        f.freqs.pop();
+        let v = check_bounded(&f, 0).expect("length mismatch not caught");
+        assert_eq!(v.class, "malformed");
     }
 
     #[test]
