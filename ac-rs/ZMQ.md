@@ -2073,17 +2073,25 @@ Resolution / trade-off the user gets:
     at 65536 / 48 kHz. This is not the frame cadence.
   - *Effective period:* recomputes land on whole monitor ticks. The daemon
     recomputes once every `lf_recompute_every` =
-    `max(1, round(hop / interval))` ticks (#616), so the LF band changes every
-    `lf_recompute_every · interval` seconds: every tick (200 ms) at the default
-    0.2 s `interval`, every 9 ticks (144 ms) at 16 ms. No recompute happens
-    until the capture ring holds a full block. On ticks without a recompute
-    the LF columns repeat the cached spectrum.
+    `clamp(round(hop / max(interval, 1e-6)), 1, 4096)` ticks (#616), so the
+    LF band changes every `lf_recompute_every · interval` seconds: every tick
+    (200 ms) at the default 0.2 s `interval`, every 9 ticks (144 ms) at
+    16 ms. The 4096-tick ceiling applies once `interval` drops below about
+    33 µs at 65536 / 48 kHz. No recompute happens until the capture ring
+    holds a full block. On ticks without a recompute the LF columns repeat
+    the cached spectrum.
 
   Consecutive LF frames are **not** independent estimates. Successive
-  recomputes share most of their samples (≈ 85 % of the window at the default
-  interval, 9600 of 65536 samples advanced per tick), and each recompute passes
-  through a power-domain EMA (τ = `LF_AVG_TAU_S`, 0.25 s) before it is cached.
-  Roughly one independent LF estimate arrives per window length.
+  recomputes share most of their samples, and each recompute passes through a
+  power-domain EMA (τ = `LF_AVG_TAU_S`, 0.25 s) before it is cached. How much
+  they share depends on the channel count: each channel's nominal capture
+  budget per tick is `interval / n_channels` (floored at 2 ms). For a
+  single-channel monitor at the default interval, 9600 of 65536 samples
+  advance per tick (≈ 85 % shared); with two channels it is
+  4800 (≈ 93 % shared), and more channels share more. For a single channel,
+  roughly one independent LF estimate arrives per window length; with
+  `n_channels` channels a full window of new samples per channel takes about
+  `n_channels` times as long.
 - **Above `crossover_hz`:** unchanged — `Δf = sr / fft_n` at the live refresh
   rate, so mid/high responsiveness is not degraded.
 
