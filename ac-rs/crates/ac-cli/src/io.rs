@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use ac_core::measurement::thd::NOISE_FLOOR_BASIS;
+
 pub fn save_csv(results: &[serde_json::Value], path: &Path) {
     let fields = [
         "freq_hz",
@@ -64,14 +66,6 @@ fn thd_db_re_total(pct: f64) -> String {
 
 /// The fallback for a field an older daemon does not send, verbatim.
 pub const NOT_REPORTED: &str = "(not reported by this daemon)";
-
-/// What `noise_floor_dbfs` is measured against. It describes
-/// `ac_core::measurement::thd::analyze`: the RMS of the residual left after
-/// the fundamental and its harmonics are removed, with no weighting and no
-/// band limit. If that computation ever gains weighting or a band limit,
-/// this text — and the `noise_floor_dbfs` line in `ZMQ.md` — must change
-/// with it.
-const NOISE_FLOOR_BASIS: &str = "unweighted, full band";
 
 /// Two leading spaces, then `label` left-aligned in 14 columns — the grid
 /// `plot ir`'s read-out block uses, so the binary has one register.

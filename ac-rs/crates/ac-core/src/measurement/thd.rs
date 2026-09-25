@@ -60,6 +60,18 @@ pub fn citation() -> StandardsCitation {
     }
 }
 
+/// Measurement basis of [`AnalysisResult::noise_floor_dbfs`], as printed
+/// beside the value by consumers (`ac-cli` imports it; #621).
+///
+/// [`analyze`] computes the noise floor as the RMS, over the trimmed slice,
+/// of the time-domain residual left after the fundamental and its harmonics
+/// are subtracted. No weighting filter and no band limit is applied. The test
+/// `noise_floor_basis_is_unweighted_full_band` pins both this text and that
+/// behaviour, with one spur at each band edge; editing either alone fails it.
+/// If the basis ever changes, the `noise_floor_dbfs` line in `ac-rs/ZMQ.md`
+/// is the second place to update.
+pub const NOISE_FLOOR_BASIS: &str = "unweighted, full band";
+
 /// Analyse a mono audio capture and return THD, THD+N, noise floor, spectrum.
 ///
 /// # Arguments
@@ -388,6 +400,49 @@ mod tests {
         let expected_pct = 0.001 / (0.5 / std::f64::consts::SQRT_2) * 100.0;
         assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.005);
         assert_relative_eq!(r.noise_floor_dbfs, -60.0, epsilon = 0.2);
+    }
+
+    /// Guards [`NOISE_FLOOR_BASIS`] against the estimator (#621). A 1 kHz
+    /// tone plus one non-harmonic spur, at 10 Hz and then at 23 500 Hz, each
+    /// at −40 dBFS RMS: the noise floor must read the spur's full RMS within
+    /// 0.2 dB (tolerance inherited from
+    /// `broadband_noise_uses_hann_enbw_normalization`). A-, C- or CCIR-468
+    /// weighting, or an AES17 20 Hz–20 kHz / 22 Hz–22 kHz band limit,
+    /// attenuates at least one spur by well over 1 dB and fails this test.
+    /// Covered range: a band edge between 10 Hz and 23.5 kHz. A band limit
+    /// below 10 Hz or above 23.5 kHz, or a weighting under 0.2 dB at both
+    /// spurs, passes undetected. Each edge is asserted in its own signal so
+    /// one edge's loss cannot hide behind the other.
+    #[test]
+    fn noise_floor_basis_is_unweighted_full_band() {
+        assert_eq!(NOISE_FLOOR_BASIS, "unweighted, full band");
+
+        // n = SR gives 1 Hz bins; the 5 % trim leaves 0.9 s, so both spurs
+        // complete a whole number of cycles over the RMS slice. Both sit
+        // outside the fundamental notch and every harmonic search window
+        // (±100 bins around k·1 kHz, k ≤ 11).
+        let n = SR as usize;
+        let spur_rms = 0.01_f64;
+        let expected_dbfs = 20.0 * spur_rms.log10();
+        for spur_hz in [10.0, 23_500.0] {
+            let samples: Vec<f32> = pure_sine(F1, 0.5, SR, n)
+                .into_iter()
+                .zip(pure_sine(
+                    spur_hz,
+                    spur_rms * std::f64::consts::SQRT_2,
+                    SR,
+                    n,
+                ))
+                .map(|(tone, spur)| tone + spur)
+                .collect();
+            let r = analyze(&samples, SR, F1, 10).unwrap();
+            assert!(
+                (r.noise_floor_dbfs - expected_dbfs).abs() <= 0.2,
+                "spur at {spur_hz} Hz: noise floor {:.3} dBFS, expected {expected_dbfs:.3} dBFS \
+                 for an unweighted, full-band residual",
+                r.noise_floor_dbfs
+            );
+        }
     }
 
     #[test]
