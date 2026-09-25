@@ -726,8 +726,36 @@ fn correlated_pair_lag_survives_a_routed_drive() {
     // 1 s = 48 000 samples, far above 4 × DELAY.
     let (meas, refch) = engine(true, true).capture_stereo(1.0).unwrap();
     let (pair_meas, pair_ref) = engine(true, false).capture_stereo(1.0).unwrap();
-    let (gen_meas, _) = engine(false, true).capture_stereo(1.0).unwrap();
+    let (gen_meas, gen_ref) = engine(false, true).capture_stereo(1.0).unwrap();
     assert!(meas.len() >= 4 * DELAY);
+
+    // The generator is present in the correlated-pair capture, on each
+    // channel, as that channel's own stream: combined − pair-alone must be
+    // generator-alone, sample for sample. This is what refuses a stimulus
+    // rule that drops the generator when `external` is `CorrelatedPair`
+    // (the rejected rev. 2 shape: `meas == pair_meas` would pass every
+    // lag assertion below). Bar as in
+    // `external_and_generator_noise_keep_separate_state`.
+    assert!(
+        rms(&gen_meas) > 0.01 && rms(&gen_ref) > 0.01,
+        "drive silent"
+    );
+    assert_ne!(gen_meas, gen_ref, "generator legs must be per-channel");
+    for (leg, actual, pair, gen) in [
+        ("meas", &meas, &pair_meas, &gen_meas),
+        ("ref", &refch, &pair_ref, &gen_ref),
+    ] {
+        assert_eq!(actual.len(), gen.len());
+        for i in 0..actual.len() {
+            let residual = (actual[i] - pair[i]) - gen[i];
+            assert!(
+                residual.abs() <= 1e-6,
+                "{leg} sample {i}: combined − pair = {}, generator = {}",
+                actual[i] - pair[i],
+                gen[i]
+            );
+        }
+    }
 
     let actual = xcorr(&meas, &refch, MAX_LAG);
     let argmax = (0..=MAX_LAG)
