@@ -359,7 +359,7 @@ pub fn freq_row_lines(frame: &serde_json::Value, have_cal: bool, verbose: bool) 
     };
     let noise = fmt("noise_floor_dbfs", &|v| format!("{v:.1}"));
 
-    let mut row = if have_cal {
+    let row = if have_cal {
         let odbu = fmt("out_dbu", &|v| format!("{v:+.2}"));
         let idbu = fmt("in_dbu", &|v| format!("{v:+.2}"));
         let gain = fmt("gain_db", &|v| format!("{v:+.2}"));
