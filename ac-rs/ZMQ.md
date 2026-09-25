@@ -2039,13 +2039,24 @@ all drawn from the same live port.
   "in_ports":     ["<port>", ...],  // resolved port per entry in `channels`
   "channels":     [<int>, ...],     // echoed channel indices (defaulted if absent)
   "lf_fft_n":     <int>,            // dual-resolution low-band FFT N (see below)
-  "crossover_hz": <float>           // LF/HF split frequency (daemon-owned constant)
+  "crossover_hz": <float>,          // LF/HF split frequency (daemon-owned constant)
+  "lf_avg_tau_ms": <float>,         // ms — LF power-domain EMA time constant (see below)
+  "lf_overlap_pct": <float>,        // % — LF FFT window overlap (see below)
+  "backend":      "jack" | "cpal" | "fake"
 }
 ```
 
-`lf_fft_n` and `crossover_hz` are daemon-owned constants for the
-dual-resolution low-frequency path (see below). They are read-only and
-echoed so the UI can label the LF band without hardcoding daemon values.
+`lf_fft_n`, `crossover_hz`, `lf_avg_tau_ms` and `lf_overlap_pct` are
+daemon-owned constants for the dual-resolution low-frequency path (see
+below). They are read-only, echoed on every successful start — including
+when the LF path is inactive (`fft_n >= lf_fft_n`) — so the UI can label the
+LF band without hardcoding daemon values. `lf_avg_tau_ms` is `LF_AVG_TAU_S`
+× 1000: the time constant, in milliseconds, of the power-domain EMA applied
+to each LF recompute before it is cached. `lf_overlap_pct` is `LF_OVERLAP`
+× 100: the LF FFT window overlap, in percent, which sets the target hop
+`(1 − LF_OVERLAP) · lf_fft_n / sr`. Neither is the effective LF refresh
+period, which is `lf_recompute_every · interval` (see below). `backend`
+names the audio backend serving the monitor, as in the `spectrum` frame.
 
 **DATA** — repeated until stopped (spectrum frame, see Shared types).
 
