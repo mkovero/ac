@@ -472,3 +472,63 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
         "a lock taken while driving was discarded by a later drive edge"
     );
 }
+
+/// #221: a ladder's recorded origin is the stream sample count *before* the
+/// tick that built it — the ladder is built and then fed that tick's `bufs`,
+/// so its first input sample is the first sample of that tick. One tick
+/// either way replays a different block set, and a pure gain+delay stimulus
+/// could not show it; this pins the count directly.
+#[test]
+fn a_ladder_records_the_sample_count_before_the_tick_that_built_it() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    let x = noise(CHUNK * 60 + 480, 0x5eed);
+    let mut built_on: Option<(usize, u64)> = None;
+    for k in 0..40 {
+        let r0 = 480 + k * CHUNK;
+        let refb = x[r0..r0 + CHUNK].to_vec();
+        let meas = x[r0 - 480..r0 - 480 + CHUNK].to_vec();
+        let before = s.consumed;
+        assert_eq!(
+            before,
+            (k * CHUNK) as u64,
+            "consumed counts every tick's bufs"
+        );
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        s.tick(&[meas, refb], events(true), &drive_msg(true), now);
+        if built_on.is_none() && s.ladders[0].is_some() {
+            built_on = Some((k, before));
+        }
+    }
+    let (k, before) = built_on.expect("a correlated pair must build its ladder");
+    let prov = s.mtw_provenance()[0]
+        .clone()
+        .expect("a built ladder has provenance");
+    assert_eq!(
+        prov.origin, before as i64,
+        "ladder built on tick {k}: origin must be the count before that tick"
+    );
+    assert_eq!(
+        prov.offset, 480,
+        "the ladder's offset is the lock it was built on"
+    );
+    assert_eq!(s.consumed, (40 * CHUNK) as u64);
+}
+
+/// #221: a flush drops the ladder, and its provenance with it, so a snapshot
+/// between the flush and the rebuild cannot carry the old origin.
+#[test]
+fn a_flush_clears_the_ladder_provenance() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 30, 480, events(true), t0);
+    assert!(
+        s.mtw_provenance()[0].is_some(),
+        "precondition: ladder built"
+    );
+    s.flush_all();
+    assert!(
+        s.mtw_provenance()[0].is_none(),
+        "provenance outlived the ladder it describes"
+    );
+}

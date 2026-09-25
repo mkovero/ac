@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
-use ac_core::snapshot::{ChannelMeta, SessionMeta, SnapshotMeta};
+use ac_core::snapshot::{ChannelMeta, MtwProvenance, SessionMeta, SnapshotMeta};
 
 use crate::server::ServerState;
 
@@ -122,6 +122,15 @@ pub struct SnapshotRingState {
     /// Mirrors the worker's own `pair_delays` — `None` until the
     /// per-pair delay is estimated on warm-up.
     pub delay_samples: Vec<Option<i64>>,
+    /// Mirrors the session's per-pair ladder provenance (#221), one entry
+    /// per pair, `origin` still an absolute stream sample count; converted
+    /// to ring coordinates at capture. `None` for a pair with no ladder.
+    pub mtw: Vec<Option<MtwProvenance>>,
+    /// Samples pushed per channel since the ring started, including the ones
+    /// since dropped off its front. The session counts the same total, so a
+    /// ladder origin converts to a ring position as
+    /// `origin − (pushed_total − ring_len)`.
+    pushed_total: u64,
     pub weighting_tag: String,
     pub integration_tag: String,
     /// Per-`unique_chans`-position calibration, loaded once at session
@@ -146,6 +155,7 @@ impl SnapshotRingState {
         // before it first syncs delays, and a `snapshot` landing between
         // the two must still write one delay per pair (#435).
         let delay_samples = vec![None; pairs.len()];
+        let mtw = vec![None; pairs.len()];
         Self {
             sr,
             unique_chans,
@@ -156,6 +166,8 @@ impl SnapshotRingState {
             pending_ring_s: None,
             pairs,
             delay_samples,
+            mtw,
+            pushed_total: 0,
             weighting_tag,
             integration_tag,
             unique_cals,
@@ -199,6 +211,11 @@ impl SnapshotRingState {
         }
     }
 
+    /// Samples pushed per channel since the ring started — see the field.
+    pub fn pushed_total(&self) -> u64 {
+        self.pushed_total
+    }
+
     /// `false` between [`pending`](Self::pending) and [`start`](Self::start).
     pub fn is_started(&self) -> bool {
         self.pending_ring_s.is_none()
@@ -207,6 +224,8 @@ impl SnapshotRingState {
     /// Push one tick's captured samples (same shape as `capture_multi`'s
     /// return) into the ring, dropping from the front once over cap.
     pub fn push_tick(&mut self, bufs: &[Vec<f32>]) {
+        // The same per-tick length the session adds to its own count.
+        self.pushed_total += bufs.first().map(Vec::len).unwrap_or(0) as u64;
         for (i, buf) in bufs.iter().enumerate() {
             if i >= self.channels.len() {
                 break;
@@ -294,6 +313,20 @@ impl SnapshotRingState {
 
         let delay_samples: Vec<i64> = self.delay_samples.iter().map(|d| d.unwrap_or(0)).collect();
 
+        // Ladder origins into ring coordinates (#221): the first stored
+        // sample is stream sample `pushed_total − n_frames`. Negative when
+        // the ladder started before the ring's retained window.
+        let first_stored = self.pushed_total as i64 - n_frames as i64;
+        let mtw: Vec<Option<MtwProvenance>> = (0..self.pairs.len())
+            .map(|k| {
+                let p = self.mtw.get(k)?.as_ref()?;
+                Some(MtwProvenance {
+                    origin: p.origin - first_stored,
+                    ..p.clone()
+                })
+            })
+            .collect();
+
         let meta = SnapshotMeta {
             format_version: ac_core::snapshot::FORMAT_VERSION,
             sr: self.sr,
@@ -302,7 +335,8 @@ impl SnapshotRingState {
             session: SessionMeta {
                 pairs: self.pairs.clone(),
                 delay_samples,
-                nperseg: self.sr as usize,
+                nperseg: ac_core::visualize::transfer::h1_nperseg(self.sr),
+                mtw: Some(mtw),
             },
             captured_at_utc: chrono::Utc::now().to_rfc3339(),
             daemon_version: daemon_version.to_string(),
@@ -605,6 +639,44 @@ mod tests {
             "delay_samples must have one entry per pair before the first sync"
         );
         build_acsnap(&meta, &channels).expect("first-tick snapshot must write");
+    }
+
+    /// #221: a ladder origin recorded as an absolute stream count lands at
+    /// its ring position — negative once the ring has dropped the ladder's
+    /// first sample — and a pair with no ladder stays `None`.
+    #[test]
+    fn ladder_origin_converts_to_ring_coordinates_at_capture() {
+        let mut ring = SnapshotRingState::new(
+            48_000,
+            vec![0, 1, 2],
+            100,
+            vec![(0, 1), (0, 2)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None, None],
+        );
+        for _ in 0..5 {
+            ring.push_tick(&[vec![0.1; 30], vec![0.2; 30], vec![0.3; 30]]);
+        }
+        assert_eq!(ring.pushed_total(), 150);
+        let prov =
+            |origin| MtwProvenance::for_layout(48_000, 7, origin, 4, 48.0, 20.0, 24_000.0).unwrap();
+        ring.mtw = vec![Some(prov(60)), None];
+        let (meta, channels) = ring.snapshot_meta_and_channels("test").unwrap();
+        // 150 pushed, 100 held: the ring starts at stream sample 50.
+        let mtw = meta.session.mtw.clone().unwrap();
+        assert_eq!(mtw[0].as_ref().map(|p| p.origin), Some(10));
+        assert_eq!(mtw[0].as_ref().map(|p| p.offset), Some(7));
+        assert!(mtw[1].is_none());
+        build_acsnap(&meta, &channels).expect("v3 snapshot with a ladder must write");
+
+        ring.push_tick(&[vec![0.1; 30], vec![0.2; 30], vec![0.3; 30]]);
+        let (meta, _) = ring.snapshot_meta_and_channels("test").unwrap();
+        assert_eq!(
+            meta.session.mtw.unwrap()[0].as_ref().map(|p| p.origin),
+            Some(-20),
+            "an origin the ring has dropped must go negative, not clamp"
+        );
     }
 
     /// #188: a pending ring refuses to produce snapshot metadata, tolerates

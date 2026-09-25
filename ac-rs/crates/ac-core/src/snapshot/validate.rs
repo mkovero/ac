@@ -22,6 +22,11 @@
 //!    any reorder of `per_channel` against the audio — a same-role swap, or
 //!    `channel_map` and `per_channel` permuted together — moves a digest
 //!    off its stream.
+//! 8. Format v3 (#221): `session.mtw` is present with one entry per
+//!    `session.pairs` entry; v1 and v2 must not carry it. Whether an entry's
+//!    ladder is one the reader builds is not checked here: that is
+//!    [`crate::visualize::mtw::replay`]'s refusal, at derivation time, so a
+//!    file from a later ladder still opens and says why it cannot replay.
 //!
 //! Deliberately **not** rules, because the daemon writes both cases: unique
 //! roles (pairs `[[m,r1],[m,r2]]` give two `"ref"` channels) and
@@ -43,7 +48,7 @@ use anyhow::{anyhow, Result};
 
 use super::SnapshotMeta;
 
-/// Rules 1 (metadata half), 2, 3, 4, 5, 6 and 7's presence/shape half —
+/// Rules 1 (metadata half), 2, 3, 4, 5, 6, 7's presence/shape half and 8 —
 /// everything that needs only `meta.json`. The reader runs this before
 /// decoding `audio.flac`.
 pub(super) fn validate_metadata(meta: &SnapshotMeta) -> Result<()> {
@@ -111,6 +116,29 @@ pub(super) fn validate_metadata(meta: &SnapshotMeta) -> Result<()> {
                 "per_channel[{i}].voltage_check is refused but per_channel[{i}].calibration \
                  carries vrms_at_0dbfs"
             ));
+        }
+    }
+
+    match (meta.format_version, session.mtw.as_ref()) {
+        (1 | 2, None) => {}
+        (v @ (1 | 2), Some(_)) => {
+            return Err(anyhow!(
+                "session.mtw present, but format_version {v} has no such field"
+            ));
+        }
+        (v, None) => {
+            return Err(anyhow!(
+                "session.mtw missing; format_version {v} requires it"
+            ));
+        }
+        (_, Some(m)) => {
+            if m.len() != session.pairs.len() {
+                return Err(anyhow!(
+                    "session.mtw has {} entries but session.pairs has {}",
+                    m.len(),
+                    session.pairs.len()
+                ));
+            }
         }
     }
 
@@ -256,6 +284,7 @@ mod tests {
                 pairs: vec![(0, 4), (0, 7)],
                 delay_samples: vec![0, 0],
                 nperseg: SR as usize,
+                mtw: Some(vec![None, None]),
             },
             captured_at_utc: "2026-01-01T00:00:00Z".to_string(),
             daemon_version: "test".to_string(),
@@ -372,6 +401,7 @@ mod tests {
                 pairs: vec![(0, 0)],
                 delay_samples: vec![0],
                 nperseg: SR as usize,
+                mtw: Some(vec![None]),
             },
             ..control_meta()
         };
@@ -545,10 +575,12 @@ mod tests {
     }
 
     fn v1_control_meta() -> SnapshotMeta {
-        SnapshotMeta {
+        let mut meta = SnapshotMeta {
             format_version: 1,
             ..control_meta()
-        }
+        };
+        meta.session.mtw = None;
+        meta
     }
 
     /// Worked case, v2: the two `"ref"` entries swapped in `meta.json` only.
@@ -558,7 +590,7 @@ mod tests {
     fn v2_same_role_per_channel_swap_is_refused() {
         let channels = worked_audio();
         let mut meta = written_meta(&channels);
-        assert_eq!(meta.format_version, 2);
+        assert_eq!(meta.format_version, FORMAT_VERSION);
         meta.per_channel.swap(0, 2); // ref/4 <-> ref/7, roles unchanged
         assert_eq!(
             read_err(&zip_by_hand(&meta, &channels)),
@@ -647,7 +679,7 @@ mod tests {
         meta.per_channel[1].stream_sha256 = None;
         assert_eq!(
             read_err(&zip_by_hand(&meta, &channels)),
-            "read_acsnap: per_channel[1].stream_sha256 missing; format_version 2 requires it"
+            "read_acsnap: per_channel[1].stream_sha256 missing; format_version 3 requires it"
         );
     }
 
@@ -720,7 +752,7 @@ mod tests {
         let v1 = read_acsnap(&zip_by_hand(&v1_control_meta(), &channels)).expect("v1 reads");
         let (bytes, _) = write_acsnap(&control_meta(), &channels).expect("write v2");
         let v2 = read_acsnap(&bytes).expect("v2 reads");
-        assert_eq!(v2.meta.format_version, 2);
+        assert_eq!(v2.meta.format_version, FORMAT_VERSION);
         for pair in 0..2 {
             let d1 = v1.derive_pair(pair, WeightingCurve::Z, None).unwrap();
             let d2 = v2.derive_pair(pair, WeightingCurve::Z, None).unwrap();
@@ -728,6 +760,72 @@ mod tests {
             assert_eq!(d1.h1.phase_deg, d2.h1.phase_deg, "pair {pair}");
             assert_eq!(d1.h1.coherence, d2.h1.coherence, "pair {pair}");
         }
+    }
+
+    // ---- #221: rule 8, `session.mtw` presence and shape ----
+
+    #[test]
+    fn v3_round_trips_session_mtw() {
+        use crate::visualize::mtw::replay::MtwProvenance;
+        let mut meta = control_meta();
+        let prov = MtwProvenance::for_layout(SR, -120, -4_000, 4, 48.0, 20.0, 24_000.0).unwrap();
+        meta.session.mtw = Some(vec![Some(prov), None]);
+        let (bytes, _) = write_acsnap(&meta, &short_audio(3)).expect("v3 with a ladder writes");
+        let snap = read_acsnap(&bytes).expect("and reads");
+        assert_eq!(snap.meta.session.mtw, meta.session.mtw);
+    }
+
+    #[test]
+    fn v3_without_session_mtw_is_refused() {
+        let mut meta = control_meta();
+        meta.session.mtw = None;
+        assert_read_rejects(
+            &meta,
+            3,
+            "session.mtw missing; format_version 3 requires it",
+        );
+        let err = match write_acsnap(&meta, &short_audio(3)) {
+            Ok(_) => panic!("write_acsnap wrote a v3 file with no session.mtw"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("session.mtw missing"), "{err}");
+    }
+
+    #[test]
+    fn v3_session_mtw_length_differing_from_pairs_is_refused() {
+        let mut meta = control_meta();
+        meta.session.mtw = Some(vec![None]);
+        assert_read_rejects(
+            &meta,
+            3,
+            "session.mtw has 1 entries but session.pairs has 2",
+        );
+    }
+
+    #[test]
+    fn v2_carrying_session_mtw_is_refused() {
+        let meta = SnapshotMeta {
+            format_version: 2,
+            ..control_meta()
+        };
+        assert_read_rejects(
+            &meta,
+            3,
+            "session.mtw present, but format_version 2 has no such field",
+        );
+    }
+
+    #[test]
+    fn v2_without_session_mtw_reads_with_no_ladder() {
+        let mut meta = SnapshotMeta {
+            format_version: 2,
+            ..control_meta()
+        };
+        meta.session.mtw = None;
+        let channels = short_audio(3);
+        let meta = with_digests(&meta, &channels);
+        let snap = read_acsnap(&zip_by_hand(&meta, &channels)).expect("v2 reads");
+        assert!(snap.meta.session.mtw.is_none());
     }
 
     #[test]

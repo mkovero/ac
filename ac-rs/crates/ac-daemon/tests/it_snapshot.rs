@@ -896,3 +896,247 @@ fn full_ib_parity_under_correlated_stimulus() {
         (live_spl - derived_spl).abs(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// #221 — the live ladder's columns, replayed from the snapshot
+// ---------------------------------------------------------------------------
+
+/// Tolerances for a replayed column against the live one.
+///
+/// The two inputs differ only where FLAC stores the ring: i24 rounding, and
+/// the i24 clamp at full scale. The design sized the bar on rounding alone
+/// (≈ LSB/√12 against a −10 dBFS source, ~1e-5 dB). That misses the larger
+/// term: the fake's correlated reference is a **full-scale** uniform source,
+/// so any drive added on top pushes its peaks past ±1 and the stored ring is
+/// clipped where the live ladder's input was not. Measured, the closest frame's
+/// worst column scales with the drive: 0.97 dB at −10 dBFS, 0.031 dB at
+/// −30 dBFS, 0.0055 dB at −40 dBFS. Hence the drive below is −40 dBFS, about
+/// half the magnitude bar, while coherence still falls below 1 (≈ 0.996). That
+/// keeps a replay from an origin one tick late 0.086 dB off, 8.6x the bar.
+/// The fake is seeded, so these figures repeat run to run. The observed maxima
+/// are printed.
+const MTW_TOL_DB: f64 = 0.01;
+const MTW_TOL_DEG: f64 = 0.1;
+const MTW_TOL_COH: f64 = 1e-4;
+
+/// Two `f64`s that differ by no more than a JSON parse can move them. The
+/// frame crosses the PUB socket as JSON and `serde_json`'s default parser is
+/// not guaranteed to round-trip the last bit — measured: the frame's
+/// `freqs`, `f_lo`, `f_hi`, `blend` and stage descriptions all miss exact
+/// equality with the in-process replay while every integer field matches.
+/// 1e-12 relative is four orders above that and far below any real
+/// difference in a column grid.
+fn parse_close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0)
+}
+
+fn all_parse_close(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| parse_close(x, y))
+}
+
+/// `None` when the column set or ladder description differs; otherwise the
+/// largest `(|Δmagnitude| dB, |Δphase| °, |Δcoherence|)` over all columns.
+fn mtw_deviation(
+    a: &ac_core::wire::MtwColumns,
+    b: &ac_core::wire::MtwColumns,
+) -> Option<(f64, f64, f64)> {
+    let stages_agree = a.stages.len() == b.stages.len()
+        && a.stages.iter().zip(&b.stages).all(|(x, y)| {
+            x.decim == y.decim
+                && all_parse_close(
+                    &[
+                        x.rate,
+                        x.df,
+                        x.window_s,
+                        x.hop_s,
+                        x.f_valid,
+                        x.f_top,
+                        x.blend_top,
+                        x.settling_s,
+                    ],
+                    &[
+                        y.rate,
+                        y.df,
+                        y.window_s,
+                        y.hop_s,
+                        y.f_valid,
+                        y.f_top,
+                        y.blend_top,
+                        y.settling_s,
+                    ],
+                )
+        });
+    let same_structure = all_parse_close(&a.freqs, &b.freqs)
+        && all_parse_close(&a.f_lo, &b.f_lo)
+        && all_parse_close(&a.f_hi, &b.f_hi)
+        && all_parse_close(&a.blend, &b.blend)
+        && a.stage == b.stage
+        && a.n == b.n
+        && a.bins == b.bins
+        && a.settled_stages == b.settled_stages
+        && stages_agree;
+    if !same_structure {
+        return None;
+    }
+    let mut worst = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..a.freqs.len() {
+        let dphi = (a.phase_deg[i] - b.phase_deg[i] + 180.0).rem_euclid(360.0) - 180.0;
+        worst.0 = worst.0.max((a.magnitude_db[i] - b.magnitude_db[i]).abs());
+        worst.1 = worst.1.max(dphi.abs());
+        worst.2 = worst.2.max((a.coherence[i] - b.coherence[i]).abs());
+    }
+    Some(worst)
+}
+
+fn within_mtw_tolerance(dev: Option<(f64, f64, f64)>) -> bool {
+    dev.is_some_and(|(db, deg, coh)| db <= MTW_TOL_DB && deg <= MTW_TOL_DEG && coh <= MTW_TOL_COH)
+}
+
+/// Every `mtw` block among the `transfer_stream` frames on the PUB socket
+/// until it has been quiet for `quiet_ms`, or `for_ms` have passed.
+fn collect_mtw_frames(c: &Client, for_ms: u64, quiet_ms: i32) -> Vec<ac_core::wire::MtwColumns> {
+    let deadline = Instant::now() + Duration::from_millis(for_ms);
+    let mut out = Vec::new();
+    while Instant::now() < deadline {
+        match c.recv_pub(quiet_ms) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                if !v["mtw"].is_null() {
+                    out.push(serde_json::from_value(v["mtw"].clone()).expect("mtw parses"));
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    out
+}
+
+/// #221: a snapshot reprocessed from stored state reproduces the live
+/// ladder's columns — the display's source — of a frame published around the
+/// capture instant. `full_ib_parity_under_correlated_stimulus` stays: it
+/// guards the Welch arrays, which IR, spectra and SPL still use.
+///
+/// The stimulus is two sources: the correlated pair plus the session's own
+/// drive, which the fake adds independently on each leg. Coherence therefore
+/// sits below 1 and each column depends on which blocks were averaged. Under
+/// a pure gain+delay stimulus every block agrees, and a replay on the wrong
+/// grid would pass.
+///
+/// The mutations are the claim that proves the daemon's origin bookkeeping,
+/// which the `ac-core` replay test cannot reach: the stored `origin` moved by
+/// one stage-0 hop, and the stored `offset` by 48 samples, must each match no
+/// received frame.
+#[test]
+fn snapshot_replays_the_live_ladder_columns_under_a_two_source_stimulus() {
+    use ac_core::snapshot::read_acsnap;
+    use ac_core::visualize::mtw::{ladder::HOP, replay::replay};
+    use ac_core::visualize::weighting_curves::WeightingCurve;
+
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    // Launch-time drive: the legacy form holds without keepalives, so the
+    // second source is on from the first tick and no drive edge flushes the
+    // lock mid-test. −40 dBFS: see `MTW_TOL_DB` for why not louder. The fake
+    // emits nothing physical. Gain 0.9 rather than 0.5: at 0.5 the meas stream
+    // hits the FLAC size defect (#661) and the snapshot is ~350 MB.
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+        "fake_correlated_pair": {"gain": 0.9, "delay_samples": 200},
+        "drive": true, "level_dbfs": -40.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    // Lock ~1 s, then the deepest rung's 2.56 s settling, plus margin.
+    thread::sleep(Duration::from_secs(6));
+
+    let mut frames = collect_mtw_frames(&c, 5_000, 30);
+    // Only the tail of what queued before the call can be the capture's frame.
+    let keep = frames.len().saturating_sub(10);
+    frames.drain(..keep);
+    let r = c.call(json!({"cmd": "snapshot"}));
+    assert_eq!(r["ok"], json!(true), "snapshot: {r}");
+    frames.extend(collect_mtw_frames(&c, 600, 600));
+    let id = r["id"].as_str().unwrap().to_string();
+    let bytes = fetch_all(&c, &id, 131_072);
+    let _ = c.call(json!({"cmd": "stop"}));
+    assert!(!frames.is_empty(), "no mtw frame around the snapshot call");
+
+    let snap = read_acsnap(&bytes).expect("read fetched .acsnap");
+    assert_eq!(snap.meta.format_version, 3);
+    let derived = snap
+        .derive_pair(0, WeightingCurve::Z, None)
+        .expect("derive_pair on fetched snapshot");
+    let replayed = derived
+        .mtw
+        .clone()
+        .expect("a locked pair's snapshot replays its ladder");
+    assert_eq!(
+        replayed.settled_stages,
+        vec![true; replayed.stages.len()],
+        "precondition: the ring must hold a fully settled replay"
+    );
+    let min_coh = replayed.coherence.iter().cloned().fold(1.0f64, f64::min);
+    assert!(
+        min_coh < 0.999,
+        "precondition: coherence {min_coh} — the drive must act as a second source, \
+         or a wrong grid cannot be told from the right one"
+    );
+
+    let devs: Vec<Option<(f64, f64, f64)>> =
+        frames.iter().map(|f| mtw_deviation(&replayed, f)).collect();
+    let best = devs
+        .iter()
+        .flatten()
+        .cloned()
+        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    eprintln!(
+        "#221 replay vs live: {} candidate frames, closest max |Δ| = {best:?} (dB, °, coherence)",
+        frames.len()
+    );
+    assert!(
+        devs.iter().any(|&dv| within_mtw_tolerance(dv)),
+        "the replayed snapshot matches no live frame around the capture within \
+         {MTW_TOL_DB} dB / {MTW_TOL_DEG}° / {MTW_TOL_COH}: closest {best:?}"
+    );
+
+    // ---- mutations: the daemon's bookkeeping, not the replay, is on trial ----
+    let pos = |input: u32| {
+        snap.meta
+            .per_channel
+            .iter()
+            .position(|c| c.input_channel == input)
+            .unwrap()
+    };
+    let (meas_ch, ref_ch) = snap.meta.session.pairs[0];
+    let (meas, reference) = (&snap.channels[pos(meas_ch)], &snap.channels[pos(ref_ch)]);
+    let prov = snap.meta.session.mtw.clone().unwrap()[0]
+        .clone()
+        .expect("pair 0 has a ladder");
+    for (name, wrong) in [
+        (
+            "origin + one stage-0 hop",
+            ac_core::snapshot::MtwProvenance {
+                origin: prov.origin + (HOP * prov.stages[0].decim) as i64,
+                ..prov.clone()
+            },
+        ),
+        (
+            "offset + 48 samples",
+            ac_core::snapshot::MtwProvenance {
+                offset: prov.offset + 48,
+                ..prov.clone()
+            },
+        ),
+    ] {
+        let alt = replay(meas, reference, snap.meta.sr, &wrong)
+            .expect("mutated replay runs")
+            .expect("mutated replay settles");
+        assert!(
+            !frames
+                .iter()
+                .any(|f| within_mtw_tolerance(mtw_deviation(&alt, f))),
+            "stored {name} still matches a live frame — the parity check cannot see a \
+             wrong origin or offset"
+        );
+    }
+}

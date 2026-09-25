@@ -566,7 +566,23 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         // arriving during a fan-out reads the previous tick's locks.
         // A lock only changes at acquisition, so the difference is
         // confined to the one tick a pair first locks on.
-        snapshot_ring.lock().unwrap().delay_samples = session.delay_samples();
+        //
+        // The ladder provenance rides the same sync (#221): after the tick,
+        // so a ladder built or flushed this tick is described as it now
+        // stands, and a snapshot taken mid-tick reads the previous tick's.
+        {
+            let mut ring = snapshot_ring.lock().unwrap();
+            ring.delay_samples = session.delay_samples();
+            ring.mtw = session.mtw_provenance();
+            // Both count the same `bufs`, so a ladder origin taken from one
+            // converts into the other's coordinates. If they ever part, every
+            // snapshot replays a different block set than the screen drew.
+            debug_assert_eq!(
+                ring.pushed_total(),
+                session.consumed,
+                "snapshot ring and session disagree about the stream length"
+            );
+        }
 
         for msg in messages {
             send_pub(pub_tx, "data", &msg);
