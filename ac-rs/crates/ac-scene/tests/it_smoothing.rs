@@ -7,10 +7,10 @@
 //! density. A uniform hand-written grid would let an index-based window pass.
 
 use ac_core::visualize::mtw::ladder;
+use ac_core::wire::TransferFrame;
 use ac_scene::transfer::{
     DerotMode, DisplayModes, MeterState, Smoothing, TransferScene, COHERENCE_THRESHOLD,
 };
-use ac_core::wire::TransferFrame;
 use ac_scene::{FaultState, TransferInput};
 use serde_json::json;
 

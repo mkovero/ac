@@ -6,9 +6,9 @@
 //! is derived directly from the checked-in `.acsnap` via
 //! `Snapshot::derive_pair`, deliberately — that's what makes the
 //! wire-vs-snapshot equivalence test (AC4) sound, since both scenes
-//! come from the same underlying data. But it means `ac-scene`'s
-//! `WireFrame` deserializer has never actually parsed a frame that came
-//! off a real ZMQ socket: field-name drift, JSON number formatting,
+//! come from the same underlying data. But it means the
+//! `ac_core::wire::TransferFrame` deserializer `ac-scene` reads through
+//! would never parse a frame that came off a real ZMQ socket: field-name drift, JSON number formatting,
 //! null handling, and tag-string vocabulary all go untested by a
 //! fixture built from Rust struct literals. This regenerator captures
 //! **one real DATA frame's raw bytes, verbatim**, from an actual

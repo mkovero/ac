@@ -169,7 +169,10 @@ mod tests {
 
     #[test]
     fn absent_wire_version_is_accepted() {
-        assert_eq!(check_wire_version(&json!({"type": "transfer_stream"})), Ok(()));
+        assert_eq!(
+            check_wire_version(&json!({"type": "transfer_stream"})),
+            Ok(())
+        );
     }
 
     #[test]
@@ -197,7 +200,10 @@ mod tests {
 
     #[test]
     fn supported_label_collapses_a_one_version_range() {
-        assert_eq!(MIN_WIRE_VERSION, WIRE_VERSION, "update this test's expectation");
+        assert_eq!(
+            MIN_WIRE_VERSION, WIRE_VERSION,
+            "update this test's expectation"
+        );
         assert_eq!(WireVersionError::supported_label(), "v1");
     }
 

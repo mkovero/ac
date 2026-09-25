@@ -188,6 +188,9 @@ mod tests {
         let v = json!({"channel": 0, "freqs": [1.0, 2.0], "spectrum": [null, 0.5]});
         let f: SpectrumFrame = serde_json::from_value(v).unwrap();
         assert!(f.spectrum[0].is_nan());
-        assert_eq!(serde_json::to_value(&f).unwrap()["spectrum"], json!([null, 0.5]));
+        assert_eq!(
+            serde_json::to_value(&f).unwrap()["spectrum"],
+            json!([null, 0.5])
+        );
     }
 }

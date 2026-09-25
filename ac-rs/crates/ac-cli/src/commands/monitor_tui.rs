@@ -141,7 +141,11 @@ impl Refusal {
 pub fn refusal_exit_lines(r: &Refusal) -> [String; 2] {
     [
         format!("ac monitor: version mismatch — {}", r.endpoint),
-        format!("ac monitor: {} — {} frames refused", r.versions(), r.refused),
+        format!(
+            "ac monitor: {} — {} frames refused",
+            r.versions(),
+            r.refused
+        ),
     ]
 }
 

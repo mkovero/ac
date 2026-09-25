@@ -467,6 +467,9 @@ mod tests {
             "coherence": [1.0], "n": [4]
         });
         let m: MtwColumns = serde_json::from_value(v).expect("deserialize");
-        assert_eq!(serde_json::to_value(&m).unwrap()["n"], serde_json::json!([4]));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap()["n"],
+            serde_json::json!([4])
+        );
     }
 }

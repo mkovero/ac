@@ -206,15 +206,31 @@ Unit tests in `audio::{jack_backend, cpal_backend, fake}`, `gpio`, and the
 `it_loopback_ir`.
 
 `it_zmq_doc_parity` is the only test here that can fail because a *document*
-is wrong. `ZMQ.md` is the sole statement of the wire contract — the daemon
-emits frames inline, `ac-scene` and `ac-cli` each parse them separately, and
-nothing ties the three together at compile time — so it can drift from the
-code silently, and has. The test compares the command roster in both
-directions against the `COMMANDS` table in `server.rs`, and compares the
-documented reply keys of the read-only commands against a live `--fake-audio`
-daemon. It also sends every dispatched command an unrecognised top-level
-field and requires the refusal that names it (#628). It does not check DATA payloads, field types or values: a green run
-means the roster and the read-only replies agree, not that the prose is true.
+is wrong. `ZMQ.md` states the wire contract in prose, and nothing but this
+test ties the prose to the code, so it can drift silently, and has. The test
+compares the command roster in both directions against the `COMMANDS` table in
+`server.rs`, and compares the documented reply keys of the read-only commands
+against a live `--fake-audio` daemon. It also sends every dispatched command
+an unrecognised top-level field and requires the refusal that names it (#628).
+For the four typed DATA frames (`transfer_stream`, `visualize/ir`,
+`visualize/spectrum`, `measurement/loudness`) it captures live frames, reads
+them through their `ac_core::wire` type, and requires the key set that type
+writes — nested keys included — to equal the frame's `ZMQ.md` block. That is
+the guard for a field no consumer reads: renaming `LoudnessFrame::lra_lu`
+compiles everywhere and fails here. It does not check the untyped frames'
+payloads, the keys inside `cal_tags` / `delay_evidence`, field types or
+values: a green run means the roster, the read-only replies and the typed
+frames' keys agree, not that the prose is true.
+
+The four typed frames have three more guards (#112). Characterisation tests
+(`handlers/transfer/frame/tests.rs`, `it_protocol::monitor`) pin each frame's
+exact key set, so a key the shared type forgets cannot vanish from the wire.
+Lossless round trips (`to_value(from_value::<T>(v)) == v`) run on builder
+output and on live `--fake-audio` frames (`it_protocol::{transfer,monitor}`),
+and assert `wire_version`. Consumer read-back tests feed builder output
+through `ac-scene`'s `TransferInput` / `FaultInput` / `IrInput` and through
+`ac monitor`'s `stats_from_frame`. A field renamed on the shared type with an
+in-tree reader breaks that reader's build.
 
 `it_protocol::monitor_soak` is the temporal (onset-delay) gate for the
 `monitor_spectrum` pipeline. The monitor tests beside it settle, read one frame
