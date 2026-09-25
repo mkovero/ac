@@ -153,12 +153,42 @@ impl WireError {
         let mut out = format!("{headline} \u{2014} {} {}", self.field, self.problem.text());
         let lines =
             std::iter::once(("received", &*received)).chain(trailers.iter().map(|&(l, v)| (l, v)));
-        for (label, value) in lines {
-            out.push('\n');
-            out.push_str(TRAILER_INDENT);
-            out.push_str(&format!("{label:<width$}  {value}"));
-        }
+        push_trailer_lines(&mut out, width, lines);
         out
+    }
+}
+
+/// A refusal with no single out-of-domain wire value, so no `received`
+/// line (#642): `<headline> — <subject>`, then each `(label, value)`
+/// trailer with the same indent and label padding as
+/// [`WireError::refusal`]. Values are shown as given; a caller that wants
+/// numbers aligned pads them.
+pub(crate) fn trailer_refusal(headline: &str, subject: &str, trailers: &[(&str, &str)]) -> String {
+    let width = trailers
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    debug_assert!(
+        width <= MAX_TRAILER_LABEL_CHARS,
+        "refusal label column {width} is wider than {MAX_TRAILER_LABEL_CHARS}"
+    );
+    let mut out = format!("{headline} \u{2014} {subject}");
+    push_trailer_lines(&mut out, width, trailers.iter().map(|&(l, v)| (l, v)));
+    out
+}
+
+/// Append each `(label, value)` as a new line: [`TRAILER_INDENT`], the
+/// label padded to `width`, two spaces, the value.
+fn push_trailer_lines<'a>(
+    out: &mut String,
+    width: usize,
+    lines: impl Iterator<Item = (&'a str, &'a str)>,
+) {
+    for (label, value) in lines {
+        out.push('\n');
+        out.push_str(TRAILER_INDENT);
+        out.push_str(&format!("{label:<width$}  {value}"));
     }
 }
 
@@ -689,6 +719,18 @@ mod tests {
         assert!(
             text.contains("\n         data          existing curve unchanged"),
             "{text}"
+        );
+    }
+
+    /// #642: the sibling layout has no `received` line and pads labels to
+    /// the widest one given, with the same indent as `WireError::refusal`.
+    #[test]
+    fn trailer_refusal_has_no_received_line() {
+        assert_eq!(
+            trailer_refusal("x stopped", "thing too big", &[("a", "1"), ("long", "2")]),
+            "x stopped \u{2014} thing too big\n\
+             \x20        a     1\n\
+             \x20        long  2"
         );
     }
 

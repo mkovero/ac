@@ -313,7 +313,20 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         return;
     }
     let snapshot_ring = guard.snapshot_ring.clone();
-    snapshot_ring.lock().unwrap().start(sr);
+    // #642: the launch checked the ring's bytes against the probed rate;
+    // this holds if the engine started at a different one (a JACK server
+    // restarted in between). The CTRL `ok` is already sent, so the refusal
+    // goes out on PUB, and nothing has been allocated.
+    let started = snapshot_ring.lock().unwrap().start(sr);
+    if let Err(e) = started {
+        eng.stop();
+        send_pub(
+            pub_tx,
+            "error",
+            &json!({"cmd":"transfer_stream","message":e.refusal("transfer stopped")}),
+        );
+        return;
+    }
 
     // Analysis window: the last `n_averages` Welch blocks, cut on the
     // **stream's own** `k·step` lattice rather than from the head of a
@@ -701,7 +714,12 @@ mod tests {
 
     /// Start the ring and add a spool entry, as a running worker would.
     fn fill_worker_slots(guard: &TransferSessionGuard) {
-        guard.snapshot_ring.lock().unwrap().start(48_000);
+        guard
+            .snapshot_ring
+            .lock()
+            .unwrap()
+            .start(48_000)
+            .expect("a 0.01 s ring fits the ceiling");
         guard.snapshot_spool.lock().unwrap().insert(
             "snap".to_string(),
             SpoolEntry {

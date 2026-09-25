@@ -342,6 +342,13 @@ impl AudioEngine for CpalEngine {
         self.sample_rate
     }
 
+    /// The default output config's rate — the same source `start` sets
+    /// `sample_rate` from (#642).
+    fn probe_sample_rate(&self) -> Option<u32> {
+        let dev = cpal::default_host().default_output_device()?;
+        Some(dev.default_output_config().ok()?.sample_rate().0)
+    }
+
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
         let buf = generate_sine_1s(freq_hz, amplitude, self.sample_rate);
         *self.state.tone_buf.lock().unwrap() = buf;

@@ -588,7 +588,36 @@ pub(super) const MAX_IR_WINDOW_SAMPLES: usize = 1_048_576;
 /// test sends (60 s); neither `ac-cli` nor `ac-view` sends the key, so the
 /// default is the only value in use. A `u32` so the refusal text renders it
 /// exactly.
+///
+/// This bounds seconds only; channels × seconds × rate is bounded in memory
+/// by [`MAX_SNAPSHOT_RING_BYTES`] (#642).
 pub(super) const MAX_SNAPSHOT_RING_S: u32 = 300;
+
+/// Largest snapshot ring one `transfer_stream` session may reserve, in bytes
+/// (#642): channels × `ring_cap_samples(snapshot_ring_s, rate)` × bytes per
+/// sample. A launch whose ring would exceed it is refused before any
+/// allocation; a ring exactly at it is accepted.
+///
+/// Provenance: assumed — a policy choice. The default `snapshot_ring_s`
+/// (30 s) on the widest supported interface (FF400, 18 capture channels) at
+/// its highest rate (192 kHz) is 18 × 30 × 192 000 × 4 B = 414.72 MB, which
+/// fits with 2.4× headroom; 300 s still fits up to 4 channels at 192 kHz or
+/// 8 at 96 kHz (921.6 MB). The ring only: `snapshot` clones the ring before
+/// encoding, so the transient peak is about twice this, at most about
+/// 2 GB. Per session, which is also per daemon for this ring: at most one
+/// `transfer_stream` runs at a time.
+///
+/// Bytes per sample — provenance: measured. 4 B
+/// (`snapshot::RING_BYTES_PER_SAMPLE`): 192 000 B per channel-second at
+/// 48 kHz and 768 000 B at 192 kHz, read as `VecDeque::capacity` ×
+/// `size_of::<f32>()` on a 1 s ring after `start` and after three
+/// capacities' worth of uneven 4099-sample ticks (steady state equals the
+/// reservation). Test `ring_footprint_measured_at_48k_and_192k` in
+/// `handlers/snapshot.rs`, run 2026-09-25 on the x86_64 dev VM (`ai`). The
+/// pre-#642 extend-then-pop `push_tick`, measured in the same test, settled
+/// at 384 000 and 1 536 000 B per channel-second — twice the cap — which is
+/// why `push_tick` now drops before it extends.
+pub(super) const MAX_SNAPSHOT_RING_BYTES: u64 = 1_000_000_000;
 
 /// Longest `monitor_spectrum.channels` list the daemon accepts (#635).
 ///

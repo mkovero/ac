@@ -32,7 +32,7 @@ use ac_core::snapshot::{ChannelMeta, SessionMeta, SnapshotMeta};
 use crate::server::ServerState;
 
 use super::wire::Problem;
-use super::MAX_SNAPSHOT_RING_S;
+use super::{MAX_SNAPSHOT_RING_BYTES, MAX_SNAPSHOT_RING_S};
 
 /// A `snapshot_ring_s` that has passed [`RingSeconds::new`]: finite, > 0 and
 /// at most [`MAX_SNAPSHOT_RING_S`] (#635). The only way to size a ring, so
@@ -82,6 +82,84 @@ pub(crate) fn ring_cap_samples(ring_s: RingSeconds, sr: u32) -> usize {
         "ring of {samples} samples overflows its byte count"
     );
     samples
+}
+
+/// Bytes the ring holds per sample per channel, as measured from the real
+/// allocation (`VecDeque::capacity` after steady state), not from the wire
+/// format. See [`MAX_SNAPSHOT_RING_BYTES`] for the measurement.
+pub(crate) const RING_BYTES_PER_SAMPLE: u128 = 4;
+
+/// A snapshot ring whose byte count is above [`MAX_SNAPSHOT_RING_BYTES`]
+/// (#642): the three factors, and the product they reach.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RingTooLarge {
+    pub(crate) needs_bytes: u128,
+    pub(crate) channels: usize,
+    pub(crate) ring_s: RingSeconds,
+    pub(crate) sr: u32,
+}
+
+impl RingTooLarge {
+    /// The refusal text under `headline` — `transfer not started` before the
+    /// CTRL reply, `transfer stopped` after it. What arrived and the bound;
+    /// it does not rank the factors, since the daemon cannot know which one
+    /// the operator can change.
+    pub(crate) fn refusal(&self, headline: &str) -> String {
+        let needs = format_mb(self.needs_bytes);
+        let ceiling = format_mb(u128::from(MAX_SNAPSHOT_RING_BYTES));
+        let w = needs.len().max(ceiling.len());
+        let needs = format!("{needs:>w$} MB");
+        let ceiling = format!("{ceiling:>w$} MB");
+        let channels = self.channels.to_string();
+        let ring_s = format!("{} s", self.ring_s.get());
+        let rate = format!("{} Hz", self.sr);
+        super::wire::trailer_refusal(
+            headline,
+            "snapshot ring exceeds the memory ceiling",
+            &[
+                ("needs", &needs),
+                ("ceiling", &ceiling),
+                ("channels", &channels),
+                ("snapshot_ring_s", &ring_s),
+                ("rate", &rate),
+                ("source", "config.json"),
+            ],
+        )
+    }
+}
+
+/// `b` bytes as MB (10⁶ B) with six decimals, from integers: exact to the
+/// byte, so no over-ceiling count can print equal to the ceiling.
+fn format_mb(b: u128) -> String {
+    format!("{}.{:06}", b / 1_000_000, b % 1_000_000)
+}
+
+/// The bytes a ring of `channels` channels, `ring_s` long at `sr`, reserves:
+/// `channels × ring_cap_samples × RING_BYTES_PER_SAMPLE`. Takes its sample
+/// count from [`ring_cap_samples`], the same function [`SnapshotRingState::start`]
+/// sizes the allocation with, so the check and the allocation cannot drift
+/// apart. `u128`: `usize × usize × 4` cannot overflow it.
+pub(crate) fn ring_bytes(channels: usize, ring_s: RingSeconds, sr: u32) -> u128 {
+    channels as u128 * ring_cap_samples(ring_s, sr) as u128 * RING_BYTES_PER_SAMPLE
+}
+
+/// `Ok(bytes)` when the ring fits [`MAX_SNAPSHOT_RING_BYTES`] — a ring
+/// exactly at the ceiling is accepted — else the refusal's inputs (#642).
+pub(crate) fn check_ring_bytes(
+    channels: usize,
+    ring_s: RingSeconds,
+    sr: u32,
+) -> Result<u128, RingTooLarge> {
+    let needs_bytes = ring_bytes(channels, ring_s, sr);
+    if needs_bytes > u128::from(MAX_SNAPSHOT_RING_BYTES) {
+        return Err(RingTooLarge {
+            needs_bytes,
+            channels,
+            ring_s,
+            sr,
+        });
+    }
+    Ok(needs_bytes)
 }
 
 /// Max bytes returned per `snapshot_fetch` chunk (pre-base64; base64
@@ -188,15 +266,24 @@ impl SnapshotRingState {
 
     /// Fix the sample rate and allocate the cap; from here on `snapshot`
     /// can encode this ring. A no-op on a ring that is already started.
-    pub fn start(&mut self, sr: u32) {
-        let Some(ring_s) = self.pending_ring_s.take() else {
-            return;
+    ///
+    /// `Err` when the ring at this `sr` would exceed
+    /// [`MAX_SNAPSHOT_RING_BYTES`] (#642): nothing is allocated and the ring
+    /// stays pending. The launch checked the same product against the rate
+    /// the engine was probed at; this check holds whichever rate the engine
+    /// actually started at.
+    pub(crate) fn start(&mut self, sr: u32) -> Result<(), RingTooLarge> {
+        let Some(ring_s) = self.pending_ring_s else {
+            return Ok(());
         };
+        check_ring_bytes(self.channels.len(), ring_s, sr)?;
+        self.pending_ring_s = None;
         self.sr = sr;
         self.cap_samples = ring_cap_samples(ring_s, sr);
         for ch in &mut self.channels {
-            ch.reserve(self.cap_samples);
+            ch.reserve_exact(self.cap_samples);
         }
+        Ok(())
     }
 
     /// `false` between [`pending`](Self::pending) and [`start`](Self::start).
@@ -205,17 +292,25 @@ impl SnapshotRingState {
     }
 
     /// Push one tick's captured samples (same shape as `capture_multi`'s
-    /// return) into the ring, dropping from the front once over cap.
+    /// return) into the ring, keeping the newest `cap_samples`.
+    ///
+    /// Drops from the front *before* extending, and keeps only the newest
+    /// `cap_samples` of an oversized tick, so `len` never passes the cap and
+    /// the allocation never grows past what `start` reserved (#642). The
+    /// earlier extend-then-pop order pushed `len` over the cap on the first
+    /// tick after the ring filled, and `VecDeque` then doubled its capacity
+    /// for the rest of the session.
     pub fn push_tick(&mut self, bufs: &[Vec<f32>]) {
+        let cap = self.cap_samples;
         for (i, buf) in bufs.iter().enumerate() {
             if i >= self.channels.len() {
                 break;
             }
             let ring = &mut self.channels[i];
-            ring.extend(buf.iter().copied());
-            while ring.len() > self.cap_samples {
-                ring.pop_front();
-            }
+            let tail = &buf[buf.len() - buf.len().min(cap)..];
+            let overflow = (ring.len() + tail.len()).saturating_sub(cap);
+            ring.drain(..overflow);
+            ring.extend(tail.iter().copied());
         }
     }
 
@@ -624,7 +719,7 @@ mod tests {
         ring.push_tick(&[vec![0.1; 8], vec![0.2; 8]]);
         assert!(ring.snapshot_meta_and_channels("test").is_none());
 
-        ring.start(100);
+        ring.start(100).expect("a 50-sample ring fits the ceiling");
         assert!(ring.is_started());
         for _ in 0..20 {
             ring.push_tick(&[vec![0.1; 8], vec![0.2; 8]]);
@@ -709,5 +804,219 @@ mod tests {
             got, expected,
             "ring must hold exactly the newest {cap} samples, in order"
         );
+    }
+
+    /// The pre-#642 `push_tick` body, kept here only to measure what it
+    /// did to the allocation: extend first, then pop down to the cap.
+    fn rejected_push_tick(ring: &mut VecDeque<f32>, buf: &[f32], cap: usize) {
+        ring.extend(buf.iter().copied());
+        while ring.len() > cap {
+            ring.pop_front();
+        }
+    }
+
+    /// Uneven ticks (4099 samples, like real capture blocks of no fixed
+    /// size) totalling three times `cap`, so the ring wraps repeatedly.
+    fn ticks(cap: usize) -> Vec<Vec<f32>> {
+        let total = 3 * cap;
+        (0..total)
+            .step_by(4099)
+            .map(|start| {
+                (start..(start + 4099).min(total))
+                    .map(|v| v as f32)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// #642 criterion 1: bytes per channel-second of the ring, measured from
+    /// the real allocation (`VecDeque::capacity` after steady state) at 48 kHz
+    /// and 192 kHz, against the rejected extend-then-pop order computed in
+    /// the same test. Run with `--nocapture` to print the figures quoted on
+    /// `MAX_SNAPSHOT_RING_BYTES`.
+    #[test]
+    fn ring_footprint_measured_at_48k_and_192k() {
+        let ring_s = RingSeconds::new(1.0).unwrap();
+        for sr in [48_000u32, 192_000] {
+            let mut ring = SnapshotRingState::pending(
+                ring_s,
+                vec![0, 1],
+                vec![(0, 1)],
+                "Z".to_string(),
+                "fast".to_string(),
+                vec![None, None],
+            );
+            ring.start(sr).expect("a 1 s ring fits the ceiling");
+            let cap = ring_cap_samples(ring_s, sr);
+            let reserved = ring.channels[0].capacity();
+
+            let mut rejected: VecDeque<f32> = VecDeque::new();
+            rejected.reserve(cap);
+            for t in ticks(cap) {
+                ring.push_tick(&[t.clone(), t.clone()]);
+                rejected_push_tick(&mut rejected, &t, cap);
+            }
+
+            let size = std::mem::size_of::<f32>();
+            let per_ch_s = |capacity: usize| (capacity * size) as f64 / ring_s.get();
+            eprintln!(
+                "sr {sr}: reserved {} B/ch·s, steady {} B/ch·s; rejected order steady {} B/ch·s",
+                per_ch_s(reserved),
+                per_ch_s(ring.channels[0].capacity()),
+                per_ch_s(rejected.capacity()),
+            );
+            for ch in &ring.channels {
+                assert_eq!(ch.len(), cap);
+                assert_eq!(
+                    ch.capacity(),
+                    reserved,
+                    "the ring must not grow past what start reserved"
+                );
+            }
+            assert_eq!(
+                (reserved * size) as u128,
+                cap as u128 * RING_BYTES_PER_SAMPLE,
+                "RING_BYTES_PER_SAMPLE must match the measured allocation"
+            );
+            assert!(
+                rejected.capacity() > cap,
+                "the rejected order is expected to grow past the cap"
+            );
+            assert_eq!(
+                ring.channels[0].iter().copied().collect::<Vec<_>>(),
+                rejected.iter().copied().collect::<Vec<_>>(),
+                "the fix must keep exactly what the rejected order kept"
+            );
+        }
+    }
+
+    /// #642 coupled constants: the bytes `start` reserves across every
+    /// channel equal the count the ceiling check compares.
+    #[test]
+    fn start_reserves_exactly_the_checked_bytes() {
+        let ring_s = RingSeconds::new(0.37).unwrap();
+        let chans = vec![0, 3, 5];
+        let mut ring = SnapshotRingState::pending(
+            ring_s,
+            chans.clone(),
+            vec![(0, 3), (5, 3)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None, None, None],
+        );
+        let checked = check_ring_bytes(chans.len(), ring_s, 96_000).unwrap();
+        ring.start(96_000).unwrap();
+        let reserved: u128 = ring
+            .channels
+            .iter()
+            .map(|c| (c.capacity() * std::mem::size_of::<f32>()) as u128)
+            .sum();
+        assert_eq!(reserved, checked);
+    }
+
+    /// #642: an oversized tick keeps its newest `cap` samples, in order, and
+    /// does not grow the allocation.
+    #[test]
+    fn oversized_tick_keeps_newest_cap_samples() {
+        let mut ring = SnapshotRingState::pending(
+            RingSeconds::new(0.1).unwrap(),
+            vec![0],
+            vec![(0, 0)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None],
+        );
+        ring.start(100).unwrap();
+        let reserved = ring.channels[0].capacity();
+        ring.push_tick(&[vec![-1.0; 4]]);
+        ring.push_tick(&[(0..25).map(|v| v as f32).collect()]);
+        let got: Vec<f32> = ring.channels[0].iter().copied().collect();
+        assert_eq!(got, (15..25).map(|v| v as f32).collect::<Vec<_>>());
+        assert_eq!(ring.channels[0].capacity(), reserved);
+    }
+
+    /// #642: a ring over the ceiling is refused by `start` before anything is
+    /// allocated, and stays pending.
+    #[test]
+    fn start_over_ceiling_allocates_nothing() {
+        let ring_s = RingSeconds::new(289.3519).unwrap();
+        let mut ring = SnapshotRingState::pending(
+            ring_s,
+            (0..18).collect(),
+            vec![(0, 1)],
+            "Z".to_string(),
+            "fast".to_string(),
+            vec![None; 18],
+        );
+        let err = ring.start(48_000).unwrap_err();
+        assert_eq!(err.needs_bytes, 1_000_000_152);
+        assert_eq!((err.channels, err.sr), (18, 48_000));
+        assert!(!ring.is_started(), "a refused ring stays pending");
+        for ch in &ring.channels {
+            assert_eq!(ch.capacity(), 0, "refused before allocation");
+        }
+        ring.push_tick(&vec![vec![0.5; 64]; 18]);
+        assert_eq!(ring.channels[0].capacity(), 0, "a pending ring never grows");
+    }
+
+    /// #642 criterion 6: the bound is reachable from both sides — a ring of
+    /// exactly `MAX_SNAPSHOT_RING_BYTES` is accepted, one sample per channel
+    /// more is refused.
+    #[test]
+    fn ceiling_accepts_exactly_the_limit_and_refuses_one_sample_more() {
+        // 20 ch × 12 500 000 samples × 4 B = 10⁹ B.
+        let at = RingSeconds::new(12_500_000.0 / 48_000.0).unwrap();
+        assert_eq!(ring_cap_samples(at, 48_000), 12_500_000);
+        assert_eq!(
+            check_ring_bytes(20, at, 48_000),
+            Ok(u128::from(MAX_SNAPSHOT_RING_BYTES))
+        );
+        let over = RingSeconds::new(12_500_001.0 / 48_000.0).unwrap();
+        assert_eq!(ring_cap_samples(over, 48_000), 12_500_001);
+        let err = check_ring_bytes(20, over, 48_000).unwrap_err();
+        assert_eq!(err.needs_bytes, 1_000_000_080);
+    }
+
+    /// #642: the refusal blocks as UX specified them, character for
+    /// character — just over the ceiling, a typical over, and the widest.
+    #[test]
+    fn ring_refusal_text_matches_ux() {
+        let refuse = |channels: usize, ring_s: f64, sr: u32| {
+            check_ring_bytes(channels, RingSeconds::new(ring_s).unwrap(), sr).unwrap_err()
+        };
+        assert_eq!(
+            refuse(18, 289.3519, 48_000).refusal("transfer not started"),
+            "transfer not started \u{2014} snapshot ring exceeds the memory ceiling\n\
+             \x20        needs            1000.000152 MB\n\
+             \x20        ceiling          1000.000000 MB\n\
+             \x20        channels         18\n\
+             \x20        snapshot_ring_s  289.3519 s\n\
+             \x20        rate             48000 Hz\n\
+             \x20        source           config.json"
+        );
+        assert_eq!(
+            refuse(6, 300.0, 192_000).refusal("transfer stopped"),
+            "transfer stopped \u{2014} snapshot ring exceeds the memory ceiling\n\
+             \x20        needs            1382.400000 MB\n\
+             \x20        ceiling          1000.000000 MB\n\
+             \x20        channels         6\n\
+             \x20        snapshot_ring_s  300 s\n\
+             \x20        rate             192000 Hz\n\
+             \x20        source           config.json"
+        );
+        let widest = refuse(64, 300.0, 192_000).refusal("transfer not started");
+        assert_eq!(
+            widest,
+            "transfer not started \u{2014} snapshot ring exceeds the memory ceiling\n\
+             \x20        needs            14745.600000 MB\n\
+             \x20        ceiling           1000.000000 MB\n\
+             \x20        channels         64\n\
+             \x20        snapshot_ring_s  300 s\n\
+             \x20        rate             192000 Hz\n\
+             \x20        source           config.json"
+        );
+        for line in widest.lines() {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
     }
 }

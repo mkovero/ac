@@ -34,6 +34,13 @@ pub trait AudioEngine: Send + 'static {
     /// Sample rate in Hz.
     fn sample_rate(&self) -> u32;
 
+    /// The rate this engine would run at if started now, read from the
+    /// backend without starting it — never a placeholder held before
+    /// `start` (#642). `None` when the backend cannot say; a caller that
+    /// needs the rate then learns it from [`sample_rate`](Self::sample_rate)
+    /// after `start`. Not cached: a restarted JACK server can change it.
+    fn probe_sample_rate(&self) -> Option<u32>;
+
     /// Set continuous sine tone output.
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64);
 

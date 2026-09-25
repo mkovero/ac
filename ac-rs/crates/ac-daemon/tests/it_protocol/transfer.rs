@@ -531,6 +531,55 @@ fn transfer_stream_refuses_out_of_domain_ring_from_config() {
     let _ = c.wait_for_topic("done", Duration::from_secs(5));
 }
 
+/// #642: a ring whose channels × `snapshot_ring_s` × rate exceeds the
+/// memory ceiling is refused on the CTRL reply, with the product, the
+/// ceiling and all three factors, and no worker starts. The fake engine
+/// runs at 48 kHz with 20 capture ports: 18 channels × round(289.3519 ×
+/// 48 000) × 4 B = 1 000 000 152 B, 152 B over.
+///
+/// Precedence: a `snapshot_ring_s` that breaks its own #635 bound gets the
+/// #635 text even when the product is also over the ceiling.
+#[test]
+fn transfer_stream_refuses_ring_over_memory_ceiling() {
+    let pairs: Vec<[u32; 2]> = (0..9).map(|i| [2 * i, 2 * i + 1]).collect();
+
+    let d = Daemon::spawn_with_config(Some(json!({"snapshot_ring_s": 289.3519})));
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "transfer_stream", "pairs": pairs}));
+    assert_eq!(
+        r["ok"],
+        json!(false),
+        "over the ceiling must be refused: {r}"
+    );
+    assert_eq!(
+        r["error"].as_str().unwrap_or_default(),
+        "transfer not started \u{2014} snapshot ring exceeds the memory ceiling\n\
+         \x20        needs            1000.000152 MB\n\
+         \x20        ceiling          1000.000000 MB\n\
+         \x20        channels         18\n\
+         \x20        snapshot_ring_s  289.3519 s\n\
+         \x20        rate             48000 Hz\n\
+         \x20        source           config.json"
+    );
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(s["ok"], json!(true), "daemon must still answer: {s}");
+    assert_eq!(s["busy"], json!(false), "no worker may start: {s}");
+
+    let d = Daemon::spawn_with_config(Some(json!({"snapshot_ring_s": 1000000.0})));
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "transfer_stream", "pairs": pairs}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(
+        r["error"].as_str().unwrap_or_default(),
+        "transfer not started \u{2014} snapshot_ring_s must be at most 300 s\n\
+         \x20        received  1000000.0\n\
+         \x20        source    config.json",
+        "the #635 per-field refusal runs before the memory ceiling"
+    );
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(s["busy"], json!(false), "no worker may start: {s}");
+}
+
 #[test]
 fn transfer_stream_refuses_mic_curve_on_reference_channel() {
     // #101 (H): H1 is a ratio. Applying a mic-curve to the reference
