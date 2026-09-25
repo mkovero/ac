@@ -718,6 +718,9 @@ fn render_tau_declared_latency_leg(
 /// xrun-first in the daemon). States which lifecycle and how many, never
 /// that τ itself is wrong — the instrument cannot know that, only that a
 /// dropout happened during the reading that was supposed to measure it.
+/// The per-reading counts are evidence for the `Delay:` headline, so they
+/// sit at the block's evidence indent rather than in the warning register
+/// (#130).
 fn render_tau_xrun_leg(data: &serde_json::Value) -> Vec<String> {
     let r1 = data
         .get("tau_reading1_xruns")
@@ -743,12 +746,14 @@ fn render_tau_xrun_leg(data: &serde_json::Value) -> Vec<String> {
 
     if r1 > 0 {
         lines.push(format!(
-            "  !! reading 1: {r1} xrun(s) during that lifecycle"
+            "{TAU_EVIDENCE_INDENT}reading 1: {} during that lifecycle",
+            crate::io::xruns_text(r1)
         ));
     }
     if r2 > 0 {
         lines.push(format!(
-            "  !! reading 2: {r2} xrun(s) during that lifecycle"
+            "{TAU_EVIDENCE_INDENT}reading 2: {} during that lifecycle",
+            crate::io::xruns_text(r2)
         ));
     }
     lines
@@ -2214,7 +2219,7 @@ mod tests {
             lines,
             vec![
                 "  Delay:  not measured (xrun during reading 2 — not stored)".to_string(),
-                "  !! reading 2: 1 xrun(s) during that lifecycle".to_string(),
+                "          reading 2: 1 xrun during that lifecycle".to_string(),
             ]
         );
     }
@@ -2228,8 +2233,13 @@ mod tests {
         });
         let lines = render_tau_xrun_leg(&data);
         assert_eq!(lines.len(), 3, "got {lines:?}");
-        assert!(lines[1].contains("reading 1: 2 xrun"));
-        assert!(lines[2].contains("reading 2: 1 xrun"));
+        assert_eq!(
+            lines[1..],
+            [
+                "          reading 1: 2 xruns during that lifecycle",
+                "          reading 2: 1 xrun during that lifecycle",
+            ]
+        );
     }
 
     #[test]

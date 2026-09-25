@@ -111,6 +111,27 @@ fn bool_of(r: &serde_json::Value, key: &str) -> bool {
     r.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+/// A warning line in the post-table register: the `warning` label, then
+/// the message. The one form every run warning in `ac-cli` takes.
+pub fn warning_line(msg: &str) -> String {
+    format!("{}{msg}", label("warning"))
+}
+
+/// `1 xrun` / `{n} xruns`: the count and the condition, nothing else.
+pub fn xruns_text(n: u64) -> String {
+    if n == 1 {
+        "1 xrun".to_string()
+    } else {
+        format!("{n} xruns")
+    }
+}
+
+/// The warning line for a run's xrun count, or `None` for a clean run —
+/// zero xruns prints nothing.
+pub fn xrun_warning_line(xruns: u64) -> Option<String> {
+    (xruns > 0).then(|| warning_line(&xruns_text(xruns)))
+}
+
 fn points(n: usize) -> &'static str {
     if n == 1 {
         "point"
@@ -167,8 +188,12 @@ fn range_line(lbl: &str, lo: f64, hi: f64) -> String {
 ///
 /// Worst and average figures come from the points that are neither clipped
 /// nor AC-coupled; when every point is flagged they come from all points.
-/// Each warning line gives only a count and a condition; one continuation
-/// line under the last warning states how many points the figures used.
+/// Each warning line gives only a count and a condition. Order: the clip
+/// and AC-coupled warnings, then one continuation line under them stating
+/// how many points the figures used, then the xrun warning. The xrun line
+/// excludes no point, so an xrun-only run has no continuation line. With
+/// no results, only the xrun warning (if any) is returned, so a path that
+/// collected no points still reports its xruns.
 ///
 /// The noise-floor `worst` is the **highest** `noise_floor_dbfs` over that
 /// same set — the least favourable floor. The sign runs opposite to a worst
@@ -178,9 +203,14 @@ pub fn summary_lines(
     results: &[serde_json::Value],
     device_name: &str,
     have_cal: bool,
+    xruns: u64,
 ) -> Vec<String> {
+    let xrun_line = xrun_warning_line(xruns);
     if results.is_empty() {
-        return Vec::new();
+        return match xrun_line {
+            Some(l) => vec![String::new(), l, String::new()],
+            None => Vec::new(),
+        };
     }
     let n = results.len();
 
@@ -277,14 +307,14 @@ pub fn summary_lines(
     let mut warnings = Vec::new();
     for (count, what) in [(clipped_n, "clipped"), (ac_n, "AC-coupled")] {
         if count > 0 {
-            warnings.push(format!(
-                "{}{count} of {n} {} {what}",
-                label("warning"),
+            warnings.push(warning_line(&format!(
+                "{count} of {n} {} {what}",
                 points(n)
-            ));
+            )));
         }
     }
-    if !warnings.is_empty() {
+    let has_flag_warnings = !warnings.is_empty();
+    if has_flag_warnings {
         lines.push(String::new());
         lines.extend(warnings);
         // One continuation line states the basis of every figure above.
@@ -304,12 +334,18 @@ pub fn summary_lines(
             )
         });
     }
+    if let Some(l) = xrun_line {
+        if !has_flag_warnings {
+            lines.push(String::new());
+        }
+        lines.push(l);
+    }
     lines.push(String::new());
     lines
 }
 
-pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal: bool) {
-    for line in summary_lines(results, device_name, have_cal) {
+pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal: bool, xruns: u64) {
+    for line in summary_lines(results, device_name, have_cal, xruns) {
         println!("{line}");
     }
 }
@@ -422,7 +458,7 @@ pub fn freq_row_lines(frame: &serde_json::Value, have_cal: bool, verbose: bool) 
         (false, false) => None,
     };
     if let Some(f) = flags {
-        lines.push(format!("{}{f}", label("warning")));
+        lines.push(warning_line(f));
     }
     lines
 }
@@ -487,7 +523,7 @@ mod tests {
     fn every_summary_and_table_line_fits_80_columns() {
         for cal in [false, true] {
             let run = mixed_run(cal);
-            for line in summary_lines(&run, "DUT", cal) {
+            for line in summary_lines(&run, "DUT", cal, 0) {
                 assert!(cols(&line) <= 80, "{} cols: {line:?}", cols(&line));
             }
             for verbose in [false, true] {
@@ -525,7 +561,7 @@ mod tests {
                         }
                     }
                     for cal in [false, true] {
-                        for line in summary_lines(&run, "DUT", cal) {
+                        for line in summary_lines(&run, "DUT", cal, 0) {
                             assert!(
                                 cols(&line) <= 80,
                                 "n={n} {flags:?} clean={clean}: {} cols: {line:?}",
@@ -563,7 +599,7 @@ mod tests {
     #[test]
     fn no_rules_or_shouted_labels_remain() {
         let run = mixed_run(true);
-        let mut all = summary_lines(&run, "DUT", true);
+        let mut all = summary_lines(&run, "DUT", true, 0);
         all.extend(freq_header_lines(true, true));
         all.extend(freq_row_lines(&cal_point(true, true), true, true));
         for line in &all {
@@ -633,7 +669,7 @@ mod tests {
             // Flagged: excluded, so its higher floor must not win.
             json!({"thd_pct": 0.04, "noise_floor_dbfs": -71.9, "clipping": true}),
         ];
-        let lines = summary_lines(&run, "DUT", false);
+        let lines = summary_lines(&run, "DUT", false, 0);
         let noise = lines
             .iter()
             .find(|l| l.starts_with("  noise floor"))
@@ -646,7 +682,7 @@ mod tests {
 
     #[test]
     fn noise_floor_shares_the_db_column() {
-        let lines = summary_lines(&[uncal_point(20.0, 0.0023, -94.1, 1.0)], "DUT", false);
+        let lines = summary_lines(&[uncal_point(20.0, 0.0023, -94.1, 1.0)], "DUT", false, 0);
         let thd = lines.iter().find(|l| l.starts_with("  THD ")).unwrap();
         let noise = lines
             .iter()
@@ -659,7 +695,7 @@ mod tests {
     #[test]
     fn captured_reads_one_value_a_range_or_not_reported() {
         let find = |run: &[Value]| {
-            summary_lines(run, "DUT", false)
+            summary_lines(run, "DUT", false, 0)
                 .into_iter()
                 .find(|l| l.starts_with("  captured"))
                 .expect("captured line is never omitted")
@@ -689,7 +725,7 @@ mod tests {
             .collect();
         run.push(json!({"thd_pct": 5.0, "clipping": true}));
         run.push(json!({"thd_pct": 5.0, "clipping": true, "ac_coupled": true}));
-        let lines = summary_lines(&run, "DUT", false);
+        let lines = summary_lines(&run, "DUT", false, 0);
         assert_eq!(lines[1], "  summary       DUT \u{00b7} 9 points");
         // Warnings and their continuation come last, after one blank line.
         let first_warn = lines
@@ -717,7 +753,7 @@ mod tests {
         let all: Vec<Value> = (0..9)
             .map(|_| json!({"thd_pct": 1.0, "clipping": true}))
             .collect();
-        let lines = summary_lines(&all, "DUT", false);
+        let lines = summary_lines(&all, "DUT", false, 0);
         let first_warn = lines
             .iter()
             .position(|l| l.starts_with("  warning"))
@@ -736,28 +772,84 @@ mod tests {
             .map(|_| json!({"thd_pct": 1.0, "ac_coupled": true}))
             .collect();
         one_clean.push(uncal_point(1e3, 0.002, -94.0, 1.0));
-        let lines = summary_lines(&one_clean, "DUT", false);
+        let lines = summary_lines(&one_clean, "DUT", false, 0);
         assert!(
             lines.contains(&"                worst / avg from the 1 unflagged point".to_string())
         );
         let single = [json!({"thd_pct": 1.0, "ac_coupled": true})];
-        let lines = summary_lines(&single, "DUT", false);
+        let lines = summary_lines(&single, "DUT", false, 0);
         assert!(lines.contains(&"  warning       1 of 1 point AC-coupled".to_string()));
         assert!(
             lines.contains(&"                worst / avg include all 1 flagged point".to_string())
         );
 
         // No flags: no warning lines and no continuation line.
-        let lines = summary_lines(&run[..7], "DUT", false);
+        let lines = summary_lines(&run[..7], "DUT", false, 0);
         assert!(!lines
             .iter()
             .any(|l| l.contains("warning") || l.contains("worst / avg")));
     }
 
+    /// #130: an xrun-only run gets the xrun warning after one blank line
+    /// and no basis line — an xrun excludes no point.
+    #[test]
+    fn summary_xrun_only_has_no_basis_line() {
+        let run: Vec<Value> = (0..3)
+            .map(|i| uncal_point(1e3 * (i + 1) as f64, 0.002, -94.0, 1.0))
+            .collect();
+        let lines = summary_lines(&run, "DUT", false, 1);
+        let first_warn = lines
+            .iter()
+            .position(|l| l.starts_with("  warning"))
+            .unwrap();
+        assert_eq!(lines[first_warn - 1], "");
+        assert_eq!(lines[first_warn..], ["  warning       1 xrun", ""]);
+        assert!(!lines.iter().any(|l| l.contains("worst / avg")));
+
+        // Zero xruns prints nothing xrun-shaped.
+        let clean = summary_lines(&run, "DUT", false, 0);
+        assert!(!clean.iter().any(|l| l.contains("xrun")));
+    }
+
+    /// #130: with clip warnings, the xrun line comes after the basis line.
+    #[test]
+    fn summary_clip_and_xrun_puts_xrun_last() {
+        let mut run: Vec<Value> = (0..7)
+            .map(|i| uncal_point(1e3 * (i + 1) as f64, 0.002, -94.0, 1.0))
+            .collect();
+        run.push(json!({"thd_pct": 5.0, "clipping": true}));
+        run.push(json!({"thd_pct": 5.0, "clipping": true}));
+        let lines = summary_lines(&run, "DUT", false, 3);
+        let first_warn = lines
+            .iter()
+            .position(|l| l.starts_with("  warning"))
+            .unwrap();
+        assert_eq!(lines[first_warn - 1], "");
+        assert_eq!(
+            lines[first_warn..],
+            [
+                "  warning       2 of 9 points clipped",
+                "                worst / avg from the 7 unflagged points",
+                "  warning       3 xruns",
+                "",
+            ]
+        );
+    }
+
+    /// #130: no results still reports the xruns, and nothing else.
+    #[test]
+    fn summary_empty_results_keeps_xrun_line() {
+        assert_eq!(
+            summary_lines(&[], "DUT", false, 3),
+            ["", "  warning       3 xruns", ""]
+        );
+        assert!(summary_lines(&[], "DUT", false, 0).is_empty());
+    }
+
     #[test]
     fn calibrated_summary_puts_dbu_before_vrms() {
         let run = vec![cal_point(false, false)];
-        let lines = summary_lines(&run, "DUT", true);
+        let lines = summary_lines(&run, "DUT", true, 0);
         assert!(lines.contains(
             &"  DUT out       -38.2 dBu  ->  -38.2 dBu   (9.504 mVrms -> 9.504 mVrms)".to_string()
         ));
