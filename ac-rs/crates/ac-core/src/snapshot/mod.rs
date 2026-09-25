@@ -25,10 +25,12 @@ use sha2::{Digest, Sha256};
 
 use crate::shared::calibration::{Calibration, LayerVerdict};
 
-/// Current `.acsnap` schema version. Bump on any breaking `meta.json`
-/// layout change (e.g. a future 32-bit FLAC path) — readers must refuse
-/// an unrecognised version rather than guess.
-pub const FORMAT_VERSION: u32 = 1;
+/// Current `.acsnap` schema version, the only one `write_acsnap` writes.
+/// Bump on any breaking `meta.json` layout change (e.g. a future 32-bit
+/// FLAC path) — readers must refuse an unrecognised version rather than
+/// guess. v2 (#637) added the required `per_channel[i].stream_sha256`;
+/// `read_acsnap` still reads v1.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Per-channel provenance stored alongside the raw audio. `weighting` /
 /// `integration` use the string-identical vocabulary to the M0
@@ -53,6 +55,12 @@ pub struct ChannelMeta {
     /// field existed, and on a channel with no stored voltage scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voltage_check: Option<LayerVerdict>,
+    /// SHA-256 (lowercase hex) of the FLAC stream at this entry's position,
+    /// over its i24 samples (#637). Required in format v2, absent in v1.
+    /// `write_acsnap` always computes it from the audio it encodes and
+    /// overwrites whatever the caller passed — pass `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_sha256: Option<String>,
 }
 
 /// Session configuration in effect at capture time — enough to reproduce
@@ -177,6 +185,10 @@ impl Snapshot {
 /// zip, and return the raw bytes plus their sha256 (the daemon ships both
 /// straight through — `sha256` in the `snapshot` CTRL reply, bytes to the
 /// spool file).
+///
+/// Each `per_channel[i].stream_sha256` is set to the digest of
+/// `channels[i]` as encoded; any value in `meta` is overwritten. The writer
+/// is the one party that knows which samples went to which position.
 pub fn write_acsnap(meta: &SnapshotMeta, channels: &[Vec<f32>]) -> Result<(Vec<u8>, String)> {
     if meta.format_version != FORMAT_VERSION {
         return Err(anyhow!(
@@ -185,12 +197,20 @@ pub fn write_acsnap(meta: &SnapshotMeta, channels: &[Vec<f32>]) -> Result<(Vec<u
             FORMAT_VERSION
         ));
     }
-    validate::validate_metadata(meta).map_err(|e| anyhow!("write_acsnap: {e}"))?;
     validate::validate_stream_count(meta, channels.len(), "channels")
         .map_err(|e| anyhow!("write_acsnap: {e}"))?;
+    let mut meta = meta.clone();
+    for (ch, digest) in meta
+        .per_channel
+        .iter_mut()
+        .zip(flac::stream_digests(channels))
+    {
+        ch.stream_sha256 = Some(digest);
+    }
+    validate::validate_metadata(&meta).map_err(|e| anyhow!("write_acsnap: {e}"))?;
 
     let flac_bytes = flac::encode(channels, meta.sr).context("encoding audio.flac")?;
-    let meta_json = serde_json::to_vec_pretty(meta).context("serializing meta.json")?;
+    let meta_json = serde_json::to_vec_pretty(&meta).context("serializing meta.json")?;
 
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options =
@@ -230,15 +250,15 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
         entry.read_to_end(&mut buf).context("reading meta.json")?;
         serde_json::from_slice(&buf).context("parsing meta.json")?
     };
-    if meta.format_version != FORMAT_VERSION {
+    if !(1..=FORMAT_VERSION).contains(&meta.format_version) {
         return Err(anyhow!(
-            "read_acsnap: unsupported format_version {} (this reader supports {})",
+            "read_acsnap: unsupported format_version {} (this reader supports 1 and {})",
             meta.format_version,
             FORMAT_VERSION
         ));
     }
-    // Metadata-only rules before the decode; the stream-count rule after.
-    // See `validate` for the rule list.
+    // Metadata-only rules before the decode; the stream-count and stream
+    // identity rules after. See `validate` for the rule list.
     validate::validate_metadata(&meta).map_err(|e| anyhow!("read_acsnap: {e}"))?;
 
     let flac_bytes = {
@@ -249,7 +269,8 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
         entry.read_to_end(&mut buf).context("reading audio.flac")?;
         buf
     };
-    let (channels, decoded_sr) = flac::decode(&flac_bytes).context("decoding audio.flac")?;
+    let (channels, decoded_sr, digests) =
+        flac::decode(&flac_bytes).context("decoding audio.flac")?;
     if decoded_sr != meta.sr {
         return Err(anyhow!(
             "read_acsnap: FLAC stream sr {decoded_sr} != meta.sr {}",
@@ -258,6 +279,7 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
     }
     validate::validate_stream_count(&meta, channels.len(), "audio.flac")
         .map_err(|e| anyhow!("read_acsnap: {e}"))?;
+    validate::validate_stream_identity(&meta, &digests).map_err(|e| anyhow!("read_acsnap: {e}"))?;
 
     Ok(Snapshot { meta, channels })
 }
@@ -279,6 +301,7 @@ mod tests {
                     integration: "fast".to_string(),
                     calibration: None,
                     voltage_check: None,
+                    stream_sha256: None,
                 })
                 .collect(),
             session: SessionMeta {
@@ -303,7 +326,14 @@ mod tests {
         assert!(!sha256.is_empty());
 
         let snap = read_acsnap(&bytes).expect("read");
-        assert_eq!(snap.meta, meta);
+        // The writer adds the per-stream digests; everything else round-trips.
+        let mut read_meta = snap.meta.clone();
+        for ch in &mut read_meta.per_channel {
+            let d = ch.stream_sha256.take().expect("writer fills stream_sha256");
+            assert_eq!(d.len(), 64, "{d}");
+            assert!(d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        }
+        assert_eq!(read_meta, meta);
         assert_eq!(snap.channels.len(), 2);
         for (orig, got) in channels.iter().zip(snap.channels.iter()) {
             assert_eq!(orig.len(), got.len());
@@ -342,10 +372,32 @@ mod tests {
             Ok(_) => panic!("read_acsnap accepted format_version 999"),
             Err(e) => format!("{e:#}"),
         };
-        assert!(
-            err.contains("unsupported format_version 999"),
-            "refused for the wrong reason: {err}"
+        assert_eq!(
+            err, "read_acsnap: unsupported format_version 999 (this reader supports 1 and 2)",
+            "refused for the wrong reason"
         );
+    }
+
+    /// #637 test 7: an off-grid f32 input (a plain tone, not snapped to the
+    /// i24 grid) must round-trip with no digest refusal. The writer hashes
+    /// after quantization, the reader the decoded samples; hashing the f32
+    /// input on either side would refuse this.
+    #[test]
+    fn off_grid_input_round_trips_without_a_digest_refusal() {
+        let sr = 48_000u32;
+        let tone: Vec<f32> = (0..4_800)
+            .map(|i| {
+                (0.3 * (2.0 * std::f64::consts::PI * 997.0 * i as f64 / sr as f64).sin()) as f32
+            })
+            .collect();
+        assert!(
+            tone.iter()
+                .any(|&x| (x as f64 * 8_388_608.0).fract() != 0.0),
+            "precondition: input must sit off the i24 grid"
+        );
+        let meta = tiny_meta(2);
+        let (bytes, _) = write_acsnap(&meta, &[tone.clone(), tone]).expect("write");
+        read_acsnap(&bytes).expect("off-grid input must read back");
     }
 
     #[test]
@@ -474,6 +526,7 @@ mod tests {
                     integration: "fast".to_string(),
                     calibration: Some(meas_cal),
                     voltage_check: None,
+                    stream_sha256: None,
                 },
                 ChannelMeta {
                     role: "ref".to_string(),
@@ -482,6 +535,7 @@ mod tests {
                     integration: "fast".to_string(),
                     calibration: None,
                     voltage_check: None,
+                    stream_sha256: None,
                 },
             ],
             session: SessionMeta {
@@ -539,8 +593,75 @@ mod tests {
     fn fixture_path() -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/snapshot-fixture-v2.acsnap"
+        ))
+    }
+
+    /// The format-v1 fixture, byte-frozen (#637). Nothing regenerates it:
+    /// `write_acsnap` writes only the current version, so a regenerated file
+    /// would be v2 and the v1 read path would lose its only real archive.
+    /// [`V1_FIXTURE_SHA256`] pins the bytes.
+    fn v1_fixture_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
             "/../../../tests/fixtures/snapshot-fixture-v1.acsnap"
         ))
+    }
+
+    const V1_FIXTURE_SHA256: &str =
+        "2dbc4d5b1495740f87f1b3b34c280af2be5717c5e0bd2417d349ede28467da20";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    }
+
+    /// #637: the v1 fixture is the same content as the v2 one, written
+    /// before v2 existed. It must stay exactly those bytes.
+    #[test]
+    fn v1_fixture_is_byte_frozen() {
+        let bytes = std::fs::read(v1_fixture_path()).expect(
+            "tests/fixtures/snapshot-fixture-v1.acsnap must exist — it is frozen, not generated",
+        );
+        assert_eq!(
+            sha256_hex(&bytes),
+            V1_FIXTURE_SHA256,
+            "the frozen v1 .acsnap fixture changed; restore it from git — no code can regenerate a v1 file"
+        );
+    }
+
+    /// #637 test 6, fixture half: the frozen v1 fixture and the v2 fixture
+    /// hold the same samples, so pair 0 derives bit-identical H1 from both in
+    /// one build. Also pins that a v1 archive still reads.
+    #[test]
+    fn v1_and_v2_fixtures_derive_bit_identical_h1() {
+        use crate::visualize::weighting_curves::WeightingCurve;
+        let v1 = read_acsnap(&std::fs::read(v1_fixture_path()).expect("read v1 fixture"))
+            .expect("v1 fixture must still read");
+        let v2 = read_acsnap(&std::fs::read(fixture_path()).expect("read v2 fixture"))
+            .expect("v2 fixture must read");
+        assert_eq!(v1.meta.format_version, 1);
+        assert_eq!(v2.meta.format_version, 2);
+        assert!(v1
+            .meta
+            .per_channel
+            .iter()
+            .all(|c| c.stream_sha256.is_none()));
+        assert_eq!(v1.channels, v2.channels);
+
+        let d1 = v1
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("derive v1");
+        let d2 = v2
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("derive v2");
+        assert_eq!(d1.h1.magnitude_db, d2.h1.magnitude_db);
+        assert_eq!(d1.h1.phase_deg, d2.h1.phase_deg);
+        assert_eq!(d1.h1.coherence, d2.h1.coherence);
     }
 
     /// Deterministic broadband source for the fixture, `[-1, 1)`. A
@@ -581,7 +702,7 @@ mod tests {
     /// fixture had one). SPL-calibrated meas channel so `derive_pair`'s
     /// `spl` path is exercised too.
     #[test]
-    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v1.acsnap — run manually"]
+    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v2.acsnap — run manually"]
     fn generate_snapshot_fixture() {
         let (bytes, sha256) = build_snapshot_fixture();
         std::fs::write(fixture_path(), &bytes).expect("write fixture file");
@@ -648,6 +769,7 @@ mod tests {
                     integration: "fast".to_string(),
                     calibration: Some(meas_cal),
                     voltage_check: None,
+                    stream_sha256: None,
                 },
                 ChannelMeta {
                     role: "ref".to_string(),
@@ -656,6 +778,7 @@ mod tests {
                     integration: "fast".to_string(),
                     calibration: None,
                     voltage_check: None,
+                    stream_sha256: None,
                 },
             ],
             session: SessionMeta {
@@ -690,7 +813,7 @@ mod tests {
     fn snapshot_fixture_on_disk_is_current() {
         let (expected_bytes, expected_sha) = build_snapshot_fixture();
         let on_disk = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v1.acsnap must exist — regenerate with \
+            "tests/fixtures/snapshot-fixture-v2.acsnap must exist — regenerate with \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let actual_sha = {
@@ -753,6 +876,7 @@ mod tests {
                         integration: "fast".to_string(),
                         calibration: None,
                         voltage_check: None,
+                        stream_sha256: None,
                     },
                     ChannelMeta {
                         role: "ref".to_string(),
@@ -761,6 +885,7 @@ mod tests {
                         integration: "fast".to_string(),
                         calibration: None,
                         voltage_check: None,
+                        stream_sha256: None,
                     },
                 ],
                 session: SessionMeta {
@@ -788,7 +913,7 @@ mod tests {
     #[test]
     fn t3_checked_in_fixture_reprocesses_with_no_daemon() {
         let bytes = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v1.acsnap must exist — regenerate via \
+            "tests/fixtures/snapshot-fixture-v2.acsnap must exist — regenerate via \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let snap = read_acsnap(&bytes).expect("read checked-in fixture");

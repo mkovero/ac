@@ -62,7 +62,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "sr": 48000,
   "channel_map": ["meas_0", "ref"],
   "per_channel": [
@@ -71,14 +71,16 @@ Both entries are required; a reader must reject a file missing either one.
       "input_channel": 0,
       "weighting": "Z",
       "integration": "fast",
-      "calibration": { "...": "full Calibration struct, or null" }
+      "calibration": { "...": "full Calibration struct, or null" },
+      "stream_sha256": "<64 lowercase hex: digest of audio.flac stream 0>"
     },
     {
       "role": "ref",
       "input_channel": 1,
       "weighting": "Z",
       "integration": "fast",
-      "calibration": null
+      "calibration": null,
+      "stream_sha256": "<64 lowercase hex: digest of audio.flac stream 1>"
     }
   ],
   "session": {
@@ -94,7 +96,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `format_version` | int | Currently `1`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). |
+| `format_version` | int | `write_acsnap` writes `2`; `read_acsnap` reads `1` and `2`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). v2 (#637) added `per_channel[i].stream_sha256`; v1 files are read exactly as before, under the v1 limit in *Reader validation*. |
 | `sr` | int | Sample rate, Hz. Also `audio.flac`'s own stream rate — a reader cross-checks the two match. |
 | `channel_map` | `[string]` | FLAC stream channel index → session role (`"meas_0"`, `"meas_1"`, `"ref"`, …). The field a reader checks first. |
 | `per_channel` | `[ChannelMeta]` | Same order as `channel_map`. |
@@ -103,6 +105,7 @@ Both entries are required; a reader must reject a file missing either one.
 | `per_channel[i].weighting` | `"A"｜"C"｜"Z"` | String-identical vocabulary to the M0 `transfer_stream` frame's `spl_weighting` tag. |
 | `per_channel[i].integration` | `"fast"｜"slow"` | String-identical vocabulary to `spl_integration`. |
 | `per_channel[i].calibration` | object or `null` | Full 3-layer `Calibration` (voltage / SPL / mic-curve) in effect at capture time. `null` when the channel had no cal entry. |
+| `per_channel[i].stream_sha256` | string | **v2: required. v1: must be absent.** SHA-256, 64 lowercase hex characters, of `audio.flac` stream `i`: every sample on the i24 grid as `i32` little-endian, in stream order over the whole stream. The writer computes it from the audio it encodes. A binding check — which stream this entry describes — not integrity or tamper protection. |
 | `session.pairs` | `[[int,int]]` | `(meas_input_channel, ref_input_channel)` per pair, session indices — not FLAC stream positions. |
 | `session.delay_samples` | `[int]` | Per-pair ref↔meas delay in samples, same order as `pairs`. |
 | `session.nperseg` | int | Welch segment length in effect. `h1_estimate_core` currently pins this to `sr`, but it's recorded explicitly — a future estimator change can't silently break old snapshots. |
@@ -112,10 +115,12 @@ Both entries are required; a reader must reject a file missing either one.
 
 ### Reader validation
 
-In format v1, a FLAC stream is linked to its metadata by position alone:
-`per_channel[i]` ↔ `channel_map[i]` ↔ decoded stream `i`. `read_acsnap`
-refuses a file that breaks any of these rules, and `write_acsnap` refuses
-to write one (`ac_core::snapshot::validate`, shared by both):
+A FLAC stream is linked to its metadata by position:
+`per_channel[i]` ↔ `channel_map[i]` ↔ decoded stream `i`. In format v2
+each `per_channel` entry also carries the digest of the stream it
+describes, so the reader can check that link. `read_acsnap` refuses a file
+that breaks any of these rules, and `write_acsnap` refuses to write one
+(`ac_core::snapshot::validate`, shared by both):
 
 1. `per_channel` and `channel_map` have the same length, and it equals
    the number of streams in `audio.flac`.
@@ -124,10 +129,28 @@ to write one (`ac_core::snapshot::validate`, shared by both):
 4. `session.delay_samples` has exactly one entry per `session.pairs` entry.
 5. Both inputs of every pair equal the `input_channel` of some
    `per_channel` entry. Rule 3 makes that entry the only one.
+6. A channel whose `voltage_check` is refused carries no
+   `vrms_at_0dbfs_*` in its `calibration` (#466).
+7. **v2 only.** `per_channel[i].stream_sha256` equals the digest of
+   decoded stream `i` (#637). Because the digest travels inside the entry,
+   any reorder of `per_channel` against the audio — two same-role entries
+   swapped, or `channel_map` and `per_channel` permuted together — moves a
+   digest off its stream.
 
-The reader checks `format_version` first, then rules 2–5 and the
-metadata half of rule 1 before it decodes the audio, then the stream count.
-An error names the fields and indices that disagree.
+Presence and shape of `stream_sha256` are checked with the metadata: a v2
+entry must carry it as 64 lowercase hex characters; a v1 entry must not
+carry it at all.
+
+The reader checks `format_version` first (1 and 2 are accepted), then
+rules 2–6, the metadata half of rule 1 and the digest's presence and shape
+before it decodes the audio, then the stream count, then rule 7. An error
+names the fields and indices that disagree and never states a cause. Rule 7
+names the entry, its input, and which stream its digest does match:
+
+```
+read_acsnap: per_channel[0].stream_sha256 (input 7) matches audio.flac stream 2, not 0
+read_acsnap: per_channel[0].stream_sha256 (input 7) matches no audio.flac stream
+```
 
 Two things are deliberately **not** rules, because the daemon writes both:
 
@@ -135,10 +158,23 @@ Two things are deliberately **not** rules, because the daemon writes both:
   channels with role `"ref"`. Roles are labels; `input_channel` is the key.
 - **A pair may use the same input for meas and ref**, e.g. `[[0,0]]`.
 
-**Not detected:** `channel_map` and `per_channel` permuted *together*
-against the audio. The file passes validation and streams are associated
-with the wrong metadata. Detecting that needs a per-stream identity, which
-v1 does not have.
+**Not detected** (#637), so a passing read is not read as more than it is:
+
+- **Format v1 archives.** A v1 file carries no digest, so rule 7 cannot
+  run. A v1 `per_channel` reordered against the audio without changing a
+  role — the two `"ref"` entries of a multi-ref session `[[m,r1],[m,r2]]`
+  swapped, or `channel_map` permuted with it — still reads, and binds
+  calibration and pair identity to the wrong stream. v1 files are read
+  exactly as before this check existed, no better and no worse.
+- **Writer-side misbinding.** The digest certifies what the writer encoded
+  at each position. If the daemon attaches the wrong `input_channel` to a
+  stream before encoding, the digest agrees with the wrong claim (#523's
+  class, guarded in the daemon).
+- **Sample-identical streams.** They share a digest, so a swap between
+  their entries passes. It is also harmless: each entry's calibration
+  moves with it, onto identical audio.
+- **Tampering.** SHA-256 here is a binding check, not integrity
+  protection: anyone editing `meta.json` can recompute the digests.
 
 The daemon names roles by first occurrence: walking `pairs` in order, a
 channel takes `"meas_<pair index>"` or `"ref"` from the first leg it
@@ -192,11 +228,17 @@ verified.
 
 ## Fixture
 
-`tests/fixtures/snapshot-fixture-v1.acsnap` (repo root) is a checked-in,
-synthetic `.acsnap` used by `ac-core`'s self-containment test
+`tests/fixtures/snapshot-fixture-v2.acsnap` (repo root) is a checked-in,
+synthetic format-v2 `.acsnap` used by `ac-core`'s self-containment test
 (`snapshot::tests::t3_checked_in_fixture_reprocesses_with_no_daemon`) and
-reserved as the substrate for M2's display-truth fixtures. Regenerate via:
+by `ac-scene`'s display-truth fixtures. Regenerate via:
 
 ```
 cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored
 ```
+
+`tests/fixtures/snapshot-fixture-v1.acsnap` holds the same samples as a
+format-v1 file. It is **byte-frozen**: nothing regenerates it, since
+`write_acsnap` writes only v2, and `snapshot::tests::v1_fixture_is_byte_frozen`
+pins its sha256. It is the v1 read path's real archive
+(`v1_and_v2_fixtures_derive_bit_identical_h1`).

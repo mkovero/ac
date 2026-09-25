@@ -234,6 +234,8 @@ impl SnapshotRingState {
                 // Filled by the `snapshot` handler from the verdicts the
                 // session applied at start (#466); `cal` is already gated.
                 voltage_check: None,
+                // Computed by `write_acsnap` from the audio it encodes.
+                stream_sha256: None,
             })
             .collect();
 

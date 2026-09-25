@@ -37,6 +37,7 @@ fn write_fixture(path: &std::path::Path) {
                 integration: "fast".to_string(),
                 calibration: None::<Calibration>,
                 voltage_check: None,
+                stream_sha256: None,
             },
             ChannelMeta {
                 role: "ref".to_string(),
@@ -45,6 +46,7 @@ fn write_fixture(path: &std::path::Path) {
                 integration: "fast".to_string(),
                 calibration: None,
                 voltage_check: None,
+                stream_sha256: None,
             },
         ],
         session: SessionMeta {

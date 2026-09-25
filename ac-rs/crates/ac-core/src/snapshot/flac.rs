@@ -15,9 +15,16 @@
 //! doesn't quantizes at the i24 LSB, ≈ −138 dBFS
 //! (`20·log10(1/2^23) ≈ -138.99`) — the I-B parity tolerance in the
 //! acceptance tests accounts for exactly this floor and nothing more.
+//!
+//! Per-stream identity (#637, format v2): [`StreamHasher`] is the one
+//! definition of the bytes a `stream_sha256` covers. The writer feeds it
+//! through [`f32_to_i24`] ([`stream_digests`]), the reader feeds it the raw
+//! decoded sample ([`decode`]), so both hash the i24 grid that crosses the
+//! FLAC boundary and cannot drift apart.
 
 use anyhow::{anyhow, Context, Result};
 use flacenc::error::Verify;
+use sha2::{Digest, Sha256};
 
 /// 24-bit signed integer full-scale magnitude (`2^23`).
 const I24_SCALE: f64 = 8_388_608.0; // 2^23
@@ -41,6 +48,44 @@ fn f32_to_i24(x: f32) -> i32 {
 /// [`f32_to_i24`].
 fn i24_to_f32(x: i32) -> f32 {
     (x as f64 / I24_SCALE) as f32
+}
+
+/// SHA-256 of one stream: every i24 sample, as `i32` little-endian, in
+/// stream order over the whole stream. Finishes to lowercase hex, the same
+/// form as the file digest `write_acsnap` returns.
+pub(super) struct StreamHasher(Sha256);
+
+impl StreamHasher {
+    pub(super) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub(super) fn push(&mut self, sample: i32) {
+        self.0.update(sample.to_le_bytes());
+    }
+
+    pub(super) fn finish(self) -> String {
+        self.0
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
+/// Writer side of the per-stream identity: the digest of each channel as
+/// [`encode`] will store it, i.e. after [`f32_to_i24`].
+pub(super) fn stream_digests(channels: &[Vec<f32>]) -> Vec<String> {
+    channels
+        .iter()
+        .map(|ch| {
+            let mut h = StreamHasher::new();
+            for &x in ch {
+                h.push(f32_to_i24(x));
+            }
+            h.finish()
+        })
+        .collect()
 }
 
 /// Encode `n_channels` interleaved f32 channels into a 24-bit FLAC byte
@@ -95,8 +140,9 @@ pub fn encode(channels: &[Vec<f32>], sr: u32) -> Result<Vec<u8>> {
 }
 
 /// Decode a 24-bit FLAC byte stream back into per-channel f32 samples.
-/// Returns `(channels, sr)`.
-pub fn decode(flac_bytes: &[u8]) -> Result<(Vec<Vec<f32>>, u32)> {
+/// Returns `(channels, sr, digests)`, where `digests[i]` is stream `i`'s
+/// [`StreamHasher`] digest over the raw decoded samples.
+pub fn decode(flac_bytes: &[u8]) -> Result<(Vec<Vec<f32>>, u32, Vec<String>)> {
     let cursor = std::io::Cursor::new(flac_bytes);
     let mut reader = claxon::FlacReader::new(cursor).context("claxon: failed to open stream")?;
     let info = reader.streaminfo();
@@ -107,11 +153,14 @@ pub fn decode(flac_bytes: &[u8]) -> Result<(Vec<Vec<f32>>, u32)> {
     }
 
     let mut channels: Vec<Vec<f32>> = vec![Vec::new(); n_channels];
+    let mut hashers: Vec<StreamHasher> = (0..n_channels).map(|_| StreamHasher::new()).collect();
     for (i, sample) in reader.samples().enumerate() {
         let s = sample.context("claxon: sample decode error")?;
+        hashers[i % n_channels].push(s);
         channels[i % n_channels].push(i24_to_f32(s));
     }
-    Ok((channels, sr))
+    let digests = hashers.into_iter().map(StreamHasher::finish).collect();
+    Ok((channels, sr, digests))
 }
 
 #[cfg(test)]
@@ -173,7 +222,7 @@ mod tests {
             .collect();
 
         let flac_bytes = encode(&channels, sr).expect("encode");
-        let (decoded, decoded_sr) = decode(&flac_bytes).expect("decode");
+        let (decoded, decoded_sr, _) = decode(&flac_bytes).expect("decode");
 
         assert_eq!(decoded_sr, sr);
         assert_eq!(decoded.len(), 4, "channel count must round-trip");
@@ -199,7 +248,7 @@ mod tests {
         let channels: Vec<Vec<f32>> = vec![sine(n, 1_000.0, sr as f64, 0.3162)]; // -10 dBFS-ish
 
         let flac_bytes = encode(&channels, sr).expect("encode");
-        let (decoded, _) = decode(&flac_bytes).expect("decode");
+        let (decoded, _, _) = decode(&flac_bytes).expect("decode");
 
         let one_lsb = (1.0 / I24_SCALE) as f32;
         for (i, (&o, &g)) in channels[0].iter().zip(decoded[0].iter()).enumerate() {
@@ -208,6 +257,29 @@ mod tests {
                 "sample {i}: {o} vs {g}, diff {} exceeds 1 LSB",
                 (o - g).abs()
             );
+        }
+    }
+
+    /// #637 coupling: the writer's digests (off-grid f32 through
+    /// `f32_to_i24`) equal the reader's (raw decoded samples), stream by
+    /// stream. A writer that hashed the f32 input instead would still agree
+    /// with itself but not with this.
+    #[test]
+    fn writer_and_reader_stream_digests_agree_on_off_grid_input() {
+        let sr = 48_000u32;
+        let channels = vec![
+            sine(4_800, 1_000.0, sr as f64, 0.3162),
+            sine(4_800, 440.0, sr as f64, 0.1),
+        ];
+        let written = stream_digests(&channels);
+        let (_, _, read) = decode(&encode(&channels, sr).expect("encode")).expect("decode");
+        assert_eq!(written, read);
+        assert_ne!(read[0], read[1], "different streams, different digests");
+        for d in &read {
+            assert_eq!(d.len(), 64);
+            assert!(d
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         }
     }
 

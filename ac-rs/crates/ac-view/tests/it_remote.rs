@@ -75,6 +75,7 @@ fn open_local_snapshot_needs_no_daemon_connection() {
                 integration: "fast".to_string(),
                 calibration: None::<Calibration>,
                 voltage_check: None,
+                stream_sha256: None,
             },
             ChannelMeta {
                 role: "ref".to_string(),
@@ -83,6 +84,7 @@ fn open_local_snapshot_needs_no_daemon_connection() {
                 integration: "fast".to_string(),
                 calibration: None,
                 voltage_check: None,
+                stream_sha256: None,
             },
         ],
         session: SessionMeta {

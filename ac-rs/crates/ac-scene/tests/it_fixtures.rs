@@ -1,6 +1,6 @@
 //! AC1 (readout truth), AC4 (wire/snapshot scene equivalence), AC5
 //! (reference-label correctness) against the frozen fixtures — the
-//! checked-in `.acsnap` (`a10688c7…`) and the captured
+//! checked-in `.acsnap` (`056edcef…`, format v2) and the captured
 //! `transfer-frame-v2.json` derived from it (`regenerate_fixture.rs`,
 //! "same underlying data" per AC4's premise).
 
@@ -15,7 +15,7 @@ const DB_RANGE: (f64, f64) = (-140.0, 0.0);
 fn acsnap_fixture_path() -> PathBuf {
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../tests/fixtures/snapshot-fixture-v1.acsnap"
+        "/../../../tests/fixtures/snapshot-fixture-v2.acsnap"
     ))
 }
 
