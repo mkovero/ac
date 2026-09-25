@@ -412,6 +412,8 @@ pub enum CommandKind {
         /// IEC 61260-1 filterbank at this bands-per-octave resolution
         /// and emit an additional `SpectrumBands` report.
         bpo: Option<u32>,
+        /// `--verbose` adds the per-point `noise` column to the table.
+        verbose: bool,
     },
     PlotLevel {
         start: LevelSpec,
@@ -419,6 +421,8 @@ pub enum CommandKind {
         level_defaulted: bool,
         freq: f64,
         steps: u32,
+        /// `--verbose` adds the per-point `noise` column to the table.
+        verbose: bool,
     },
     #[allow(dead_code)]
     Monitor {
@@ -770,7 +774,8 @@ Commands:
   generate level  <start> <stop> [freq] [duration]                    level sweep at fixed frequency (output-only)
   generate frequency [freqStart freqStop] [level] [duration]          frequency sweep at fixed level (output-only)
   plot            [freqStart freqStop] [level] [ppd] [<N>bpo] [show]  per-point THD vs freq (+ optional IEC 61260-1 bands)
-  plot level      <start> <stop> [freq] [steps] [show]                per-point THD vs level
+                  [--verbose]                                         (--verbose: per-point noise floor column)
+  plot level      <start> <stop> [freq] [steps] [show] [--verbose]    per-point THD vs level
   plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
                   [<N>harm] [<N>win] [<N>s tail]                      (gate params: harmonics, window, tail capture)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]

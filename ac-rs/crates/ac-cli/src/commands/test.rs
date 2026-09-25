@@ -32,7 +32,7 @@ pub fn run_software(client: &mut AcClient) {
 
     println!("  Display-truth harness (T2/T3, #170)");
     println!("  {}", "\u{2500}".repeat(40));
-    println!("  [SKIP]  pending re-home onto ac-cli truth harness");
+    println!("  skip  pending re-home onto ac-cli truth harness");
     println!();
 
     if !all_pass {
@@ -40,13 +40,28 @@ pub fn run_software(client: &mut AcClient) {
     }
 }
 
-fn print_rows(results: &[Value]) {
+/// Self-test rows: `pass` / `FAIL`, four wide, then the name; the detail
+/// sits on a continuation line indented 8 so name plus detail never share
+/// one line. `FAIL` stays in capitals on purpose — it is the only row that
+/// makes the command exit 1, and capitals keep it visible with colour gone.
+fn result_lines(results: &[Value]) -> Vec<String> {
+    let mut lines = Vec::new();
     for r in results {
         let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let pass = r.get("pass").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mark = if pass { "PASS" } else { "FAIL" };
+        let mark = if pass { "pass" } else { "FAIL" };
+        lines.push(format!("  {mark:<4}  {name}"));
         let detail = r.get("detail").and_then(|v| v.as_str()).unwrap_or("");
-        println!("  [{mark}]  {name}  {detail}");
+        if !detail.is_empty() {
+            lines.push(format!("        {detail}"));
+        }
+    }
+    lines
+}
+
+fn print_rows(results: &[Value]) {
+    for line in result_lines(results) {
+        println!("{line}");
     }
 }
 
@@ -72,7 +87,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
     }
     println!();
 
-    io::print_freq_header(false);
+    io::print_freq_header(false, false);
 
     loop {
         let frame = match client.recv_data(300_000) {
@@ -88,7 +103,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
             if data.get("type").and_then(|v| v.as_str())
                 == Some("measurement/frequency_response/point")
             {
-                io::print_freq_row(&data);
+                io::print_freq_row(&data, false, false);
             }
         } else if topic == "done" {
             if let Some(xruns) = data.get("xruns").and_then(|v| v.as_u64()) {
@@ -144,7 +159,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     }
     println!();
 
-    io::print_freq_header(have_cal);
+    io::print_freq_header(have_cal, false);
 
     let mut results = Vec::new();
     loop {
@@ -161,7 +176,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
             if data.get("type").and_then(|v| v.as_str())
                 == Some("measurement/frequency_response/point")
             {
-                io::print_freq_row(&data);
+                io::print_freq_row(&data, have_cal, false);
                 results.push(data);
             }
         } else if topic == "done" {
@@ -187,5 +202,32 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         let ts = io::timestamp();
         let path = dir.join(format!("test_dut_{ts}.csv"));
         io::save_csv(&results, &path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn result_rows_are_lowercase_pass_and_capital_fail_with_detail_below() {
+        let lines = result_lines(&[
+            json!({"name": "Pure sine: THD < 0.05%", "pass": true, "detail": "THD = 0.0003%"}),
+            json!({"name": "Synthetic 1% H2: THD \u{2248} 1.0%", "pass": false,
+                   "detail": "THD = 0.8712% (expected 1.0% \u{00b1} 0.1%)"}),
+            json!({"name": "no detail", "pass": true}),
+        ]);
+        assert_eq!(
+            lines,
+            vec![
+                "  pass  Pure sine: THD < 0.05%",
+                "        THD = 0.0003%",
+                "  FAIL  Synthetic 1% H2: THD \u{2248} 1.0%",
+                "        THD = 0.8712% (expected 1.0% \u{00b1} 0.1%)",
+                "  pass  no detail",
+            ]
+        );
+        assert!(lines.iter().all(|l| !l.contains('[')));
     }
 }

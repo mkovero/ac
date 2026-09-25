@@ -240,7 +240,12 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "fundamental_dbfs": <float>,
   "linear_rms":       <float>,        // 0–1 dBFS scale
   "harmonic_levels":  [[<hz>, <amp>], ...],  // 2nd, 3rd, … harmonics; <amp> is linear amplitude — NOT dB
-  "noise_floor_dbfs": <float>,
+  "noise_floor_dbfs": <float>,        // RMS of the residual after the fundamental and
+                                     // harmonics are removed, dBFS; unweighted, full band
+  "capture_s":        <float>,        // seconds of audio analysed for this point; the 0.1 s
+                                     // settle discard before it is excluded. plot captures
+                                     // max(duration, 3/freq) per point; plot_level captures
+                                     // duration. Absent from frames of older daemons
   "spectrum":         [<float>, ...], // linear amplitude — NOT dB; downsampled to ≤ 1000 points, DC bin removed
   "freqs":            [<float>, ...], // matching frequency axis (Hz)
   "clipping":         <bool>,
