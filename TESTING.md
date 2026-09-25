@@ -373,6 +373,10 @@ Tests use the Rust `FakeEngine` which produces synthetic float32 sine waves, not
   the *wrong* port is invisible here and stays verified on the box. Harness
   inputs (`fake_tones`, `fake_noise_dbfs`, `fake_correlated_pair`) are an
   external source at the inputs and are captured regardless of routing.
+- A drive that replaces the input signal. An external harness source and a
+  routed drive add rather than replace: a `fake_correlated_pair` session that
+  turns on `set_drive` captures the pair plus the generator's noise, which is
+  seeded per channel and so uncorrelated between meas and ref.
 
 Integration tests verify the software pipeline is correct; hardware validation requires real equipment — use `ac test hardware`.
 
