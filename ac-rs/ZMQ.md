@@ -2864,6 +2864,41 @@ transfer not started — snapshot_ring_s must be at most 300 s
          received  1000000.0
          source    config.json
 ```
+The ring also has a memory ceiling of 1 000 000 000 B (1000 MB, 10⁶ B per
+MB) per session (#642). Its size is distinct capture channels ×
+round(`snapshot_ring_s` × rate) × 4 B. The daemon reads the rate the engine
+would run at before it replies, and refuses a launch whose ring would exceed
+the ceiling, with no worker started. A ring exactly at the ceiling is
+accepted. The per-field `snapshot_ring_s` refusals above run first, so a
+value that breaks its own bound gets that text, not this one. `setup` does
+not check the product; it knows neither the channels nor the rate.
+
+```text
+transfer not started — snapshot ring exceeds the memory ceiling
+         needs            1382.400000 MB
+         ceiling          1000.000000 MB
+         channels         6
+         snapshot_ring_s  300 s
+         rate             192000 Hz
+         source           config.json
+```
+`needs` and `ceiling` are exact to the byte (six decimals) and right-aligned
+to one width. `channels` counts distinct channels, not pairs. The ring is
+checked again when the engine starts, on the rate it actually started at. If
+that rate differs from the one read before the reply (a JACK server
+restarted in between), the session ends with a PUB `error`
+`{"cmd":"transfer_stream","message": …}` whose text has the headline
+`transfer stopped` and the same lines:
+
+```text
+transfer stopped — snapshot ring exceeds the memory ceiling
+         needs            1382.400000 MB
+         ceiling          1000.000000 MB
+         channels         6
+         snapshot_ring_s  300 s
+         rate             192000 Hz
+         source           config.json
+```
 `weighting`/`integration` apply to every pair in the session; invalid values
 reply `{"ok": false, "error": "..."}` before the worker spawns.
 
@@ -3904,13 +3939,14 @@ generate not started — channels[0] must be an integer
 `must be at most <limit> <unit>`, `must list at most <limit> entries`,
 `repeats <field>[i]` (#635). The ceilings are fixed daemon constants, not
 config keys: `snapshot_ring_s` 300 s, `monitor_spectrum` `channels` 64
-entries.
+entries, and the `transfer_stream` snapshot ring 1 000 000 000 B (#642).
 
 | command | headline | state line |
 |---|---|---|
 | `generate`, `generate_pink` | `<cmd> not started` | `stimulus  silent` |
 | `transfer_stream` | `transfer_stream not started` | `stimulus  silent` |
 | `transfer_stream`, `snapshot_ring_s` from `config.json` | `transfer not started` | `source  config.json` |
+| `transfer_stream`, snapshot ring over the memory ceiling (no `received` line; `needs`, `ceiling`, `channels`, `snapshot_ring_s`, `rate` lines) | `transfer not started` (CTRL) / `transfer stopped` (PUB `error`) | `source  config.json` |
 | `calibrate` | `calibration not started` | `stimulus  silent` |
 | `calibrate_spl` | `SPL calibration not started` | — |
 | `calibrate_mic_curve` | `mic curve not saved` / `mic curve not cleared` | `data  existing curve unchanged` (plus `paired field  <other>[i] = <value>` when the partner element is valid) |

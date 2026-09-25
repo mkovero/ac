@@ -701,6 +701,19 @@ impl AudioEngine for JackEngine {
         self.sample_rate
     }
 
+    /// Read from a live client — the running one when there is one, else a
+    /// short-lived probe client — never from `self.sample_rate`, which holds
+    /// a 48 000 placeholder until `start` (#642).
+    fn probe_sample_rate(&self) -> Option<u32> {
+        let rate = if let Some(ref ac) = self._async_client {
+            ac.as_client().sample_rate()
+        } else {
+            let (c, _) = Client::new("ac-daemon-probe", ClientOptions::NO_START_SERVER).ok()?;
+            c.sample_rate()
+        };
+        u32::try_from(rate).ok()
+    }
+
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
         let buf = generate_sine_1s(freq_hz, amplitude, self.sample_rate);
         self.state.tone_buf.store(Arc::new(buf));

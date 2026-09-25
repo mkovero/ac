@@ -178,6 +178,17 @@ impl SessionPlan {
         let fake = selected_backend_is_fake(probe_eng.as_ref());
         let backend = probe_eng.backend_name().to_string();
 
+        // #642: the ring's memory ceiling, on the rate the engine would run
+        // at, before the reply — the only refusal path `ac-view` reads. Runs
+        // after every per-field refusal (`snapshot_ring_s` above) and before
+        // anything below mutates state. A backend that cannot report its
+        // rate skips it here; `SnapshotRingState::start` checks the same
+        // product again on the rate the engine actually starts at.
+        if let Some(sr) = probe_eng.probe_sample_rate() {
+            crate::handlers::snapshot::check_ring_bytes(unique_chans.len(), snapshot_ring_s, sr)
+                .map_err(|e| json!({"ok": false, "error": e.refusal("transfer not started")}))?;
+        }
+
         let out_ch = cfg.output_channel;
 
         // One calibration load per unique capture channel, and every

@@ -256,6 +256,12 @@ impl AudioEngine for FakeEngine {
         self.sample_rate
     }
 
+    /// The fake engine's rate is fixed at construction, so it is the rate
+    /// `start` runs at.
+    fn probe_sample_rate(&self) -> Option<u32> {
+        Some(self.sample_rate)
+    }
+
     fn period_size(&self) -> Option<u32> {
         period_size_override()
     }
