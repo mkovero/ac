@@ -18,26 +18,32 @@ pub fn run_software(client: &mut AcClient) {
         client.send_cmd(&serde_json::json!({"cmd": "test_software"}), None),
         "test_software",
     );
-    println!("\n  Software self-test");
-    println!("  {}", "\u{2500}".repeat(40));
+    for line in software_lines(&ack) {
+        println!("{line}");
+    }
 
     let all_pass = ack
         .get("all_pass")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if let Some(results) = ack.get("results").and_then(|v| v.as_array()) {
-        print_rows(results);
-    }
-    println!();
-
-    println!("  Display-truth harness (T2/T3, #170)");
-    println!("  {}", "\u{2500}".repeat(40));
-    println!("  skip  pending re-home onto ac-cli truth harness");
-    println!();
-
     if !all_pass {
         std::process::exit(1);
     }
+}
+
+/// Full `ac test software` report. Each heading is followed directly by
+/// its rows and groups are separated by exactly one blank line — no rule
+/// under a heading (#116 layout, #129).
+fn software_lines(ack: &Value) -> Vec<String> {
+    let mut lines = vec![String::new(), "  Software self-test".to_string()];
+    if let Some(results) = ack.get("results").and_then(|v| v.as_array()) {
+        lines.extend(result_lines(results));
+    }
+    lines.push(String::new());
+    lines.push("  Display-truth harness (T2/T3, #170)".to_string());
+    lines.push("  skip  pending re-home onto ac-cli truth harness".to_string());
+    lines.push(String::new());
+    lines
 }
 
 /// Self-test rows: `pass` / `FAIL`, four wide, then the name; the detail
@@ -57,12 +63,6 @@ fn result_lines(results: &[Value]) -> Vec<String> {
         }
     }
     lines
-}
-
-fn print_rows(results: &[Value]) {
-    for line in result_lines(results) {
-        println!("{line}");
-    }
 }
 
 pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
@@ -227,5 +227,48 @@ mod tests {
             ]
         );
         assert!(lines.iter().all(|l| !l.contains('[')));
+    }
+
+    /// Headings carry no rule: the first result row follows the heading
+    /// directly, and the two groups are split by exactly one blank line.
+    #[test]
+    fn software_report_has_no_rules_and_one_blank_line_between_groups() {
+        let ack = json!({
+            "all_pass": false,
+            "results": [
+                {"name": "Pure sine: THD < 0.05%", "pass": true, "detail": "THD = 0.0003%"},
+                {"name": "Synthetic 1% H2", "pass": false, "detail": "THD = 0.8712%"},
+            ],
+        });
+        let lines = software_lines(&ack);
+
+        for l in &lines {
+            assert!(!l.contains('\u{2500}'), "box-drawing rule in {l:?}");
+            assert!(!l.contains("=="), "= rule in {l:?}");
+            assert!(!l.contains("-----"), "- rule in {l:?}");
+        }
+
+        let heading = lines
+            .iter()
+            .position(|l| l == "  Software self-test")
+            .expect("self-test heading");
+        assert_eq!(lines[heading + 1], "  pass  Pure sine: THD < 0.05%");
+
+        let second = lines
+            .iter()
+            .position(|l| l == "  Display-truth harness (T2/T3, #170)")
+            .expect("display-truth heading");
+        assert!(lines[second - 1].is_empty());
+        assert!(!lines[second - 2].is_empty());
+        assert_eq!(
+            lines[heading..second]
+                .iter()
+                .filter(|l| l.is_empty())
+                .count(),
+            1
+        );
+        assert!(lines
+            .windows(2)
+            .all(|w| !(w[0].is_empty() && w[1].is_empty())));
     }
 }
