@@ -542,11 +542,6 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
             drivable: plan.drivable,
         };
 
-        // Feed the snapshot ring the same raw, pre-processing `bufs`
-        // the H1 sliding window derives from — same capture, second
-        // (larger, longer-retention) consumer.
-        snapshot_ring.lock().unwrap().push_tick(&bufs);
-
         let messages = session.tick(
             &bufs,
             TickEvents {
@@ -559,30 +554,10 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
             std::time::Instant::now(),
         );
 
-        // Keep the snapshot ring's copy of the locks in sync — cheap
-        // (small Vec), and simpler than pushing incrementally from
-        // inside the acquisition loop. Written after the tick rather
-        // than between acquisition and the fan-out, so a `snapshot`
-        // arriving during a fan-out reads the previous tick's locks.
-        // A lock only changes at acquisition, so the difference is
-        // confined to the one tick a pair first locks on.
-        //
-        // The ladder provenance rides the same sync (#221): after the tick,
-        // so a ladder built or flushed this tick is described as it now
-        // stands, and a snapshot taken mid-tick reads the previous tick's.
-        {
-            let mut ring = snapshot_ring.lock().unwrap();
-            ring.delay_samples = session.delay_samples();
-            ring.mtw = session.mtw_provenance();
-            // Both count the same `bufs`, so a ladder origin taken from one
-            // converts into the other's coordinates. If they ever part, every
-            // snapshot replays a different block set than the screen drew.
-            debug_assert_eq!(
-                ring.pushed_total(),
-                session.consumed,
-                "snapshot ring and session disagree about the stream length"
-            );
-        }
+        // Commit this tick to the snapshot ring (#221): its samples and the
+        // lock/ladder state that describes them, under one guard. See
+        // `commit_tick`.
+        commit_tick(&snapshot_ring, &bufs, &session);
 
         for msg in messages {
             send_pub(pub_tx, "data", &msg);
@@ -627,6 +602,42 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         pub_tx,
         "done",
         &json!({"cmd":"transfer_stream","stopped":true}),
+    );
+}
+
+/// Publish one analysed tick to the snapshot ring: its raw `bufs` — the same
+/// pre-processing capture the H1 sliding window derives from — and the
+/// session's lock and ladder state *after* that tick, in one critical section.
+///
+/// The ring's audio tail and its `delay_samples`/`mtw` are one fact: which
+/// block set a replay reconstructs and which ladder it continues. Updating
+/// them under two separate guards around `SessionState::tick` let `snapshot`
+/// clone tick K's samples beside tick K−1's ladder origin; when K flushed and
+/// rebuilt the ladder (a `relock`, a drive edge), the file then replayed a
+/// retired ladder through K and matched no published frame (#221, Codex
+/// review of PR #662).
+///
+/// Called after the tick, not before, so the analysis runs without the ring
+/// lock: a `snapshot` arriving mid-tick sees the previous tick whole, one
+/// arriving after sees this one whole. The worker fans the tick's frames out
+/// only after this returns, so every frame a client has already received is
+/// covered by what `snapshot` can clone.
+pub(super) fn commit_tick(
+    ring: &Mutex<SnapshotRingState>,
+    bufs: &[Vec<f32>],
+    session: &SessionState,
+) {
+    let mut ring = ring.lock().unwrap();
+    ring.push_tick(bufs);
+    ring.delay_samples = session.delay_samples();
+    ring.mtw = session.mtw_provenance();
+    // Both count the same `bufs`, so a ladder origin taken from one converts
+    // into the other's coordinates. If they ever part, every snapshot replays
+    // a different block set than the screen drew.
+    debug_assert_eq!(
+        ring.pushed_total(),
+        session.consumed,
+        "snapshot ring and session disagree about the stream length"
     );
 }
 
