@@ -489,7 +489,6 @@ def test_monitor_spectrum_frames(server_client):
     ack = client.send_cmd({
         "cmd":        "monitor_spectrum",
         "freq_hz":    1000.0,
-        "level_dbfs": -20.0,
         "interval":   0.05,
     })
     assert ack["ok"] is True

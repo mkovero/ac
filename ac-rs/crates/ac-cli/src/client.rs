@@ -51,7 +51,9 @@ impl AcClient {
         let timeout = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         self.ctrl.set_rcvtimeo(timeout).ok();
         match self.ctrl.recv_string(0) {
-            Ok(Ok(s)) => serde_json::from_str(&s).ok(),
+            Ok(Ok(s)) => serde_json::from_str(&s)
+                .ok()
+                .map(|reply| annotate_unrecognised(reply, &self.host, self.ctrl_port)),
             _ => {
                 self.reconnect_ctrl();
                 None
@@ -80,5 +82,63 @@ impl AcClient {
         self.ctrl.set_rcvtimeo(DEFAULT_TIMEOUT_MS).ok();
         self.ctrl.set_linger(0).ok();
         self.ctrl.connect(&addr).ok();
+    }
+}
+
+/// #628: an unrecognised-field refusal gets a `daemon  <endpoint>` line under
+/// the daemon's text, so every path that prints `error` also says which
+/// daemon refused. Any other reply is returned unchanged.
+fn annotate_unrecognised(
+    mut reply: serde_json::Value,
+    host: &str,
+    ctrl_port: u16,
+) -> serde_json::Value {
+    if reply.get("unrecognised_fields").is_none() {
+        return reply;
+    }
+    if let Some(err) = reply.get_mut("error") {
+        if let Some(text) = err.as_str() {
+            *err = serde_json::Value::String(format!(
+                "{text}\n         daemon  tcp://{host}:{ctrl_port}"
+            ));
+        }
+    }
+    reply
+}
+
+#[cfg(test)]
+mod tests {
+    use super::annotate_unrecognised;
+    use serde_json::json;
+
+    #[test]
+    fn unrecognised_refusal_gains_the_daemon_line() {
+        let reply = json!({
+            "ok": false,
+            "error": "monitor_spectrum: field 'interval_ms' not recognised \u{2014} command not run\n         reads   interval",
+            "unrecognised_fields": ["interval_ms"],
+            "accepted_fields": ["interval"],
+        });
+        let out = annotate_unrecognised(reply, "127.0.0.1", 5556);
+        assert_eq!(
+            out["error"],
+            json!(
+                "monitor_spectrum: field 'interval_ms' not recognised \u{2014} command not run\n\
+                 \x20        reads   interval\n\
+                 \x20        daemon  tcp://127.0.0.1:5556"
+            )
+        );
+        assert_eq!(out["unrecognised_fields"], json!(["interval_ms"]));
+    }
+
+    #[test]
+    fn other_replies_are_unchanged() {
+        for reply in [
+            json!({"ok": false, "error": "busy: plot running — send stop first"}),
+            json!({"ok": true, "busy": false}),
+            json!({"ok": false, "error": "unknown command: 'x'"}),
+        ] {
+            assert_eq!(annotate_unrecognised(reply.clone(), "h", 1), reply);
+        }
     }
 }

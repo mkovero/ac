@@ -52,6 +52,10 @@ Every CTRL reply contains at minimum:
 
 On failure: `"ok": false, "error": "<human-readable string>"`.
 
+A request carrying a top-level field its command does not read is refused
+before anything runs; that reply adds `unrecognised_fields` and
+`accepted_fields` (see **Error handling → Unrecognised field**, #628).
+
 Commands that use calibration refuse synchronously when `cal.json` exists
 but cannot be read or parsed. No worker starts and no measurement frames are
 published. The error string names the store and cause and confirms that the
@@ -1940,7 +1944,6 @@ across `reconnect_input` can't be preserved).
 {
   "cmd":        "monitor_spectrum",
   "freq_hz":    <float>,     // hint for initial fundamental; auto-detected thereafter
-  "level_dbfs": <float>,     // unused by server (kept for client compat)
   "interval":   <float>,     // tick cadence (seconds), default 0.2
   "fft_n":      <int>,       // capture window = FFT N, power of 2 in [256, 131072]
                               // default: nearest pow2 of sr*interval (preserves legacy)
@@ -3914,6 +3917,54 @@ entries.
 | `monitor_spectrum` | `monitor not started` | — |
 | `setup` | `setup rejected` | `config  unchanged` |
 | `get_calibration` | `calibration lookup rejected` | — |
+
+### Unrecognised field
+
+Every CTRL command accepts a fixed set of top-level request fields — the
+ones its handler reads — plus `cmd`. A request with any other top-level
+key is refused with nothing run: no worker, no config write, no emission,
+and `quit` does not stop the daemon (#628). The check comes after the
+`invalid JSON`, `missing 'cmd' field` and `unknown command` refusals and
+before every other one. Keys nested inside a field are not checked: the
+`setup` `update` object's keys (#514) and the sub-keys of the fake-audio
+harness objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
+
+```json
+{ "ok": false,
+  "error": "monitor_spectrum: field 'interval_ms' not recognised — command not run\n         reads   amplitude  channels  fake_noise_dbfs  fake_tones  fft_n\n                 freq_hz  interval",
+  "unrecognised_fields": ["interval_ms"],
+  "accepted_fields": ["amplitude", "channels", "fake_noise_dbfs", "fake_tones", "fft_n", "freq_hz", "interval"] }
+```
+
+| key | meaning |
+|---|---|
+| `unrecognised_fields` | every refused key, exactly as sent, alphabetical |
+| `accepted_fields` | the command's accepted fields (without `cmd`), alphabetical; `[]` for a command that reads none |
+
+Text layout — one field is named inline; two or more are counted on the
+first line and listed on a `fields` line. `fields` / `reads` values start
+at column 17, are separated by two spaces, and wrap at 80 columns with a
+17-space hanging indent. A command whose accepted set is empty has no
+`reads` line.
+
+```text
+monitor_spectrum: 2 fields not recognised — command not run
+         fields  chan  interval_ms
+         reads   amplitude  channels  fake_noise_dbfs  fake_tones  fft_n
+                 freq_hz  interval
+```
+
+Unrecognised names are listed alphabetically, not in request order. In
+the text each name has control characters escaped and is cut at 64
+characters with `…`, and the `fields` line lists at most 8 names, then
+`+<N> more`; `unrecognised_fields` carries every name uncut.
+
+`ac` prints the text under its `  error: ` prefix and adds a
+`daemon  tcp://<host>:<port>` line at the same column, then exits 1.
+
+**Compatibility.** A client that sends a field an older daemon does not
+read now gets this refusal instead of a silent default. Adding an optional
+request field is therefore a breaking change towards older daemons.
 
 ### Invalid JSON
 ```json

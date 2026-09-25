@@ -558,54 +558,402 @@ fn dispatch(
         None => return json!({"ok": false, "error": "missing 'cmd' field"}),
     };
 
-    match name {
-        "status" => handlers::status(state),
-        "quit" => handlers::quit(state),
-        "stop" => handlers::stop(state, &cmd),
-        "devices" => handlers::devices(state),
-        "setup" => handlers::setup(state, &cmd),
-        "get_calibration" => handlers::get_calibration(state, &cmd),
-        "list_calibrations" => handlers::list_calibrations(state),
-        "sweep_level" => handlers::sweep_level(state, &cmd),
-        "sweep_frequency" => handlers::sweep_frequency(state, &cmd),
-        "plot" => handlers::plot(state, &cmd),
-        "plot_level" => handlers::plot_level(state, &cmd),
-        "plot_ir" => handlers::plot_ir(state, &cmd),
-        "monitor_spectrum" => handlers::monitor_spectrum(state, &cmd),
-        "set_analysis_mode" => handlers::set_analysis_mode(state, &cmd),
-        "get_analysis_mode" => handlers::get_analysis_mode(state),
-        "set_ioct_bpo" => handlers::set_ioct_bpo(state, &cmd),
-        "set_band_weighting" => handlers::set_band_weighting(state, &cmd),
-        "get_band_weighting" => handlers::get_band_weighting(state),
-        "set_time_integration" => handlers::set_time_integration(state, &cmd),
-        "get_time_integration" => handlers::get_time_integration(state),
-        "reset_leq" => handlers::reset_leq(state),
-        "reset_loudness" => handlers::reset_loudness(state),
-        "set_monitor_params" => handlers::set_monitor_params(state, &cmd),
-        "generate" => handlers::generate(state, &cmd),
-        "generate_pink" => handlers::generate_pink(state, &cmd),
-        "calibrate" => handlers::calibrate(state, &cmd),
-        "calibrate_spl" => handlers::calibrate_spl(state, &cmd),
-        "session_check" => handlers::session_check(state, &cmd),
-        "calibrate_mic_curve" => handlers::calibrate_mic_curve(state, &cmd),
-        "set_mic_correction_enabled" => handlers::set_mic_correction_enabled(state, &cmd),
-        "cal_reply" => handlers::cal_reply(state, &cmd),
-        "dmm_read" => handlers::dmm_read(state),
-        "server_enable" => handlers::server_enable(state),
-        "server_disable" => handlers::server_disable(state),
-        "server_connections" => handlers::server_connections(state),
-        "transfer_stream" => handlers::transfer_stream(state, &cmd),
-        "set_drive" => handlers::set_drive(state, &cmd),
-        "relock" => handlers::relock(state, &cmd),
-        "snapshot" => handlers::snapshot(state, &cmd),
-        "snapshot_fetch" => handlers::snapshot_fetch(state, &cmd),
-        "snapshot_list" => handlers::snapshot_list(state, &cmd),
-        "snapshot_delete" => handlers::snapshot_delete(state, &cmd),
-        "probe" => handlers::probe(state, &cmd),
-        "test_software" => handlers::test_software(state),
-        "test_hardware" => handlers::test_hardware(state, &cmd),
-        "test_dut" => handlers::test_dut(state, &cmd),
-        "dut_reply" => handlers::dut_reply(state),
-        other => json!({"ok": false, "error": format!("unknown command: '{other}'")}),
+    let Some(command) = COMMANDS.iter().find(|c| c.name == name) else {
+        return json!({"ok": false, "error": format!("unknown command: '{name}'")});
+    };
+
+    // #628: a top-level field the command does not read is refused here,
+    // before any busy, config or emission guard and before the handler, so
+    // "command not run" holds by construction.
+    let unrecognised = handlers::unrecognised_fields(&cmd, command.fields);
+    if !unrecognised.is_empty() {
+        return handlers::unrecognised_refusal(name, &unrecognised, command.fields);
+    }
+
+    (command.run)(state, &cmd)
+}
+
+/// One CTRL command: its name, the top-level request fields its handler
+/// reads (besides `cmd`), and the handler.
+struct Command {
+    name: &'static str,
+    /// Derived from the handler's reads, helpers included
+    /// (`LevelUnit::from_request` → `level_unit`, `calibrate::channels_from`
+    /// → `output_channel` / `input_channel`, `transfer::parse_params`, …).
+    /// Any other top-level key is refused (#628). Keys nested inside a field
+    /// (`setup.update`, the fake-audio harness objects) are not checked here.
+    fields: &'static [&'static str],
+    run: fn(&ServerState, &Value) -> Value,
+}
+
+/// Every CTRL command the daemon serves. A command cannot be dispatched
+/// without a field list: this table is the only roster.
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "status",
+        fields: &[],
+        run: |s, _| handlers::status(s),
+    },
+    Command {
+        name: "quit",
+        fields: &[],
+        run: |s, _| handlers::quit(s),
+    },
+    Command {
+        name: "stop",
+        fields: &["name"],
+        run: handlers::stop,
+    },
+    Command {
+        name: "devices",
+        fields: &[],
+        run: |s, _| handlers::devices(s),
+    },
+    Command {
+        name: "setup",
+        fields: &["update"],
+        run: handlers::setup,
+    },
+    Command {
+        name: "get_calibration",
+        fields: &["input_channel", "output_channel"],
+        run: handlers::get_calibration,
+    },
+    Command {
+        name: "list_calibrations",
+        fields: &[],
+        run: |s, _| handlers::list_calibrations(s),
+    },
+    Command {
+        name: "sweep_level",
+        fields: &[
+            "duration",
+            "freq_hz",
+            "level_unit",
+            "start_dbfs",
+            "stop_dbfs",
+        ],
+        run: handlers::sweep_level,
+    },
+    Command {
+        name: "sweep_frequency",
+        fields: &[
+            "duration",
+            "level_dbfs",
+            "level_unit",
+            "start_hz",
+            "stop_hz",
+        ],
+        run: handlers::sweep_frequency,
+    },
+    Command {
+        name: "plot",
+        fields: &[
+            "bpo",
+            "duration",
+            "level_dbfs",
+            "level_unit",
+            "ppd",
+            "start_hz",
+            "stop_hz",
+        ],
+        run: handlers::plot,
+    },
+    Command {
+        name: "plot_level",
+        fields: &[
+            "duration",
+            "freq_hz",
+            "level_unit",
+            "start_dbfs",
+            "steps",
+            "stop_dbfs",
+        ],
+        run: handlers::plot_level,
+    },
+    Command {
+        name: "plot_ir",
+        fields: &[
+            "distance_m",
+            "duration",
+            "f1_hz",
+            "f2_hz",
+            "level_dbfs",
+            "level_unit",
+            "n_harmonics",
+            "tail_s",
+            "window_len",
+        ],
+        run: handlers::plot_ir,
+    },
+    Command {
+        name: "monitor_spectrum",
+        fields: &[
+            "amplitude",
+            "channels",
+            "fake_noise_dbfs",
+            "fake_tones",
+            "fft_n",
+            "freq_hz",
+            "interval",
+        ],
+        run: handlers::monitor_spectrum,
+    },
+    Command {
+        name: "set_analysis_mode",
+        fields: &["mode", "n_scales", "sigma"],
+        run: handlers::set_analysis_mode,
+    },
+    Command {
+        name: "get_analysis_mode",
+        fields: &[],
+        run: |s, _| handlers::get_analysis_mode(s),
+    },
+    Command {
+        name: "set_ioct_bpo",
+        fields: &["bpo"],
+        run: handlers::set_ioct_bpo,
+    },
+    Command {
+        name: "set_band_weighting",
+        fields: &["mode"],
+        run: handlers::set_band_weighting,
+    },
+    Command {
+        name: "get_band_weighting",
+        fields: &[],
+        run: |s, _| handlers::get_band_weighting(s),
+    },
+    Command {
+        name: "set_time_integration",
+        fields: &["mode"],
+        run: handlers::set_time_integration,
+    },
+    Command {
+        name: "get_time_integration",
+        fields: &[],
+        run: |s, _| handlers::get_time_integration(s),
+    },
+    Command {
+        name: "reset_leq",
+        fields: &[],
+        run: |s, _| handlers::reset_leq(s),
+    },
+    Command {
+        name: "reset_loudness",
+        fields: &[],
+        run: |s, _| handlers::reset_loudness(s),
+    },
+    Command {
+        name: "set_monitor_params",
+        fields: &["fft_n", "interval"],
+        run: handlers::set_monitor_params,
+    },
+    Command {
+        name: "generate",
+        fields: &["channels", "freq_hz", "level_dbfs", "level_unit"],
+        run: handlers::generate,
+    },
+    Command {
+        name: "generate_pink",
+        fields: &["channels", "level_dbfs", "level_unit"],
+        run: handlers::generate_pink,
+    },
+    Command {
+        name: "calibrate",
+        fields: &["input_channel", "output_channel", "ref_dbfs"],
+        run: handlers::calibrate,
+    },
+    Command {
+        name: "calibrate_spl",
+        fields: &["capture_s", "input_channel", "output_channel"],
+        run: handlers::calibrate_spl,
+    },
+    Command {
+        name: "session_check",
+        fields: &["layers"],
+        run: handlers::session_check,
+    },
+    Command {
+        name: "calibrate_mic_curve",
+        fields: &[
+            "freqs_hz",
+            "gain_db",
+            "input_channel",
+            "op",
+            "output_channel",
+            "source_path",
+        ],
+        run: handlers::calibrate_mic_curve,
+    },
+    Command {
+        name: "set_mic_correction_enabled",
+        fields: &["enabled"],
+        run: handlers::set_mic_correction_enabled,
+    },
+    Command {
+        name: "cal_reply",
+        fields: &["clear", "vrms"],
+        run: handlers::cal_reply,
+    },
+    Command {
+        name: "dmm_read",
+        fields: &[],
+        run: |s, _| handlers::dmm_read(s),
+    },
+    Command {
+        name: "server_enable",
+        fields: &[],
+        run: |s, _| handlers::server_enable(s),
+    },
+    Command {
+        name: "server_disable",
+        fields: &[],
+        run: |s, _| handlers::server_disable(s),
+    },
+    Command {
+        name: "server_connections",
+        fields: &[],
+        run: |s, _| handlers::server_connections(s),
+    },
+    Command {
+        name: "transfer_stream",
+        fields: &[
+            "drivable",
+            "drive",
+            "fake_correlated_pair",
+            "fake_ring",
+            "integration",
+            "level_dbfs",
+            "meas_channel",
+            "mtw_n_blocks",
+            "mtw_ppo",
+            "pairs",
+            "ref_channel",
+            "weighting",
+        ],
+        run: handlers::transfer_stream,
+    },
+    Command {
+        name: "set_drive",
+        fields: &["level_dbfs", "on"],
+        run: handlers::set_drive,
+    },
+    Command {
+        name: "relock",
+        fields: &[],
+        run: handlers::relock,
+    },
+    Command {
+        name: "snapshot",
+        fields: &[],
+        run: handlers::snapshot,
+    },
+    Command {
+        name: "snapshot_fetch",
+        fields: &["id", "len", "offset"],
+        run: handlers::snapshot_fetch,
+    },
+    Command {
+        name: "snapshot_list",
+        fields: &[],
+        run: handlers::snapshot_list,
+    },
+    Command {
+        name: "snapshot_delete",
+        fields: &["id"],
+        run: handlers::snapshot_delete,
+    },
+    Command {
+        name: "probe",
+        fields: &[],
+        run: handlers::probe,
+    },
+    Command {
+        name: "test_software",
+        fields: &[],
+        run: |s, _| handlers::test_software(s),
+    },
+    Command {
+        name: "test_hardware",
+        fields: &["dmm", "level_unit"],
+        run: handlers::test_hardware,
+    },
+    Command {
+        name: "test_dut",
+        fields: &["compare", "level_dbfs", "level_unit"],
+        run: handlers::test_dut,
+    },
+    Command {
+        name: "dut_reply",
+        fields: &[],
+        run: |s, _| handlers::dut_reply(s),
+    },
+];
+
+#[cfg(test)]
+mod command_table_tests {
+    use super::COMMANDS;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    /// Every `.rs` file under `dir`, skipping `*tests.rs` files and `tests/`
+    /// directories.
+    fn handler_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    handler_sources(&path, out);
+                }
+            } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Listed ⇒ read (#628): every accepted field appears as a `"<field>"`
+    /// literal somewhere in the handler sources, so deleting the last read
+    /// of a listed field fails here instead of quietly bringing back the
+    /// silent default for it.
+    ///
+    /// What this cannot catch: a literal that survives only in a reply
+    /// builder (`json!({"<field>": …})`) or in an inline `mod tests` block
+    /// of a handler file. Both still count as "read" here.
+    #[test]
+    fn every_listed_field_is_read_by_a_handler() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/handlers");
+        let mut files = Vec::new();
+        handler_sources(&root, &mut files);
+        assert!(files.len() > 10, "found only {} handler files", files.len());
+        let text: String = files
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut missing = Vec::new();
+        for c in COMMANDS {
+            for f in c.fields {
+                if !text.contains(&format!("\"{f}\"")) {
+                    missing.push(format!("{}.{f}", c.name));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "listed in COMMANDS but no handler source has the literal: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn command_names_and_fields_are_unique() {
+        let mut names = BTreeSet::new();
+        for c in COMMANDS {
+            assert!(names.insert(c.name), "`{}` listed twice", c.name);
+            let fields: BTreeSet<&str> = c.fields.iter().copied().collect();
+            assert_eq!(fields.len(), c.fields.len(), "`{}` repeats a field", c.name);
+            assert!(!c.fields.contains(&"cmd"), "`{}` lists `cmd`", c.name);
+        }
     }
 }

@@ -210,9 +210,10 @@ is wrong. `ZMQ.md` is the sole statement of the wire contract — the daemon
 emits frames inline, `ac-scene` and `ac-cli` each parse them separately, and
 nothing ties the three together at compile time — so it can drift from the
 code silently, and has. The test compares the command roster in both
-directions against the dispatch `match` in `server.rs`, and compares the
+directions against the `COMMANDS` table in `server.rs`, and compares the
 documented reply keys of the read-only commands against a live `--fake-audio`
-daemon. It does not check DATA payloads, field types or values: a green run
+daemon. It also sends every dispatched command an unrecognised top-level
+field and requires the refusal that names it (#628). It does not check DATA payloads, field types or values: a green run
 means the roster and the read-only replies agree, not that the prose is true.
 
 `it_protocol::monitor_soak` is the temporal (onset-delay) gate for the

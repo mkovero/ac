@@ -90,7 +90,7 @@ fn monitor_spectrum_refuses_an_out_of_range_input_channel() {
 fn plot_refuses_an_out_of_range_input_channel() {
     let d = Daemon::spawn_with_config(Some(cfg_with_channel("input_channel", OUT_OF_RANGE_CH)));
     let c = Client::new(&d);
-    let r = c.call(json!({"cmd":"plot","freq_start":100.0,"freq_stop":1000.0,"ppd":2}));
+    let r = c.call(json!({"cmd":"plot","start_hz":100.0,"stop_hz":1000.0,"ppd":2}));
     assert_out_of_range_error(&r, "plot");
 }
 
@@ -99,7 +99,7 @@ fn sweep_refuses_an_out_of_range_output_channel() {
     let d = Daemon::spawn_with_config(Some(cfg_with_channel("output_channel", OUT_OF_RANGE_CH)));
     let c = Client::new(&d);
     let r = c.call(json!({
-        "cmd":"sweep_frequency","freq_start":100.0,"freq_stop":1000.0,"level_dbfs":-40.0
+        "cmd":"sweep_frequency","start_hz":100.0,"stop_hz":1000.0,"level_dbfs":-40.0
     }));
     assert_out_of_range_error(&r, "sweep_frequency");
 }

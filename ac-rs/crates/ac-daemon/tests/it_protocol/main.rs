@@ -26,5 +26,6 @@ mod plot_ir;
 mod server;
 mod setup;
 mod transfer;
+mod unrecognised_fields;
 mod warmup;
 mod wire_values;

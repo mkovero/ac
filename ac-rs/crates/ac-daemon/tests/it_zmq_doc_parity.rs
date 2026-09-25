@@ -11,9 +11,12 @@
 //! What is checked, and on what evidence:
 //!
 //! * **Command roster, both directions** — `ZMQ.md`'s `### `cmd`` headings
-//!   against the dispatch `match` in `src/server.rs`. Text on both sides; no
+//!   against the `COMMANDS` table in `src/server.rs`. Text on both sides; no
 //!   daemon runs. Catches a command added to the daemon without a spec, and a
 //!   spec left behind by a removed command.
+//! * **Every dispatched command refuses an unrecognised field** (#628) —
+//!   against a live `--fake-audio` daemon. Safe for every command, because a
+//!   refused request runs nothing.
 //! * **Each section names its own command** — every `"cmd"` literal inside a
 //!   section's JSON blocks must equal that section's heading. Catches a
 //!   section copy-pasted from its neighbour.
@@ -123,28 +126,30 @@ fn is_command_ident(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
 }
 
-/// Every name in the CTRL dispatch `match` in `server.rs`, read from the
-/// source text. There is no runtime roster to ask for — a client can only
-/// discover a command by guessing its name — so the source is the only
+/// Every name in the CTRL `COMMANDS` table in `server.rs`, read from the
+/// source text: each `name: "<cmd>"` line between `const COMMANDS` and the
+/// table's closing `];`. There is no runtime roster to ask for — a client can
+/// only discover a command by guessing its name — so the source is the only
 /// statement of what the daemon actually serves.
 fn dispatched_commands(src: &str) -> BTreeSet<String> {
+    let start = src
+        .find("const COMMANDS")
+        .expect("server.rs has a `const COMMANDS` table");
+    let table = &src[start..];
+    let table = &table[..table.find("\n];").expect("COMMANDS table ends with `];`")];
     let mut out = BTreeSet::new();
-    for line in src.lines() {
-        let t = line.trim();
-        let Some(rest) = t.strip_prefix('"') else {
+    for line in table.lines() {
+        let Some(rest) = line.trim().strip_prefix("name: \"") else {
             continue;
         };
-        let Some((name, tail)) = rest.split_once('"') else {
-            continue;
-        };
-        if tail.trim_start().starts_with("=> handlers::") {
+        if let Some((name, _)) = rest.split_once('"') {
             out.insert(name.to_string());
         }
     }
     assert!(
         out.len() > 20,
-        "dispatch parse found only {} commands — the `match` in server.rs \
-         probably changed shape, so this whole file is checking nothing",
+        "dispatch parse found only {} commands — the `COMMANDS` table in \
+         server.rs probably changed shape, so this whole file is checking nothing",
         out.len()
     );
     out
@@ -385,4 +390,32 @@ fn documented_reply_keys_match_the_daemon() {
         "ZMQ.md reply blocks disagree with the daemon:\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// #628: every dispatched command refuses a top-level field it does not
+/// read, naming that field. Goes red for any command the check misses.
+#[test]
+fn every_dispatched_command_refuses_an_unrecognised_field() {
+    const FIELD: &str = "zz_unrecognised_628";
+    let daemon = Daemon::spawn();
+    let client = Client::new(&daemon);
+
+    let mut failures: Vec<String> = Vec::new();
+    for name in dispatched_commands(&server_rs()) {
+        let reply = client.call(json!({ "cmd": name, FIELD: 1 }));
+        let err = reply["error"].as_str().unwrap_or_default();
+        if reply["ok"] != json!(false)
+            || reply["unrecognised_fields"] != json!([FIELD])
+            || !err.contains(&format!("'{FIELD}'"))
+        {
+            failures.push(format!("{name}: {reply}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "commands that did not refuse `{FIELD}`:\n  {}",
+        failures.join("\n  ")
+    );
+    let status = client.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
 }
