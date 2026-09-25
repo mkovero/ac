@@ -159,10 +159,17 @@ fn soak_frame(payload: &Value) -> SoakFrame {
     SoakFrame { freqs, spectrum }
 }
 
+/// Where a failing soak writes its dump, under `CARGO_TARGET_TMPDIR`.
+fn dump_dir(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()))
+}
+
 /// Write frames N-1, N, N+1 as `freq_hz,dbfs` CSVs with a comment header,
-/// plus a `violation.txt` sidecar. `frames` holds what was received, oldest
-/// first; a missing N+1 is written as a header-only file saying so.
+/// plus a `violation.txt` sidecar, into `dir`. `frames` holds what was
+/// received, oldest first; a missing N-1 or N+1 is written as a header-only
+/// file saying so.
 fn dump_violation(
+    dir: PathBuf,
     frames: &[&Received],
     have_next: bool,
     v: &Violation,
@@ -170,8 +177,6 @@ fn dump_violation(
     wall_s: f64,
     pacing: &str,
 ) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("monitor_soak-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
 
     let mut summary = String::new();
@@ -190,6 +195,12 @@ fn dump_violation(
     write("violation.txt", &summary);
 
     let n_idx = frames.len() - usize::from(have_next) - 1;
+    if n_idx == 0 {
+        write(
+            "frame_N-1.csv",
+            "# missing: frame N was the first frame received\nfreq_hz,dbfs\n",
+        );
+    }
     for (i, r) in frames.iter().enumerate() {
         let name = match i as isize - n_idx as isize {
             -1 => "frame_N-1.csv",
@@ -229,17 +240,20 @@ fn dump_violation(
     dir
 }
 
-/// Receive N+1 (if the stream still runs), dump, and panic.
+/// Receive N+1 (if the stream still runs), dump, and panic. `next_frame_idx`
+/// is N+1's index on the soak clock: `0` when N is the pre-interval frame,
+/// which is not on the clock.
 fn fail_with_dump(
     c: &Client,
     history: &VecDeque<Received>,
     v: Violation,
+    next_frame_idx: usize,
     start: Instant,
     frames_seen: usize,
     pacing: &str,
 ) -> ! {
     let next = next_spectrum(c).map(|p| Received {
-        frame_idx: Some(v.frame_idx + 1),
+        frame_idx: Some(next_frame_idx),
         wall_s: start.elapsed().as_secs_f64(),
         frame: soak_frame(&p),
     });
@@ -248,7 +262,15 @@ fn fail_with_dump(
         frames.push(n);
     }
     let wall_s = history.back().map_or(0.0, |r| r.wall_s);
-    let dir = dump_violation(&frames, next.is_some(), &v, frames_seen, wall_s, pacing);
+    let dir = dump_violation(
+        dump_dir("monitor_soak"),
+        &frames,
+        next.is_some(),
+        &v,
+        frames_seen,
+        wall_s,
+        pacing,
+    );
     let _ = c.call(json!({"cmd": "stop"}));
     panic!(
         "monitor soak: {} ({}) at frame {} after {frames_seen} frames / {wall_s:.3} s: {}\n\
@@ -298,7 +320,15 @@ fn monitor_spectrum_soak_holds_every_frame() {
     let mut history: VecDeque<Received> = VecDeque::with_capacity(3);
     if let Some(v) = check_bounded(&first.frame, 0) {
         history.push_back(first);
-        fail_with_dump(&c, &history, v, start, 0, "no frames on the soak clock yet");
+        fail_with_dump(
+            &c,
+            &history,
+            v,
+            0,
+            start,
+            0,
+            "no frames on the soak clock yet",
+        );
     }
     history.push_back(first);
 
@@ -358,7 +388,11 @@ fn monitor_spectrum_soak_holds_every_frame() {
         }
         if let Some(v) = verdict {
             let pacing = pacing_readout(idx + 1, clock_start.elapsed().as_secs_f64(), interval);
-            fail_with_dump(&c, &history, v, start, idx + 1, &pacing);
+            eprintln!(
+                "monitor soak healthy margin (information only, to the violation): {}",
+                checker.stats().readout()
+            );
+            fail_with_dump(&c, &history, v, idx + 1, start, idx + 1, &pacing);
         }
     }
     let clock_wall_s = clock_start.elapsed().as_secs_f64();
@@ -367,6 +401,10 @@ fn monitor_spectrum_soak_holds_every_frame() {
     eprintln!(
         "monitor soak pacing (information only): {}",
         pacing_readout(total_frames, clock_wall_s, interval)
+    );
+    eprintln!(
+        "monitor soak healthy margin (information only): {}",
+        checker.stats().readout()
     );
 
     let k = checker.counts();
@@ -390,4 +428,79 @@ fn monitor_spectrum_soak_holds_every_frame() {
          counts: {k:?}",
         k.lf_changes
     );
+}
+
+/// The dump path runs only when the soak fails, which is exactly when it is
+/// needed, so it is exercised here on synthetic frames.
+#[test]
+fn dump_violation_writes_n_minus_1_n_n_plus_1_and_sidecar() {
+    let mk = |k: Option<usize>, v: f64| Received {
+        frame_idx: k,
+        wall_s: k.unwrap_or(0) as f64 * 0.1,
+        frame: SoakFrame {
+            freqs: vec![100.0, 200.0],
+            spectrum: vec![v, v - 1.0],
+        },
+    };
+    let (a, b, c) = (mk(Some(9), -40.0), mk(Some(10), -41.0), mk(Some(11), -42.0));
+    let v = Violation {
+        invariant: checker::Invariant::Liveness,
+        class: "frozen",
+        frame_idx: 10,
+        detail: "synthetic".into(),
+    };
+    let read = |dir: &std::path::Path, n: &str| {
+        std::fs::read_to_string(dir.join(n)).unwrap_or_else(|e| panic!("{n}: {e}"))
+    };
+
+    let dir = dump_violation(
+        dump_dir("monitor_soak_selftest_full"),
+        &[&a, &b, &c],
+        true,
+        &v,
+        11,
+        1.0,
+        "pacing",
+    );
+    assert!(read(&dir, "frame_N-1.csv").contains("# frame_index=9\n"));
+    assert!(read(&dir, "frame_N.csv").contains("# frame_index=10\n"));
+    assert!(read(&dir, "frame_N.csv").ends_with("freq_hz,dbfs\n100,-41\n200,-42\n"));
+    assert!(read(&dir, "frame_N+1.csv").contains("# frame_index=11\n"));
+    let s = read(&dir, "violation.txt");
+    assert!(s.contains("invariant=I5a liveness\n"), "{s}");
+    assert!(
+        s.contains("frame_index=10\n") && s.contains("elapsed_wall_s=1.000\n"),
+        "{s}"
+    );
+
+    // Stream ended before N+1: N is still the last received frame.
+    let dir = dump_violation(
+        dump_dir("monitor_soak_selftest_no_next"),
+        &[&a, &b],
+        false,
+        &v,
+        11,
+        1.0,
+        "pacing",
+    );
+    assert!(read(&dir, "frame_N-1.csv").contains("# frame_index=9\n"));
+    assert!(read(&dir, "frame_N.csv").contains("# frame_index=10\n"));
+    assert!(read(&dir, "frame_N+1.csv").starts_with("# missing"));
+
+    // Violation on the pre-interval frame: no N-1 exists, and N+1 is clock
+    // frame 0, as `fail_with_dump` labels it.
+    let pre = mk(None, -40.0);
+    let first = mk(Some(0), -41.0);
+    let dir = dump_violation(
+        dump_dir("monitor_soak_selftest_first"),
+        &[&pre, &first],
+        true,
+        &v,
+        0,
+        0.0,
+        "pacing",
+    );
+    assert!(read(&dir, "frame_N-1.csv").starts_with("# missing"));
+    assert!(read(&dir, "frame_N.csv").contains("# frame_index=pre-interval\n"));
+    assert!(read(&dir, "frame_N+1.csv").contains("# frame_index=0\n"));
 }

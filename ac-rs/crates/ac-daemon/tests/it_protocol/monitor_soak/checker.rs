@@ -61,6 +61,14 @@ pub const SPLICE_COLS: usize = 3;
 /// crossing is expected from broadband-noise chi-squared tails with no bug
 /// present (c9523d9 recorded a lone 8.16 dB step in 327 frames against an
 /// 8 dB tolerance); the failure modes this soak exists for are sustained.
+///
+/// That point came from non-overlapping HF windows (0.2 s interval). At this
+/// soak's interval (hop/4 = 34.1 ms) consecutive HF windows share about 80 %
+/// of their samples. Measured there on a healthy `--fake-audio` daemon
+/// (#189, three runs, bit-identical readouts): max step 8.66 dB, one frame
+/// over tolerance in 440, longest over-tolerance streak 1. The healthy
+/// maximum is over [`CONTINUITY_TOL_DB`], so the margin rests on this streak
+/// rule, not on the tolerance.
 pub const CONTINUITY_STREAK: u32 = 3;
 
 /// I5a: LF slice unchanged for more than this many expected hops is
@@ -87,9 +95,18 @@ pub const BASELINE_FRAMES: usize = 5;
 pub const PLAUSIBILITY_TOL_DB: f64 = 6.0;
 
 /// I5b: rolling window and the out-of-tolerance count within it that is a
-/// violation. A majority vote rather than a strict streak, because a band
-/// updating with wrong values can dip back into tolerance between bad
-/// frames and would reset a streak forever.
+/// violation. A count rather than a strict streak, because a band updating
+/// with wrong values can dip back into tolerance between bad frames and
+/// would reset a streak forever.
+///
+/// The window is **not** a vote over independent frames. The LF-only slice
+/// is bit-identical between recomputes, so its power-mean repeats for
+/// `hop_ticks + 1` frames: at the soak's `hop_ticks` = 4 the 10 frames cover
+/// two LF recomputes, and one out-of-tolerance recompute fills 5 slots and
+/// fires by itself. What keeps that from being a false red is the healthy
+/// margin, which the soak prints ([`SoakStats`]): measured 0.67 dB max
+/// |cur − baseline| against the 6 dB tolerance (#189, three runs,
+/// bit-identical readouts).
 pub const PLAUSIBILITY_WINDOW: usize = 10;
 pub const PLAUSIBILITY_WINDOW_MIN_VIOLATIONS: usize = 5;
 
@@ -171,6 +188,47 @@ pub struct CheckCounts {
     pub lf_changes: usize,
 }
 
+/// Healthy-margin statistics for the assumed I2-t and I5b tolerances,
+/// information only: the runner prints them, nothing asserts on them. They
+/// are what shows how far a healthy daemon sits from each tolerance at the
+/// soak's own configuration (overlapping HF windows, `hop_ticks` = 4).
+#[derive(Clone, Copy, Debug)]
+pub struct SoakStats {
+    /// Largest I2-t splice step judged, dB.
+    pub continuity_max_step_db: f64,
+    /// Frames whose splice step exceeded [`CONTINUITY_TOL_DB`].
+    pub continuity_over_tol: usize,
+    /// Longest run of consecutive over-tolerance splice steps.
+    pub continuity_longest_streak: u32,
+    /// Largest |LF power-mean − baseline| judged by I5b, dB.
+    pub plausibility_max_err_db: f64,
+}
+
+impl Default for SoakStats {
+    fn default() -> Self {
+        Self {
+            continuity_max_step_db: f64::NEG_INFINITY,
+            continuity_over_tol: 0,
+            continuity_longest_streak: 0,
+            plausibility_max_err_db: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl SoakStats {
+    pub fn readout(&self) -> String {
+        format!(
+            "I2-t max step {:.2} dB (tol {CONTINUITY_TOL_DB}), {} frames over tol, longest \
+             over-tol streak {} (violation at {CONTINUITY_STREAK}); I5b max |cur - baseline| \
+             {:.2} dB (tol {PLAUSIBILITY_TOL_DB})",
+            self.continuity_max_step_db,
+            self.continuity_over_tol,
+            self.continuity_longest_streak,
+            self.plausibility_max_err_db
+        )
+    }
+}
+
 /// Split index: `freqs[..split]` below `edge_hz`, `freqs[split..]` at or
 /// above it.
 pub fn lf_split(freqs: &[f64], edge_hz: f64) -> usize {
@@ -237,6 +295,7 @@ pub struct SoakChecker {
     plausibility_window: VecDeque<bool>,
 
     counts: CheckCounts,
+    stats: SoakStats,
 }
 
 impl SoakChecker {
@@ -262,11 +321,16 @@ impl SoakChecker {
             baseline_mean_db: None,
             plausibility_window: VecDeque::with_capacity(PLAUSIBILITY_WINDOW),
             counts: CheckCounts::default(),
+            stats: SoakStats::default(),
         }
     }
 
     pub fn counts(&self) -> CheckCounts {
         self.counts
+    }
+
+    pub fn stats(&self) -> SoakStats {
+        self.stats
     }
 
     /// Judge the next frame. Returns the first violation it trips, if any.
@@ -287,8 +351,14 @@ impl SoakChecker {
             let lf_edge = power_mean_db(&sf.spectrum[split - SPLICE_COLS..split]);
             let hf_edge = power_mean_db(&sf.spectrum[split..split + SPLICE_COLS]);
             let step = (hf_edge - lf_edge).abs();
+            self.stats.continuity_max_step_db = self.stats.continuity_max_step_db.max(step);
             if step > CONTINUITY_TOL_DB {
                 self.continuity_streak += 1;
+                self.stats.continuity_over_tol += 1;
+                self.stats.continuity_longest_streak = self
+                    .stats
+                    .continuity_longest_streak
+                    .max(self.continuity_streak);
                 if self.continuity_streak >= CONTINUITY_STREAK {
                     return Some(Violation {
                         invariant: Invariant::Continuity,
@@ -388,6 +458,7 @@ impl SoakChecker {
             Some(baseline) => {
                 self.counts.plausibility += 1;
                 let err = (cur - baseline).abs();
+                self.stats.plausibility_max_err_db = self.stats.plausibility_max_err_db.max(err);
                 self.plausibility_window
                     .push_back(err > PLAUSIBILITY_TOL_DB);
                 while self.plausibility_window.len() > PLAUSIBILITY_WINDOW {
@@ -569,6 +640,38 @@ mod tests {
             frame(&lf_content(i / 5, -40.0), &[hf; HF_COLS])
         });
         assert!(v.is_none(), "lone {step:.2} dB step flagged: {v:?}");
+    }
+
+    /// The healthy-margin readout counts what it says: a lone step and a
+    /// pair of steps give 3 frames over tolerance, longest streak 2, and the
+    /// max step is the injected one. All three sit in one LF recompute
+    /// (frames 100-104), so each step is exactly [`injected_step_db`].
+    #[test]
+    fn stats_readout_records_over_tolerance_steps_and_streaks() {
+        let step = injected_step_db();
+        let mut c = SoakChecker::new(CROSSOVER_HZ, lf_only_edge_hz(CROSSOVER_HZ), 4.0, 20);
+        for i in 0..200 {
+            let hf = if [100, 102, 103].contains(&i) {
+                -31.0
+            } else {
+                -40.0
+            };
+            let v = c.check_frame(&frame(&lf_content(i / 5, -40.0), &[hf; HF_COLS]));
+            assert!(v.is_none(), "frame {i} flagged: {v:?}");
+        }
+        let s = c.stats();
+        assert_eq!(s.continuity_over_tol, 3, "{s:?}");
+        assert_eq!(s.continuity_longest_streak, 2, "{s:?}");
+        assert!(
+            (s.continuity_max_step_db - step).abs() < 1e-9,
+            "max step {} vs injected {step}",
+            s.continuity_max_step_db
+        );
+        assert!(
+            s.plausibility_max_err_db.is_finite()
+                && s.plausibility_max_err_db < PLAUSIBILITY_TOL_DB,
+            "{s:?}"
+        );
     }
 
     #[test]

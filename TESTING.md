@@ -221,8 +221,8 @@ updating at the wrong rate. The soak runs seeded noise through a `--fake-audio`
 daemon for a length derived from the ack's `lf_fft_n` / `lf_overlap_pct` /
 `lf_avg_tau_ms`, and judges every frame: bounded (I4-t), LF/HF splice (I2-t),
 LF liveness (I5a), plausibility (I5b) and LF update rate (I5c). Its clock is
-the received-frame count, one frame per tick, not wall time, so a loaded host
-cannot turn it red. On the first violation it dumps frames N-1/N/N+1 as CSVs
+the received-frame count, one frame per tick, not wall time, so slow ticks
+alone cannot turn it red. On the first violation it dumps frames N-1/N/N+1 as CSVs
 under `CARGO_TARGET_TMPDIR`. It does not cover drift of the tick itself
 against wall time, multi-channel monitoring, or the CWT/CQT/reassigned modes.
 
