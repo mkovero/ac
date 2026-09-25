@@ -105,10 +105,10 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
                 io::print_freq_row(&data, false, false);
             }
         } else if topic == "done" {
-            if let Some(xruns) = data.get("xruns").and_then(|v| v.as_u64()) {
-                if xruns > 0 {
-                    println!("\n  !! {xruns} xrun(s)");
-                }
+            // No summary here, so the xrun warning prints under the table.
+            let xruns = data.get("xruns").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(line) = io::xrun_warning_line(xruns) {
+                println!("\n{line}");
             }
             println!();
             return;
@@ -160,6 +160,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     io::print_freq_header(have_cal, false);
 
     let mut results = Vec::new();
+    let mut xruns = 0;
     loop {
         let frame = match client.recv_data(300_000) {
             Some(f) => f,
@@ -178,11 +179,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
                 results.push(data);
             }
         } else if topic == "done" {
-            if let Some(xruns) = data.get("xruns").and_then(|v| v.as_u64()) {
-                if xruns > 0 {
-                    println!("\n  !! {xruns} xrun(s)");
-                }
-            }
+            xruns = data.get("xruns").and_then(|v| v.as_u64()).unwrap_or(0);
             break;
         } else if topic == "error" {
             let msg = data
@@ -194,8 +191,9 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         }
     }
 
+    // Ungated: with no points (#619) the summary is the xrun line alone.
+    io::print_summary(&results, "DUT", have_cal, xruns);
     if !results.is_empty() {
-        io::print_summary(&results, "DUT", have_cal);
         let dir = io::output_dir(cfg);
         let ts = io::timestamp();
         let path = dir.join(format!("test_dut_{ts}.csv"));

@@ -84,10 +84,13 @@ pub fn run(
     }
 
     let (results, outcome) = collect_sweep(client, "plot", have_cal, verbose);
-    if outcome != SweepOutcome::Done || results.is_empty() {
+    let SweepOutcome::Done { xruns } = outcome else {
+        return;
+    };
+    io::print_summary(&results, "DUT", have_cal, xruns);
+    if results.is_empty() {
         return;
     }
-    io::print_summary(&results, "DUT", have_cal);
     save_results(&results, "plot", cfg);
 }
 
@@ -167,10 +170,13 @@ pub fn run_level(
     }
 
     let (results, outcome) = collect_sweep(client, "plot_level", have_cal, verbose);
-    if outcome != SweepOutcome::Done || results.is_empty() {
+    let SweepOutcome::Done { xruns } = outcome else {
+        return;
+    };
+    io::print_summary(&results, "DUT", have_cal, xruns);
+    if results.is_empty() {
         return;
     }
-    io::print_summary(&results, "DUT", have_cal);
     save_results(&results, "plot_level", cfg);
 }
 
@@ -1995,10 +2001,12 @@ fn ir_notes_lines(report: Option<&MeasurementReport>) -> Vec<String> {
 /// Whether a sweep reached its terminal `done` frame. Anything else — a
 /// terminal `error` (analyzer failure, #428) or a timeout — leaves
 /// `results` holding only a prefix that must never be treated as a
-/// complete artifact: no summary printed, no CSV written.
+/// complete artifact: no summary printed, no CSV written. `Done` carries
+/// the `done` frame's xrun count (0 when absent) for the summary's warning
+/// group (#130); nothing prints it while frames are still arriving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepOutcome {
-    Done,
+    Done { xruns: u64 },
     Failed,
 }
 
@@ -2043,12 +2051,8 @@ fn collect_sweep_frames(
                 results.push(data);
             }
         } else if topic == "done" {
-            if let Some(xruns) = data.get("xruns").and_then(|v| v.as_u64()) {
-                if xruns > 0 {
-                    println!("\n  !! {xruns} xrun(s) during {cmd_name}");
-                }
-            }
-            outcome = SweepOutcome::Done;
+            let xruns = data.get("xruns").and_then(|v| v.as_u64()).unwrap_or(0);
+            outcome = SweepOutcome::Done { xruns };
             break;
         } else if topic == "error" {
             let msg = data
@@ -2310,8 +2314,23 @@ mod tests {
 
         let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot", false, false);
 
-        assert_eq!(outcome, SweepOutcome::Done);
+        assert_eq!(outcome, SweepOutcome::Done { xruns: 0 });
         assert_eq!(results.len(), 2);
+    }
+
+    /// #130: the `done` frame's xrun count is returned for the summary's
+    /// warning group rather than printed inside the frame loop.
+    #[test]
+    fn done_returns_xrun_count() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            ("data".to_string(), point(100.0)),
+            ("done".to_string(), serde_json::json!({"xruns": 3})),
+        ]);
+
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot", false, false);
+
+        assert_eq!(outcome, SweepOutcome::Done { xruns: 3 });
+        assert_eq!(results.len(), 1);
     }
 
     /// #472 UX: the three `report` states, all on the `report` slot.
