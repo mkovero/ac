@@ -1,5 +1,11 @@
 # Codex Audit
 
+> **Status:** point-in-time report written 2026-08-30. It does not describe
+> current code. The status of each finding is the line directly under its
+> heading; the Executive Summary, Areas Requiring Deeper Investigation and
+> Final Assessment restate or speculate and carry no status of their own.
+> Reconciled against main `5e0d98d6` for #614.
+
 ## Executive Summary
 
 `ac` is a Rust bench-audio measurement system: a ZeroMQ daemon owns audio I/O and long-running measurement workers, `ac-core` supplies DSP and archival formats, and CLI/view crates consume the daemon's frames. I reviewed the architecture and protocol documentation, current status/history, daemon lifecycle and routing, capture/transfer/monitor paths, snapshots, configuration persistence, and selected core DSP/serialization code.
@@ -15,6 +21,8 @@ Important intended invariants include: local daemon use should not expose contro
 ## Findings
 
 ### AUDIT-001 — Default daemon exposes unauthenticated remote control and arbitrary recursive deletion
+
+**fixed by PR #521** (issue #433) — loopback bind by default with explicit `--public`, and the spool is confined to a marked leaf under the spool root; both halves.
 
 **Severity:** Critical  
 **Confidence:** Confirmed  
@@ -49,6 +57,8 @@ Bind loopback by default and require an explicit, clearly named public-listen op
 
 ### AUDIT-002 — Protocol parameters can cause unbounded allocation and CPU denial of service
 
+**open #635** — PR #437 (issue #427) bounded `ppd`, `steps`, `n_harmonics`, `window_len` and durations; `snapshot_ring_s` and `monitor_spectrum.channels` cardinality remain unbounded.
+
 **Severity:** High  
 **Confidence:** Confirmed  
 **Location:** `ac-rs/crates/ac-daemon/src/handlers/audio/plot.rs:34-47,287-296,566-587`; `ac-rs/crates/ac-daemon/src/handlers/mod.rs:370-376`; `ac-rs/crates/ac-daemon/src/handlers/admin.rs:150-154`; `ac-rs/crates/ac-daemon/src/handlers/transfer.rs:570-581`
@@ -76,6 +86,8 @@ The daemon accepts protocol input from a client before spawning the worker, but 
 Define and enforce explicit protocol limits before worker spawn for point counts, harmonic count, window size, capture duration, and retained snapshot samples/bytes. Use checked conversions and checked arithmetic, return a request error on overflow or budget excess, and cover maxima/overflow in protocol tests.
 
 ### AUDIT-003 — Oversized channel IDs silently select a different hardware channel
+
+**fixed by PR #519** (issue #431) — channel values go through `u32::try_from` and are refused on overflow.
 
 **Severity:** Medium  
 **Confidence:** Confirmed  
@@ -105,6 +117,8 @@ Use `u32::try_from` for every protocol/configuration channel conversion and reje
 
 ### AUDIT-004 — Multi-channel scope frames claim synchronization for sequential, non-overlapping captures
 
+**fixed by PR #522** (issue #434) — scope frames carry `capture_mode: "sequential"`.
+
 **Severity:** Medium  
 **Confidence:** Confirmed  
 **Location:** `ac-rs/crates/ac-daemon/src/handlers/audio/monitor.rs:70-98,1159-1197,1207-1216`
@@ -132,6 +146,8 @@ The worker's multi-channel branch calls `capture_block` once per channel; its ow
 Acquire multichannel scope samples from simultaneous capture rings, or do not publish them as synchronizable pairs. If sequential capture must remain, give each channel its own capture timestamp/range and prevent phase/goniometer consumers from pairing them.
 
 ### AUDIT-005 — Snapshot reader accepts internally inconsistent channel metadata and can derive with mismatched calibration/audio
+
+**fixed by PR #525** (issue #435) — reader and writer share cross-field metadata validation.
 
 **Severity:** Medium  
 **Confidence:** Confirmed  
@@ -161,6 +177,8 @@ Treat metadata relationships as format validity: require `per_channel.len() == c
 
 ### AUDIT-006 — `plot` archives mixed mic-correction states as one processing chain
 
+**fixed by PR #526** (issue #436) — mic-correction state is read once per measurement.
+
 **Severity:** Medium  
 **Confidence:** Confirmed  
 **Location:** `ac-rs/crates/ac-daemon/src/handlers/audio/plot.rs:120-161,173-219`; `ac-rs/crates/ac-daemon/src/handlers/calibrate.rs:710-721`
@@ -188,6 +206,8 @@ The per-point code loads `mic_corr_enabled` at lines 126-130 and immediately cha
 Freeze processing-affecting settings for the lifetime of an archival measurement, or reject/stop the measurement on a requested change. If live changes are deliberately supported, record the per-point state and make mixed-state reports explicitly non-reproducible.
 
 ### AUDIT-007 — Cumulative xrun counter is summed once per sweep point
+
+**fixed by PR #451** (issue #428) — xruns reported as a session delta from a baseline at engine start.
 
 **Severity:** Low  
 **Confidence:** Confirmed  
