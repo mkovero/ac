@@ -3,11 +3,15 @@
 use super::*;
 
 pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<ParsedCommand, String> {
-    // `--verbose` adds the per-point noise column to `plot` / `plot level`
-    // (#116); stripped here the way `parse_monitor` strips `--tui`. `plot ir`
-    // has no such column, so there it is put back and refused below.
-    let verbose = args.iter().any(|a| a == "--verbose");
-    args.retain(|a| a != "--verbose");
+    // `--verbose` / `-v` adds the per-point `fund` and `noise` columns and,
+    // once the run completes, the harmonic table to `plot` / `plot level`
+    // (#116, #132); stripped here the way `parse_monitor` strips `--tui`, so
+    // `classify_all` never sees `-v`. `plot ir` has none of these, so there
+    // the flags are put back as typed and refused below.
+    let is_verbose = |a: &String| a == "--verbose" || a == "-v";
+    let verbose_flags: Vec<String> = args.iter().filter(|a| is_verbose(a)).cloned().collect();
+    let verbose = !verbose_flags.is_empty();
+    args.retain(|a| !is_verbose(a));
     if args.first().map(|a| expand(a)) == Some("level") {
         args.remove(0);
         let mut tokens = classify_all(args)?;
@@ -43,9 +47,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
 
     if args.first().map(|a| expand(a)) == Some("ir") {
         args.remove(0);
-        if verbose {
-            args.push("--verbose".to_string());
-        }
+        args.extend(verbose_flags);
         let mut tokens = classify_all(args)?;
         // Unset stays unset: the daemon applies `ac-core`'s defaults and
         // echoes them in the ack (#501).
@@ -200,10 +202,32 @@ mod tests {
         }
     }
 
-    /// #116: `--verbose` sets the noise-column flag on `plot` and
+    /// #116, #132: `--verbose` / `-v` sets the verbose flag on `plot` and
     /// `plot level`, wherever it sits, and is off by default.
     #[test]
     fn verbose_flag_on_plot_and_plot_level() {
+        let p = parse(&args("plot 20hz 20khz -v -10dbfs")).unwrap();
+        match p.cmd {
+            CommandKind::Plot { verbose, level, .. } => {
+                assert!(verbose);
+                assert!(matches!(level, LevelSpec::Dbfs(v) if (v + 10.0).abs() < 1e-9));
+            }
+            other => panic!("expected Plot, got {other:?}"),
+        }
+        let p = parse(&args("plot level -v -20dbu 6dbu")).unwrap();
+        assert!(matches!(
+            p.cmd,
+            CommandKind::PlotLevel { verbose: true, .. }
+        ));
+        let p = parse(&args("plot -v level -30dbfs 0dbfs 1khz 5steps")).unwrap();
+        assert!(matches!(
+            p.cmd,
+            CommandKind::PlotLevel {
+                verbose: true,
+                steps: 5,
+                ..
+            }
+        ));
         let p = parse(&args("plot 20hz 20khz --verbose -10dbfs")).unwrap();
         assert!(matches!(p.cmd, CommandKind::Plot { verbose: true, .. }));
         let p = parse(&args("plot 20hz 20khz -10dbfs")).unwrap();
@@ -220,12 +244,16 @@ mod tests {
         ));
     }
 
-    /// `--verbose` is never silently ignored: `plot ir` and other verbs
-    /// have no noise column, so the token is refused as leftover.
+    /// `--verbose` / `-v` is never silently ignored: `plot ir` and other
+    /// verbs have no verbose output, so the token is refused as leftover.
     #[test]
     fn verbose_flag_is_refused_where_it_does_nothing() {
         assert!(parse(&args("plot ir 20hz 20khz --verbose")).is_err());
+        assert!(parse(&args("plot ir 20hz 20khz -v")).is_err());
         assert!(parse(&args("generate sine --verbose")).is_err());
+        assert!(parse(&args("generate sine -v")).is_err());
+        assert!(parse(&args("test dut --verbose")).is_err());
+        assert!(parse(&args("test dut -v")).is_err());
     }
 
     #[test]

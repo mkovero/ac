@@ -87,6 +87,9 @@ pub fn run(
     let SweepOutcome::Done { xruns } = outcome else {
         return;
     };
+    if verbose {
+        io::print_harmonic_table(&results, io::HarmonicKey::Freq);
+    }
     io::print_summary(&results, "DUT", have_cal, xruns);
     if results.is_empty() {
         return;
@@ -173,6 +176,14 @@ pub fn run_level(
     let SweepOutcome::Done { xruns } = outcome else {
         return;
     };
+    if verbose {
+        let key = if have_cal {
+            io::HarmonicKey::OutDbu
+        } else {
+            io::HarmonicKey::Drive
+        };
+        io::print_harmonic_table(&results, key);
+    }
     io::print_summary(&results, "DUT", have_cal, xruns);
     if results.is_empty() {
         return;
