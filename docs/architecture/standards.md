@@ -61,7 +61,7 @@ Source docs in `stddocs/` at (main) repo root. Read relevant standard before rev
 | IEC 61260-1:2014 | `stddocs/iec-full/IEC61260-1.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
 | IEC 61672-1:2013 | `stddocs/iec-full/IEC61672-1.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
 | ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
-| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
+| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LKFS), true-peak |
 | ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
 | ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
 | ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
@@ -75,7 +75,6 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
 | Farina, AES 108th Conv. preprint #5093 (2000) — "Simultaneous Measurement of Impulse Response and Distortion with a Swept-Sine Technique" | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Log-sweep impulse-response measurement and deconvolution (inverse filter), harmonic-distortion separation — cited by `sweep/mod.rs::citation()` and `farina_citation()`. Not an H1 reference. |
-| Müller & Massarani 2001 | not held — no local copy | H1 / `ac-core/visualize/transfer.rs` checks. Attribution **unverified**: no local copy exists, and `transfer.rs` implements Welch-averaged H1 (Gxy/Gxx). |
 
 ### how to use them during review
 
@@ -107,9 +106,9 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 - Weighting curve identified in output if not unweighted
 
 **ITU-R BS.1770-5** apply if integrated loudness or true-peak values appear. Check:
-- Integrated loudness expressed as `LUFS` (not `LKFS` — both used in wild, LUFS is current preferred term per BS.1770-5 §3)
+- Integrated loudness expressed as `LKFS` — BS.1770-5 Annex 1, paragraph following eq. (7): the result "should be followed by the designation LKFS" (Loudness, K-weighted, relative to nominal full scale). `LUFS` is the EBU R128 / Tech 3341 name for the same quantity; seeing `LUFS` in a Tier 1 label is not a BS.1770-5 finding, but `ac` output uses `LKFS`
 - True-peak expressed as `dBTP`, not `dBFS`
-- Gating behaviour (absolute + relative gates) match §2.7 if implemented
+- Gating behaviour (absolute + relative gates) match BS.1770-5 Annex 1 gating, eqs. (3)–(7), if implemented: 400 ms blocks at 75 % overlap, absolute threshold Γa = −70 LKFS, relative threshold Γr = loudness of the absolute-gated blocks − 10
 
 **ISO 18233** apply to swept-sine / deterministic-signal measurement. It is a *substitution* standard — §1 gives methods used "as substitutes for measurement methods specified in standards covering classical methods", and §9(c) require the report name the applicable classical standard. It never stands alone. Check:
 - A room measurement cite ISO 18233 **and** the classical standard it substitutes for (ISO 3382-1 or 3382-2). One without the other is incomplete.
@@ -177,7 +176,7 @@ Source docs in `stddocs/` at repo root. Read relevant standard before reviewing 
 | IEC 61260-1:2014 | `stddocs/iec-full/IEC61260-1.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
 | IEC 61672-1:2013 | `stddocs/iec-full/IEC61672-1.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
 | ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
-| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
+| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LKFS), true-peak |
 | ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
 | ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
 | ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
@@ -191,4 +190,3 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
 | Farina, AES 108th Conv. preprint #5093 (2000) — "Simultaneous Measurement of Impulse Response and Distortion with a Swept-Sine Technique" | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Log-sweep impulse-response measurement and deconvolution (inverse filter), harmonic-distortion separation — cited by `sweep/mod.rs::citation()` and `farina_citation()`. Not an H1 reference. |
-| Müller & Massarani 2001 | not held — no local copy | H1 / `ac-core/visualize/transfer.rs` checks. Attribution **unverified**: no local copy exists, and `transfer.rs` implements Welch-averaged H1 (Gxy/Gxx). |
