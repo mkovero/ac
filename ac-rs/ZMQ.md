@@ -926,7 +926,8 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
     "backend":           "jack" | "cpal" | "fake" | null,  // optional
-    "snapshot_ring_s":   <number>,  // optional — finite, > 0; null refused — see `snapshot`
+    "snapshot_ring_s":   <number>,  // optional — seconds, finite, > 0 and at most 300;
+                                    //   null refused — see `snapshot`
     "snapshot_spool_dir":"<leaf>" | "<absolute path>" | null, // optional — see below
     "temperature_c":     <number> | null,  // optional — finite; null = clear
     "server_idle_timeout_secs": <int> | null,  // optional — integer >= 0;
@@ -942,7 +943,14 @@ The four channel fields and the four scalar keys `dbu_ref_vrms`,
 applied, so a wrong type or a value outside the key's domain leaves the
 whole config unchanged (`setup rejected — …`, `config  unchanged`). A float
 for `server_idle_timeout_secs`, `30.0` included, is refused as not an
-integer.
+integer. `snapshot_ring_s` above its fixed 300 s ceiling (#635) is refused
+the same way:
+
+```text
+setup rejected — snapshot_ring_s must be at most 300 s
+         received  300.001
+         config    unchanged
+```
 
 `snapshot_spool_dir` is confined to the daemon's spool root,
 `~/.local/state/ac/snapshots` on the daemon host. The value is a leaf name
@@ -1938,12 +1946,33 @@ across `reconnect_input` can't be preserved).
                               // default: nearest pow2 of sr*interval (preserves legacy)
   "channels":   [<int>, ...] // optional; input channel indices to monitor
                               // defaults to [config.input_channel]
+                              // at most 64 entries, none repeated
 }
 ```
 
 See **Error handling → Wire values** for how a malformed field is refused. Any present `fft_n`
 that is not an integer in 0–4294967295 — `null` and strings included — gets the `fft_n must be power of 2 …` refusal; a `fake_tones` element
 missing `freq_hz` or `level_dbfs` refuses the whole request.
+
+A `channels` list longer than 64 entries, or with an entry equal to an
+earlier one, is refused before any port lookup, calibration load or worker
+start (#635). Length is checked before repeats, and the first repeat in
+list order is reported:
+
+```text
+monitor not started — channels must list at most 64 entries
+         received  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0…
+         entries   100000
+```
+
+```text
+monitor not started — channels[2] repeats channels[0]
+         received  [0,1,0]
+         channel   0
+```
+
+64 is at least the widest supported interface (FF400: 18 capture channels).
+A repeat is refused, not de-duplicated.
 
 Both `interval` and `fft_n` are live-reconfigurable — see
 `set_monitor_params` below.
@@ -2821,6 +2850,17 @@ See **Error handling → Wire values** for how a malformed field is refused:
 a malformed `pairs[i][j]`, `meas_channel` or `ref_channel` is refused as
 `transfer_stream not started`, and a non-array `pairs` is refused rather than
 falling back to the legacy form.
+`setup` refuses an out-of-domain `snapshot_ring_s`, but `config.json` can
+still carry one. `transfer_stream`, the only command that builds the
+snapshot ring, refuses the launch with no worker started — never a clamped
+ring (#635). A value above 300 s gets `must be at most 300 s`; a value
+≤ 0 gets `must be a finite number > 0`:
+
+```text
+transfer not started — snapshot_ring_s must be at most 300 s
+         received  1000000.0
+         source    config.json
+```
 `weighting`/`integration` apply to every pair in the session; invalid values
 reply `{"ok": false, "error": "..."}` before the worker spawns.
 
@@ -3815,7 +3855,8 @@ Applies to every channel field (`channels`, `output_channel`,
 `input_channel`, `reference_channel`, `reference_output_channel`,
 `pairs[i][j]`, `meas_channel`, `ref_channel`), to the positional
 `calibrate_mic_curve` arrays, and to the `setup` scalar keys
-`dbu_ref_vrms`, `snapshot_ring_s` (finite, > 0, not nullable),
+`dbu_ref_vrms` (finite, > 0, not nullable), `snapshot_ring_s` (finite,
+> 0 and at most 300 s, not nullable; #635),
 `temperature_c` (finite; `null` clears) and `server_idle_timeout_secs`
 (integer ≥ 0; `null` clears) (#516).
 
@@ -3826,8 +3867,13 @@ Applies to every channel field (`channels`, `output_channel`,
 | `reference_channel` / `reference_output_channel`: `null` | clear |
 | channel field: integer in 0–4294967295 | that channel |
 | channel field: anything else present — string, float, negative, > 4294967295, `null` on a non-nullable field, non-array `channels`/`pairs`, any bad array element | refused |
-| `dbu_ref_vrms` / `snapshot_ring_s`: finite number > 0 (integer or float) | that value |
-| `dbu_ref_vrms` / `snapshot_ring_s`: anything else — `null`, string, bool, 0, negative | refused |
+| `dbu_ref_vrms`: finite number > 0 (integer or float) | that value |
+| `dbu_ref_vrms`: anything else — `null`, string, bool, 0, negative | refused |
+| `snapshot_ring_s`: finite number > 0 and ≤ 300 (integer or float) | that value |
+| `snapshot_ring_s`: above 300 | refused — `must be at most 300 s` |
+| `snapshot_ring_s`: anything else — `null`, string, bool, 0, negative | refused |
+| `monitor_spectrum` `channels`: more than 64 entries | refused — `must list at most 64 entries`, trailer `entries  <N>` |
+| `monitor_spectrum` `channels`: an entry equal to an earlier one | refused — `channels[j] repeats channels[i]`, trailer `channel  <n>` |
 | `temperature_c`: finite number (integer or float, any sign) | that value |
 | `temperature_c`: `null` | clear |
 | `temperature_c`: anything else — string, bool, array, object | refused |
@@ -3851,12 +3897,17 @@ generate not started — channels[0] must be an integer
 
 `<problem>` is one of `must be an integer`, `is outside 0–4294967295`,
 `must be a finite number`, `must be a finite number > 0`,
-`must be a non-negative integer`, `must be an array`.
+`must be a non-negative integer`, `must be an array`,
+`must be at most <limit> <unit>`, `must list at most <limit> entries`,
+`repeats <field>[i]` (#635). The ceilings are fixed daemon constants, not
+config keys: `snapshot_ring_s` 300 s, `monitor_spectrum` `channels` 64
+entries.
 
 | command | headline | state line |
 |---|---|---|
 | `generate`, `generate_pink` | `<cmd> not started` | `stimulus  silent` |
 | `transfer_stream` | `transfer_stream not started` | `stimulus  silent` |
+| `transfer_stream`, `snapshot_ring_s` from `config.json` | `transfer not started` | `source  config.json` |
 | `calibrate` | `calibration not started` | `stimulus  silent` |
 | `calibrate_spl` | `SPL calibration not started` | — |
 | `calibrate_mic_curve` | `mic curve not saved` / `mic curve not cleared` | `data  existing curve unchanged` (plus `paired field  <other>[i] = <value>` when the partner element is valid) |

@@ -690,7 +690,7 @@ mod tests {
     /// A ring as the handler publishes it: pending, no sample rate yet.
     fn pending_ring() -> Arc<Mutex<SnapshotRingState>> {
         Arc::new(Mutex::new(SnapshotRingState::pending(
-            0.01,
+            crate::handlers::snapshot::RingSeconds::new(0.01).unwrap(),
             vec![0, 1],
             vec![(0, 1)],
             "Z".to_string(),

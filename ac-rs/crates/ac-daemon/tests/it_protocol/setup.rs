@@ -81,6 +81,46 @@ fn setup_channel_clears_sticky_port() {
     );
 }
 
+/// #635: `snapshot_ring_s` has a fixed ceiling of 300 s. The ceiling
+/// itself is accepted; one step above it and an overflow-scale value are
+/// refused naming the field and the limit, leave the previous value in
+/// place, and leave the daemon answering.
+#[test]
+fn setup_snapshot_ring_s_ceiling() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": 300}}));
+    assert_eq!(r["ok"], json!(true), "the ceiling itself is accepted: {r}");
+    assert_eq!(r["config"]["snapshot_ring_s"], json!(300.0));
+
+    for (bad, echo) in [(json!(300.001), "300.001"), (json!(1e300), "1e+300")] {
+        let r = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": bad}}));
+        assert_eq!(r["ok"], json!(false), "{bad} must be refused: {r}");
+        assert_eq!(
+            r["error"].as_str().unwrap_or_default(),
+            format!(
+                "setup rejected \u{2014} snapshot_ring_s must be at most 300 s\n\
+                 \x20        received  {echo}\n\
+                 \x20        config    unchanged"
+            ),
+        );
+        let status = c.call(json!({"cmd": "status"}));
+        assert_eq!(
+            status["ok"],
+            json!(true),
+            "daemon must still answer: {status}"
+        );
+        assert_eq!(status["busy"], json!(false), "{status}");
+        let after = c.call(json!({"cmd": "setup", "update": {}}));
+        assert_eq!(
+            after["config"]["snapshot_ring_s"],
+            json!(300.0),
+            "a refused {bad} must leave the previous value in place"
+        );
+    }
+}
+
 /// handoff: snapshot-backend M1 — `snapshot_ring_s`/`snapshot_spool_dir`
 /// round-trip through `setup` like every other config field, including
 /// persistence (a second `setup` read reflects the earlier write). Since

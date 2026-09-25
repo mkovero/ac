@@ -17,11 +17,17 @@
 //! | [`opt_positive_f64`]: finite number > 0 (integer or float); `null` refused | the value |
 //! | [`opt_nullable_finite_f64`]: finite number (integer or float, any sign) | the value |
 //! | [`opt_nullable_u64`]: integer in 0–18446744073709551615 | the value |
+//! | [`bounded_distinct_u32s`]: more than `limit` entries | [`ListRefusal`] — `must list at most <limit> entries` |
+//! | [`bounded_distinct_u32s`]: an entry equal to an earlier one | [`ListRefusal`] — `<field>[j] repeats <field>[i]` |
+//! | a value above a ceiling ([`Problem::AtMost`]) | [`WireError`] — `must be at most <limit> <unit>` |
 //! | anything else | [`WireError`] — caller refuses the whole request |
 //!
 //! The one thing these readers never do is drop an element or narrow a
 //! value: independent element filtering shifts positional pairs, and an
 //! unchecked `u64 as u32` turns 4294967296 into channel 0.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -34,7 +40,7 @@ const RECEIVED_MAX_CHARS: usize = 64;
 const TRAILER_INDENT: &str = "         ";
 
 /// What was wrong with a supplied value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Problem {
     NotInteger,
     OutOfRange,
@@ -42,17 +48,37 @@ pub(crate) enum Problem {
     NotPositive,
     NotNonNegativeInteger,
     NotArray,
+    /// A number above a fixed ceiling (#635). `limit` is a `u32` so the
+    /// text renders it exactly, with no `.0`.
+    AtMost {
+        limit: u32,
+        unit: &'static str,
+    },
+    /// An array with more entries than a fixed ceiling (#635).
+    TooManyEntries {
+        limit: u32,
+    },
+    /// An array entry equal to an earlier one; `earlier` is that entry's
+    /// field path, e.g. `channels[0]` (#635).
+    Repeats {
+        earlier: String,
+    },
 }
 
 impl Problem {
-    fn text(self) -> &'static str {
+    fn text(&self) -> Cow<'static, str> {
         match self {
-            Problem::NotInteger => "must be an integer",
-            Problem::OutOfRange => "is outside 0\u{2013}4294967295",
-            Problem::NotFinite => "must be a finite number",
-            Problem::NotPositive => "must be a finite number > 0",
-            Problem::NotNonNegativeInteger => "must be a non-negative integer",
-            Problem::NotArray => "must be an array",
+            Problem::NotInteger => "must be an integer".into(),
+            Problem::OutOfRange => "is outside 0\u{2013}4294967295".into(),
+            Problem::NotFinite => "must be a finite number".into(),
+            Problem::NotPositive => "must be a finite number > 0".into(),
+            Problem::NotNonNegativeInteger => "must be a non-negative integer".into(),
+            Problem::NotArray => "must be an array".into(),
+            Problem::AtMost { limit, unit } => format!("must be at most {limit} {unit}").into(),
+            Problem::TooManyEntries { limit } => {
+                format!("must list at most {limit} entries").into()
+            }
+            Problem::Repeats { earlier } => format!("repeats {earlier}").into(),
         }
     }
 }
@@ -67,7 +93,10 @@ pub(crate) struct WireError {
 }
 
 impl WireError {
-    fn new(field: &str, problem: Problem, v: &Value) -> Self {
+    /// A refusal of `v`, found at `field`, for `problem`. For checks made
+    /// outside this module — a ceiling on an already-parsed value — so the
+    /// `received` echo is still the value as sent.
+    pub(crate) fn new(field: &str, problem: Problem, v: &Value) -> Self {
         Self {
             field: field.to_string(),
             problem,
@@ -234,6 +263,62 @@ pub(crate) fn opt_u32_array(obj: &Value, field: &str) -> Result<Option<Vec<u32>>
         .map(|(i, v)| u32_value(v, &format!("{field}[{i}]")))
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+/// A refused list, plus the one trailer line that locates the problem in
+/// it: `entries N` for a list over its ceiling (the `received` echo is cut
+/// at 64 characters, so it cannot be counted from that), `channel N` for a
+/// repeat (still readable when the echo is cut before the repeat).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListRefusal {
+    pub(crate) error: WireError,
+    pub(crate) trailer: (&'static str, String),
+}
+
+impl ListRefusal {
+    /// The refusal text: [`WireError::refusal`] with this list's trailer
+    /// after `received`.
+    pub(crate) fn refusal(&self, headline: &str) -> String {
+        let (label, value) = &self.trailer;
+        self.error.refusal(headline, &[(label, value.as_str())])
+    }
+}
+
+/// A parsed `u32` list that must hold at most `limit` entries, none equal
+/// to an earlier one (#635). `raw` is the list as sent, for the `received`
+/// echo. Length is checked first: a long list almost always repeats too,
+/// and the length refusal is the one fix that clears both. A repeat is the
+/// first in list order — the lowest `j` whose value already sat at some
+/// `i < j`.
+pub(crate) fn bounded_distinct_u32s(
+    field: &str,
+    raw: &Value,
+    values: &[u32],
+    limit: u32,
+) -> Result<(), ListRefusal> {
+    if values.len() > limit as usize {
+        return Err(ListRefusal {
+            error: WireError::new(field, Problem::TooManyEntries { limit }, raw),
+            trailer: ("entries", values.len().to_string()),
+        });
+    }
+    let mut first_at: HashMap<u32, usize> = HashMap::with_capacity(values.len());
+    for (j, &v) in values.iter().enumerate() {
+        if let Some(&i) = first_at.get(&v) {
+            return Err(ListRefusal {
+                error: WireError::new(
+                    &format!("{field}[{j}]"),
+                    Problem::Repeats {
+                        earlier: format!("{field}[{i}]"),
+                    },
+                    raw,
+                ),
+                trailer: ("channel", v.to_string()),
+            });
+        }
+        first_at.insert(v, j);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -425,6 +510,84 @@ mod tests {
         assert!(
             text.contains("\n         data          existing curve unchanged"),
             "{text}"
+        );
+    }
+
+    /// #635: the ceiling itself passes, one more entry is refused.
+    #[test]
+    fn bounded_distinct_accepts_limit_and_refuses_one_more() {
+        let at: Vec<u32> = (0..64).collect();
+        assert_eq!(bounded_distinct_u32s("x", &json!(at), &at, 64), Ok(()));
+        let over: Vec<u32> = (0..65).collect();
+        let e = bounded_distinct_u32s("x", &json!(over), &over, 64).unwrap_err();
+        assert_eq!(e.error.field, "x");
+        assert_eq!(e.error.problem, Problem::TooManyEntries { limit: 64 });
+        assert_eq!(e.trailer, ("entries", "65".to_string()));
+        assert_eq!(bounded_distinct_u32s("x", &json!([]), &[], 64), Ok(()));
+    }
+
+    /// #635: length is checked before repeats, so a long list of zeros is
+    /// refused for its length, and the count survives the cut echo.
+    #[test]
+    fn bounded_distinct_checks_length_before_repeats() {
+        let zeros = vec![0u32; 100_000];
+        let e = bounded_distinct_u32s("channels", &json!(zeros), &zeros, 64).unwrap_err();
+        assert_eq!(
+            e.refusal("monitor not started"),
+            format!(
+                "monitor not started \u{2014} channels must list at most 64 entries\n\
+                 \x20        received  [{}0\u{2026}\n\
+                 \x20        entries   100000",
+                "0,".repeat(31)
+            )
+        );
+    }
+
+    /// #635: the first repeat in list order is reported, with both indices
+    /// and the repeated value.
+    #[test]
+    fn bounded_distinct_reports_first_repeat() {
+        let e = bounded_distinct_u32s("channels", &json!([0, 1, 0]), &[0, 1, 0], 64).unwrap_err();
+        assert_eq!(
+            e.refusal("monitor not started"),
+            "monitor not started \u{2014} channels[2] repeats channels[0]\n\
+             \x20        received  [0,1,0]\n\
+             \x20        channel   0"
+        );
+        let e = bounded_distinct_u32s("channels", &json!([0, 0, 0]), &[0, 0, 0], 64).unwrap_err();
+        assert_eq!(e.error.field, "channels[1]");
+        // `[5,7,7,5]`: index 2 repeats before index 3 does.
+        let e =
+            bounded_distinct_u32s("channels", &json!([5, 7, 7, 5]), &[5, 7, 7, 5], 64).unwrap_err();
+        assert_eq!(
+            (e.error.field.as_str(), e.error.problem),
+            (
+                "channels[2]",
+                Problem::Repeats {
+                    earlier: "channels[1]".to_string()
+                }
+            )
+        );
+        assert_eq!(e.trailer, ("channel", "7".to_string()));
+    }
+
+    /// The echo is serde_json's rendering of the parsed number, so `1e300`
+    /// as sent reads back as `1e+300`.
+    #[test]
+    fn at_most_renders_the_limit_exactly() {
+        let e = WireError::new(
+            "snapshot_ring_s",
+            Problem::AtMost {
+                limit: 300,
+                unit: "s",
+            },
+            &json!(1e300),
+        );
+        assert_eq!(
+            e.refusal("setup rejected", &[("config", "unchanged")]),
+            "setup rejected \u{2014} snapshot_ring_s must be at most 300 s\n\
+             \x20        received  1e+300\n\
+             \x20        config    unchanged"
         );
     }
 

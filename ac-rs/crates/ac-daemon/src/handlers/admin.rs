@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use ac_core::shared::calibration::{Calibration, DeviceEpoch, EnumerationCheck, TauEntry};
 
 use crate::handlers::checks;
+use crate::handlers::snapshot::RingSeconds;
 use crate::server::ServerState;
 
 use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache, wire};
@@ -36,7 +37,7 @@ fn parse_setup_channels(update: &Value) -> Result<SetupChannels, wire::WireError
 /// `null` (clear).
 struct SetupScalars {
     dbu_ref_vrms: Option<f64>,
-    snapshot_ring_s: Option<f64>,
+    snapshot_ring_s: Option<RingSeconds>,
     temperature_c: Option<Option<f64>>,
     server_idle_timeout_secs: Option<Option<u64>>,
 }
@@ -45,9 +46,22 @@ fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> 
     Ok(SetupScalars {
         dbu_ref_vrms: wire::opt_positive_f64(update, "dbu_ref_vrms")?,
         server_idle_timeout_secs: wire::opt_nullable_u64(update, "server_idle_timeout_secs")?,
-        snapshot_ring_s: wire::opt_positive_f64(update, "snapshot_ring_s")?,
+        snapshot_ring_s: parse_ring_seconds(update)?,
         temperature_c: wire::opt_nullable_finite_f64(update, "temperature_c")?,
     })
+}
+
+/// `snapshot_ring_s`: the positive-number reader, then the ring's own
+/// ceiling (#635), both before anything is applied. A value above the
+/// ceiling echoes as sent, so `1e300` and `300.001` stay distinguishable.
+fn parse_ring_seconds(update: &Value) -> Result<Option<RingSeconds>, wire::WireError> {
+    const FIELD: &str = "snapshot_ring_s";
+    let Some(x) = wire::opt_positive_f64(update, FIELD)? else {
+        return Ok(None);
+    };
+    RingSeconds::new(x)
+        .map(Some)
+        .map_err(|problem| wire::WireError::new(FIELD, problem, &update[FIELD]))
 }
 
 pub fn status(state: &ServerState) -> Value {
@@ -265,7 +279,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     }
     // Snapshot backend (handoff: snapshot-backend M1, deliverable 1/2).
     if let Some(v) = scalars.snapshot_ring_s {
-        cfg.snapshot_ring_s = v;
+        cfg.snapshot_ring_s = v.get();
     }
     if let Some(dir) = spool_update {
         cfg.snapshot_spool_dir = dir;
