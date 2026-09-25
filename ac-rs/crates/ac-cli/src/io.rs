@@ -142,8 +142,9 @@ fn range_line(lbl: &str, lo: f64, hi: f64) -> String {
 /// The summary block printed after a `plot` / `plot level` table.
 ///
 /// Worst and average figures come from the points that are neither clipped
-/// nor AC-coupled; when every point is flagged they come from all points,
-/// and the warning lines say so.
+/// nor AC-coupled; when every point is flagged they come from all points.
+/// Each warning line gives only a count and a condition; one continuation
+/// line under the last warning states how many points the figures used.
 ///
 /// The noise-floor `worst` is the **highest** `noise_floor_dbfs` over that
 /// same set — the least favourable floor. The sign runs opposite to a worst
@@ -176,6 +177,7 @@ pub fn summary_lines(
         }
     }
     let all_flagged = clean.is_empty();
+    let clean_n = clean.len();
     let valid: Vec<&serde_json::Value> = if all_flagged {
         results.iter().collect()
     } else {
@@ -248,16 +250,11 @@ pub fn summary_lines(
         }
     }
 
-    let consequence = if all_flagged {
-        "worst / avg include flagged points"
-    } else {
-        "excluded from worst / avg"
-    };
     let mut warnings = Vec::new();
     for (count, what) in [(clipped_n, "clipped"), (ac_n, "AC-coupled")] {
         if count > 0 {
             warnings.push(format!(
-                "{}{count} of {n} {} {what} \u{2014} {consequence}",
+                "{}{count} of {n} {} {what}",
                 label("warning"),
                 points(n)
             ));
@@ -266,6 +263,22 @@ pub fn summary_lines(
     if !warnings.is_empty() {
         lines.push(String::new());
         lines.extend(warnings);
+        // One continuation line states the basis of every figure above.
+        // `clean_n` counts points with neither flag, so overlapping flags
+        // are not double-subtracted.
+        lines.push(if all_flagged {
+            format!(
+                "{}worst / avg include all {n} flagged {}",
+                label(""),
+                points(n)
+            )
+        } else {
+            format!(
+                "{}worst / avg from the {clean_n} unflagged {}",
+                label(""),
+                points(clean_n)
+            )
+        });
     }
     lines.push(String::new());
     lines
@@ -385,10 +398,7 @@ pub fn freq_row_lines(frame: &serde_json::Value, have_cal: bool, verbose: bool) 
         (false, false) => None,
     };
     if let Some(f) = flags {
-        lines.push(format!(
-            "{}{f} \u{2014} point excluded from summary",
-            label("warning")
-        ));
+        lines.push(format!("{}{f}", label("warning")));
     }
     lines
 }
@@ -456,11 +466,6 @@ mod tests {
             for line in summary_lines(&run, "DUT", cal) {
                 assert!(cols(&line) <= 80, "{} cols: {line:?}", cols(&line));
             }
-            // Every point flagged: the longer "include flagged points" form.
-            let flagged: Vec<Value> = (0..99).map(|_| cal_point(true, true)).collect();
-            for line in summary_lines(&flagged, "DUT", cal) {
-                assert!(cols(&line) <= 80, "{} cols: {line:?}", cols(&line));
-            }
             for verbose in [false, true] {
                 for line in freq_header_lines(cal, verbose) {
                     assert!(cols(&line) <= 80, "{line:?}");
@@ -470,6 +475,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// MAX_SWEEP_POINTS is 10 000 (ac-daemon handlers/mod.rs); `plot level`
+    /// at 20 Hz with >= 100 steps into an AC-coupled DUT flags every point.
+    #[test]
+    fn summary_fits_80_columns_up_to_max_sweep_points() {
+        let flag_sets: [&[&str]; 3] = [&["clipping"], &["ac_coupled"], &["clipping", "ac_coupled"]];
+        for n in [1usize, 99, 100, 1_000, 10_000] {
+            for flags in flag_sets {
+                // All flagged, then all but one flagged.
+                for clean in [0usize, 1] {
+                    let mut run: Vec<Value> = (0..n)
+                        .map(|_| {
+                            let mut p = json!({"thd_pct": 1.0, "noise_floor_dbfs": -90.0});
+                            for f in flags {
+                                p[*f] = json!(true);
+                            }
+                            p
+                        })
+                        .collect();
+                    for p in run.iter_mut().take(clean) {
+                        for f in flags {
+                            p[*f] = json!(false);
+                        }
+                    }
+                    for cal in [false, true] {
+                        for line in summary_lines(&run, "DUT", cal) {
+                            assert!(
+                                cols(&line) <= 80,
+                                "n={n} {flags:?} clean={clean}: {} cols: {line:?}",
+                                cols(&line)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn header_rows_match_the_ux_mockup() {
+        let h = freq_header_lines(false, true);
+        assert_eq!(
+            h[3],
+            "        freq     drive        THD      THD+N       noise"
+        );
+        assert_eq!(
+            h[4],
+            "          Hz      dBFS          %          %        dBFS"
+        );
+        let h = freq_header_lines(true, true);
+        assert_eq!(
+            h[3],
+            "      freq       out        in     gain        THD      THD+N    noise"
+        );
+        assert_eq!(
+            h[4],
+            "        Hz       dBu       dBu       dB          %          %     dBFS"
+        );
     }
 
     #[test]
@@ -517,15 +581,19 @@ mod tests {
         let lines = freq_row_lines(&cal_point(true, false), true, false);
         assert_eq!(lines.len(), 2);
         assert!(!lines[0].contains("clipped"));
-        assert_eq!(
-            lines[1],
-            "  warning       clipped \u{2014} point excluded from summary"
-        );
+        assert_eq!(lines[1], "  warning       clipped");
         let lines = freq_row_lines(&cal_point(true, true), true, false);
-        assert_eq!(
-            lines[1],
-            "  warning       clipped, AC-coupled \u{2014} point excluded from summary"
-        );
+        assert_eq!(lines[1], "  warning       clipped, AC-coupled");
+        let lines = freq_row_lines(&cal_point(false, true), false, true);
+        assert_eq!(lines[1], "  warning       AC-coupled");
+        // A row cannot know whether its point ends up in the summary.
+        for (clip, ac) in [(true, false), (false, true), (true, true)] {
+            for (cal, verbose) in [(false, false), (true, true)] {
+                for line in freq_row_lines(&cal_point(clip, ac), cal, verbose) {
+                    assert!(!line.contains("summary"), "{line:?}");
+                }
+            }
+        }
         assert_eq!(
             freq_row_lines(&cal_point(false, false), true, false).len(),
             1
@@ -590,7 +658,8 @@ mod tests {
     }
 
     #[test]
-    fn summary_warnings_count_out_of_total_and_change_when_all_flagged() {
+    fn summary_warnings_count_out_of_total_then_state_the_basis() {
+        // 9 points: 2 clipped, 1 AC-coupled, one point carrying both.
         let mut run: Vec<Value> = (0..7)
             .map(|i| uncal_point(20.0 * (i + 1) as f64, 0.002, -94.0, 1.0))
             .collect();
@@ -598,35 +667,67 @@ mod tests {
         run.push(json!({"thd_pct": 5.0, "clipping": true, "ac_coupled": true}));
         let lines = summary_lines(&run, "DUT", false);
         assert_eq!(lines[1], "  summary       DUT \u{00b7} 9 points");
-        let warnings: Vec<&String> = lines
-            .iter()
-            .filter(|l| l.starts_with("  warning"))
-            .collect();
-        assert_eq!(
-            warnings,
-            vec![
-                "  warning       2 of 9 points clipped \u{2014} excluded from worst / avg",
-                "  warning       1 of 9 points AC-coupled \u{2014} excluded from worst / avg",
-            ]
-        );
-        // Warnings come last, after one blank line.
+        // Warnings and their continuation come last, after one blank line.
         let first_warn = lines
             .iter()
             .position(|l| l.starts_with("  warning"))
             .unwrap();
         assert_eq!(lines[first_warn - 1], "");
-        assert!(lines[first_warn..]
+        assert_eq!(
+            lines[first_warn..],
+            [
+                "  warning       2 of 9 points clipped",
+                "  warning       1 of 9 points AC-coupled",
+                "                worst / avg from the 7 unflagged points",
+                "",
+            ]
+        );
+        // The rejected count, n − clipped − ac, differs on this overlapping run.
+        let flagged = |k: &str| run.iter().filter(|r| bool_of(r, k)).count();
+        let rejected = run.len() - flagged("clipping") - flagged("ac_coupled");
+        assert_eq!(rejected, 6);
+        assert!(!lines
             .iter()
-            .all(|l| l.is_empty() || l.starts_with("  warning")));
+            .any(|l| l.contains(&format!("the {rejected} unflagged"))));
 
         let all: Vec<Value> = (0..9)
             .map(|_| json!({"thd_pct": 1.0, "clipping": true}))
             .collect();
         let lines = summary_lines(&all, "DUT", false);
-        assert!(lines.contains(
-            &"  warning       9 of 9 points clipped \u{2014} worst / avg include flagged points"
-                .to_string()
-        ));
+        let first_warn = lines
+            .iter()
+            .position(|l| l.starts_with("  warning"))
+            .unwrap();
+        assert_eq!(
+            lines[first_warn..],
+            [
+                "  warning       9 of 9 points clipped",
+                "                worst / avg include all 9 flagged points",
+                "",
+            ]
+        );
+
+        // Singular forms.
+        let mut one_clean: Vec<Value> = (0..3)
+            .map(|_| json!({"thd_pct": 1.0, "ac_coupled": true}))
+            .collect();
+        one_clean.push(uncal_point(1e3, 0.002, -94.0, 1.0));
+        let lines = summary_lines(&one_clean, "DUT", false);
+        assert!(
+            lines.contains(&"                worst / avg from the 1 unflagged point".to_string())
+        );
+        let single = [json!({"thd_pct": 1.0, "ac_coupled": true})];
+        let lines = summary_lines(&single, "DUT", false);
+        assert!(lines.contains(&"  warning       1 of 1 point AC-coupled".to_string()));
+        assert!(
+            lines.contains(&"                worst / avg include all 1 flagged point".to_string())
+        );
+
+        // No flags: no warning lines and no continuation line.
+        let lines = summary_lines(&run[..7], "DUT", false);
+        assert!(!lines
+            .iter()
+            .any(|l| l.contains("warning") || l.contains("worst / avg")));
     }
 
     #[test]
