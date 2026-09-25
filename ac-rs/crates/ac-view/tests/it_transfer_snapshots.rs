@@ -44,6 +44,13 @@
 //! `TESTING.md` → "A3 snapshot reference currency" for the checklist a
 //! `draw_view`/pane change must satisfy before merge.
 //!
+//! **Regenerated 2026-09-25** on the same box for #221, same
+//! build-on-the-dev-VM-and-copy method: a plain run first failed only
+//! `transfer_stored_comparison_no_live` (its stored runs now carry the
+//! "H₁ Welch 1.00 Hz flat — not the live ladder" legend span); that one
+//! reference was regenerated and a plain re-run passed all 7. The other 6
+//! were not regenerated — they passed unchanged.
+//!
 //! **Re-verified 2026-08-31** on the same box for the `view.rs` module
 //! split (PR #418), same build-on-the-dev-VM-and-copy method: all 7 pass
 //! against these references unchanged. Two facts worth recording from
@@ -86,6 +93,13 @@ const SIZE: egui::Vec2 = egui::vec2(960.0, 420.0);
 /// Transfer scene over 24 columns with a coherence gap at 8..14 and a
 /// sloped magnitude, so the gap and the pane shapes are both visible.
 fn transfer_scene() -> TransferScene {
+    transfer_scene_from(ac_scene::transfer::Estimator::Ladder)
+}
+
+/// The same scene, derived by `estimator`. A stored run without recorded
+/// ladder provenance is `Welch`, and its legend row carries the #221
+/// statement.
+fn transfer_scene_from(estimator: ac_scene::transfer::Estimator) -> TransferScene {
     let n = 24;
     let freqs: Vec<f64> = (0..n).map(|i| 40.0 * 1.3f64.powi(i as i32)).collect();
     let magnitude_db: Vec<f64> = (0..n).map(|i| -6.0 + (i as f64 - 12.0) * 0.8).collect();
@@ -120,6 +134,7 @@ fn transfer_scene() -> TransferScene {
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages: Vec::new(),
+        estimator,
         fault: None,
         calibration: None,
     };
@@ -270,8 +285,13 @@ fn snapshot_transfer_ir_panel() {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_stored_comparison_no_live() {
-    let run_a = transfer_scene();
-    let run_b = transfer_scene();
+    // Welch-derived stored runs (#221): each legend row states that it is
+    // not the live ladder.
+    let welch = ac_scene::transfer::Estimator::Welch {
+        nperseg: ac_core::visualize::transfer::h1_nperseg(48_000),
+    };
+    let run_a = transfer_scene_from(welch);
+    let run_b = transfer_scene_from(welch);
     let mut state = TransferViewState::new(-10.0, -20.0);
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);

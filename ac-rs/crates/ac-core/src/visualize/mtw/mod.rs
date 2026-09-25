@@ -59,6 +59,7 @@ pub mod align;
 pub mod average;
 pub mod decimate;
 pub mod ladder;
+pub mod replay;
 pub mod splice;
 
 use realfft::RealFftPlanner;
@@ -330,6 +331,70 @@ fn analyse_block(
 /// reverse-engineering it from the frame rate.
 pub fn settling_seconds(stage: &Stage, n_blocks: usize) -> f64 {
     stage.window_s + stage.hop_s * (n_blocks.max(1) - 1) as f64
+}
+
+/// The wire description of `ladder`'s rungs, shallowest first, for a ladder
+/// averaging `n_blocks` blocks per stage.
+///
+/// One converter for both producers of `mtw` columns — the daemon's live
+/// frame and [`replay`]'s snapshot reprocessing (#221) — so the two cannot
+/// describe the same ladder differently.
+pub fn wire_stages(ladder: &Ladder, n_blocks: usize) -> Vec<crate::wire::MtwStage> {
+    ladder
+        .stages
+        .iter()
+        .map(|s| crate::wire::MtwStage {
+            // `W + hop·(N−1)` — how long this rung takes to fill its
+            // average. Shipped so a viewer can say how stale a band is
+            // without deriving it from the frame rate.
+            settling_s: settling_seconds(s, n_blocks),
+            decim: s.decim,
+            rate: s.rate,
+            df: s.df,
+            window_s: s.window_s,
+            hop_s: s.hop_s,
+            f_valid: s.f_valid,
+            f_top: s.f_top,
+            blend_top: s.blend_top,
+        })
+        .collect()
+}
+
+/// Assembled columns in their wire form: dB and degrees applied, every
+/// column carrying the Δf, window and N that produced it.
+///
+/// Shared by the live frame and [`replay`] (#221) for the same reason as
+/// [`wire_stages`]. dB is applied here rather than in a viewer, per the
+/// display-truth rule: `ac-view` plots what it is given and does no
+/// `log10` of its own.
+pub fn wire_columns(
+    cols: &[Column],
+    ppo: f64,
+    n_blocks: usize,
+    settled_stages: Vec<bool>,
+    stages: Vec<crate::wire::MtwStage>,
+) -> crate::wire::MtwColumns {
+    crate::wire::MtwColumns {
+        freqs: cols.iter().map(|c| c.freq).collect(),
+        f_lo: cols.iter().map(|c| c.lo).collect(),
+        f_hi: cols.iter().map(|c| c.hi).collect(),
+        magnitude_db: cols
+            .iter()
+            .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
+            .collect(),
+        phase_deg: cols.iter().map(|c| c.h1.arg().to_degrees()).collect(),
+        coherence: cols.iter().map(|c| c.coherence).collect(),
+        df: cols.iter().map(|c| c.df).collect(),
+        window_s: cols.iter().map(|c| c.window_s).collect(),
+        n: cols.iter().map(|c| c.n).collect(),
+        stage: cols.iter().map(|c| c.stage).collect(),
+        blend: cols.iter().map(|c| c.blend).collect(),
+        bins: cols.iter().map(|c| c.bins).collect(),
+        ppo,
+        n_blocks,
+        settled_stages,
+        stages,
+    }
 }
 
 #[cfg(test)]

@@ -86,6 +86,17 @@ pub(super) struct SessionState {
     /// the ladder is a push pipeline, and pushing a re-segmented sliding
     /// buffer into it would reproduce #208's re-analysis one level down.
     pub(super) ladders: Vec<Option<ac_core::visualize::mtw::MtwPair>>,
+    /// Per pair, the `(offset, origin)` its current ladder was built with:
+    /// the alignment offset, and the stream sample count before the tick
+    /// that built it — the ladder's first input sample (#221). Read only
+    /// alongside a `Some` in [`Self::ladders`], so a flush, which drops the
+    /// ladder, retires the entry with it.
+    pub(super) ladder_origins: Vec<Option<(i64, u64)>>,
+    /// Samples of stream consumed since session start: the total length of
+    /// every tick's `bufs` handed to [`Self::tick`]. The snapshot ring counts
+    /// the same total, which is what lets a ladder origin be converted into
+    /// a ring position at capture.
+    pub(super) consumed: u64,
     /// A layout the ladder cannot serve (an unsupported rate) degrades to
     /// "no ladder" rather than to a dead session, and is logged once.
     pub(super) ladder_failed: bool,
@@ -145,6 +156,8 @@ impl SessionState {
             pairs,
             rings,
             ladders,
+            ladder_origins: vec![None; n_pairs],
+            consumed: 0,
             ladder_failed: false,
             analysis: (0..n_pairs).map(|_| None).collect(),
             dropped: 0,
@@ -165,6 +178,40 @@ impl SessionState {
         self.pairs
             .iter()
             .map(|st| st.delay.map(|l| l.samples))
+            .collect()
+    }
+
+    /// Each pair's ladder provenance for the snapshot ring (#221), with
+    /// `origin` still the absolute stream sample count — the ring converts it
+    /// to its own coordinates at capture. `None` for a pair with no ladder.
+    pub(super) fn mtw_provenance(
+        &self,
+    ) -> Vec<Option<ac_core::visualize::mtw::replay::MtwProvenance>> {
+        let FrameStatics {
+            sr,
+            spec_f_min,
+            spec_f_max,
+            mtw_ppo,
+            mtw_n_blocks,
+            ..
+        } = self.statics;
+        self.ladders
+            .iter()
+            .zip(self.ladder_origins.iter())
+            .map(|(ladder, origin)| {
+                ladder.as_ref()?;
+                let (offset, origin) = (*origin)?;
+                ac_core::visualize::mtw::replay::MtwProvenance::for_layout(
+                    sr,
+                    offset,
+                    i64::try_from(origin).ok()?,
+                    mtw_n_blocks,
+                    mtw_ppo,
+                    spec_f_min,
+                    spec_f_max,
+                )
+                .ok()
+            })
             .collect()
     }
 
@@ -320,7 +367,12 @@ impl SessionState {
             mtw_n_blocks,
             ..
         } = self.statics;
-        for (slot, st) in self.ladders.iter_mut().zip(self.pairs.iter()) {
+        for ((slot, origin), st) in self
+            .ladders
+            .iter_mut()
+            .zip(self.ladder_origins.iter_mut())
+            .zip(self.pairs.iter())
+        {
             if slot.is_some() || self.ladder_failed {
                 continue;
             }
@@ -328,7 +380,13 @@ impl SessionState {
                 continue;
             };
             match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
-                Ok(p) => *slot = Some(p),
+                Ok(p) => {
+                    *slot = Some(p);
+                    // Built, then fed this tick's `bufs` below: its first
+                    // input sample is the stream count before this tick,
+                    // which `tick` has not yet advanced (#221).
+                    *origin = Some((delay, self.consumed));
+                }
                 Err(e) => {
                     eprintln!("transfer_stream: MTW ladder unavailable at {sr} Hz: {e}");
                     self.ladder_failed = true;
@@ -489,6 +547,9 @@ impl SessionState {
             self.refresh_analysis(n_blocks, ev.mc_enabled);
         }
         let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
+        // After the ladders, so a ladder built this tick records the count
+        // before it. The same length the snapshot ring adds per tick.
+        self.consumed += bufs.first().map(Vec::len).unwrap_or(0) as u64;
 
         // Assembly, not analysis: the expensive work happened above and
         // only when the ring moved. What is left is building frames from the

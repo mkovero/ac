@@ -698,10 +698,19 @@ pub fn h1_estimate_with_delay(
     h1_estimate_core(&r, &m, sr, delay_samples)
 }
 
+/// Welch segment length of the H₁ estimator at `sr`: one second, so 1 Hz
+/// resolution. The single definition — [`h1_estimate_with_delay`],
+/// [`capture_duration`] and `pair_derivation::PairDerivation::welch_nperseg`
+/// all read it here, so the segment a snapshot readout names is the one
+/// the derivation actually used (#221).
+pub fn h1_nperseg(sr: u32) -> usize {
+    sr as usize
+}
+
 fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> TransferResult {
     assert_eq!(r.len(), m.len(), "ref and meas must have equal length");
 
-    let nperseg = sr as usize; // 1 Hz resolution
+    let nperseg = h1_nperseg(sr); // 1 Hz resolution
     let noverlap = nperseg / 2;
     let window = hann_window(nperseg);
 
@@ -787,7 +796,7 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
 /// `TransferResult`) into a time-domain impulse response h(t).
 ///
 /// Returns `Vec<f32>` of length `(re.len() - 1) * 2`. For the
-/// `h1_estimate_core` Welch path, that's `nperseg = sr` samples = 1 s
+/// `h1_estimate_core` Welch path, that's [`h1_nperseg`] samples = 1 s
 /// of IR — plenty of visual range for typical room / DUT responses.
 ///
 /// h(t) is centred via `fftshift`-style rotation so the dominant peak
@@ -850,7 +859,7 @@ pub fn impulse_response_from_h(re: &[f64], im: &[f64]) -> Vec<f32> {
 
 /// Number of capture seconds needed for `n_averages` Welch segments at `sr`.
 pub fn capture_duration(n_averages: usize, sr: u32) -> f64 {
-    let nperseg = sr as usize;
+    let nperseg = h1_nperseg(sr);
     let noverlap = nperseg / 2;
     let step = nperseg - noverlap;
     let total = nperseg + step * (n_averages - 1);

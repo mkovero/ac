@@ -15,7 +15,7 @@
 use crate::shared::calibration::Calibration;
 use crate::visualize::aggregate::{spectrum_to_columns_wire, transfer_spectrum_n_columns};
 use crate::visualize::spl_level::weighted_broadband_dbfs;
-use crate::visualize::transfer::{h1_estimate_with_delay, TransferResult};
+use crate::visualize::transfer::{h1_estimate_with_delay, h1_nperseg, TransferResult};
 use crate::visualize::weighting_curves::WeightingCurve;
 
 /// Fixed log-column grid lower bound (D18) — 20 Hz, matching the M0 wire
@@ -54,6 +54,17 @@ pub struct PairDerivation {
     /// confused with) the capture-time provenance, which stays untouched
     /// in `SnapshotMeta`.
     pub spl_weighting: WeightingCurve,
+    /// The multi-time-window columns the live view drew at the capture
+    /// instant, replayed from the stored ring (#221), or `None` when this
+    /// derivation has no ladder to replay: this free function never has one,
+    /// and [`crate::snapshot::Snapshot::derive_pair`] fills it only for a
+    /// format-v3 pair with a recorded ladder, over the whole ring.
+    pub mtw: Option<crate::wire::MtwColumns>,
+    /// Segment length of the Welch H₁ behind [`Self::h1`], in samples — the
+    /// one [`h1_estimate_with_delay`] actually used ([`h1_nperseg`]). A
+    /// display naming the Welch resolution reads it here rather than
+    /// assuming `sr`.
+    pub welch_nperseg: usize,
 }
 
 /// Subtract `curve`'s per-frequency correction from `amp` in the linear
@@ -126,6 +137,8 @@ pub fn derive_pair(
         ref_spectrum,
         spl,
         spl_weighting: weighting,
+        mtw: None,
+        welch_nperseg: h1_nperseg(sr),
     }
 }
 
@@ -142,6 +155,31 @@ mod tests {
                 (amp * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sr as f64).sin()) as f32
             })
             .collect()
+    }
+
+    /// #221: `welch_nperseg` is the segment length the H₁ behind it used,
+    /// read off the result itself — its bin spacing is `sr / nperseg`. Fails
+    /// if the field and the estimator's segment length ever stop being one
+    /// quantity, whichever of the two moves.
+    #[test]
+    fn welch_nperseg_is_the_segment_length_behind_h1() {
+        for sr in [44_100u32, 48_000, 96_000] {
+            let sig = sine(sr as usize * 2, 1_000.0, sr, 0.3);
+            let d = derive_pair(&sig, &sig, sr, 0, None, None, WeightingCurve::Z);
+            let spacing = d.h1.freqs[1] - d.h1.freqs[0];
+            let from_bins = f64::from(sr) / spacing;
+            assert_eq!(
+                d.welch_nperseg,
+                from_bins.round() as usize,
+                "{sr} Hz: welch_nperseg {} but H1 bins imply {from_bins}",
+                d.welch_nperseg
+            );
+            assert!((from_bins - from_bins.round()).abs() < 1e-6, "{from_bins}");
+            assert!(
+                d.mtw.is_none(),
+                "the free derive_pair has no ladder to replay"
+            );
+        }
     }
 
     #[test]

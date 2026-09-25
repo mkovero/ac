@@ -91,6 +91,8 @@ fn open_local_snapshot_needs_no_daemon_connection() {
             pairs: vec![(0, 1)],
             delay_samples: vec![0],
             nperseg: sr as usize,
+            // One `None` per pair: a valid v3 file whose pair has no ladder.
+            mtw: Some(vec![None]),
         },
         captured_at_utc: "2026-07-16T00:00:00Z".to_string(),
         daemon_version: "test".to_string(),

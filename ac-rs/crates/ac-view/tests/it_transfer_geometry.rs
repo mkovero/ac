@@ -48,6 +48,7 @@ fn masked_scene() -> TransferScene {
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Ladder,
         fault: None,
         calibration: None,
     };
@@ -166,6 +167,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Ladder,
         fault,
         calibration: None,
     };
@@ -274,6 +276,7 @@ fn the_persistent_row_paints_its_instruction() {
             column_n: Vec::new(),
             column_bins: Vec::new(),
             stages: Vec::new(),
+            estimator: ac_scene::transfer::Estimator::Ladder,
             fault: inp_fault,
             calibration: None,
         };
@@ -446,6 +449,7 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         column_n: Vec::new(),
         column_bins: Vec::new(),
         stages,
+        estimator: ac_scene::transfer::Estimator::Ladder,
         fault: None,
         calibration: None,
     };

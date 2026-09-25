@@ -472,3 +472,207 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
         "a lock taken while driving was discarded by a later drive edge"
     );
 }
+
+/// #221: a ladder's recorded origin is the stream sample count *before* the
+/// tick that built it — the ladder is built and then fed that tick's `bufs`,
+/// so its first input sample is the first sample of that tick. One tick
+/// either way replays a different block set, and a pure gain+delay stimulus
+/// could not show it; this pins the count directly.
+#[test]
+fn a_ladder_records_the_sample_count_before_the_tick_that_built_it() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    let x = noise(CHUNK * 60 + 480, 0x5eed);
+    let mut built_on: Option<(usize, u64)> = None;
+    for k in 0..40 {
+        let r0 = 480 + k * CHUNK;
+        let refb = x[r0..r0 + CHUNK].to_vec();
+        let meas = x[r0 - 480..r0 - 480 + CHUNK].to_vec();
+        let before = s.consumed;
+        assert_eq!(
+            before,
+            (k * CHUNK) as u64,
+            "consumed counts every tick's bufs"
+        );
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        s.tick(&[meas, refb], events(true), &drive_msg(true), now);
+        if built_on.is_none() && s.ladders[0].is_some() {
+            built_on = Some((k, before));
+        }
+    }
+    let (k, before) = built_on.expect("a correlated pair must build its ladder");
+    let prov = s.mtw_provenance()[0]
+        .clone()
+        .expect("a built ladder has provenance");
+    assert_eq!(
+        prov.origin, before as i64,
+        "ladder built on tick {k}: origin must be the count before that tick"
+    );
+    assert_eq!(
+        prov.offset, 480,
+        "the ladder's offset is the lock it was built on"
+    );
+    assert_eq!(s.consumed, (40 * CHUNK) as u64);
+}
+
+/// #221: a flush drops the ladder, and its provenance with it, so a snapshot
+/// between the flush and the rebuild cannot carry the old origin.
+#[test]
+fn a_flush_clears_the_ladder_provenance() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 30, 480, events(true), t0);
+    assert!(
+        s.mtw_provenance()[0].is_some(),
+        "precondition: ladder built"
+    );
+    s.flush_all();
+    assert!(
+        s.mtw_provenance()[0].is_none(),
+        "provenance outlived the ladder it describes"
+    );
+}
+
+/// A started ring for `session()`'s one pair, as the worker holds it.
+fn started_ring() -> std::sync::Mutex<crate::handlers::snapshot::SnapshotRingState> {
+    std::sync::Mutex::new(crate::handlers::snapshot::SnapshotRingState::new(
+        SR,
+        vec![0, 1],
+        (SR as usize) * 30,
+        vec![(0, 1)],
+        "Z".to_string(),
+        "fast".to_string(),
+        vec![None, None],
+    ))
+}
+
+/// One correlated tick `k` of the stream `run_correlated` feeds, delay 480.
+fn correlated_tick(x: &[f32], k: usize) -> Vec<Vec<f32>> {
+    let r0 = 480 + k * CHUNK;
+    vec![
+        x[r0 - 480..r0 - 480 + CHUNK].to_vec(),
+        x[r0..r0 + CHUNK].to_vec(),
+    ]
+}
+
+/// What `snapshot` would clone that bears on replay: the stream length the
+/// tail ends at, and the ladder provenance and locks written beside it.
+type Committed = (
+    u64,
+    Vec<Option<ac_core::visualize::mtw::replay::MtwProvenance>>,
+    Vec<Option<i64>>,
+);
+
+/// #221 (Codex review of PR #662): the ring's tail and its ladder provenance
+/// are committed together. A flush tick is the case that exposed the old
+/// two-guard order — samples pushed before `tick`, provenance synced after —
+/// because it retires the ladder the previous tick's provenance described.
+/// This pins what `commit_tick` writes on that tick — the session's post-tick
+/// state, not the retired ladder. It cannot see ordering: the old code ended
+/// in the same state. The concurrent test below is the one that does.
+#[test]
+fn a_flush_tick_commits_its_samples_and_its_provenance_together() {
+    let mut s = session();
+    let ring = started_ring();
+    let t0 = std::time::Instant::now();
+    let x = noise(CHUNK * 60 + 480, 0x5eed);
+    for k in 0..30 {
+        let bufs = correlated_tick(&x, k);
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        s.tick(&bufs, events(true), &drive_msg(true), now);
+        super::super::worker::commit_tick(&ring, &bufs, &s);
+    }
+    let before = ring.lock().unwrap().mtw.clone();
+    assert!(
+        before[0].is_some(),
+        "precondition: ladder built and committed"
+    );
+
+    let bufs = correlated_tick(&x, 30);
+    let ev = TickEvents {
+        relock_requested: true,
+        ..events(true)
+    };
+    s.tick(
+        &bufs,
+        ev,
+        &drive_msg(true),
+        t0 + std::time::Duration::from_secs(2),
+    );
+    super::super::worker::commit_tick(&ring, &bufs, &s);
+
+    let r = ring.lock().unwrap();
+    assert_eq!(r.pushed_total(), s.consumed);
+    assert_eq!(r.mtw, s.mtw_provenance());
+    assert_eq!(r.delay_samples, s.delay_samples());
+    assert_ne!(
+        r.mtw, before,
+        "the flush tick's samples were committed beside the retired ladder"
+    );
+}
+
+/// #221 (Codex review of PR #662): a reader taking the ring lock the way
+/// `snapshot` does never sees a tail and a provenance from different ticks.
+/// Every observed state must be one the worker committed whole — the empty
+/// start or the session as it stood after some tick — including across
+/// repeated flush-and-rebuild cycles.
+///
+/// Under the old order (push, unlock, tick, lock, sync) the reader can land
+/// in the gap and see tick K's length beside tick K−1's ladder; that state
+/// is in no committed set. The race is scheduler-dependent, so in principle
+/// a regression could pass; with the old order restored in this loop it
+/// failed on every run tried (length 48000 beside a flushed `[None]`).
+#[test]
+fn a_concurrent_reader_only_ever_sees_whole_ticks() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ring = std::sync::Arc::new(started_ring());
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let reader = {
+        let ring = ring.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut seen: Vec<Committed> = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                let r = ring.lock().unwrap();
+                let state = (r.pushed_total(), r.mtw.clone(), r.delay_samples.clone());
+                drop(r);
+                if seen.last() != Some(&state) {
+                    seen.push(state);
+                }
+            }
+            seen
+        })
+    };
+
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    let n = 120;
+    let x = noise(CHUNK * (n + 2) + 480, 0x5eed);
+    let mut committed: Vec<Committed> = vec![(0, vec![None], vec![None])];
+    for k in 0..n {
+        let bufs = correlated_tick(&x, k);
+        let ev = TickEvents {
+            relock_requested: k > 0 && k % 30 == 0,
+            ..events(true)
+        };
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        s.tick(&bufs, ev, &drive_msg(true), now);
+        super::super::worker::commit_tick(&ring, &bufs, &s);
+        committed.push((s.consumed, s.mtw_provenance(), s.delay_samples()));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let seen = reader.join().unwrap();
+
+    assert!(
+        committed.iter().any(|c| c.1[0].is_some()),
+        "precondition: a ladder was built and committed"
+    );
+    for state in &seen {
+        assert!(
+            committed.contains(state),
+            "reader saw a state no tick committed: length {} beside {:?}",
+            state.0,
+            state.1
+        );
+    }
+}

@@ -292,37 +292,24 @@ pub(super) fn build_pair_messages(
     // without those a screenshot of this display is not interpretable.
     // `bins` is criterion 1 made observable — it is never zero.
     //
-    // dB is applied here, daemon-side, per the display-truth rule:
-    // `ac-view` plots what it is given and does no `log10` of its own.
-    let mtw = mtw_columns
-        .get(pos)
-        .and_then(|c| c.as_ref())
-        .map(|cols| MtwColumns {
-            freqs: cols.iter().map(|c| c.freq).collect(),
-            f_lo: cols.iter().map(|c| c.lo).collect(),
-            f_hi: cols.iter().map(|c| c.hi).collect(),
-            magnitude_db: cols
-                .iter()
-                .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
-                .collect(),
-            phase_deg: cols.iter().map(|c| c.h1.arg().to_degrees()).collect(),
-            coherence: cols.iter().map(|c| c.coherence).collect(),
-            df: cols.iter().map(|c| c.df).collect(),
-            window_s: cols.iter().map(|c| c.window_s).collect(),
-            n: cols.iter().map(|c| c.n).collect(),
-            stage: cols.iter().map(|c| c.stage).collect(),
-            blend: cols.iter().map(|c| c.blend).collect(),
-            bins: cols.iter().map(|c| c.bins).collect(),
-            ppo: mtw_ppo,
-            n_blocks: mtw_n_blocks,
+    // dB is applied daemon-side, per the display-truth rule: `ac-view`
+    // plots what it is given and does no `log10` of its own. The conversion
+    // is `ac-core`'s, shared with snapshot replay (#221), so a replayed
+    // snapshot and this frame cannot convert the same columns differently.
+    let mtw: Option<MtwColumns> = mtw_columns.get(pos).and_then(|c| c.as_ref()).map(|cols| {
+        ac_core::visualize::mtw::wire_columns(
+            cols,
+            mtw_ppo,
+            mtw_n_blocks,
             // Which rungs have settled, shallowest first. Shipped so a
             // consumer can distinguish "still warming, more band coming"
-            // from "this is all there is" — a short column list looks the
-            // same either way, and the difference decides whether a blank
-            // low end is a fault.
-            settled_stages: mtw_settled.get(pos).cloned().unwrap_or_default(),
-            stages: statics.mtw_stages.clone(),
-        });
+            // from "this is all there is" — a short column list looks
+            // the same either way, and the difference decides whether a
+            // blank low end is a fault.
+            mtw_settled.get(pos).cloned().unwrap_or_default(),
+            statics.mtw_stages.clone(),
+        )
+    });
 
     let transfer = TransferFrame {
         frame_type: "transfer_stream".to_string(),

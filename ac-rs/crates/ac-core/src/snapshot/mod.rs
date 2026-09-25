@@ -29,8 +29,12 @@ use crate::shared::calibration::{Calibration, LayerVerdict};
 /// Bump on any breaking `meta.json` layout change (e.g. a future 32-bit
 /// FLAC path) — readers must refuse an unrecognised version rather than
 /// guess. v2 (#637) added the required `per_channel[i].stream_sha256`;
-/// `read_acsnap` still reads v1.
-pub const FORMAT_VERSION: u32 = 2;
+/// v3 (#221) added the required `session.mtw`, the per-pair ladder
+/// provenance the live view's columns are replayed from. `read_acsnap`
+/// still reads v1 and v2.
+pub const FORMAT_VERSION: u32 = 3;
+
+pub use crate::visualize::mtw::replay::{MtwProvenance, StageProvenance};
 
 /// Per-channel provenance stored alongside the raw audio. `weighting` /
 /// `integration` use the string-identical vocabulary to the M0
@@ -76,6 +80,13 @@ pub struct SessionMeta {
     /// `sr`, but it's recorded explicitly rather than assumed, so a
     /// future estimator change can't silently break old snapshots).
     pub nperseg: usize,
+    /// Per-pair ladder provenance, in the same order as `pairs` (#221):
+    /// `Some(p)` for a pair whose live view ran the multi-time-window
+    /// ladder, `None` for a pair that had none (it never locked, or the
+    /// rate has no ladder). Required in format v3, absent in v1 and v2 —
+    /// the outer `Option` is the format's, the inner one the pair's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtw: Option<Vec<Option<MtwProvenance>>>,
 }
 
 /// `.acsnap`'s `meta.json` — full provenance for the paired `audio.flac`.
@@ -115,7 +126,8 @@ impl Snapshot {
             .position(|c| c.input_channel == input_channel)
     }
 
-    /// Derive H1 + calibrated spectra + SPL for `pairs[pair_idx]`, under
+    /// Derive H1 + calibrated spectra + SPL — and, where the capture
+    /// recorded one, the live ladder's columns — for `pairs[pair_idx]`, under
     /// the session's own capture-time weighting (deliverable 5's
     /// "caller-chosen weighting/integration" — pass a different
     /// [`crate::visualize::weighting_curves::WeightingCurve`] to
@@ -126,6 +138,13 @@ impl Snapshot {
     /// (`h1_estimate_with_delay`, `spectrum_to_columns_wire`,
     /// `weighted_broadband_dbfs`) the live daemon path calls — see
     /// `visualize::pair_derivation`.
+    ///
+    /// `PairDerivation::mtw` is the live ladder replayed over the whole
+    /// ring (`visualize::mtw::replay`, #221) when the file is format v3,
+    /// the pair has recorded ladder provenance and `sample_range` is `None`.
+    /// A sub-window has no defined relationship to the live block grid, so
+    /// it derives Welch only. Errors when the recorded ladder is one the
+    /// running code does not build — refuse, don't misread.
     pub fn derive_pair(
         &self,
         pair_idx: usize,
@@ -169,7 +188,7 @@ impl Snapshot {
         let meas_cal = self.meta.per_channel[meas_idx].calibration.as_ref();
         let ref_cal = self.meta.per_channel[ref_idx].calibration.as_ref();
 
-        Ok(crate::visualize::pair_derivation::derive_pair(
+        let mut d = crate::visualize::pair_derivation::derive_pair(
             ref_samples,
             meas_samples,
             self.meta.sr,
@@ -177,7 +196,24 @@ impl Snapshot {
             meas_cal,
             ref_cal,
             weighting,
-        ))
+        );
+        let provenance = self
+            .meta
+            .session
+            .mtw
+            .as_ref()
+            .and_then(|m| m.get(pair_idx))
+            .and_then(Option::as_ref);
+        if let (None, Some(prov)) = (&sample_range, provenance) {
+            d.mtw = crate::visualize::mtw::replay::replay(
+                meas_samples,
+                ref_samples,
+                self.meta.sr,
+                prov,
+            )
+            .with_context(|| format!("derive_pair: pair {pair_idx}"))?;
+        }
+        Ok(d)
     }
 }
 
@@ -252,7 +288,7 @@ pub fn read_acsnap(bytes: &[u8]) -> Result<Snapshot> {
     };
     if !(1..=FORMAT_VERSION).contains(&meta.format_version) {
         return Err(anyhow!(
-            "read_acsnap: unsupported format_version {} (this reader supports 1 and {})",
+            "read_acsnap: unsupported format_version {} (this reader supports 1 to {})",
             meta.format_version,
             FORMAT_VERSION
         ));
@@ -308,6 +344,7 @@ mod tests {
                 pairs: vec![(0, 1)],
                 delay_samples: vec![0],
                 nperseg: 48_000,
+                mtw: Some(vec![None]),
             },
             captured_at_utc: "2026-01-01T00:00:00Z".to_string(),
             daemon_version: "test".to_string(),
@@ -373,7 +410,7 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert_eq!(
-            err, "read_acsnap: unsupported format_version 999 (this reader supports 1 and 2)",
+            err, "read_acsnap: unsupported format_version 999 (this reader supports 1 to 3)",
             "refused for the wrong reason"
         );
     }
@@ -542,6 +579,7 @@ mod tests {
                 pairs: vec![(0, 1)],
                 delay_samples: vec![0],
                 nperseg: sr as usize,
+                mtw: Some(vec![None]),
             },
             captured_at_utc: "2026-01-01T00:00:00Z".to_string(),
             daemon_version: "test".to_string(),
@@ -593,9 +631,22 @@ mod tests {
     fn fixture_path() -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/snapshot-fixture-v3.acsnap"
+        ))
+    }
+
+    /// The format-v2 fixture, byte-frozen (#221) as v1 was by #637: the
+    /// writer now writes only v3, so a regenerated file would lose the v2
+    /// read path's only real archive. [`V2_FIXTURE_SHA256`] pins the bytes.
+    fn v2_fixture_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
             "/../../../tests/fixtures/snapshot-fixture-v2.acsnap"
         ))
     }
+
+    const V2_FIXTURE_SHA256: &str =
+        "056edcefd1913e914a8a68336810c4e266cb3bfbadb9fe4340ab0d3d87ed7c4c";
 
     /// The format-v1 fixture, byte-frozen (#637). Nothing regenerates it:
     /// `write_acsnap` writes only the current version, so a regenerated file
@@ -634,24 +685,44 @@ mod tests {
         );
     }
 
-    /// #637 test 6, fixture half: the frozen v1 fixture and the v2 fixture
-    /// hold the same samples, so pair 0 derives bit-identical H1 from both in
-    /// one build. Also pins that a v1 archive still reads.
+    /// #221: the v2 fixture is the same content as the v3 one, written
+    /// before v3 existed. It must stay exactly those bytes.
+    #[test]
+    fn v2_fixture_is_byte_frozen() {
+        let bytes = std::fs::read(v2_fixture_path()).expect(
+            "tests/fixtures/snapshot-fixture-v2.acsnap must exist — it is frozen, not generated",
+        );
+        assert_eq!(
+            sha256_hex(&bytes),
+            V2_FIXTURE_SHA256,
+            "the frozen v2 .acsnap fixture changed; restore it from git — no code can regenerate a v2 file"
+        );
+    }
+
+    /// #637 test 6, fixture half, extended by #221: the frozen v1 and v2
+    /// fixtures and the v3 one hold the same samples, so pair 0 derives
+    /// bit-identical Welch H1 from all three in one build. Also pins that v1
+    /// and v2 archives still read, with no ladder to replay.
     #[test]
     fn v1_and_v2_fixtures_derive_bit_identical_h1() {
         use crate::visualize::weighting_curves::WeightingCurve;
         let v1 = read_acsnap(&std::fs::read(v1_fixture_path()).expect("read v1 fixture"))
             .expect("v1 fixture must still read");
-        let v2 = read_acsnap(&std::fs::read(fixture_path()).expect("read v2 fixture"))
-            .expect("v2 fixture must read");
+        let v2 = read_acsnap(&std::fs::read(v2_fixture_path()).expect("read v2 fixture"))
+            .expect("v2 fixture must still read");
+        let v3 = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must read");
         assert_eq!(v1.meta.format_version, 1);
         assert_eq!(v2.meta.format_version, 2);
+        assert_eq!(v3.meta.format_version, 3);
         assert!(v1
             .meta
             .per_channel
             .iter()
             .all(|c| c.stream_sha256.is_none()));
         assert_eq!(v1.channels, v2.channels);
+        assert_eq!(v2.channels, v3.channels);
+        assert!(v1.meta.session.mtw.is_none() && v2.meta.session.mtw.is_none());
 
         let d1 = v1
             .derive_pair(0, WeightingCurve::Z, None)
@@ -659,9 +730,64 @@ mod tests {
         let d2 = v2
             .derive_pair(0, WeightingCurve::Z, None)
             .expect("derive v2");
-        assert_eq!(d1.h1.magnitude_db, d2.h1.magnitude_db);
-        assert_eq!(d1.h1.phase_deg, d2.h1.phase_deg);
-        assert_eq!(d1.h1.coherence, d2.h1.coherence);
+        let d3 = v3
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("derive v3");
+        for d in [&d2, &d3] {
+            assert_eq!(d1.h1.magnitude_db, d.h1.magnitude_db);
+            assert_eq!(d1.h1.phase_deg, d.h1.phase_deg);
+            assert_eq!(d1.h1.coherence, d.h1.coherence);
+        }
+        assert!(
+            d1.mtw.is_none() && d2.mtw.is_none(),
+            "pre-v3 files have no ladder"
+        );
+        assert!(
+            d3.mtw.is_some(),
+            "the v3 fixture records a ladder for pair 0"
+        );
+    }
+
+    /// #221: the v3 fixture's ladder replays over the whole ring, and a
+    /// sub-window derives Welch only — it has no defined relationship to the
+    /// live block grid.
+    #[test]
+    fn v3_fixture_replays_its_ladder_only_over_the_whole_ring() {
+        use crate::visualize::weighting_curves::WeightingCurve;
+        let snap = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must read");
+        let whole = snap.derive_pair(0, WeightingCurve::Z, None).unwrap();
+        let m = whole.mtw.expect("whole-ring derivation replays the ladder");
+        assert!(!m.freqs.is_empty() && m.lengths_agree());
+        assert!(m.settled_stages.iter().any(|&s| s));
+        assert!(m.n.iter().all(|&n| n == m.n_blocks));
+        assert_eq!(whole.welch_nperseg, snap.meta.sr as usize);
+
+        let n = snap.channels[0].len();
+        let sub = snap.derive_pair(0, WeightingCurve::Z, Some(0..n)).unwrap();
+        assert!(
+            sub.mtw.is_none(),
+            "a sample_range derivation must not replay"
+        );
+    }
+
+    /// #221: a stored ladder the running code does not build at this rate is
+    /// refused by `derive_pair`, not replayed on the wrong layout.
+    #[test]
+    fn derive_pair_refuses_a_stored_layout_that_differs_from_the_readers() {
+        use crate::visualize::weighting_curves::WeightingCurve;
+        let snap = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must read");
+        let mut meta = snap.meta.clone();
+        let prov = meta.session.mtw.as_mut().unwrap()[0].as_mut().unwrap();
+        prov.stages[2].decim += 1;
+        let (bytes, _) = write_acsnap(&meta, &snap.channels).expect("write");
+        let tampered = read_acsnap(&bytes).expect("layout is not a structural rule");
+        let err = match tampered.derive_pair(0, WeightingCurve::Z, None) {
+            Ok(_) => panic!("derive_pair replayed a ladder this reader does not build"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("stage decims"), "{err}");
     }
 
     /// Deterministic broadband source for the fixture, `[-1, 1)`. A
@@ -702,7 +828,7 @@ mod tests {
     /// fixture had one). SPL-calibrated meas channel so `derive_pair`'s
     /// `spl` path is exercised too.
     #[test]
-    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v2.acsnap — run manually"]
+    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v3.acsnap — run manually"]
     fn generate_snapshot_fixture() {
         let (bytes, sha256) = build_snapshot_fixture();
         std::fs::write(fixture_path(), &bytes).expect("write fixture file");
@@ -785,6 +911,7 @@ mod tests {
                 pairs: vec![(0, 1)],
                 delay_samples: vec![delay as i64],
                 nperseg: sr as usize,
+                mtw: Some(vec![Some(fixture_ladder(sr, delay as i64))]),
             },
             captured_at_utc: "2026-07-16T00:00:00Z".to_string(),
             daemon_version: "fixture-generator".to_string(),
@@ -792,6 +919,24 @@ mod tests {
         };
 
         write_acsnap(&meta, &[meas, refch]).expect("write fixture")
+    }
+
+    /// The fixture's ladder (#221): built with the pair's delay as its
+    /// offset at the first stored sample, under the daemon's default density,
+    /// depth and grid — the provenance a session whose ladder started with
+    /// the ring would record.
+    fn fixture_ladder(sr: u32, offset: i64) -> MtwProvenance {
+        use crate::visualize::mtw::{average::DEFAULT_N_BLOCKS, ladder::P_REF};
+        MtwProvenance::for_layout(
+            sr,
+            offset,
+            0,
+            DEFAULT_N_BLOCKS,
+            P_REF,
+            crate::visualize::pair_derivation::SPEC_F_MIN_HZ,
+            f64::from(sr) / 2.0,
+        )
+        .expect("48 kHz has a ladder")
     }
 
     /// #271: the fixture on disk must still be what `build_snapshot_fixture`
@@ -813,7 +958,7 @@ mod tests {
     fn snapshot_fixture_on_disk_is_current() {
         let (expected_bytes, expected_sha) = build_snapshot_fixture();
         let on_disk = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v2.acsnap must exist — regenerate with \
+            "tests/fixtures/snapshot-fixture-v3.acsnap must exist — regenerate with \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let actual_sha = {
@@ -892,6 +1037,7 @@ mod tests {
                     pairs: vec![(0, 1)],
                     delay_samples: vec![delay as i64],
                     nperseg: sr as usize,
+                    mtw: Some(vec![Some(fixture_ladder(sr, delay as i64))]),
                 },
                 captured_at_utc: "2026-07-16T00:00:00Z".to_string(),
                 daemon_version: "test".to_string(),
@@ -913,7 +1059,7 @@ mod tests {
     #[test]
     fn t3_checked_in_fixture_reprocesses_with_no_daemon() {
         let bytes = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v2.acsnap must exist — regenerate via \
+            "tests/fixtures/snapshot-fixture-v3.acsnap must exist — regenerate via \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let snap = read_acsnap(&bytes).expect("read checked-in fixture");
