@@ -9,7 +9,7 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 ## repo context
 
 ### what correctness means in this codebase
-- `ac-core/visualize/transfer.rs` implement two-channel H1 estimator (Müller-Massarani). Transfer function estimates must be numerically stable + unbiased given windowing assumptions.
+- `ac-core/visualize/transfer.rs` implement the live-path Welch-averaged H1 estimator, defined by the code and its rustdoc, not an external source: Hann window, 50 % overlap (`noverlap = nperseg / 2`), H1 = Gxy/Gxx, coherence = |Gxy|²/(Gxx·Gyy) (`welch_all`, `h1_estimate_core`). The sweep/IR path is separate: Farina log-sweep deconvolution in `ac-core/measurement/sweep/mod.rs`, cited through `citation()` / `farina_citation()`. Transfer function estimates must be numerically stable + unbiased given windowing assumptions.
 - `ac-core/measurement/thd.rs` produce THD figures. Results in expected dynamic range for device under test. Gross outliers (e.g. THD > 10% for known-good amp) mean measurement error in code.
 - `ac-cli` and `ac-view` are consumers of the `ac-daemon` wire schema. Correctness = correct frame parsing, correct display of what the frame carries.
 - Level reference in `ac-core/shared` is scalar dBu offset. Any change making it frequency-dependent = regression.
