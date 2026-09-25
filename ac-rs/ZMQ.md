@@ -1964,7 +1964,7 @@ list order is reported:
 
 ```text
 monitor not started — channels must list at most 64 entries
-         received  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0…
+         received  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,…
          entries   100000
 ```
 
@@ -3889,8 +3889,8 @@ Values are never narrowed: 4294967296 is refused, not read as channel 0.
 (`set_ioct_bpo`) above u32 get their existing domain errors.
 
 Refusal layout — a headline, then 9-space-indented `label  value` lines,
-the first always `received` (the JSON text of the value, cut at 64
-characters with `…`):
+the first always `received` (the JSON text of the value, cut to fit 80
+columns with `…`; an array is cut after its last complete element):
 
 ```text
 generate not started — channels[0] must be an integer
@@ -3955,7 +3955,7 @@ monitor_spectrum: 2 fields not recognised — command not run
 ```
 
 Unrecognised names are listed alphabetically, not in request order. In
-the text each name has control characters escaped and is cut at 64
+the text each name has control characters escaped and is cut at 62
 characters with `…`, and the `fields` line lists at most 8 names, then
 `+<N> more`; `unrecognised_fields` carries every name uncut.
 
