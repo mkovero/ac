@@ -528,3 +528,237 @@ fn ring_mode_refuses_a_ref_count_mismatch() {
         "error must name both counts: {err}"
     );
 }
+
+/// #204 (f): `play_and_capture` and `play_and_capture_with_reference` gate
+/// the played burst on routing like every other synthesis path. Unrouted,
+/// neither leg contains the burst — with the noise override unset, both are
+/// exact zeros. With one output open the burst is present in each leg at
+/// that leg's hook delay. This test sets no `AC_FAKE_*` variable; it reads
+/// the hooks' values instead, so it holds whatever the process environment
+/// carries, and it relies only on the meas-leg delay list being unset
+/// (default 32 samples).
+#[test]
+fn play_and_capture_hears_the_burst_only_when_routed() {
+    use std::sync::atomic::AtomicBool;
+    const MEAS_DEFAULT_DELAY: usize = 32;
+    assert!(
+        hooks::tau_delay_override_list().is_empty(),
+        "meas-leg delay override set; this test pins the default delay"
+    );
+    let burst: Vec<f32> = (0..64).map(|i| 0.25 + i as f32 * 0.01).collect();
+    let noise_amp = tau_noise_amplitude_override();
+    let stop = AtomicBool::new(false);
+    // Nothing but the noise override's dither may appear: no sample may
+    // exceed its amplitude, and with it unset every sample is exact zero.
+    let assert_no_burst = |leg: &[f32], what: &str| {
+        assert!(
+            leg.iter().all(|&v| v.abs() <= noise_amp),
+            "{what}: unrouted leg must not carry the burst"
+        );
+        if noise_amp == 0.0 {
+            assert!(leg.iter().all(|&v| v == 0.0), "{what}: must be zeros");
+        }
+    };
+    let assert_burst_at = |leg: &[f32], delay: usize, gain: f32, what: &str| {
+        for (i, &s) in burst.iter().enumerate() {
+            let got = leg[delay + i];
+            let want = s * gain;
+            assert!(
+                (got - want).abs() <= noise_amp + 1e-6,
+                "{what}: sample {} = {got}, burst wants {want}",
+                delay + i
+            );
+        }
+    };
+
+    let mut unrouted = FakeEngine::new();
+    unrouted.start(&[], Some("fake:capture_0")).unwrap();
+    assert_no_burst(
+        &unrouted.play_and_capture(&burst, 0.005).unwrap(),
+        "play_and_capture",
+    );
+    let (meas, reference) = unrouted
+        .play_and_capture_with_reference(&burst, 0.005, "fake:capture_1", &stop)
+        .unwrap();
+    assert_no_burst(&meas, "with_reference meas");
+    assert_no_burst(&reference, "with_reference ref");
+
+    let mut routed = FakeEngine::new();
+    routed
+        .start(&["fake:playback_0".into()], Some("fake:capture_0"))
+        .unwrap();
+    let out = routed.play_and_capture(&burst, 0.005).unwrap();
+    assert_burst_at(
+        &out,
+        MEAS_DEFAULT_DELAY,
+        tau_gain_override(),
+        "play_and_capture",
+    );
+    let (meas, reference) = routed
+        .play_and_capture_with_reference(&burst, 0.005, "fake:capture_1", &stop)
+        .unwrap();
+    assert_burst_at(
+        &meas,
+        MEAS_DEFAULT_DELAY,
+        tau_gain_override(),
+        "with_reference meas",
+    );
+    assert_burst_at(
+        &reference,
+        ref_delay_samples(),
+        ref_gain(),
+        "with_reference ref",
+    );
+}
+
+/// #204 (g): ring mode builds its own `Synth`, so it needs its own copy of
+/// (a) and (c). An unrouted generator drains as zeros on every ring; an
+/// external tone in the same unrouted ring engine is heard.
+#[test]
+fn unrouted_ring_mode_drains_zeros_for_the_generator_and_hears_external() {
+    let mut eng = FakeEngine::new();
+    eng.start(&[], Some("fake:capture_0")).unwrap();
+    eng.add_ref_input("fake:capture_1").unwrap();
+    eng.set_pink(0.5);
+    eng.enable_ring_mode(0.0, 1, 1);
+
+    let bufs = eng.capture_multi(0.02).unwrap();
+    assert_eq!(bufs.len(), 2);
+    for (i, b) in bufs.iter().enumerate() {
+        assert!(!b.is_empty(), "ring {i} drained nothing");
+        assert!(
+            b.iter().all(|&v| v == 0.0),
+            "unrouted drive must drain zeros on ring {i}"
+        );
+    }
+
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
+    let bufs = eng.capture_multi(0.02).unwrap();
+    for (i, want) in [(0, 1_000.0), (1, 1_100.0)] {
+        let m = goertzel_mag(&bufs[i], 48_000.0, want);
+        assert!(
+            m > 0.2,
+            "ring {i} must hear the external {want} Hz, mag {m}"
+        );
+    }
+}
+
+/// #204 (h): the external source and the generator keep **separate** noise
+/// state maps, not one map with different seeds. The combined capture minus
+/// the external-alone capture must be the generator-alone stream, sample for
+/// sample, across several consecutive blocks. A shared map would interleave
+/// the two streams' advances and leave O(amplitude) residuals — which
+/// `external_noise_is_independent_of_driven_noise` (different bytes only)
+/// would not catch. Bar: one f32 add of values below 1.0 rounds by < 6e-8.
+#[test]
+fn external_and_generator_noise_keep_separate_state() {
+    let routed = || {
+        let mut eng = FakeEngine::new();
+        eng.start(&["fake:playback_0".into()], Some("fake:capture_0"))
+            .unwrap();
+        eng
+    };
+    let mut both = routed();
+    both.set_external_noise(0.3);
+    both.set_pink(0.2);
+    let mut ext_only = routed();
+    ext_only.set_external_noise(0.3);
+    let mut gen_only = routed();
+    gen_only.set_pink(0.2);
+
+    for block in 0..3 {
+        let b = both.capture_block(0.01).unwrap();
+        let e = ext_only.capture_block(0.01).unwrap();
+        let g = gen_only.capture_block(0.01).unwrap();
+        assert_eq!(b.len(), g.len());
+        assert!(rms(&g) > 0.05 && rms(&e) > 0.05, "block {block}: silent");
+        for i in 0..b.len() {
+            let residual = (b[i] - e[i]) - g[i];
+            assert!(
+                residual.abs() <= 1e-6,
+                "block {block} sample {i}: combined − external = {}, generator = {}",
+                b[i] - e[i],
+                g[i]
+            );
+        }
+    }
+}
+
+/// Cross-correlation `Σ meas[i + k] · refch[i]` for every lag `k` in
+/// `0..=max_lag`.
+fn xcorr(meas: &[f32], refch: &[f32], max_lag: usize) -> Vec<f64> {
+    (0..=max_lag)
+        .map(|k| {
+            (0..meas.len().saturating_sub(k))
+                .map(|i| meas[i + k] as f64 * refch[i] as f64)
+                .sum()
+        })
+        .collect()
+}
+
+/// #204 rev. 2, pin 2: a routed drive *adds* to an external correlated
+/// pair, and `it_relock.rs` locks through that sum. It can because the
+/// generator's noise is seeded per channel, so it is uncorrelated between
+/// meas and ref and the pair's lag still wins. The rejected shape — the
+/// generator block duplicated identically onto both channels, as a real
+/// loopback would carry it — is computed here too: its lag-0 term is the
+/// one that grows, which is what would let relock lock at 0. This records
+/// the coupling between the generator's per-channel seeding and relock's
+/// lag assertions.
+#[test]
+fn correlated_pair_lag_survives_a_routed_drive() {
+    const DELAY: usize = 400;
+    const MAX_LAG: usize = 800;
+    let drive = ac_core::shared::generator::dbfs_to_amplitude(-20.0);
+    let engine = |pair: bool, pink: bool| {
+        let mut eng = FakeEngine::new();
+        eng.start(&["fake:playback_0".into()], Some("fake:capture_0"))
+            .unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+        if pair {
+            eng.set_correlated_pair(0.6, DELAY);
+        }
+        if pink {
+            eng.set_pink(drive);
+        }
+        eng
+    };
+    // 1 s = 48 000 samples, far above 4 × DELAY.
+    let (meas, refch) = engine(true, true).capture_stereo(1.0).unwrap();
+    let (pair_meas, pair_ref) = engine(true, false).capture_stereo(1.0).unwrap();
+    let (gen_meas, _) = engine(false, true).capture_stereo(1.0).unwrap();
+    assert!(meas.len() >= 4 * DELAY);
+
+    let actual = xcorr(&meas, &refch, MAX_LAG);
+    let argmax = (0..=MAX_LAG)
+        .max_by(|&a, &b| actual[a].total_cmp(&actual[b]))
+        .unwrap();
+    assert_eq!(argmax, DELAY, "routed drive moved the pair's lag");
+    assert!(actual[DELAY] > actual[0]);
+
+    // The rejected shape: one generator block on both channels.
+    let dup_meas: Vec<f32> = pair_meas
+        .iter()
+        .zip(&gen_meas)
+        .map(|(p, g)| p + g)
+        .collect();
+    let dup_ref: Vec<f32> = pair_ref.iter().zip(&gen_meas).map(|(p, g)| p + g).collect();
+    let dup = xcorr(&dup_meas, &dup_ref, MAX_LAG);
+    let pair = xcorr(&pair_meas, &pair_ref, MAX_LAG);
+    let gen_energy: f64 = gen_meas.iter().map(|&g| (g as f64).powi(2)).sum();
+
+    let dup_growth_0 = dup[0] - pair[0];
+    let actual_growth_0 = actual[0] - pair[0];
+    assert!(
+        dup_growth_0 > 0.5 * gen_energy,
+        "duplicated drive must add its energy at lag 0: growth {dup_growth_0}, energy {gen_energy}"
+    );
+    assert!(
+        actual_growth_0.abs() < 0.25 * gen_energy,
+        "per-channel drive must not add a lag-0 term: growth {actual_growth_0}, energy {gen_energy}"
+    );
+    assert!(
+        (dup[DELAY] - pair[DELAY]).abs() < 0.25 * gen_energy,
+        "lag 0 is the term that grows, not lag {DELAY}"
+    );
+}
