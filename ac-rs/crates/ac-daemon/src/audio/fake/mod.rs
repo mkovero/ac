@@ -1,15 +1,31 @@
 //! Fake audio engine for tests and `--fake-audio` mode.
 //!
-//! Issue #34: the fake backend models routing so that tests can verify
-//! `reconnect_input` / `add_ref_input` / `connect_output` actually changed
-//! the channel the caller will sample.
+//! # Two sources, one routing bit (#204)
 //!
-//! Implementation: every "fake:capture_N" / "fake:playback_N" port name
-//! carries a channel index. `capture_block()` synthesizes a sine at
+//! A fake-captured signal comes from one of two sources, kept apart so that
+//! routing can gate one without silencing the other:
+//!
+//! - the **generator** — what the daemon drives out (`set_tone`, `set_pink`,
+//!   `set_tone_pair`, `set_silence`). It reaches the capture channels only
+//!   while at least one output port is open (`start`, `connect_output`,
+//!   `disconnect_output`). A drive with no output open captures **zeros**, so
+//!   a generator connected to nothing (#203) is visible to every fake-only
+//!   peak test;
+//! - the **external** source — a signal at the input the daemon does not
+//!   emit, set by the harness knobs (`set_external_tones`,
+//!   `set_external_noise`, `set_correlated_pair`). It reaches the capture
+//!   channels regardless of routing, and adds to a routed drive.
+//!
+//! Routing is one bit per engine, not a port-to-port graph: any open output
+//! reaches every capture channel. A drive into the *wrong* port is therefore
+//! not visible here, and stays verified on the box.
+//!
+//! Each capture channel keeps its own identity (#34): every
+//! "fake:capture_N" port name carries a channel index, and tones synthesise at
 //! `freq_hz + channel_idx * 100 Hz`, so a test that reroutes from
-//! `fake:capture_0` to `fake:capture_3` and captures at a nominal 1 kHz will
-//! observe energy at 1 300 Hz instead. `capture_stereo()` emits independent
-//! offsets for the measurement and reference channels.
+//! `fake:capture_0` to `fake:capture_3` and captures at a nominal 1 kHz
+//! observes energy at 1 300 Hz instead. Noise is seeded per channel, and the
+//! correlated pair keeps a read cursor per measurement port.
 //!
 //! # What this backend must never do
 //!
@@ -107,11 +123,19 @@ impl FakeEngine {
         self.ref_ports.first().map(String::as_str)
     }
 
+    /// Whether the generator reaches the capture channels: at least one
+    /// output port is open. The fake's entire routing model — see the module
+    /// doc.
+    fn routed(&self) -> bool {
+        !self.output_ports.is_empty()
+    }
+
     /// Borrow the generator with the context a synthesis call needs.
     ///
     /// Takes `&mut self`, so a caller that also needs a port name must clone
     /// it first — every capture path below does.
     fn synth(&mut self) -> Synth<'_> {
+        let routed = self.routed();
         let FakeEngine {
             gen,
             ref_ports,
@@ -122,27 +146,21 @@ impl FakeEngine {
             gen,
             sample_rate: *sample_rate,
             ref_port: ref_ports.first().map(String::as_str),
+            routed,
         }
     }
 
-    /// Port names for the ring-mode channels, measurement first then refs, in
-    /// the order `capture_multi` returns them.
+    /// Port names for the ring-mode channels, measurement first then every
+    /// registered ref port in registration order — ref ring `i` reads
+    /// `ref_ports[i]`, the same order `capture_multi` returns off ring mode.
     ///
-    /// **Ring mode still reads one channel for every ref ring** — the first
-    /// registered ref — which is enough for the contiguity question, since
-    /// that is per-channel and not about routing. The off-ring path no longer
-    /// works this way (#254: one buffer per registered port), so the two
-    /// differ, and **ring mode is not a way to rehearse a multi-channel
-    /// session**: it models N refs on one channel, while the case that
-    /// mattered is two distinct *measurement* channels sharing a reference.
-    /// That remaining blind spot is #204.
+    /// The ring count was fixed at `enable_ring_mode`, the ports at
+    /// `add_ref_input`; if they disagree, the drain refuses rather than
+    /// substituting a port (`FakeRings::drain`).
     fn ring_ports(&self) -> Vec<Option<String>> {
-        let n_refs = self.ring.as_ref().map(FakeRings::n_refs).unwrap_or(0);
-        let mut ports = Vec::with_capacity(1 + n_refs);
+        let mut ports = Vec::with_capacity(1 + self.ref_ports.len());
         ports.push(self.input_port.clone());
-        for _ in 0..n_refs {
-            ports.push(self.ref_port().map(str::to_string));
-        }
+        ports.extend(self.ref_ports.iter().cloned().map(Some));
         ports
     }
 
@@ -160,6 +178,7 @@ impl FakeEngine {
     ) -> Option<Result<Vec<Vec<f32>>>> {
         self.ring.as_ref()?;
         let ports = self.ring_ports();
+        let routed = self.routed();
         let FakeEngine {
             gen,
             ref_ports,
@@ -171,6 +190,7 @@ impl FakeEngine {
             gen,
             sample_rate: *sample_rate,
             ref_port: ref_ports.first().map(String::as_str),
+            routed,
         };
         let rings = ring.as_mut()?;
         Some(rings.drain(&mut synth, &ports, n, duration, kind))
@@ -290,6 +310,14 @@ impl AudioEngine for FakeEngine {
         self.gen.set_correlated_pair(gain, delay_samples);
     }
 
+    fn set_external_tones(&mut self, tones: &[(f64, f64)]) {
+        self.gen.set_external(Stimulus::Tones(tones.to_vec()));
+    }
+
+    fn set_external_noise(&mut self, amplitude: f64) {
+        self.gen.set_external(Stimulus::Noise(amplitude));
+    }
+
     /// #368 codex-qa finding on PR #384: `AC_FAKE_TAU_GAIN_OVERRIDE` models
     /// the loopback cable's own gain, and `calibrate`'s step-2 captured
     /// level (read through this path via `capture_rms`) is that same cable
@@ -333,6 +361,10 @@ impl AudioEngine for FakeEngine {
     /// zeros to `samples.len() + tail` total length. Used by the
     /// `plot_ir` integration test to verify the deconvolved linear IR
     /// peaks at the expected offset.
+    ///
+    /// The played `samples` reach the capture only while an output port is
+    /// open (#204); unrouted, the capture is the noise override's dither
+    /// alone — the input floor, which exists whatever is connected.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         let delay_samples = next_loopback_delay_samples();
         let gain = tau_gain_override();
@@ -354,10 +386,12 @@ impl AudioEngine for FakeEngine {
                 *v = (noise_amp as f64 * u) as f32;
             }
         }
-        for (i, &s) in samples.iter().enumerate() {
-            let j = i + delay_samples;
-            if j < total {
-                out[j] += s * gain;
+        if self.routed() {
+            for (i, &s) in samples.iter().enumerate() {
+                let j = i + delay_samples;
+                if j < total {
+                    out[j] += s * gain;
+                }
             }
         }
         Ok(out)
@@ -396,7 +430,8 @@ impl AudioEngine for FakeEngine {
     /// `samples.len() + tail` long (invariant a); both come from one call, so
     /// they are aligned by construction (invariant b). Paced and cancellable
     /// like `play_and_capture_cancellable`. The fake does not route by port,
-    /// so `reference_port` only has to be present.
+    /// so `reference_port` only has to be present; with no output port open
+    /// neither leg hears the stimulus (#204).
     fn play_and_capture_with_reference(
         &mut self,
         samples: &[f32],
@@ -420,10 +455,12 @@ impl AudioEngine for FakeEngine {
                 *v = (noise_amp as f64 * u) as f32;
             }
         }
-        for (i, &s) in samples.iter().enumerate() {
-            let j = i + delay;
-            if j < total {
-                reference[j] += s * gain;
+        if self.routed() {
+            for (i, &s) in samples.iter().enumerate() {
+                let j = i + delay;
+                if j < total {
+                    reference[j] += s * gain;
+                }
             }
         }
         let chunk = (self.sample_rate as usize / 100).max(1);

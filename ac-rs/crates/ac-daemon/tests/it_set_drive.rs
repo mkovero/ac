@@ -3,16 +3,20 @@
 //!
 //! # Why published peaks are the drive observable
 //!
-//! The fake backend's capture is derived from its own stimulus
-//! (`audio/fake.rs::make_samples_for`), so changing what the engine
-//! drives changes what the session captures. A published
-//! `meas_peak_dbfs` moving between the idle ≈ −20 dBFS (the fake default
-//! 0.1-amplitude tone) and the quieter `DRIVE_DBFS` a `set_drive` applies
-//! is therefore direct evidence that the worker acted on the drive
-//! state — not a proxy for it. `set_silence` on the fake backend
-//! restores that default tone rather than true digital silence, which
-//! is why the assertions below are "returned to the idle level", not
-//! "went to −inf".
+//! The fake backend's capture is derived from its own generator
+//! (`audio/fake/stimulus.rs::Synth::block`), and since #204 the generator
+//! reaches the capture only while the session has an output port open. A
+//! published `meas_peak_dbfs` at the quieter `DRIVE_DBFS` a `set_drive`
+//! applies is therefore evidence of two things at once: the worker acted
+//! on the drive state, **and** the session drives into a connected output.
+//! A drive into nothing — the #203 class — captures zeros and publishes no
+//! peak, so every drive test below goes red on it. The drive tests launch
+//! `drivable` sessions for that reason: a passive session opens no outputs.
+//!
+//! An idle generator is heard whatever the routing: the fake's default
+//! 0.1-amplitude tone (≈ −20 dBFS), which `set_silence` restores rather
+//! than true digital silence. That is why the assertions below are
+//! "returned to the idle level", not "went to −inf".
 //!
 //! # Why the driving level is quieter than idle, not louder (#459)
 //!
@@ -49,6 +53,16 @@ fn start_transfer(c: &Client) -> Value {
     c.call(json!({
         "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
         "weighting": "Z", "integration": "fast",
+    }))
+}
+
+/// A session that opens and connects its output ports at launch while
+/// staying silent until `set_drive` — the session shape a drive test needs,
+/// since only a connected output reaches the fake's capture (#204).
+fn start_drivable_transfer(c: &Client) -> Value {
+    c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast", "drivable": true,
     }))
 }
 
@@ -278,11 +292,14 @@ fn peaks_are_raw_and_do_not_follow_a_voltage_calibration() {
 // Drive lifecycle, live level change, dead-man
 // ---------------------------------------------------------------------
 
+/// The #203-class guard: a drivable session whose worker opened no output
+/// port captures zeros under the fake (#204), so "driving peak" is absent
+/// and this fails. Proven by making `drive_out_ports` return no ports.
 #[test]
 fn drive_on_lowers_the_captured_level_and_off_returns_it_within_one_frame() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     // On at `DRIVE_DBFS`: amplitude 10^(DRIVE_DBFS/20) ⇒ a peak well
@@ -316,7 +333,7 @@ fn drive_on_lowers_the_captured_level_and_off_returns_it_within_one_frame() {
 fn level_changes_take_effect_without_restarting_the_session() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": -50.0}));
@@ -343,7 +360,7 @@ fn level_changes_take_effect_without_restarting_the_session() {
 fn dead_man_drops_drive_after_keepalive_silence_but_keeps_the_session() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     assert_eq!(
@@ -380,7 +397,7 @@ fn dead_man_drops_drive_after_keepalive_silence_but_keeps_the_session() {
 fn drive_survives_up_to_the_dead_man_window() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     assert_eq!(
@@ -405,7 +422,7 @@ fn drive_survives_up_to_the_dead_man_window() {
 fn idempotent_resends_hold_drive_past_the_dead_man_window() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     let msg = json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS});

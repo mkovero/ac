@@ -233,7 +233,10 @@ per the hard fence.
    forbid relocating it unchanged. Flagging explicitly rather than assuming —
    if Markus reads the fence as "do not touch that code at all", fall back to
    option A and accept the weaker evidence.
-2. #204 (`FakeEngine cannot model routing`, `needs-design`) is the same
-   structural complaint about the same file: the fake models the generator,
-   not the plumbing. Option B is the routing-side precedent for #204's option
-   1. Worth deciding them together; not merged into this slice.
+2. #204 made the routing-side decision for the same file, separately from
+   this slice (architect design comment on #204): the fake keeps two sources —
+   the daemon's generator and an external harness input — and gates only the
+   generator on one routing bit, "some output port is open". Routing is not a
+   port-to-port graph, so a drive into the wrong port stays box-verified. The
+   same change made ring mode read one port per ref ring and refuse a
+   ring/port count mismatch.

@@ -76,9 +76,16 @@ fn capture_multi_matches_stereo_default() {
     // registered, and the assertion below ratified it. The count is
     // asserted per registered port in
     // `capture_multi_returns_one_buffer_per_registered_port`.
+    //
+    // #204 changed this test deliberately a second time: it drives the
+    // generator, and a generator reaches the capture only while an output
+    // port is open, so it now starts with one. Without the `start` both
+    // buffers would be zeros and the "differ" assertion below would fail —
+    // which is the routing gate working, not a regression.
     let mut eng = FakeEngine::new();
+    eng.start(&["fake:playback_0".into()], Some("fake:capture_0"))
+        .unwrap();
     eng.set_tone(1_000.0, 0.5);
-    eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_2").unwrap();
     let bufs = eng.capture_multi(0.02).unwrap();
     assert_eq!(bufs.len(), 2);
@@ -105,7 +112,7 @@ fn capture_multi_matches_stereo_default() {
 #[test]
 fn capture_multi_returns_one_buffer_per_registered_port() {
     let mut eng = FakeEngine::new();
-    eng.set_tone(1_000.0, 0.5);
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_3").unwrap();
     eng.add_ref_input("fake:capture_1").unwrap();
@@ -171,7 +178,7 @@ fn correlated_pair_tracks_each_measurement_port_separately() {
 #[test]
 fn stereo_channels_are_independent() {
     let mut eng = FakeEngine::new();
-    eng.set_tone(1_000.0, 0.5);
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_2").unwrap();
     let (meas, refch) = eng.capture_stereo(0.02).unwrap();
@@ -189,6 +196,8 @@ fn tone_pair_synthesizes_both_frequencies() {
     // just the first (the old `set_tone` single-tone behaviour).
     let sr = 48_000;
     let mut eng = FakeEngine::new();
+    // `set_tone_pair` drives the generator, which needs an open output.
+    eng.start(&["fake:playback_0".into()], None).unwrap();
     eng.set_tone_pair(&[(1_000.0, 0.5), (5_000.0, 0.1)]);
     let s = eng.capture_block(0.5).unwrap();
     let m1 = goertzel_mag(&s, sr as f64, 1_000.0);
@@ -212,7 +221,7 @@ fn tone_pair_synthesizes_both_frequencies() {
 #[test]
 fn noise_stream_advances_across_calls() {
     let mut eng = FakeEngine::new();
-    eng.set_broadband_noise(0.5);
+    eng.set_external_noise(0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     let a = eng.capture_block(0.01).unwrap();
     let b = eng.capture_block(0.01).unwrap();
@@ -230,12 +239,12 @@ fn noise_stream_advances_across_calls() {
 #[test]
 fn noise_stream_is_deterministic_from_a_fresh_engine() {
     let mut eng1 = FakeEngine::new();
-    eng1.set_broadband_noise(0.5);
+    eng1.set_external_noise(0.5);
     eng1.reconnect_input("fake:capture_0").unwrap();
     let first = eng1.capture_block(0.01).unwrap();
 
     let mut eng2 = FakeEngine::new();
-    eng2.set_broadband_noise(0.5);
+    eng2.set_external_noise(0.5);
     eng2.reconnect_input("fake:capture_0").unwrap();
     let replay = eng2.capture_block(0.01).unwrap();
 
@@ -247,7 +256,7 @@ fn broadband_noise_has_no_dominant_tone() {
     // #170: I2 stimulus needs genuine spectral content, not the old
     // `set_pink` fallback (which only ever synthesized a sine).
     let mut eng = FakeEngine::new();
-    eng.set_broadband_noise(0.5);
+    eng.set_external_noise(0.5);
     let s = eng.capture_block(0.5).unwrap();
     assert!(!s.is_empty());
     let rms: f64 = (s.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
@@ -344,4 +353,180 @@ fn correlated_pair_is_deterministic_from_a_fresh_engine() {
     let (meas2, ref2) = build();
     assert_eq!(meas1, meas2, "meas stream must replay identically");
     assert_eq!(ref1, ref2, "ref stream must replay identically");
+}
+
+/// RMS of a buffer; zero for an all-zero buffer.
+fn rms(s: &[f32]) -> f64 {
+    (s.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / s.len().max(1) as f64).sqrt()
+}
+
+/// #204 (a): a generator driven with no output port open reaches nothing,
+/// so every captured buffer is exact zeros — the #203 class, a drive into
+/// nothing. The same drive with one output open is heard. Both halves in one
+/// test, so the zeros cannot come from something other than routing.
+#[test]
+fn unrouted_generator_captures_zeros_and_routed_generator_is_heard() {
+    let mut unrouted = FakeEngine::new();
+    unrouted.start(&[], Some("fake:capture_0")).unwrap();
+    unrouted.add_ref_input("fake:capture_1").unwrap();
+    unrouted.add_ref_input("fake:capture_2").unwrap();
+    unrouted.set_pink(0.5);
+    let bufs = unrouted.capture_multi(0.01).unwrap();
+    assert_eq!(bufs.len(), 3);
+    for (i, b) in bufs.iter().enumerate() {
+        assert!(!b.is_empty(), "buffer {i} is empty");
+        assert!(
+            b.iter().all(|&v| v == 0.0),
+            "unrouted drive must capture zeros on buffer {i}"
+        );
+    }
+    let block = unrouted.capture_block(0.01).unwrap();
+    assert!(block.iter().all(|&v| v == 0.0), "capture_block too");
+
+    let mut routed = FakeEngine::new();
+    routed
+        .start(&["fake:playback_0".into()], Some("fake:capture_0"))
+        .unwrap();
+    routed.add_ref_input("fake:capture_1").unwrap();
+    routed.add_ref_input("fake:capture_2").unwrap();
+    routed.set_pink(0.5);
+    for (i, b) in routed.capture_multi(0.01).unwrap().iter().enumerate() {
+        assert!(rms(b) > 0.05, "routed drive must be heard on buffer {i}");
+    }
+}
+
+/// #204 (b): disconnecting the last output port unroutes the engine; the
+/// next capture is zeros.
+#[test]
+fn disconnecting_the_last_output_silences_the_generator() {
+    let mut eng = FakeEngine::new();
+    eng.start(&["fake:playback_0".into()], Some("fake:capture_0"))
+        .unwrap();
+    eng.connect_output("fake:playback_1").unwrap();
+    eng.set_tone(1_000.0, 0.5);
+    assert!(rms(&eng.capture_block(0.01).unwrap()) > 0.1);
+
+    eng.disconnect_output("fake:playback_0");
+    assert!(
+        rms(&eng.capture_block(0.01).unwrap()) > 0.1,
+        "one output still open: still routed"
+    );
+    eng.disconnect_output("fake:playback_1");
+    let after = eng.capture_block(0.01).unwrap();
+    assert!(
+        after.iter().all(|&v| v == 0.0),
+        "no output left: the drive reaches nothing"
+    );
+}
+
+/// #204 (c): an external source is a signal at the input, not a drive, so
+/// it survives an engine with no output port open — the monitor and passive
+/// `transfer_stream` case.
+#[test]
+fn external_tone_survives_an_unrouted_engine() {
+    let mut eng = FakeEngine::new();
+    eng.start(&[], Some("fake:capture_0")).unwrap();
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
+    let s = eng.capture_block(0.02).unwrap();
+    let m = goertzel_mag(&s, 48_000.0, 1_000.0);
+    assert!(m > 0.2, "external 1 kHz must be captured, mag {m}");
+}
+
+/// External plus a routed drive add; unrouted, only the external is heard,
+/// byte for byte. A drive leaking into an unrouted capture alongside an
+/// external source would pass (a) and fail here.
+#[test]
+fn external_and_routed_drive_add_and_unrouted_drive_does_not() {
+    let capture = |outputs: &[String], drive: bool| {
+        let mut eng = FakeEngine::new();
+        eng.start(outputs, Some("fake:capture_0")).unwrap();
+        eng.set_external_tones(&[(1_000.0, 0.5)]);
+        if drive {
+            eng.set_tone(3_000.0, 0.25);
+        }
+        eng.capture_block(0.02).unwrap()
+    };
+
+    let external_only = capture(&[], false);
+    let unrouted = capture(&[], true);
+    assert_eq!(unrouted, external_only, "unrouted drive must add nothing");
+
+    let routed = capture(&["fake:playback_0".into()], true);
+    let ext = goertzel_mag(&routed, 48_000.0, 1_000.0);
+    let drv = goertzel_mag(&routed, 48_000.0, 3_000.0);
+    assert!(ext > 0.2, "external must still be heard, mag {ext}");
+    assert!(drv > 0.1, "routed drive must be heard too, mag {drv}");
+}
+
+/// External noise and driven noise on one channel must be independent
+/// streams. Sharing a seed would make them one sequence, so the two sources
+/// together would read as one correlated stream at +6 dB.
+#[test]
+fn external_noise_is_independent_of_driven_noise() {
+    let mut driven = FakeEngine::new();
+    driven
+        .start(&["fake:playback_0".into()], Some("fake:capture_0"))
+        .unwrap();
+    driven.set_pink(0.5);
+    let d = driven.capture_block(0.01).unwrap();
+
+    let mut external = FakeEngine::new();
+    external.start(&[], Some("fake:capture_0")).unwrap();
+    external.set_external_noise(0.5);
+    let e = external.capture_block(0.01).unwrap();
+
+    assert_eq!(d.len(), e.len());
+    assert_ne!(d, e, "external and driven noise share one stream");
+}
+
+/// #204 (d): ring mode reads one port per ref ring. Ring 2 must carry
+/// `fake:capture_1`'s channel offset (1 100 Hz), not the first ref's
+/// (`fake:capture_3`, 1 300 Hz) repeated — which is what ring mode did
+/// before, and which made it unable to rehearse a multi-channel session.
+#[test]
+fn ring_mode_reads_one_port_per_ref_ring() {
+    let mut eng = FakeEngine::new();
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    eng.add_ref_input("fake:capture_3").unwrap();
+    eng.add_ref_input("fake:capture_1").unwrap();
+    eng.enable_ring_mode(0.0, 2, 1);
+
+    let bufs = eng.capture_multi(0.02).unwrap();
+    assert_eq!(bufs.len(), 3);
+    // 960 samples at 48 kHz: 50 Hz bins, so 1 000, 1 100 and 1 300 Hz all
+    // sit on a bin.
+    let energy_at = |buf: &[f32], freq: f64| goertzel_mag(buf, 48_000.0, freq);
+    for (i, want, other) in [
+        (0, 1_000.0, 1_300.0),
+        (1, 1_300.0, 1_100.0),
+        (2, 1_100.0, 1_300.0),
+    ] {
+        assert!(
+            energy_at(&bufs[i], want) > 10.0 * energy_at(&bufs[i], other),
+            "ring {i} must carry {want} Hz, got {want} Hz {:.6} vs {other} Hz {:.6}",
+            energy_at(&bufs[i], want),
+            energy_at(&bufs[i], other),
+        );
+    }
+}
+
+/// #204 (e): a ring count that disagrees with the registered ref ports is
+/// refused, naming both counts, rather than served by substituting a port.
+#[test]
+fn ring_mode_refuses_a_ref_count_mismatch() {
+    let mut eng = FakeEngine::new();
+    eng.set_external_tones(&[(1_000.0, 0.5)]);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    eng.add_ref_input("fake:capture_1").unwrap();
+    eng.enable_ring_mode(0.0, 2, 1);
+
+    let err = eng
+        .capture_multi(0.01)
+        .expect_err("two ref rings, one ref port: must refuse")
+        .to_string();
+    assert!(
+        err.contains("2 ref ring(s)") && err.contains("1 ref port(s)"),
+        "error must name both counts: {err}"
+    );
 }

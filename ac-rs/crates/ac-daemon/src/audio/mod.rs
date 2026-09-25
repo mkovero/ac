@@ -348,6 +348,17 @@ pub trait AudioEngine: Send + 'static {
     /// backends have no "known ground truth" concept to synthesize.
     fn set_correlated_pair(&mut self, _gain: f64, _delay_samples: usize) {}
 
+    /// Put the sum of `(freq_hz, amplitude)` tones at the fake's inputs as a
+    /// signal the daemon does not emit (#204): heard on every capture channel
+    /// whether or not any output port is open, unlike `set_tone_pair`, which
+    /// drives the generator. Default no-op — on hardware the outside world
+    /// supplies the input, and callers reach this only inside a fake branch.
+    fn set_external_tones(&mut self, _tones: &[(f64, f64)]) {}
+
+    /// Broadband-noise counterpart of [`Self::set_external_tones`], at peak
+    /// `amplitude` (0..1 full-scale). Default no-op for the same reason.
+    fn set_external_noise(&mut self, _amplitude: f64) {}
+
     /// Route fake capture through a real ring driven by a synthetic clock,
     /// with `process_secs` of modelled per-tick consumer processing time,
     /// `n_refs` reference channels, and a producer granularity of `period`

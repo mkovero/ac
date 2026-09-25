@@ -256,7 +256,7 @@ mod ring_contiguity_tests {
         let mut eng = FakeEngine::new();
         eng.set_sample_rate(SR);
         eng.enable_ring_mode(PROCESS_SECS, 0, PERIOD);
-        eng.set_tone(TONE_HZ, AMPLITUDE);
+        eng.set_external_tones(&[(TONE_HZ, AMPLITUDE)]);
 
         let caps = RingCaps {
             cwt: ring_cap,

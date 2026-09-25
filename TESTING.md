@@ -366,6 +366,13 @@ Tests use the Rust `FakeEngine` which produces synthetic float32 sine waves, not
 - ADC/DAC nonlinearity
 - Real noise floors
 - Sample rate drift
+- Port-to-port routing. Routing is one bit per engine (#204): the daemon's
+  generator reaches the capture channels only while at least one output port
+  is open, and then it reaches every capture channel. A drive into nothing
+  therefore captures zeros and fails the fake-only peak tests, but a drive into
+  the *wrong* port is invisible here and stays verified on the box. Harness
+  inputs (`fake_tones`, `fake_noise_dbfs`, `fake_correlated_pair`) are an
+  external source at the inputs and are captured regardless of routing.
 
 Integration tests verify the software pipeline is correct; hardware validation requires real equipment — use `ac test hardware`.
 

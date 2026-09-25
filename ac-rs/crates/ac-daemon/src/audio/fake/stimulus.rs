@@ -2,10 +2,18 @@
 //! between calls.
 //!
 //! [`StimulusGen`] owns every field that exists only to feed a sample
-//! generator: the configured stimulus and the per-channel positions the
+//! generator: the configured stimuli and the per-channel positions the
 //! `Noise` and `CorrelatedPair` arms advance. Keeping them here rather than
 //! on `FakeEngine` is what lets ring mode borrow the generator and the ring
 //! producers at the same time (see [`Synth`]).
+//!
+//! There are two sources (#204). The **generator** is what the daemon drives
+//! out of a playback port (`set_tone`, `set_pink`, ...), and it reaches the
+//! capture channels only while at least one output port is open. The
+//! **external** source is a signal the daemon does not emit — a harness input
+//! (`fake_tones`, `fake_noise_dbfs`, `fake_correlated_pair`) — and it reaches
+//! the capture channels regardless of routing. [`Synth::block`] holds the
+//! rule that combines them.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -37,6 +45,19 @@ pub(super) enum Stimulus {
 /// sha256, every time.
 pub(super) const CORRELATED_PAIR_SEED: u64 = 0xC0FFEE_C0FFEE_u64;
 
+/// XORed into the external source's `Noise` seed so external noise and a
+/// driven generator's noise on the same channel are two independent streams,
+/// not one stream counted twice (which would read as a correlated, 6 dB
+/// louder signal).
+const EXTERNAL_NOISE_SEED_XOR: u64 = 0x5DEE_CE66_D1CE_4E5B;
+
+/// Which of [`StimulusGen`]'s two sources a render reads.
+#[derive(Clone, Copy)]
+enum Source {
+    Generator,
+    External,
+}
+
 /// Deterministic pseudo-random sample at absolute index `index`, in
 /// `[-1, 1)`. A *pure* function of `(seed, index)` — unlike `Stimulus::
 /// Noise`'s sequentially-advanced LCG, this needs to be independently
@@ -61,6 +82,18 @@ impl Default for Stimulus {
     }
 }
 
+impl Stimulus {
+    /// Whether this stimulus, as the generator, is driving anything: a tone
+    /// with some amplitude above zero, or any noise. The complement is the
+    /// idle state `Synth::block` fills with its 0.1-amplitude fallback tone.
+    fn is_active(&self) -> bool {
+        match self {
+            Stimulus::Tones(tones) => tones.iter().any(|&(_, a)| a > 0.0),
+            Stimulus::Noise(_) | Stimulus::CorrelatedPair { .. } => true,
+        }
+    }
+}
+
 /// Everything the sample generator reads or advances, split out of
 /// `FakeEngine` so the ring producers can be borrowed alongside it.
 ///
@@ -71,7 +104,12 @@ impl Default for Stimulus {
 /// block straight into its ring.
 #[derive(Default)]
 pub(super) struct StimulusGen {
+    /// The generator: what the daemon drives out of a playback port. Heard
+    /// on the capture channels only while the engine is routed.
     stimulus: Stimulus,
+    /// A signal at the input the daemon does not emit (harness knobs).
+    /// Heard regardless of routing. `None` until a harness setter runs.
+    external: Option<Stimulus>,
     /// Per-channel-offset LCG state for `Stimulus::Noise`, keyed on the
     /// offset's bit pattern (one entry per distinct channel). Persisted
     /// across `capture_block`/`capture_stereo` calls so a soak driving the
@@ -85,6 +123,9 @@ pub(super) struct StimulusGen {
     /// -> same starting state) so replay from a logged seed still works;
     /// see `noise_stream_advances_across_calls`.
     noise_state: HashMap<u64, u64>,
+    /// `noise_state` for the external source, seeded apart from the
+    /// generator's (see `EXTERNAL_NOISE_SEED_XOR`).
+    external_noise_state: HashMap<u64, u64>,
     /// Absolute-sample read position per role for `Stimulus::
     /// CorrelatedPair`, tracked independently (not a shared cursor) so
     /// the two roles' blocks are correct regardless of which is
@@ -108,20 +149,28 @@ pub(super) struct StimulusGen {
 }
 
 impl StimulusGen {
+    /// Set the generator — what the daemon drives out.
     pub(super) fn set(&mut self, stimulus: Stimulus) {
         self.stimulus = stimulus;
     }
 
-    /// Set the correlated-pair stimulus and restart both roles at `t = 0`.
+    /// Set the external source — a signal at the input the daemon does not
+    /// emit.
+    pub(super) fn set_external(&mut self, stimulus: Stimulus) {
+        self.external = Some(stimulus);
+    }
+
+    /// Set the correlated-pair stimulus as the external source and restart
+    /// both roles at `t = 0`.
     ///
     /// Fresh stimulus, fresh positions — otherwise a session that switches
     /// stimulus mid-life would read from a stale absolute index instead of
     /// starting the pair cleanly at `t = 0`.
     pub(super) fn set_correlated_pair(&mut self, gain: f64, delay_samples: usize) {
-        self.stimulus = Stimulus::CorrelatedPair {
+        self.external = Some(Stimulus::CorrelatedPair {
             gain,
             delay_samples,
-        };
+        });
         self.correlated_ref_pos = 0;
         self.correlated_meas_pos.clear();
     }
@@ -161,10 +210,16 @@ fn channel_offset_hz(port: Option<&str>) -> f64 {
 /// through `add_ref_input`. `CorrelatedPair`'s role dispatch turns on it:
 /// that port is the source, anything else reads the same source scaled and
 /// delayed.
+///
+/// `routed` is the whole of the fake's routing model: at least one output
+/// port is open. It is one bit per engine, not a port-to-port graph — any
+/// open output reaches every capture channel, so a drive into the *wrong*
+/// port is not visible here; only a drive into *nothing* is.
 pub(super) struct Synth<'a> {
     pub(super) gen: &'a mut StimulusGen,
     pub(super) sample_rate: u32,
     pub(super) ref_port: Option<&'a str>,
+    pub(super) routed: bool,
 }
 
 impl Synth<'_> {
@@ -177,11 +232,67 @@ impl Synth<'_> {
     /// exactly, so default output stays byte-identical. `Noise` and
     /// `CorrelatedPair` already track their own absolute position and are
     /// unaffected.
+    ///
+    /// Combination rule (#204):
+    ///
+    /// | external | generator active | routed | captured |
+    /// |---|---|---|---|
+    /// | set | — | — | external + generator if active ∧ routed |
+    /// | unset | yes | yes | generator |
+    /// | unset | yes | no | zeros |
+    /// | unset | no | — | the 0.1-amplitude idle fallback tone |
+    ///
+    /// Zeros for an unrouted drive are deliberate: they cannot be mistaken
+    /// for a drive at any level, so a generator connected to nothing (#203)
+    /// shows up as silence in every fake-only peak test.
     pub(super) fn block(&mut self, port: Option<&str>, duration: f64, tone_start: u64) -> Vec<f32> {
+        let n = (self.sample_rate as f64 * duration) as usize;
+        let gen_active = self.gen.stimulus.is_active();
+        let gen_heard = gen_active && self.routed;
+        if self.gen.external.is_some() {
+            let mut out = self.render(Source::External, port, n, tone_start);
+            if gen_heard {
+                let driven = self.render(Source::Generator, port, n, tone_start);
+                for (o, d) in out.iter_mut().zip(driven) {
+                    *o += d;
+                }
+            }
+            out
+        } else if gen_active && !self.routed {
+            vec![0.0; n]
+        } else {
+            self.render(Source::Generator, port, n, tone_start)
+        }
+    }
+
+    /// Render `n` samples of one source for `port`'s channel. The
+    /// generator's idle fallback lives here, so an idle generator renders
+    /// the fallback tone; `block` decides whether it is heard at all.
+    fn render(
+        &mut self,
+        source: Source,
+        port: Option<&str>,
+        n: usize,
+        tone_start: u64,
+    ) -> Vec<f32> {
         let sr = self.sample_rate as f64;
-        let n = (sr * duration) as usize;
         let offset = channel_offset_hz(port);
-        match &self.gen.stimulus {
+        let StimulusGen {
+            stimulus,
+            external,
+            noise_state,
+            external_noise_state,
+            correlated_ref_pos,
+            correlated_meas_pos,
+        } = &mut *self.gen;
+        let (stimulus, noise_state, seed_xor) = match source {
+            Source::Generator => (&*stimulus, noise_state, 0),
+            Source::External => match external.as_ref() {
+                Some(ext) => (ext, external_noise_state, EXTERNAL_NOISE_SEED_XOR),
+                None => return vec![0.0; n],
+            },
+        };
+        match stimulus {
             Stimulus::Tones(tones) => {
                 // Historical default: nothing has set a nonzero amplitude
                 // yet → fall back to a 0.1-amplitude sine so `--fake-audio`
@@ -221,11 +332,9 @@ impl Synth<'_> {
                 // same pseudorandom stream instead of each replaying an
                 // identical block — see the field doc on `noise_state`.
                 let key = offset.to_bits();
-                let state = self
-                    .gen
-                    .noise_state
+                let state = noise_state
                     .entry(key)
-                    .or_insert(0x9E3779B97F4A7C15 ^ key);
+                    .or_insert(0x9E3779B97F4A7C15 ^ key ^ seed_xor);
                 (0..n)
                     .map(|_| {
                         *state = state
@@ -249,13 +358,11 @@ impl Synth<'_> {
                 // cursor) — see the field doc on `correlated_ref_pos`.
                 let is_ref = port.is_some() && port == self.ref_port;
                 let start_pos = if is_ref {
-                    let p = self.gen.correlated_ref_pos;
-                    self.gen.correlated_ref_pos += n as u64;
+                    let p = *correlated_ref_pos;
+                    *correlated_ref_pos += n as u64;
                     p
                 } else {
-                    let slot = self
-                        .gen
-                        .correlated_meas_pos
+                    let slot = correlated_meas_pos
                         .entry(port.unwrap_or_default().to_string())
                         .or_insert(0);
                     let p = *slot;

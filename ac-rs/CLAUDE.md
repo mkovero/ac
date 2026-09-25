@@ -59,4 +59,4 @@ See `ac-rs/ZMQ.md` — authoritative for both Python and Rust.
 | `dmm_read` | SCPI client wired (only used when `[dmm]` section configured; else `no DMM configured`) |
 | GPIO handler | USB2GPIO (Arduino Mega) handler in `gpio.rs`, spawned by `--gpio <port>` |
 | CPAL backend | Runs when no JACK. **Note:** CPAL backend inherits `AudioEngine` default no-op routing methods — commands needing port routing (`probe`, `transfer`, `test_hardware`, `test_dut`) behave wrong now. See issue #27. |
-| `--fake-audio` | Synthetic sine loopback; bypasses routing (see issue #34) |
+| `--fake-audio` | Synthetic sine loopback. Routing is one bit (#204): the generator is captured only while an output port is open, on every channel; wrong-port routing is box-only |
