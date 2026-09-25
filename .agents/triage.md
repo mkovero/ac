@@ -163,7 +163,7 @@ claim about how the code works.
 | `needs-ux` | output surface change; ux must specify it before implementation |
 | `ready-to-implement` | spec complete, developer can pick up |
 | `tier-1` / `tier-2` / `scene` / `view` / `scope-none` | what the change touches; `tier-1` is what makes QA run the standards check |
-| `in-review` | PR open |
+| `in-review` | PR open and handed to QA; not waiting on a revision Claude QA requested |
 | `blocked` | depends on something external |
 | `epic` | contains sub-issues |
 | `agent:triage` | this agent acted on it |

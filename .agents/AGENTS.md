@@ -52,7 +52,7 @@ Always human-only:
 | `design-approved` | architect | design decided, ready for dev |
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
 | `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
-| `in-review` | developer (via PR) | PR open |
+| `in-review` | the runner (`master.sh`), each time a PR is handed to QA: a first-pass PR when it opens, after a revision, after integration. **Removed** by qa on request-changes | PR open and handed to QA; not waiting on a revision Claude QA requested. A PR opened outside the runner lacks it until its first runner-driven revision |
 | `claude-approved` | qa (step 5, approve verdict); runner after a Codex recheck pass. **Removed** by the runner on a design revision (below) | Claude QA passed **at the commit it reviewed**, with no pending rig gate — or at an earlier commit whose only successors answer a Codex finding and passed a Codex recheck (the runner's comment names both) |
 | `codex-approved` | codex-qa (pass verdict). **Removed** by the runner on a design revision (below); the runner never adds it | independent Codex QA passed at the commit it reviewed, with no pending rig gate |
 | `needs-work` | qa **or** codex-qa | PR has issues, developer must revise |
