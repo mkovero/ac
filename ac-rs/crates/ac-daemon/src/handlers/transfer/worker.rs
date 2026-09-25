@@ -22,11 +22,19 @@ use super::session::{SessionState, TickEvents};
 use super::window::Window;
 
 /// Which output ports a `transfer_stream` worker must open and connect at
-/// launch. Deliberately a pure fn: this decision is invisible to the fake
-/// backend (which synthesizes the generator's signal into the capture
-/// buffer regardless of routing), so peak-based tests cannot see it and a
-/// live JACK run is the only other observer. This seam makes it falsifiable
+/// launch. Deliberately a pure fn, so the unit tests below
+/// (`drivable_session_connects_output_with_drive_off`,
+/// `drivable_session_connects_distinct_ref_output`,
+/// `passive_session_opens_no_output_ports`) pin the exact port list
 /// headlessly.
+///
+/// End to end, the fake backend sees one bit of this decision: an empty vs
+/// non-empty port list (#204). With no port open, a driven fake captures no
+/// generator signal — silence, or the fake's dither floor — and
+/// `it_set_drive.rs::drive_on_lowers_the_captured_level_and_off_returns_it_within_one_frame`
+/// fails. The fake does not see *which* ports are connected: a wrong port,
+/// or `ref_out_port` dropped while `out_port` stays connected, still reads
+/// as driven there and needs a live JACK/box run to observe.
 ///
 /// Keyed on `drivable`, **not** `drive`: allocation and emission are
 /// separate. A drivable session comes up connected but silent — emission
@@ -612,8 +620,9 @@ mod tests {
 
     // The regression: a drivable session must connect its output even though
     // launch-time `drive` is false. Against the old `!drive` gate this is
-    // empty, the generator plays onto an unconnected port, and the interface
-    // is silent — invisible to every peak-based test.
+    // empty and the generator plays onto an unconnected port. This test pins
+    // the port list; the no-ports half of the regression is also caught end
+    // to end by `it_set_drive.rs`'s drive-level test under the fake (#204).
     #[test]
     fn drivable_session_connects_output_with_drive_off() {
         assert_eq!(
