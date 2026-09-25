@@ -32,7 +32,7 @@ use crate::workers::{with_unpoisoned, StoppingEngine};
 
 use super::super::{
     busy_guard, cfg_guard, load_calibration_or_refuse, make_engine_for_state, resolve_input,
-    selected_backend_is_fake, send_pub, spawn_worker, wire,
+    selected_backend_is_fake, send_pub, spawn_worker, wire, MAX_MONITOR_CHANNELS,
 };
 
 use self::capture::{
@@ -95,8 +95,10 @@ fn dbfs_to_amplitude(dbfs: f64) -> f64 {
 /// The documented `fft_n` domain refusal (same text as `set_monitor_params`).
 const FFT_N_DOMAIN_ERROR: &str = "fft_n must be power of 2 in [256, 131072]";
 
+const MONITOR_HEADLINE: &str = "monitor not started";
+
 fn monitor_refusal(e: &wire::WireError) -> Value {
-    json!({"ok": false, "error": e.refusal("monitor not started", &[])})
+    json!({"ok": false, "error": e.refusal(MONITOR_HEADLINE, &[])})
 }
 
 /// `fake_tones`, positionally: every element must carry a finite `freq_hz`
@@ -165,12 +167,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
     // Absent, `null` or `[]` monitors the configured input; a list with any
     // invalid element is refused, never narrowed to its valid part (#431).
-    let channels: Vec<u32> = match wire::opt_u32_array(cmd, "channels") {
-        Ok(v) => v
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| vec![cfg.input_channel]),
+    // A list over the ceiling, or with a repeated entry, is refused before
+    // any port lookup, calibration load or per-channel state (#635) — on
+    // the list as sent, not the defaulted one.
+    let requested = match wire::opt_u32_array(cmd, "channels") {
+        Ok(v) => v,
         Err(e) => return monitor_refusal(&e),
     };
+    if let Some(list) = &requested {
+        if let Err(r) =
+            wire::bounded_distinct_u32s("channels", &cmd["channels"], list, MAX_MONITOR_CHANNELS)
+        {
+            return json!({"ok": false, "error": r.refusal(MONITOR_HEADLINE)});
+        }
+    }
+    let channels: Vec<u32> = requested
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![cfg.input_channel]);
 
     // One bad channel fails the whole request rather than monitoring a
     // fabricated port alongside the good ones (#206).

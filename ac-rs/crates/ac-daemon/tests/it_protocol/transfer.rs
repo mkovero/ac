@@ -489,6 +489,48 @@ fn transfer_stream_rejects_invalid_spl_session_params() {
     let _ = c.wait_for_topic("done", Duration::from_secs(5));
 }
 
+/// #635: `setup` refuses an out-of-domain `snapshot_ring_s`, but
+/// `config.json` can still carry one. `transfer_stream` — the one command
+/// that builds the ring — refuses it rather than clamping it, names where
+/// the value lives, starts no worker and leaves the daemon answering. The
+/// ceiling itself still starts a session.
+#[test]
+fn transfer_stream_refuses_out_of_domain_ring_from_config() {
+    for (ring_s, problem, echo) in [
+        (json!(1000000.0), "must be at most 300 s", "1000000.0"),
+        (json!(300.001), "must be at most 300 s", "300.001"),
+        (json!(0.0), "must be a finite number > 0", "0.0"),
+        (json!(-5.0), "must be a finite number > 0", "-5.0"),
+    ] {
+        let d = Daemon::spawn_with_config(Some(json!({"snapshot_ring_s": ring_s})));
+        let c = Client::new(&d);
+        let r = c.call(json!({
+            "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        }));
+        assert_eq!(r["ok"], json!(false), "{ring_s} must be refused: {r}");
+        assert_eq!(
+            r["error"].as_str().unwrap_or_default(),
+            format!(
+                "transfer not started \u{2014} snapshot_ring_s {problem}\n\
+                 \x20        received  {echo}\n\
+                 \x20        source    config.json"
+            ),
+        );
+        let s = c.call(json!({"cmd": "status"}));
+        assert_eq!(s["ok"], json!(true), "daemon must still answer: {s}");
+        assert_eq!(s["busy"], json!(false), "no worker may start: {s}");
+    }
+
+    let d = Daemon::spawn_with_config(Some(json!({"snapshot_ring_s": 300.0})));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "the ceiling itself starts: {r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
 #[test]
 fn transfer_stream_refuses_mic_curve_on_reference_channel() {
     // #101 (H): H1 is a ratio. Applying a mic-curve to the reference

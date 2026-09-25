@@ -359,6 +359,7 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
     const POSITIVE: &str = "must be a finite number > 0";
     const FINITE: &str = "must be a finite number";
     const NON_NEG_INT: &str = "must be a non-negative integer";
+    const AT_MOST_RING: &str = "must be at most 300 s";
     let cases = [
         ("dbu_ref_vrms", json!("0.775"), POSITIVE),
         ("dbu_ref_vrms", json!(0), POSITIVE),
@@ -369,6 +370,8 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         ("snapshot_ring_s", json!(-1), POSITIVE),
         ("snapshot_ring_s", json!(0.0), POSITIVE),
         ("snapshot_ring_s", Value::Null, POSITIVE),
+        ("snapshot_ring_s", json!(300.001), AT_MOST_RING),
+        ("snapshot_ring_s", json!(1e300), AT_MOST_RING),
         ("temperature_c", json!("24"), FINITE),
         ("temperature_c", json!(true), FINITE),
         ("temperature_c", json!([]), FINITE),

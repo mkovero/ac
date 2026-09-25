@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use ac_core::shared::calibration::{Calibration, LayerVerdict};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
+use crate::handlers::snapshot::RingSeconds;
 use crate::handlers::{
     check_emission_or_refuse, load_calibration_or_refuse, make_engine_for_state,
     ref_output_migration_warning, resolve_output, resolve_ref_output, selected_backend_is_fake,
@@ -72,7 +73,9 @@ pub(super) struct SessionPlan {
 
     // ---- config values the worker needs after `cfg`'s lock is gone ----
     pub(super) snapshot_spool_dir: PathBuf,
-    pub(super) snapshot_ring_s: f64,
+    /// Validated here, not at the ring (#635): the ring cannot be sized
+    /// from anything else.
+    pub(super) snapshot_ring_s: RingSeconds,
     /// #225 migration notice, resolved here so the reply does not need the
     /// config again.
     pub(super) migration_warning: Option<String>,
@@ -109,6 +112,19 @@ impl SessionPlan {
                 .map(|_| leaf)
             })
             .map_err(|r| json!({"ok": false, "error": r.message()}))?;
+        // #635: `setup` refuses an out-of-domain `snapshot_ring_s`, but
+        // `config.json` can still carry one (a hand edit, an older daemon).
+        // Only this command builds the ring, so only this command refuses —
+        // `cfg_error` would lock out commands that never read the key.
+        let snapshot_ring_s = RingSeconds::new(cfg.snapshot_ring_s).map_err(|problem| {
+            let e = crate::handlers::wire::WireError::new(
+                "snapshot_ring_s",
+                problem,
+                &json!(cfg.snapshot_ring_s),
+            );
+            json!({"ok": false,
+                "error": e.refusal("transfer not started", &[("source", "config.json")])})
+        })?;
         // #459: checked here, before the `DriveState::new` construction
         // below, so the stored state never holds an over-maximum value
         // regardless of whether `set_drive` is ever called in this
@@ -283,7 +299,7 @@ impl SessionPlan {
             out_port,
             ref_out_port,
             snapshot_spool_dir,
-            snapshot_ring_s: cfg.snapshot_ring_s,
+            snapshot_ring_s,
             migration_warning: ref_output_migration_warning(&cfg),
         })
     }

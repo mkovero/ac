@@ -31,6 +31,59 @@ use ac_core::snapshot::{ChannelMeta, SessionMeta, SnapshotMeta};
 
 use crate::server::ServerState;
 
+use super::wire::Problem;
+use super::MAX_SNAPSHOT_RING_S;
+
+/// A `snapshot_ring_s` that has passed [`RingSeconds::new`]: finite, > 0 and
+/// at most [`MAX_SNAPSHOT_RING_S`] (#635). The only way to size a ring, so
+/// no path — `setup`, a hand-edited `config.json`, a future caller — can
+/// build one from an unchecked value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RingSeconds(f64);
+
+impl RingSeconds {
+    /// The one validator. `NotPositive` for `0`, a negative or a non-finite
+    /// value; `AtMost` above the ceiling. Refuses, never clamps: a ring
+    /// holding less than the config says is a value quietly doing
+    /// something other than what it states.
+    pub(crate) fn new(x: f64) -> Result<Self, Problem> {
+        if !(x.is_finite() && x > 0.0) {
+            return Err(Problem::NotPositive);
+        }
+        if x > f64::from(MAX_SNAPSHOT_RING_S) {
+            return Err(Problem::AtMost {
+                limit: MAX_SNAPSHOT_RING_S,
+                unit: "s",
+            });
+        }
+        Ok(Self(x))
+    }
+
+    pub(crate) fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// Ring capacity per channel, in samples: `ring_s × sr`, rounded. Converted
+/// with an explicit range check, not `as usize` saturation. With the
+/// ceiling the product is at most 300 × `u32::MAX` ≈ 1.3e12 samples
+/// (≈ 5.2e12 B of `f32`), which fits `usize` on the 64-bit hosts the
+/// daemon runs on; the assertion states that rather than assuming it.
+pub(crate) fn ring_cap_samples(ring_s: RingSeconds, sr: u32) -> usize {
+    let samples = (ring_s.get() * f64::from(sr)).round();
+    assert!(
+        samples >= 0.0 && samples <= usize::MAX as f64,
+        "ring of {} s at {sr} Hz does not fit usize",
+        ring_s.get()
+    );
+    let samples = samples as usize;
+    assert!(
+        samples.checked_mul(std::mem::size_of::<f32>()).is_some(),
+        "ring of {samples} samples overflows its byte count"
+    );
+    samples
+}
+
 /// Max bytes returned per `snapshot_fetch` chunk (pre-base64; base64
 /// inflates by ~4/3, so the JSON reply payload is ≈341 KB at this cap).
 /// Chosen for CTRL sanity (deliverable 3) — small enough that one chunk
@@ -64,7 +117,7 @@ pub struct SnapshotRingState {
     /// pending.
     cap_samples: usize,
     /// `Some(snapshot_ring_s)` while pending, `None` once started.
-    pending_ring_s: Option<f64>,
+    pending_ring_s: Option<RingSeconds>,
     pub pairs: Vec<(u32, u32)>,
     /// Mirrors the worker's own `pair_delays` — `None` until the
     /// per-pair delay is estimated on warm-up.
@@ -112,8 +165,8 @@ impl SnapshotRingState {
     /// A ring published before the engine has reported its sample rate
     /// (#188): everything the session plan knows, with the retention held
     /// in seconds until [`start`](Self::start) turns it into samples.
-    pub fn pending(
-        ring_s: f64,
+    pub(crate) fn pending(
+        ring_s: RingSeconds,
         unique_chans: Vec<u32>,
         pairs: Vec<(u32, u32)>,
         weighting_tag: String,
@@ -140,7 +193,7 @@ impl SnapshotRingState {
             return;
         };
         self.sr = sr;
-        self.cap_samples = (ring_s * sr as f64).round() as usize;
+        self.cap_samples = ring_cap_samples(ring_s, sr);
         for ch in &mut self.channels {
             ch.reserve(self.cap_samples);
         }
@@ -560,7 +613,7 @@ mod tests {
     #[test]
     fn pending_ring_yields_no_snapshot_until_started() {
         let mut ring = SnapshotRingState::pending(
-            0.5,
+            RingSeconds::new(0.5).unwrap(),
             vec![0, 1],
             vec![(0, 1)],
             "Z".to_string(),
@@ -582,6 +635,43 @@ mod tests {
             .expect("a started ring yields a snapshot");
         assert_eq!(meta.sr, 100);
         build_acsnap(&meta, &channels).expect("started ring snapshot must write");
+    }
+
+    /// #635: the ceiling is accepted, anything above it or outside
+    /// `(0, ∞)` is refused, and nothing is clamped.
+    #[test]
+    fn ring_seconds_bounds() {
+        let max = f64::from(MAX_SNAPSHOT_RING_S);
+        assert_eq!(RingSeconds::new(max).map(RingSeconds::get), Ok(max));
+        assert_eq!(RingSeconds::new(30.0).map(RingSeconds::get), Ok(30.0));
+        let at_most = Problem::AtMost {
+            limit: MAX_SNAPSHOT_RING_S,
+            unit: "s",
+        };
+        for x in [max + 0.001, 1e6, 1e300, f64::MAX] {
+            assert_eq!(RingSeconds::new(x), Err(at_most.clone()), "{x}");
+        }
+        for x in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(RingSeconds::new(x), Err(Problem::NotPositive), "{x}");
+        }
+    }
+
+    /// #635: the widest accepted ring at the widest representable rate
+    /// converts without saturating — the same arithmetic the raw
+    /// `as usize` cast used to hide.
+    #[test]
+    fn ring_cap_samples_at_ceiling_and_max_rate() {
+        let ceiling = RingSeconds::new(f64::from(MAX_SNAPSHOT_RING_S)).unwrap();
+        let got = ring_cap_samples(ceiling, u32::MAX);
+        assert_eq!(
+            got as u64,
+            u64::from(MAX_SNAPSHOT_RING_S) * u64::from(u32::MAX)
+        );
+        assert_eq!(ring_cap_samples(RingSeconds::new(0.5).unwrap(), 100), 50);
+        assert_eq!(
+            ring_cap_samples(ceiling, 192_000),
+            MAX_SNAPSHOT_RING_S as usize * 192_000
+        );
     }
 
     /// AC #5 (ring correctness, wraparound): push distinguishable,

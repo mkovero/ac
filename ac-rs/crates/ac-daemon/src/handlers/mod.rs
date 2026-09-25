@@ -576,6 +576,26 @@ pub(super) const MAX_SWEEP_POINTS: usize = 10_000;
 pub(super) const MAX_IR_HARMONICS: usize = 32;
 pub(super) const MAX_IR_WINDOW_SAMPLES: usize = 1_048_576;
 
+/// Longest `snapshot_ring_s` the daemon accepts, in seconds (#635).
+///
+/// Provenance: assumed — a memory budget, by arithmetic. 300 s × 192 kHz
+/// (the FF400's highest rate) × 4 B (`f32`) = 230 MB per ring channel, and
+/// `snapshot` clones the ring before encoding, so the peak is about twice
+/// that. The value is 10× the 30 s default and 5× the largest value any
+/// test sends (60 s); neither `ac-cli` nor `ac-view` sends the key, so the
+/// default is the only value in use. A `u32` so the refusal text renders it
+/// exactly.
+pub(super) const MAX_SNAPSHOT_RING_S: u32 = 300;
+
+/// Longest `monitor_spectrum.channels` list the daemon accepts (#635).
+///
+/// Provenance: assumed, with its lower bound by lookup. It must be at
+/// least the widest supported interface: FF400 18 capture channels
+/// (8 analog + 2 S/PDIF + 8 ADAT), Babyface Pro 12, fake backend 20. 64 is
+/// one MADI stream, which leaves headroom for a JACK graph with more ports
+/// than the rig interfaces.
+pub(super) const MAX_MONITOR_CHANNELS: u32 = 64;
+
 pub(super) fn checked_log_freq_point_count(
     start: f64,
     stop: f64,

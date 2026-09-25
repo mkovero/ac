@@ -564,3 +564,77 @@ fn monitor_reassigned_emits_visualize_reassigned_frame() {
         "freqs span less than 2 decades: {f0}..{f_last}"
     );
 }
+
+fn assert_monitor_refused_idle(c: &Client, channels: Value, want: &str) {
+    let r = c.call(json!({"cmd": "monitor_spectrum", "channels": channels}));
+    assert_eq!(r["ok"], json!(false), "must be refused: {r}");
+    assert_eq!(r["error"].as_str().unwrap_or_default(), want);
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(s["ok"], json!(true), "daemon must still answer: {s}");
+    assert_eq!(s["busy"], json!(false), "no worker may start: {s}");
+}
+
+/// #635: `channels` holds at most 64 entries, none repeated. Checked on
+/// the list as sent, before any port lookup, so length beats repeats.
+#[test]
+fn monitor_spectrum_bounds_channel_list() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // The ceiling itself is not refused by the bound: 64 distinct entries
+    // pass it and fail later, on the fake backend's 20 capture ports.
+    let at: Vec<u32> = (0..64).collect();
+    let r = c.call(json!({"cmd": "monitor_spectrum", "channels": at}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(
+        !err.contains("at most") && err.contains("channel 20 is out of range"),
+        "64 entries must pass the bound and reach port resolution: {err:?}"
+    );
+
+    let over: Vec<u32> = (0..65).collect();
+    let echo = serde_json::to_string(&over).unwrap();
+    let echo: String = echo.chars().take(64).collect();
+    assert_monitor_refused_idle(
+        &c,
+        json!(over),
+        &format!(
+            "monitor not started \u{2014} channels must list at most 64 entries\n\
+             \x20        received  {echo}\u{2026}\n\
+             \x20        entries   65"
+        ),
+    );
+
+    // Overflow scale: 100 000 zeros are refused for length, not repeats.
+    assert_monitor_refused_idle(
+        &c,
+        json!(vec![0u32; 100_000]),
+        &format!(
+            "monitor not started \u{2014} channels must list at most 64 entries\n\
+             \x20        received  [{}0\u{2026}\n\
+             \x20        entries   100000",
+            "0,".repeat(31)
+        ),
+    );
+
+    // Duplicate-only.
+    assert_monitor_refused_idle(
+        &c,
+        json!([0, 0]),
+        "monitor not started \u{2014} channels[1] repeats channels[0]\n\
+         \x20        received  [0,0]\n\
+         \x20        channel   0",
+    );
+    assert_monitor_refused_idle(
+        &c,
+        json!([0, 1, 0]),
+        "monitor not started \u{2014} channels[2] repeats channels[0]\n\
+         \x20        received  [0,1,0]\n\
+         \x20        channel   0",
+    );
+
+    // Distinct channels in range still start.
+    let r = c.call(json!({"cmd": "monitor_spectrum", "channels": [0, 1]}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+}
