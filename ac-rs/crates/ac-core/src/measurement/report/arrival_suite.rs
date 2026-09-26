@@ -352,7 +352,7 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
     let h = capture(k, case, index);
     let rejected = {
         let a = band_limited_arrival_under(&h, SR, k.f2_hz, ir_peak(&h).0, REVISION_2);
-        score(!a.cross_check.disputes_the_pick(), a.high_pass_index)
+        score(!a.cross_check.withholds_flight_time(), a.arrival_index)
     };
     let mut report = ir_report_with_custom_ir_band(h, SR, k.f2_hz);
     with_live_latency(&mut report, TAU_S);
@@ -364,17 +364,8 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
     let with = report.ir_stats().expect("an impulse response");
     Scored {
         case: *case,
-        // #669: the pick no longer withholds the flight time (the arrival is
-        // the peak); what it still decides is whether it is trusted — the
-        // advisory and the floor anchor. That is what is scored.
-        shipped: score(
-            !stats.high_pass_check.disputes_the_pick(),
-            stats.high_pass_index,
-        ),
-        with_distance: score(
-            !with.high_pass_check.disputes_the_pick(),
-            with.high_pass_index,
-        ),
+        shipped: score(stats.flight_time_s.is_some(), stats.arrival_index),
+        with_distance: score(with.flight_time_s.is_some(), with.arrival_index),
         flight_with_distance_s: with.flight_time_s,
         rejected,
     }
@@ -646,12 +637,12 @@ fn earlier_comparable_on_noise(kernel: &[f64], snr_db: f64, rule: ArrivalRule) -
                 ir_peak(linear_ir).0,
                 rule,
             );
-            assert_eq!(a.high_pass_index, T0, "draw {seed}: test setup");
+            assert_eq!(a.arrival_index, T0, "draw {seed}: test setup");
             assert!(
-                !matches!(a.cross_check, HighPassCheck::BandLimitedSnrLow { .. }),
+                !matches!(a.cross_check, ArrivalCrossCheck::BandLimitedSnrLow { .. }),
                 "draw {seed}: refused on SNR at {snr_db} dB"
             );
-            matches!(a.cross_check, HighPassCheck::EarlierComparable { .. })
+            matches!(a.cross_check, ArrivalCrossCheck::EarlierComparable { .. })
         })
         .count()
 }

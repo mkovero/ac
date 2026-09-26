@@ -329,7 +329,7 @@ pub(crate) mod tests {
     ///   [`crate::measurement::report::ARRIVAL_LOBE_MARGIN_MIN_DB`].
     #[test]
     fn two_way_dut_band_limited_arrival_is_never_produced_off_t0() {
-        use crate::measurement::report::{band_limited_arrival, HighPassCheck};
+        use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
         const BUDGET: i64 = 5;
         for (name, band, sr, shape, ambiguous, pick_on_t0) in [
             (
@@ -348,22 +348,22 @@ pub(crate) mod tests {
             let r = two_way_bounded(&p, shape);
             let peak = (r.centre as i64 + r.peak) as usize;
             let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
-            let arrival = a.high_pass_index as i64 - r.centre as i64 - TWO_WAY_T0;
+            let arrival = a.arrival_index as i64 - r.centre as i64 - TWO_WAY_T0;
             let context = format!(
                 "{name}: {:?}, arrival t0 {arrival:+}, margin {:?}, SNR {:?}",
                 a.cross_check, a.lobe_margin_db, a.band_limited_snr_db
             );
-            if !a.cross_check.disputes_the_pick() {
+            if !a.cross_check.withholds_flight_time() {
                 assert!(arrival.abs() <= BUDGET, "produced off t0 — {context}");
             }
             assert_eq!(
-                matches!(a.cross_check, HighPassCheck::ArrivalAmbiguous { .. }),
+                matches!(a.cross_check, ArrivalCrossCheck::ArrivalAmbiguous { .. }),
                 ambiguous,
                 "{context}"
             );
             if !ambiguous {
                 assert!(
-                    matches!(a.cross_check, HighPassCheck::Agrees { .. }),
+                    matches!(a.cross_check, ArrivalCrossCheck::Agrees { .. }),
                     "{context}"
                 );
             }

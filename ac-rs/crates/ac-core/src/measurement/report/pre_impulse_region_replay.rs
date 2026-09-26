@@ -154,10 +154,10 @@ fn default_band_captures_at_the_ceiling_pass_with_the_floor_before_the_arrival()
         // 2. The shipped rule: floor before the arrival, which precedes the
         // room-mode argmax here.
         assert!(
-            (stats.high_pass_index == 21_245 || stats.high_pass_index == 21_246)
-                && stats.peak_index > stats.high_pass_index + 2_000,
+            (stats.arrival_index == 21_245 || stats.arrival_index == 21_246)
+                && stats.peak_index > stats.arrival_index + 2_000,
             "{name}: arrival {} argmax {}",
-            stats.high_pass_index,
+            stats.arrival_index,
             stats.peak_index
         );
         assert_eq!(
@@ -174,29 +174,17 @@ fn default_band_captures_at_the_ceiling_pass_with_the_floor_before_the_arrival()
         assert_eq!(
             stats.pre_impulse_floor_lines(),
             vec![format!(
-                "floor ends 1200 samples before high-passed peak, sample {}",
-                stats.high_pass_index
+                "floor ends 1200 samples before arrival, sample {}",
+                stats.arrival_index
             )],
             "{name}"
         );
 
-        // 3. #669: the arrival is the peak — here the room mode — so the
-        // flight time is the 200 Hz set's plus the mode's lag, and the
-        // advisory names the direct sound the high-pass found.
-        let advisory = stats
-            .high_pass_advisory
-            .expect("the direct sound is advised");
-        assert_eq!(
-            advisory.earlier_samples,
-            stats.peak_index as i64 - stats.high_pass_index as i64,
-            "{name}"
-        );
+        // 3. The flight time agrees with the 200 Hz set.
         let flight = (stats.flight_time_s.expect("flight time") * SR as f64).round() as i64;
         assert!(
-            (flight - advisory.earlier_samples - HP_MEDIAN_FLIGHT).abs() <= FLIGHT_BAR,
-            "{name}: flight {flight:+} samples, 200 Hz median {HP_MEDIAN_FLIGHT:+} \
-             plus the mode's {} samples",
-            advisory.earlier_samples
+            (flight - HP_MEDIAN_FLIGHT).abs() <= FLIGHT_BAR,
+            "{name}: flight {flight:+} samples, 200 Hz median {HP_MEDIAN_FLIGHT:+}"
         );
 
         // 4. The #537 arrival gate is reached and scored.
@@ -206,25 +194,25 @@ fn default_band_captures_at_the_ceiling_pass_with_the_floor_before_the_arrival()
             "{name}: arrival SNR {arrival_snr:.1} dB"
         );
         assert!(
-            !stats.high_pass_check.disputes_the_pick()
+            !stats.arrival_cross_check.withholds_flight_time()
                 && !matches!(
-                    stats.high_pass_check,
-                    HighPassCheck::BandLimitedSnrLow { .. }
+                    stats.arrival_cross_check,
+                    ArrivalCrossCheck::BandLimitedSnrLow { .. }
                 ),
             "{name}: {:?}",
-            stats.high_pass_check
+            stats.arrival_cross_check
         );
 
         // `ARRIVAL_BROADBAND_COMPARABLE_DB`'s coupling claim, on the floor
         // now gated: the largest pre-arrival sample inside the cross-check
         // tolerance, ahead of the arrival's own lobe, stays below the
         // comparable level.
-        let tol = high_pass_check_tolerance_samples(SR) as usize;
+        let tol = arrival_cross_check_tolerance_samples(SR) as usize;
         let lobe = crate::measurement::sweep::lobe_window_samples(
             SR,
             crate::measurement::sweep::ARRIVAL_HIGH_PASS_CORNER_HZ,
         );
-        let pre = &ir[stats.high_pass_index - tol..stats.high_pass_index - lobe];
+        let pre = &ir[stats.arrival_index - tol..stats.arrival_index - lobe];
         let pre_max = pre.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         let level_db = 20.0 * (pre_max / stats.peak_magnitude).log10();
         assert!(

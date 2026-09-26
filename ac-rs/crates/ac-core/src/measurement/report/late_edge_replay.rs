@@ -72,7 +72,7 @@ const TAU_S: f64 = 1727.0 / 96_000.0;
 /// The rig record's values at N = 0 (#539, 2026-09-21), in samples.
 const ANCHOR_FLIGHT: i64 = 335;
 const ANCHOR_EXCESS: i64 = 55;
-/// Tolerance on `high_pass_lobe_margin_db` re N = 0: the zero-phase
+/// Tolerance on `arrival_lobe_margin_db` re N = 0: the zero-phase
 /// high-pass reaches the shifted arrival from a different filter state, so
 /// its last bits differ (#555 architect note 2).
 const LOBE_MARGIN_TOL_DB: f64 = 1e-6;
@@ -176,7 +176,7 @@ fn delayed_real_capture_is_never_withheld_late() {
     let flight0 = s0.flight_time_s.unwrap_or_else(|| {
         panic!(
             "N=0: flight time withheld; cross_check={:?} distance_check={:?}",
-            s0.high_pass_check, s0.distance_check
+            s0.arrival_cross_check, s0.distance_check
         )
     });
     let excess0 = excess_s(s0).unwrap_or_else(|| {
@@ -197,10 +197,10 @@ fn delayed_real_capture_is_never_withheld_late() {
         println!(
             "N={n} arrival={} {:?} margin={:?} lobe_offset={:?} band_snr={:?} \
              pre_snr={:.2} distance_check={:?} flight={:?}",
-            s.high_pass_index,
-            s.high_pass_check,
-            s.high_pass_lobe_margin_db,
-            s.high_pass_lobe_offset,
+            s.arrival_index,
+            s.arrival_cross_check,
+            s.arrival_lobe_margin_db,
+            s.arrival_lobe_offset,
             s.band_limited_snr_db,
             s.pre_impulse_snr_db,
             s.distance_check,
@@ -209,16 +209,19 @@ fn delayed_real_capture_is_never_withheld_late() {
 
         // 2. The pick and the layers above it do not change with delay.
         assert_eq!(
-            s.high_pass_index,
-            s0.high_pass_index + n,
+            s.arrival_index,
+            s0.arrival_index + n,
             "N={n}: arrival index"
         );
-        assert_eq!(s.high_pass_check, s0.high_pass_check, "N={n}: cross-check");
         assert_eq!(
-            s.high_pass_lobe_offset, s0.high_pass_lobe_offset,
+            s.arrival_cross_check, s0.arrival_cross_check,
+            "N={n}: cross-check"
+        );
+        assert_eq!(
+            s.arrival_lobe_offset, s0.arrival_lobe_offset,
             "N={n}: lobe offset"
         );
-        match (s.high_pass_lobe_margin_db, s0.high_pass_lobe_margin_db) {
+        match (s.arrival_lobe_margin_db, s0.arrival_lobe_margin_db) {
             (Some(m), Some(m0)) if m.is_finite() || m0.is_finite() => assert!(
                 (m - m0).abs() <= LOBE_MARGIN_TOL_DB,
                 "N={n}: lobe margin {m} dB, {m0} dB at N=0"
@@ -230,7 +233,7 @@ fn delayed_real_capture_is_never_withheld_late() {
         let excess = excess_s(s).unwrap_or_else(|| {
             panic!(
                 "N={n}: distance check {:?}, want Consistent; cross_check={:?}",
-                s.distance_check, s.high_pass_check
+                s.distance_check, s.arrival_cross_check
             )
         });
         assert_eq!(
@@ -245,7 +248,7 @@ fn delayed_real_capture_is_never_withheld_late() {
         let flight = s.flight_time_s.unwrap_or_else(|| {
             panic!(
                 "N={n}: flight time withheld; cross_check={:?} distance_check={:?}",
-                s.high_pass_check, s.distance_check
+                s.arrival_cross_check, s.distance_check
             )
         });
         assert_eq!(

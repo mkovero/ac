@@ -26,8 +26,9 @@
 use std::ops::RangeInclusive;
 
 use ac_core::measurement::report::{
-    pre_impulse_snr_scope, ArrivalCheck, DistanceCheck, IrVerdict, LatencyBasis, LiveOffset,
-    MeasurementData, MeasurementReport, WithheldBasis, PRE_IMPULSE_SNR_MIN_DB,
+    pre_impulse_snr_scope, ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck,
+    IrVerdict, LatencyBasis, LiveOffset, MeasurementData, MeasurementReport, WithheldBasis,
+    PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -47,20 +48,31 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// case compensation handles: the flight time stays, and the drift is named
 /// after it as `ref Δ`.
 ///
-/// Prefixed `peak:` — the arrival is the broadband IR peak, Smaart's rule
-/// (#669). When the IR high-passed at the corner peaks clearly earlier
-/// ([`HighPassAdvisory`]), the suffix says so: `, above 2 kHz 15.65 ms
-/// earlier` — acceptance criterion 4's tag on a screenshot, and the
-/// operator's cue, never a second marker.
+/// Prefixed with the rule that produced the arrival (#346 UX revision 4,
+/// #537 UX): `peak above 2 kHz:` for the band-limited peak, with the corner
+/// formatted from [`ArrivalSource::BandLimitedPeak`], or `broadband peak:`
+/// when the band did not allow it (#537 UX revision 2) — the marker then
+/// sits on the tallest peak again, and the prefix says so. The marker sits
+/// on the arrival, which is no longer necessarily the tallest peak on
+/// screen, so the prefix says which peak it marks; the cross-check suffix
+/// says why the tallest one is not it. Both are acceptance criterion 4's tag
+/// on a screenshot.
 ///
-/// Suffix order: the advisory straight after the value's word, then the
+/// Suffix order (#537 UX revision 3): the cross-check suffix
+/// ([`ArrivalCrossCheck`]) straight after the value's word, then the
 /// #544 basis suffix (offset, then drift, or the withheld reason), then the
-/// distance suffix ([`DistanceCheck`]) last — it qualifies the whole figure
-/// against an external input.
-///
-/// [`HighPassAdvisory`]: ac_core::measurement::report::HighPassAdvisory
+/// distance suffix
+/// ([`DistanceCheck`]) last — it qualifies the whole figure against an
+/// external input.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
-    format!("peak: {}", arrival_marker_value(stats))
+    match stats.arrival_source {
+        ArrivalSource::BandLimitedPeak { corner_hz } => format!(
+            "peak above {}: {}",
+            format_corner(corner_hz),
+            arrival_marker_value(stats)
+        ),
+        ArrivalSource::Peak => format!("broadband peak: {}", arrival_marker_value(stats)),
+    }
 }
 
 /// A typed distance as the marker echoes it: `2 m`, `0.5 m`.
@@ -74,12 +86,13 @@ fn format_distance(distance_m: f64) -> String {
 /// when the typed one is not a positive length, and the excess over `d/c`
 /// when it was checked (`, +0.38 ms re d/c at 2 m`, #552 UX): `Consistent`
 /// means only *not earlier than* the distance allows, so the delta is the
-/// result, with no verdict beside it. When the distance withholds the
-/// flight time: `, earlier than 2 m allows`, the words of the CLI's
-/// `withheld` row — the only refusal left. Empty otherwise: a flight time
-/// withheld by the basis has no figure to qualify.
+/// result, with no verdict beside it. When the distance is the first reason
+/// the flight time is withheld: `, earlier than 2 m allows`, the words of
+/// the CLI's `withheld` row — the only refusal left. Empty otherwise: a
+/// flight time withheld upstream has no figure to qualify.
 fn distance_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
     let produced = stats.flight_time_s.is_some();
+    let first_reason = !stats.arrival_cross_check.withholds_flight_time();
     match &stats.distance_check {
         DistanceCheck::NotGiven if produced => ", distance not given".to_string(),
         DistanceCheck::NotPositive { .. } if produced => ", distance not checked".to_string(),
@@ -88,7 +101,7 @@ fn distance_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
             excess_s * 1000.0,
             format_distance(window.distance_m)
         ),
-        DistanceCheck::TooEarly { window, .. } => format!(
+        DistanceCheck::TooEarly { window, .. } if first_reason => format!(
             ", earlier than {} allows",
             format_distance(window.distance_m)
         ),
@@ -105,16 +118,26 @@ fn format_corner(corner_hz: f64) -> String {
     }
 }
 
-/// The advisory's part of the marker (#669): `, above 2 kHz 15.65 ms
-/// earlier`. Empty without an advisory.
-fn advisory_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
-    match stats.high_pass_advisory {
-        Some(a) => format!(
-            ", above {} {:.2} ms earlier",
-            format_corner(a.corner_hz),
-            a.earlier_samples as f64 / stats.sample_rate_hz as f64 * 1000.0
-        ),
-        None => String::new(),
+/// The arrival cross-check's part of the marker (#537 UX). Empty on
+/// `Agrees`.
+fn cross_check_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
+    let gap_ms = |gap: i64| gap as f64 / stats.sample_rate_hz as f64 * 1000.0;
+    match stats.arrival_cross_check {
+        ArrivalCrossCheck::Agrees { .. } => String::new(),
+        ArrivalCrossCheck::BroadbandLater { gap } | ArrivalCrossCheck::BroadbandEarlier { gap } => {
+            format!(", broadband \u{394} {:+.2} ms", gap_ms(gap))
+        }
+        ArrivalCrossCheck::BandLimitUnavailable { .. } => ", not band-limited".to_string(),
+        ArrivalCrossCheck::ArrivalAmbiguous { margin_db, .. } => {
+            format!(", second lobe {:+.1} dB", -margin_db)
+        }
+        ArrivalCrossCheck::BandLimitedSnrUnmeasured => ", arrival SNR unmeasured".to_string(),
+        ArrivalCrossCheck::BandLimitedSnrLow { snr_db } => {
+            format!(", arrival SNR {snr_db:.1} dB")
+        }
+        ArrivalCrossCheck::EarlierComparable { level_db, .. } => {
+            format!(", earlier peak {level_db:+.1} dB")
+        }
     }
 }
 
@@ -123,8 +146,8 @@ fn advisory_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
 /// zero (it is part of the number), then `, ref Δ -32 samples` when the live
 /// reference moved from its stored value (evidence about the number, never
 /// a verdict). On a withheld basis: why there is no flight time. Empty when
-/// the basis is live but the distance withheld the flight time — its
-/// suffix says why.
+/// the basis is live but another layer withheld the flight time — the
+/// cross-check or distance suffix says why.
 fn basis_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
     match (&stats.latency_basis, stats.flight_time_s) {
         (LatencyBasis::Live { offset, .. }, Some(_)) => {
@@ -160,7 +183,7 @@ fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String
     let tail = basis_suffix(stats);
     format!(
         "{value_ms:.2} ms {word}{}{tail}{}",
-        advisory_suffix(stats),
+        cross_check_suffix(stats),
         distance_suffix(stats)
     )
 }
@@ -719,7 +742,7 @@ mod tests {
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
         let want = format!(
-            "peak: {:.2} ms round trip, no reference loopback",
+            "broadband peak: {:.2} ms round trip, not band-limited, no reference loopback",
             stats.arrival_s * 1000.0
         );
         assert_eq!(scene.arrival.text, want);
@@ -784,7 +807,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "peak: {:.2} ms round trip, no reference loopback",
+                "peak above 2 kHz: {:.2} ms round trip, no reference loopback",
                 stats.arrival_s * 1000.0
             ),
         );
@@ -811,7 +834,7 @@ mod tests {
         let flight_ms = stats.flight_time_s.expect("drift no longer withholds") * 1000.0;
         assert_eq!(
             scene.arrival.text,
-            format!("peak: {flight_ms:.2} ms flight, ref \u{394} +64 samples, distance not given"),
+            format!("peak above 2 kHz: {flight_ms:.2} ms flight, ref \u{394} +64 samples, distance not given"),
         );
         assert!(!scene.arrival.text.contains("period shift"));
     }
@@ -835,7 +858,7 @@ mod tests {
             * 1000.0;
         assert_eq!(
             scene.arrival.text,
-            format!("peak: {flight_ms:.2} ms flight, distance not given")
+            format!("peak above 2 kHz: {flight_ms:.2} ms flight, distance not given")
         );
     }
 
@@ -863,7 +886,7 @@ mod tests {
             let text = SweepIrScene::from_report(&r).unwrap().arrival.text;
             assert_eq!(
                 text,
-                format!("peak: {ms:.2} ms flight, distance not given"),
+                format!("peak above 2 kHz: {ms:.2} ms flight, distance not given"),
                 "{check:?}"
             );
             assert!(!text.contains("unverified"), "{text}");
@@ -919,7 +942,7 @@ mod tests {
         let ms = stats.flight_time_s.expect("not withheld") * 1000.0;
         assert_eq!(
             SweepIrScene::from_report(&r).unwrap().arrival.text,
-            format!("peak: {ms:.2} ms flight, offset -46 samples, distance not given")
+            format!("peak above 2 kHz: {ms:.2} ms flight, offset -46 samples, distance not given")
         );
     }
 
@@ -945,7 +968,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "peak: {ms:.2} ms flight, ref \u{394} {:+} samples, distance not given",
+                "peak above 2 kHz: {ms:.2} ms flight, ref \u{394} {:+} samples, distance not given",
                 d.delta_samples,
             )
         );
@@ -987,27 +1010,38 @@ mod tests {
             assert_eq!(stats.flight_time_s, None, "{why}");
             assert_eq!(
                 SweepIrScene::from_report(&r).unwrap().arrival.text,
-                format!("peak: {arrival_ms:.2} ms round trip, {why}"),
+                format!("peak above 2 kHz: {arrival_ms:.2} ms round trip, {why}"),
             );
         }
     }
 
-    /// #669: the marker is the peak on every onset standing and every
-    /// high-pass standing — the pick never renames it.
+    /// #346 UX revision 4, #537 UX: the marker names the rule that produced
+    /// the arrival — `peak above 2 kHz:` — on every onset standing,
+    /// including `Unscored`, where the rejected revision printed `onset`;
+    /// `broadband peak:` when the arrival is the broadband peak.
     #[test]
-    fn arrival_marker_is_the_peak() {
+    fn arrival_marker_names_the_rule_that_produced_the_arrival() {
         use ac_core::measurement::report::OnsetStanding;
         let r = gated_report_with_delayed_peak();
         let mut stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.arrival_source,
+            ArrivalSource::BandLimitedPeak { corner_hz: 2000.0 }
+        );
         let value = arrival_marker_value(&stats);
         for standing in [OnsetStanding::NoCausalBound, OnsetStanding::Unscored] {
             stats.onset_standing = standing;
             assert_eq!(
                 arrival_marker_text(&stats),
-                format!("peak: {value}"),
+                format!("peak above 2 kHz: {value}"),
                 "{standing:?}"
             );
         }
+        stats.arrival_source = ArrivalSource::Peak;
+        assert_eq!(
+            arrival_marker_text(&stats),
+            format!("broadband peak: {value}")
+        );
     }
 
     /// A [`DistanceWindow`] at `distance_m`, default c.
@@ -1015,25 +1049,24 @@ mod tests {
         ac_core::measurement::report::DistanceWindow::new(distance_m, None)
     }
 
-    /// The marker table on the rig case's numbers (96 kHz): the advisory
-    /// suffix first, the #359/#544 suffixes next, the distance suffix last.
-    /// Only the distance withholds the flight time (#669).
+    /// #537 UX revision 3's marker table, one row per standing, on the rig
+    /// case's numbers (96 kHz). The cross-check suffix comes first, the
+    /// #359/#461 suffixes next, the distance suffix last.
     #[test]
-    fn arrival_marker_suffixes_run_advisory_basis_distance() {
-        use ac_core::measurement::report::HighPassAdvisory;
+    fn arrival_marker_names_the_cross_check_standing() {
         let r = gated_report_with_delayed_peak();
         let base = r.ir_stats().unwrap();
         let consistent = DistanceCheck::Consistent {
             window: window(2.0),
             excess_s: 0.000377,
         };
-        let with = |advisory: Option<HighPassAdvisory>,
+        let with = |cc: ArrivalCrossCheck,
                     distance: DistanceCheck,
                     flight_ms: Option<f64>,
                     arrival_ms: f64| {
             let mut s = base.clone();
             s.sample_rate_hz = 96_000;
-            s.high_pass_advisory = advisory;
+            s.arrival_cross_check = cc;
             s.distance_check = distance;
             s.flight_time_s = flight_ms.map(|ms| ms / 1000.0);
             s.arrival_s = arrival_ms / 1000.0;
@@ -1044,23 +1077,31 @@ mod tests {
             };
             s
         };
-        let mode = Some(HighPassAdvisory {
-            corner_hz: 2000.0,
-            earlier_samples: 1_440,
-            level_db: -21.9,
-        });
+        let agrees = ArrivalCrossCheck::Agrees { gap: 128 };
         let cases = [
             (
-                with(None, consistent.clone(), Some(6.208), 24.031),
-                "peak: 6.21 ms flight, +0.38 ms re d/c at 2 m",
+                with(agrees.clone(), consistent.clone(), Some(6.208), 24.031),
+                "peak above 2 kHz: 6.21 ms flight, +0.38 ms re d/c at 2 m",
             ),
             (
-                with(None, DistanceCheck::NotGiven, Some(0.0), 17.823),
-                "peak: 0.00 ms flight, distance not given",
+                with(agrees.clone(), DistanceCheck::NotGiven, Some(0.0), 17.823),
+                "peak above 2 kHz: 0.00 ms flight, distance not given",
             ),
             (
                 with(
-                    None,
+                    agrees.clone(),
+                    DistanceCheck::Consistent {
+                        window: window(2.0),
+                        excess_s: 0.150,
+                    },
+                    Some(155.831),
+                    173.654,
+                ),
+                "peak above 2 kHz: 155.83 ms flight, +150.00 ms re d/c at 2 m",
+            ),
+            (
+                with(
+                    agrees.clone(),
                     DistanceCheck::TooEarly {
                         window: window(2.0),
                         excess_s: -0.000498,
@@ -1068,36 +1109,113 @@ mod tests {
                     None,
                     23.156,
                 ),
-                "peak: 23.16 ms round trip, earlier than 2 m allows",
+                "peak above 2 kHz: 23.16 ms round trip, earlier than 2 m allows",
             ),
             (
                 with(
-                    mode,
+                    ArrivalCrossCheck::BroadbandLater { gap: 1_440 },
+                    consistent.clone(),
+                    Some(6.208),
+                    24.031,
+                ),
+                "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms, +0.38 ms re d/c at 2 m",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::ArrivalAmbiguous {
+                        margin_db: 0.93,
+                        offset: -17,
+                    },
+                    consistent.clone(),
+                    None,
+                    24.219,
+                ),
+                "peak above 2 kHz: 24.22 ms round trip, second lobe -0.9 dB",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 31.2 },
+                    consistent.clone(),
+                    None,
+                    22.427,
+                ),
+                "peak above 2 kHz: 22.43 ms round trip, arrival SNR 31.2 dB",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::BandLimitedSnrUnmeasured,
+                    consistent.clone(),
+                    None,
+                    22.427,
+                ),
+                "peak above 2 kHz: 22.43 ms round trip, arrival SNR unmeasured",
+            ),
+            (
+                with(
+                    ArrivalCrossCheck::EarlierComparable {
+                        index: 0,
+                        level_db: -14.2,
+                    },
+                    // 5 ms late is Consistent (#552); the cross-check alone
+                    // withholds, and no figure was produced to qualify.
                     DistanceCheck::Consistent {
                         window: window(2.0),
-                        excess_s: 0.0154,
+                        excess_s: 0.005,
                     },
-                    Some(21.208),
-                    39.031,
+                    None,
+                    24.031,
                 ),
-                "peak: 21.21 ms flight, above 2 kHz 15.00 ms earlier, +15.40 ms re d/c at 2 m",
+                "peak above 2 kHz: 24.03 ms round trip, earlier peak -14.2 dB",
             ),
             (
                 with(
+                    ArrivalCrossCheck::BroadbandEarlier { gap: -410 },
+                    consistent.clone(),
                     None,
-                    DistanceCheck::NotPositive { distance_m: 0.0 },
-                    Some(0.0),
-                    17.823,
+                    20.17,
                 ),
-                "peak: 0.00 ms flight, distance not checked",
+                "peak above 2 kHz: 20.17 ms round trip, broadband \u{394} -4.27 ms",
             ),
         ];
         for (stats, want) in cases {
             assert_eq!(arrival_marker_text(&stats), want);
         }
-        // Order: advisory, then the #544 basis (offset before drift), then
-        // distance.
-        let mut drifted = with(mode, DistanceCheck::NotGiven, Some(21.208), 39.031);
+        let mut unavailable = with(
+            ArrivalCrossCheck::BandLimitUnavailable {
+                band_top_hz: 2_000.0,
+                required_hz: 4_000.0,
+            },
+            DistanceCheck::Consistent {
+                window: window(2.0),
+                excess_s: 0.0164,
+            },
+            None,
+            40.083,
+        );
+        unavailable.arrival_source = ArrivalSource::Peak;
+        assert_eq!(
+            arrival_marker_text(&unavailable),
+            "broadband peak: 40.08 ms round trip, not band-limited"
+        );
+        // A typed 0 m is never read as "not given".
+        let zero = with(
+            agrees.clone(),
+            DistanceCheck::NotPositive { distance_m: 0.0 },
+            Some(0.0),
+            17.823,
+        );
+        assert_eq!(
+            arrival_marker_text(&zero),
+            "peak above 2 kHz: 0.00 ms flight, distance not checked"
+        );
+        // Order: cross-check, then the #544 basis (offset before drift),
+        // then distance.
+        let mut drifted = with(
+            ArrivalCrossCheck::BroadbandLater { gap: 1_440 },
+            DistanceCheck::NotGiven,
+            Some(6.208),
+            24.031,
+        );
         drifted.latency_basis = LatencyBasis::Live {
             reference_tau_s: 0.017490,
             offset: LiveOffset::Measured {
@@ -1116,7 +1234,7 @@ mod tests {
             });
         assert_eq!(
             arrival_marker_text(&drifted),
-            "peak: 21.21 ms flight, above 2 kHz 15.00 ms earlier, offset +46 samples, \
+            "peak above 2 kHz: 6.21 ms flight, broadband \u{394} +15.00 ms, offset +46 samples, \
              ref \u{394} -32 samples, distance not given"
         );
     }
@@ -1235,7 +1353,7 @@ mod tests {
             Err(SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db: stats.pre_impulse_snr_db,
                 reason: reason.clone(),
-                floor: Some("floor ends 8 samples before peak, sample 10".to_string()),
+                floor: Some("floor ends 8 samples before arrival and peak, sample 10".to_string()),
                 scope: Some("unscored for this sweep's length, window".to_string()),
             })
         );
@@ -1246,9 +1364,7 @@ mod tests {
         let fault = SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: 12.6,
             reason: "pre-impulse SNR below threshold".to_string(),
-            floor: Some(
-                "floor ends 1200 samples before high-passed peak, sample 20563".to_string(),
-            ),
+            floor: Some("floor ends 1200 samples before arrival, sample 20563".to_string()),
             scope: Some("scored for this sweep's band, length, window".to_string()),
         };
         assert!(fault.header().contains("12.6 dB"));
@@ -1260,7 +1376,7 @@ mod tests {
         assert_eq!(
             fault.detail(),
             "pre-impulse SNR 12.6 dB below required 18.0 dB — floor ends 1200 samples \
-             before high-passed peak, sample 20563; scored for this sweep's band, length, window \
+             before arrival, sample 20563; scored for this sweep's band, length, window \
              — check sweep band start, length, window, drive level, input gain, distance, \
              room noise"
         );
@@ -1277,7 +1393,7 @@ mod tests {
             floor: Some(
                 [
                     "floor ends 1200 samples before peak, sample 26828",
-                    "not before high-passed peak \u{2014} high-passed SNR 12.2 dB, required \u{2265} 35.0 dB",
+                    "not before arrival \u{2014} arrival SNR 12.2 dB, required \u{2265} 35.0 dB",
                 ]
                 .join(", "),
             ),
@@ -1286,7 +1402,7 @@ mod tests {
         assert_eq!(
             fault.detail(),
             "pre-impulse SNR 9.4 dB below required 18.0 dB — floor ends 1200 samples \
-             before peak, sample 26828, not before high-passed peak — high-passed SNR 12.2 dB, required \
+             before peak, sample 26828, not before arrival — arrival SNR 12.2 dB, required \
              \u{2265} 35.0 dB; scored for this sweep's band, length, window — check sweep \
              band start, length, window, drive level, input gain, distance, room noise"
         );

@@ -1551,47 +1551,41 @@ inside the interface mixer (one leg through the DSP mixer, the other direct).
 Those are carried by the offset only for the exact topology it was measured
 on, and refused everywhere else.
 
-**Arrival is the peak (#669).** `IrStats::arrival_s` / `delay_samples` are
-read at `IrStats::arrival_index` = `peak_index`: the broadband magnitude peak
-of `linear_ir` (`ir_peak`) — Smaart's Delay Finder rule, and the picker
-`transfer_stream`'s start-up Find and `calibrate` τ use, so all three give
-the same number on the same path. On a multi-way loudspeaker the peak sits a
-group-delay offset past the wavefront (≈1.5 ms on the rig's Genelec), and in
-a room a low-frequency mode can outweigh the direct sound; both are shown,
-not corrected — the operator owns the delay.
+**Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
+read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
+high-passed at 2 kHz with zero phase (a 4th-order Butterworth run forward
+and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
+broadband peak. The number is a **band-limited delay estimate at that
+corner**, not an identified direct path: on a real loudspeaker it moves
+with the corner (the same pupu captures read +634 samples of flight at
+1 kHz and +596 at 2 kHz), and in the residual cases stated below it lands
+on a later path than the first. A zero-phase filter leaves a pure delay's peak on the same sample,
+so the arrival still pairs with `calibrate`'s peak-picked τ. When the
+payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
+is the broadband peak (`ArrivalSource::Peak`) and the flight time is
+withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
+but since #550 the floor under `pre_impulse_snr_db` ends one guard band
+before the band-limited arrival when that arrival is trusted and precedes
+the peak, and before the peak otherwise (`IrStats::pre_impulse_floor_anchor`,
+`pre_impulse_floor_end`). Trusted means its SNR was measured (a non-empty
+floor before the arrival, so a pick inside the guard band does not count) and
+its standing is not `BandLimitedSnrLow`.
 Derived on read, so a report written earlier re-reads with the new figure.
-
-**High-passed pick (#537, advisory since #669).** `linear_ir` high-passed at
-2 kHz with zero phase (a 4th-order Butterworth run forward and backward) is
-still picked, at `IrStats::high_pass_index`, and guarded in
-`IrStats::high_pass_check` (first match wins): `BandLimitUnavailable` (the
-payload's `f2_hz`, capped at Nyquist, is below twice the corner);
-`BandLimitedSnrUnmeasured` (#577: the pick sits inside the guard band, so no
-floor precedes it and `band_limited_snr_db` is `None`); `BandLimitedSnrLow`
-(the high-passed IR's pre-impulse SNR `band_limited_snr_db` is below 35 dB —
-ISO 3382-1:2009 §A.3.4's −20 dB trigger above the background's peaks);
-`ArrivalAmbiguous` (another local maximum of the high-passed IR within one
-corner period is less than 3 dB below the pick); `EarlierComparable` (a
-high-passed sample more than one corner period before the pick is within
-20 dB of it); `BroadbandEarlier` (the broadband maximum is more than 2.0 ms
-earlier); `BroadbandLater` (the earliest broadband peak within 6 dB of the
-maximum, at or after `pick − 2.0 ms`, is more than 2.0 ms later); `Agrees`.
-None of them withholds anything. The pick does two jobs:
-
-- **Advisory.** When it is trusted (`Agrees` or `BroadbandLater`) and sits
-  more than 2.0 ms before the peak, `IrStats::high_pass_advisory` carries
-  the corner, how many samples earlier, and the broadband level there re
-  the peak. `ac plot ir` prints it under `arrival`; the IR panel suffixes
-  the marker with it.
-- **Noise floor (#550).** The floor under `pre_impulse_snr_db` ends one guard
-  band before the high-passed pick when that pick is trusted (its SNR
-  measured over a non-empty floor, standing not `BandLimitedSnrLow`) and
-  precedes the peak, and before the peak otherwise
-  (`IrStats::pre_impulse_floor_anchor`, `pre_impulse_floor_end`). Without
-  this a room-mode peak puts the direct sound into the floor and fails good
-  captures on SNR.
-
-The onset diagnostic searches before the high-passed pick.
+`IrStats::arrival_cross_check` guards the pick and compares it with the
+broadband IR, first match wins: `BandLimitUnavailable` (withheld);
+`BandLimitedSnrUnmeasured` (#577: the high-passed pick sits inside the guard
+band, so no floor precedes it and `band_limited_snr_db` is `None` — withheld);
+`BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR
+`band_limited_snr_db` is below 35 dB — ISO 3382-1:2009 §A.3.4's −20 dB
+trigger above the background's peaks — withheld); `ArrivalAmbiguous`
+(another local maximum of the high-passed IR within one corner period is
+less than 3 dB below the pick — withheld); `EarlierComparable` (a
+high-passed sample more than one corner period before the arrival is within
+20 dB of it — withheld); `BroadbandEarlier` (the broadband maximum is more
+than 2.0 ms earlier — withheld); `BroadbandLater` (the earliest broadband
+peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
+than 2.0 ms later — produced and marked); `Agrees`. The onset diagnostic
+searches before the arrival, not the broadband peak.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
 (#544; `NoLatency` when the basis is withheld) against
