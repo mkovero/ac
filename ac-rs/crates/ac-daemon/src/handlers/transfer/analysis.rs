@@ -248,7 +248,7 @@ pub(super) fn analyse_pair(
     // calibrated IR goes through the sweep measurement, not
     // `transfer_stream`.
     let ir_full = ac_core::visualize::transfer::impulse_response_from_h(&result.re, &result.im);
-    let ir_peak_lag = ac_core::visualize::transfer::live_ir_peak_lag(&ir_full);
+    let ir_peak_lag = ac_core::visualize::transfer::live_ir_peak_lag(&ir_full, sr);
     let ir = if ir_full.is_empty() {
         None
     } else {

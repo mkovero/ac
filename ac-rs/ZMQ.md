@@ -1551,7 +1551,7 @@ inside the interface mixer (one leg through the DSP mixer, the other direct).
 Those are carried by the offset only for the exact topology it was measured
 on, and refused everywhere else.
 
-**Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
+**Band-limited arrival (#537), one picker with transfer (#669).** `IrStats::arrival_s` / `delay_samples` are
 read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
 high-passed at 2 kHz with zero phase (a 4th-order Butterworth run forward
 and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
@@ -1560,10 +1560,14 @@ corner**, not an identified direct path: on a real loudspeaker it moves
 with the corner (the same pupu captures read +634 samples of flight at
 1 kHz and +596 at 2 kHz), and in the residual cases stated below it lands
 on a later path than the first. A zero-phase filter leaves a pure delay's peak on the same sample,
-so the arrival still pairs with `calibrate`'s peak-picked τ. When the
+so the arrival still pairs with `calibrate`'s peak-picked τ. `transfer_stream`'s
+start-up Find and `delay_residual` take the same pick on the live IR
+(`band_limited_peak`, the corner above), so `plot_ir` and transfer give the
+same delay on one path: on pupu at 1 m the sweep IR's broadband peak was a
+room mode 2302 samples after the direct sound, while both high-passed picks
+landed within one sample of each other. When the
 payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
-is the broadband peak (`ArrivalSource::Peak`) and the flight time is
-withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
+is the broadband peak (`ArrivalSource::Peak`), with a warning. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
 but since #550 the floor under `pre_impulse_snr_db` ends one guard band
 before the band-limited arrival when that arrival is trusted and precedes
 the peak, and before the peak otherwise (`IrStats::pre_impulse_floor_anchor`,
@@ -1572,19 +1576,22 @@ floor before the arrival, so a pick inside the guard band does not count) and
 its standing is not `BandLimitedSnrLow`.
 Derived on read, so a report written earlier re-reads with the new figure.
 `IrStats::arrival_cross_check` guards the pick and compares it with the
-broadband IR, first match wins: `BandLimitUnavailable` (withheld);
+broadband IR, first match wins. Since #669 none of them withholds the flight
+time: a standing that disputes the arrival
+(`ArrivalCrossCheck::disputes_the_arrival`) is printed as a `warning:` row
+under it — the operator owns the delay. The standings: `BandLimitUnavailable`;
 `BandLimitedSnrUnmeasured` (#577: the high-passed pick sits inside the guard
-band, so no floor precedes it and `band_limited_snr_db` is `None` — withheld);
+band, so no floor precedes it and `band_limited_snr_db` is `None`);
 `BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR
 `band_limited_snr_db` is below 35 dB — ISO 3382-1:2009 §A.3.4's −20 dB
-trigger above the background's peaks — withheld); `ArrivalAmbiguous`
+trigger above the background's peaks); `ArrivalAmbiguous`
 (another local maximum of the high-passed IR within one corner period is
-less than 3 dB below the pick — withheld); `EarlierComparable` (a
+less than 3 dB below the pick); `EarlierComparable` (a
 high-passed sample more than one corner period before the arrival is within
-20 dB of it — withheld); `BroadbandEarlier` (the broadband maximum is more
-than 2.0 ms earlier — withheld); `BroadbandLater` (the earliest broadband
+20 dB of it); `BroadbandEarlier` (the broadband maximum is more
+than 2.0 ms earlier); `BroadbandLater` (the earliest broadband
 peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
-than 2.0 ms later — produced and marked); `Agrees`. The onset diagnostic
+than 2.0 ms later — marked); `Agrees`. The onset diagnostic
 searches before the arrival, not the broadband peak.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
@@ -2978,7 +2985,8 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 
   // The pair's delay setting (#669). Found once at session start — the
   // peak of the UNALIGNED live impulse response, Smaart's Delay Finder rule,
-  // with the same picker (`ir_peak`) `plot_ir` and `calibrate` τ use — or
+  // taken on the IR high-passed at 2 kHz as `plot_ir` takes its arrival
+  // (`band_limited_peak`, see `plot_ir`) — or
   // set by a client with `set_delay`. The daemon never moves a delay by
   // itself after that, except to re-find one it found against silence when
   // the drive comes on (see `set_drive`). The operator owns the delay.
@@ -3007,15 +3015,13 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // computed after alignment, so this is what is left over: 0 when the
   // setting sits on the IR peak, +k when the peak is k samples later. The
   // absolute IR-peak arrival is `delay_samples + delay_residual`; a client's
-  // "Find" reads it and "Insert" sends that sum as `set_delay`. Aligning a
+  // "Find" reads it and "Insert" sends that sum as `set_delay`. Same
+  // high-passed pick as the start-up Find. Aligning a
   // delay speaker to the main is reading this with each one playing.
   //
   // Range ±0.5 s (the 1 s Welch segment); a true delay outside it wraps.
   // `null` on a settling frame and on a silent leg. Sample-exact: taken from
-  // the full-resolution IR, not the downsampled `visualize/ir` sidecar. The
-  // peak reads late on a multi-way loudspeaker (group delay; ≈1.5 ms on
-  // the rig's Genelec) — the same in every tool, so it cancels in any
-  // difference.
+  // the full-resolution IR, not the downsampled `visualize/ir` sidecar.
   "delay_residual":  <int> | null,
 
   // Additive (#669) — true when `delay_samples` was set by `set_delay`,

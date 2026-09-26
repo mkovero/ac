@@ -353,7 +353,7 @@ pub(crate) mod tests {
                 "{name}: {:?}, arrival t0 {arrival:+}, margin {:?}, SNR {:?}",
                 a.cross_check, a.lobe_margin_db, a.band_limited_snr_db
             );
-            if !a.cross_check.withholds_flight_time() {
+            if !a.cross_check.disputes_the_arrival() {
                 assert!(arrival.abs() <= BUDGET, "produced off t0 — {context}");
             }
             assert_eq!(

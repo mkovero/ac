@@ -92,7 +92,6 @@ fn format_distance(distance_m: f64) -> String {
 /// flight time withheld upstream has no figure to qualify.
 fn distance_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
     let produced = stats.flight_time_s.is_some();
-    let first_reason = !stats.arrival_cross_check.withholds_flight_time();
     match &stats.distance_check {
         DistanceCheck::NotGiven if produced => ", distance not given".to_string(),
         DistanceCheck::NotPositive { .. } if produced => ", distance not checked".to_string(),
@@ -101,7 +100,7 @@ fn distance_suffix(stats: &ac_core::measurement::report::IrStats) -> String {
             excess_s * 1000.0,
             format_distance(window.distance_m)
         ),
-        DistanceCheck::TooEarly { window, .. } if first_reason => format!(
+        DistanceCheck::TooEarly { window, .. } => format!(
             ", earlier than {} allows",
             format_distance(window.distance_m)
         ),

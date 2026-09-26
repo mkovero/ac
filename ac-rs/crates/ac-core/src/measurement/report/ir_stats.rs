@@ -211,7 +211,7 @@ pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnr
 }
 
 /// Minimum pre-impulse SNR of the high-passed IR, in dB, below which the
-/// band-limited arrival withholds the flight time (#537,
+/// band-limited arrival is disputed — a warning since #669 (#537,
 /// [`ArrivalCrossCheck::BandLimitedSnrLow`]). Applies only to a measured
 /// SNR: a pick with no floor before it is
 /// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] (#577). Separate from
@@ -548,9 +548,9 @@ impl MeasurementReport {
     /// ([`ArrivalSource::BandLimitedPeak`], #537, operator ruling 2026-09-18),
     /// guarded by its lobe margin and cross-checked against the broadband IR
     /// in [`IrStats::arrival_cross_check`]. When the stimulus does not reach
-    /// an octave above the corner it is the broadband peak, with the flight
-    /// time withheld
-    /// ([`ArrivalSource::Peak`]). The onset estimate
+    /// an octave above the corner it is the broadband peak
+    /// ([`ArrivalSource::Peak`]). A disputed standing is a warning beside the
+    /// flight time, never a reason to withhold it (#669). The onset estimate
     /// ([`crate::measurement::sweep::estimate_onset`]) is anchored on that
     /// arrival and carried beside it as a diagnostic, with its standing in
     /// [`IrStats::onset_standing`]; it does not affect any number (#346
@@ -665,17 +665,18 @@ impl MeasurementReport {
         // and a refused `interface_latency.session_check` no longer withholds
         // anything, since the value it judged is not subtracted.
         //
-        // #537: an arrival its cross-check disputes is never subtracted
-        // from — the pick may not be the first path's delay.
+        // #669: an arrival its cross-check disputes is still subtracted
+        // from, with the standing printed beside it as a warning — the
+        // operator owns the delay, and the software refusing it is what
+        // #669 ended.
         //
-        // #537 architect revision 3: nor is one that falls below the
+        // #537 architect revision 3: one that falls below the
         // earliest arrival a typed distance allows (#552: no late edge). The check scores the live-basis
         // subtraction whether or not another layer withholds it, so a
         // read-out can name every reason a flight time is missing.
         let latency_basis = latency_basis(self);
         let distance_check = distance_check(self, arrival_s, &latency_basis);
         let flight_time_s = match &latency_basis {
-            _ if arrival_cross_check.withholds_flight_time() => None,
             _ if distance_check.withholds_flight_time() => None,
             LatencyBasis::Live { .. } => latency_basis.latency_s().map(|l| arrival_s - l),
             LatencyBasis::Withheld(_) => None,
@@ -1174,9 +1175,10 @@ pub struct IrStats {
     /// `Agrees` and `BroadbandLater` only — `BroadbandEarlier` measures to
     /// the maximum, and the other standings measure no Δ.
     pub broadband_delta_level_db: Option<f64>,
-    /// The arrival's guards and cross-check against the broadband IR (#537). Some
-    /// standings withhold [`Self::flight_time_s`]; see
-    /// [`ArrivalCrossCheck::withholds_flight_time`].
+    /// The arrival's guards and cross-check against the broadband IR (#537).
+    /// Some standings dispute the arrival and print as warnings; see
+    /// [`ArrivalCrossCheck::disputes_the_arrival`]. None withholds anything
+    /// since #669.
     pub arrival_cross_check: ArrivalCrossCheck,
     /// The onset diagnostic's standing: the first of `onset_standing`'s
     /// conditions that failed, or [`OnsetStanding::Unscored`] when all
@@ -1321,14 +1323,14 @@ impl IrStats {
 
 /// Why a band-limited arrival inside the guard band was not trusted for the
 /// pre-impulse floor (#550 UX revision 4), and why
-/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] withholds the flight time
+/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] disputes the arrival
 /// (#577): there was no floor before it to measure its SNR against. A fixed
 /// string, so an unmeasured SNR never prints as a number.
 pub const ARRIVAL_SNR_UNMEASURED_REASON: &str = "arrival SNR unmeasured, no floor before it";
 
 /// Why a band-limited arrival was not trusted (#537, #550):
 /// `arrival SNR 12.2 dB, required ≥ 35.0 dB`. One string for the flight
-/// time's withheld reason and the pre-impulse floor line, so the two
+/// time's warning and the pre-impulse floor line, so the two
 /// cannot drift.
 pub fn arrival_snr_low_reason(snr_db: f64) -> String {
     format!("arrival SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB")
@@ -1473,57 +1475,59 @@ pub enum ArrivalSource {
 /// The band-limited arrival's guards and its cross-check against the
 /// broadband IR (#537, operator option 4, architect revision 2). The
 /// standings are checked in declaration order and the first that fires is
-/// the result. They only add to the existing gates (#376 `verdict`, #544
-/// `latency_basis`): a flight time is produced only when every layer
-/// allows one. Every standing that doubts the pick
-/// withholds; only `BroadbandLater` marks a produced value.
+/// the result. None of them withholds the flight time since #669: every standing
+/// that doubts the pick is printed as a warning beside it
+/// ([`ArrivalCrossCheck::disputes_the_arrival`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrivalCrossCheck {
     /// The stimulus does not reach
     /// [`crate::measurement::sweep::BAND_LIMIT_MIN_F2_RATIO`] times the
     /// corner: `band_top_hz` (the payload's `f2_hz`, capped at Nyquist)
     /// against `required_hz`. The arrival is the broadband peak, which
-    /// is #537's defect when a room mode sits late, so the flight time is
-    /// withheld.
+    /// is #537's defect when a room mode sits late, and the standing
+    /// warns.
     BandLimitUnavailable { band_top_hz: f64, required_hz: f64 },
     /// The high-passed pick sits inside the guard band, so no floor precedes
     /// it and its SNR was never measured (#577). Not
     /// [`Self::BandLimitedSnrLow`]: the SNR is absent, not low, and an empty
     /// floor's `+inf` would otherwise clear [`ARRIVAL_SNR_MIN_DB`].
-    /// [`IrStats::band_limited_snr_db`] is `None`. Withholds the flight
-    /// time.
+    /// [`IrStats::band_limited_snr_db`] is `None`. Warns.
     BandLimitedSnrUnmeasured,
     /// The high-passed IR's pre-impulse SNR is below
-    /// [`ARRIVAL_SNR_MIN_DB`]. Withholds the flight time.
+    /// [`ARRIVAL_SNR_MIN_DB`]. Warns.
     BandLimitedSnrLow { snr_db: f64 },
     /// Another local maximum of the high-passed IR within one corner period
     /// of the pick is less than [`ARRIVAL_LOBE_MARGIN_MIN_DB`] below it: the
     /// pick may be a half-cycle off. `margin_db` is how far below the pick
     /// it sits, `offset` its position re the pick (negative: before).
-    /// Withholds the flight time.
+    /// Warns.
     ArrivalAmbiguous { margin_db: f64, offset: i64 },
     /// A high-passed sample more than one corner period before the arrival
     /// is within [`ARRIVAL_EARLIER_COMPARABLE_DB`] of it: the pick may be a
     /// strong HF reflection. `index` is that sample (the largest such),
-    /// `level_db` its level re the arrival. Withholds the flight time.
+    /// `level_db` its level re the arrival. Warns.
     EarlierComparable { index: usize, level_db: f64 },
     /// The broadband argmax is earlier than the arrival by more than the
     /// tolerance (`gap` = argmax − arrival, negative): something arrived
-    /// before the pick. Withholds the flight time.
+    /// before the pick. Warns.
     BroadbandEarlier { gap: i64 },
     /// `r` — the earliest broadband peak at or after `arrival − tolerance`
     /// within [`ARRIVAL_BROADBAND_COMPARABLE_DB`] of the maximum — is later
     /// than the arrival by more than the tolerance (`gap` = r − arrival,
     /// positive): nothing comparable near the arrival, as with #537's room
-    /// mode. The flight time is produced and marked with the gap.
+    /// mode. Marked with the gap.
     BroadbandLater { gap: i64 },
     /// `r` is within the tolerance of the arrival (`gap` = r − arrival).
     Agrees { gap: i64 },
 }
 
 impl ArrivalCrossCheck {
-    /// Whether this standing withholds [`IrStats::flight_time_s`].
-    pub fn withholds_flight_time(&self) -> bool {
+    /// Whether this standing disputes the arrival as the first path's:
+    /// it may be noise, a half-cycle off, or behind earlier energy. A
+    /// warning beside the flight time since #669 — until then these
+    /// withheld it. A disputed arrival also does not anchor the noise floor
+    /// (#550).
+    pub fn disputes_the_arrival(&self) -> bool {
         matches!(
             self,
             ArrivalCrossCheck::BandLimitUnavailable { .. }
@@ -3149,7 +3153,7 @@ mod tests {
         let want = (stats.arrival_index as f64 - centre as f64) / sr as f64 - tau_s;
         assert!((ft - want).abs() < 1e-12, "{ft} vs {want}");
         assert!(
-            !stats.arrival_cross_check.withholds_flight_time()
+            !stats.arrival_cross_check.disputes_the_arrival()
                 && !matches!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees { .. }),
             "the flight time is marked, not plain"
         );
@@ -3462,7 +3466,8 @@ mod tests {
             }
             other => panic!("expected EarlierComparable, got {other:?}"),
         }
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// The same pair 20.5 dB apart does not fire: the bound is 20 dB
@@ -3511,7 +3516,8 @@ mod tests {
             stats.arrival_cross_check,
             ArrivalCrossCheck::BroadbandEarlier { gap: -480 }
         );
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// White noise raised until the high-passed IR's pre-impulse SNR is
@@ -3527,7 +3533,8 @@ mod tests {
             stats.arrival_cross_check,
             ArrivalCrossCheck::BandLimitedSnrLow { snr_db: snr }
         );
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// #577: a high-passed pick inside the guard band (index < len/32) has
@@ -3558,8 +3565,9 @@ mod tests {
             ArrivalCrossCheck::BandLimitedSnrUnmeasured
         );
         assert_eq!(stats.band_limited_snr_db, None);
-        assert!(stats.arrival_cross_check.withholds_flight_time());
-        assert_eq!(stats.flight_time_s, None);
+        assert!(stats.arrival_cross_check.disputes_the_arrival());
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// A sweep that ends at 2 kHz has no octave above the 2 kHz corner: the
@@ -3583,7 +3591,8 @@ mod tests {
         assert_eq!(stats.band_limited_snr_db, None);
         assert_eq!(stats.arrival_lobe_margin_db, None);
         assert_eq!(stats.broadband_delta_samples(), None);
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
         // The edge: exactly an octave above the corner is band-limited.
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
@@ -3646,7 +3655,7 @@ mod tests {
     /// must withhold that as `ArrivalAmbiguous`. The same DUT swept to
     /// 20 kHz picks the direct sound with a clear margin and agrees.
     #[test]
-    fn a_half_cycle_hop_is_withheld_as_arrival_ambiguous() {
+    fn a_half_cycle_hop_is_disputed_as_arrival_ambiguous() {
         let half_cycle = (96_000.0 / (2.0 * 2_800.0)) as i64; // 17 samples
         let ir = ringing_direct_sound(Some(4_000.0));
 
@@ -3684,7 +3693,8 @@ mod tests {
         assert_eq!(stats.arrival_lobe_offset, Some(lobe.offset));
         assert!(stats.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
         assert_eq!(stats.broadband_delta_samples(), None);
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
 
         let full = cross_check_report(ringing_direct_sound(None), 20_000.0)
             .ir_stats()
@@ -3784,7 +3794,8 @@ mod tests {
                 "amp {amp}: SNR {snr}, {:?}",
                 s.arrival_cross_check
             );
-            assert_eq!(low, s.flight_time_s.is_none(), "amp {amp}");
+            // #669: the gate decides the warning, not the flight time.
+            assert!(s.flight_time_s.is_some(), "amp {amp}");
             saw_low |= low;
             saw_ok |= !low;
         }
@@ -3984,7 +3995,7 @@ mod tests {
     /// flight time. A pick 288 samples late is `Consistent` (#552: no late
     /// edge), so the cross-check alone withholds it.
     #[test]
-    fn distance_check_scores_under_a_withholding_cross_check() {
+    fn distance_check_scores_under_a_disputing_cross_check() {
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
         ir[CC_T0 + 288] = 0.5 * 10f64.powf(2.0 / 20.0);
@@ -4005,7 +4016,8 @@ mod tests {
             }
             ref other => panic!("{other:?}"),
         }
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed arrival is a warning, never withheld.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// A single spike `excess` samples past `d/c` at `distance_m`, in a 1 s
@@ -4511,7 +4523,7 @@ mod default_sweep_tests {
                 // #577: the arrival standing refuses on every draw, and a
                 // pick with no floor before it is unmeasured, never passed.
                 assert!(
-                    stats.arrival_cross_check.withholds_flight_time(),
+                    stats.arrival_cross_check.disputes_the_arrival(),
                     "{sr} Hz seed {seed}: noise-only draw's arrival standing {:?} produces \
                      a flight time",
                     stats.arrival_cross_check

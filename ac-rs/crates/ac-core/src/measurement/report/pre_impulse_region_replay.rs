@@ -194,7 +194,7 @@ fn default_band_captures_at_the_ceiling_pass_with_the_floor_before_the_arrival()
             "{name}: arrival SNR {arrival_snr:.1} dB"
         );
         assert!(
-            !stats.arrival_cross_check.withholds_flight_time()
+            !stats.arrival_cross_check.disputes_the_arrival()
                 && !matches!(
                     stats.arrival_cross_check,
                     ArrivalCrossCheck::BandLimitedSnrLow { .. }

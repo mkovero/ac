@@ -352,7 +352,7 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
     let h = capture(k, case, index);
     let rejected = {
         let a = band_limited_arrival_under(&h, SR, k.f2_hz, ir_peak(&h).0, REVISION_2);
-        score(!a.cross_check.withholds_flight_time(), a.arrival_index)
+        score(!a.cross_check.disputes_the_arrival(), a.arrival_index)
     };
     let mut report = ir_report_with_custom_ir_band(h, SR, k.f2_hz);
     with_live_latency(&mut report, TAU_S);
@@ -364,8 +364,18 @@ fn run(k: &Kernel, case: &Case, index: usize) -> Scored {
     let with = report.ir_stats().expect("an impulse response");
     Scored {
         case: *case,
-        shipped: score(stats.flight_time_s.is_some(), stats.arrival_index),
-        with_distance: score(with.flight_time_s.is_some(), with.arrival_index),
+        // #669: a disputed arrival no longer withholds the flight time; what
+        // the rule still decides is the warning and the floor anchor, so the
+        // suite scores whether the arrival stands undisputed. The distance
+        // check still withholds, so `with_distance` keeps it.
+        shipped: score(
+            !stats.arrival_cross_check.disputes_the_arrival(),
+            stats.arrival_index,
+        ),
+        with_distance: score(
+            !with.arrival_cross_check.disputes_the_arrival() && with.flight_time_s.is_some(),
+            with.arrival_index,
+        ),
         flight_with_distance_s: with.flight_time_s,
         rejected,
     }

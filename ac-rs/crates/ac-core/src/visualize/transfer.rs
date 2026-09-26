@@ -131,7 +131,7 @@ pub fn h1_estimate(ref_sig: &[f32], meas: &[f32], sr: u32) -> TransferResult {
     // estimate aligned. A silent leg has no peak and stays unaligned.
     let unaligned = h1_estimate_core(&r, &m, sr, 0);
     let delay_samples =
-        live_ir_peak_lag(&impulse_response_from_h(&unaligned.re, &unaligned.im)).unwrap_or(0);
+        live_ir_peak_lag(&impulse_response_from_h(&unaligned.re, &unaligned.im), sr).unwrap_or(0);
     if delay_samples == 0 {
         return unaligned;
     }
@@ -313,25 +313,37 @@ pub fn impulse_response_from_h(re: &[f64], im: &[f64]) -> Vec<f32> {
 
 /// Arrival of a live impulse response from [`impulse_response_from_h`], as a
 /// signed lag in samples from the alignment the H it came from was computed
-/// at — the Smaart Delay Finder rule: the highest peak of the IR.
+/// at: the Smaart Delay Finder's highest peak, taken — as `plot ir` takes
+/// it — on the IR high-passed at
+/// [`crate::measurement::sweep::ARRIVAL_HIGH_PASS_CORNER_HZ`] with zero phase
+/// ([`crate::measurement::sweep::band_limited_peak`]), so a low-frequency
+/// room mode cannot outweigh the direct sound. A zero-phase filter leaves a
+/// pure delay's peak on the same sample. Falls back to the broadband peak
+/// when `sr` puts the corner out of band.
 ///
-/// The picker is [`crate::measurement::sweep::ir_peak`], the one used by
-/// `plot ir` and `calibrate` τ; this only undoes the fftshift, so index
-/// `n/2` reads 0. Range is `[-n/2, n/2)`: ±0.5 s at the 1 s Welch segment.
-/// An H computed at delay `D` yields the residual `true − D`, so the
-/// absolute arrival is `D + lag`.
+/// One picker for the two IR sources (#669): on pupu at 1 m the sweep IR's
+/// broadband peak was a room mode 2302 samples after the direct sound,
+/// while this IR's was the direct sound; high-passed, both land within a
+/// sample of each other.
+///
+/// This only undoes the fftshift, so index `n/2` reads 0. Range is
+/// `[-n/2, n/2)`: ±0.5 s at the 1 s Welch segment. An H computed at delay
+/// `D` yields the residual `true − D`, so the absolute arrival is `D + lag`.
 ///
 /// `None` when the IR is empty or holds no nonzero finite sample — a
 /// silent leg, where there is no peak to report.
-pub fn live_ir_peak_lag(ir: &[f32]) -> Option<i64> {
+pub fn live_ir_peak_lag(ir: &[f32], sr: u32) -> Option<i64> {
+    use crate::measurement::sweep::{band_limited_peak, ir_peak, ARRIVAL_HIGH_PASS_CORNER_HZ};
     if ir.is_empty() {
         return None;
     }
     let linear: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
-    let (idx, mag) = crate::measurement::sweep::ir_peak(&linear);
-    if !mag.is_finite() || mag <= 0.0 {
+    let (_, broadband) = ir_peak(&linear);
+    if !broadband.is_finite() || broadband <= 0.0 {
         return None;
     }
+    let (idx, _) = band_limited_peak(&linear, sr, sr as f64 * 0.5, ARRIVAL_HIGH_PASS_CORNER_HZ)
+        .unwrap_or_else(|| ir_peak(&linear));
     Some(idx as i64 - (ir.len() / 2) as i64)
 }
 
@@ -607,7 +619,7 @@ mod tests {
 
     fn live_lag(r: &[f32], m: &[f32], at: i64) -> Option<i64> {
         let h = h1_estimate_with_delay(r, m, SR, at);
-        live_ir_peak_lag(&impulse_response_from_h(&h.re, &h.im))
+        live_ir_peak_lag(&impulse_response_from_h(&h.re, &h.im), SR)
     }
 
     /// The unaligned live IR puts its peak at the true delay, either sign,
@@ -657,12 +669,46 @@ mod tests {
         assert_eq!(live_lag(&sig, &meas, 0), Some(1_455));
     }
 
+    /// #669, pupu at 1 m: a low-frequency path stronger than the direct
+    /// sound. The broadband peak — computed inline, the rule this replaced —
+    /// lands on the LF path; the live pick, high-passed as `plot ir`'s is,
+    /// stays on the direct sound.
+    #[test]
+    fn a_stronger_low_frequency_path_does_not_move_the_live_pick() {
+        let sig = white_noise(N, 0.5, 42);
+        // One-pole low-pass at ~100 Hz: the LF path.
+        let a = 1.0 - (-2.0 * PI * 100.0 / SR as f64).exp();
+        let mut prev = 0.0f64;
+        let lf: Vec<f32> = shifted(&sig, 2_300)
+            .iter()
+            .map(|&x| {
+                prev += a * (x as f64 - prev);
+                (40.0 * prev) as f32
+            })
+            .collect();
+        let meas: Vec<f32> = shifted(&sig, 283)
+            .iter()
+            .zip(&lf)
+            .map(|(d, l)| 0.3 * d + l)
+            .collect();
+        let h = h1_estimate_with_delay(&sig, &meas, SR, 0);
+        let ir = impulse_response_from_h(&h.re, &h.im);
+        let linear: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
+        let broadband =
+            crate::measurement::sweep::ir_peak(&linear).0 as i64 - (ir.len() / 2) as i64;
+        assert!(
+            (broadband - 283).abs() > 500,
+            "test setup: the broadband peak must be the LF path, got {broadband}"
+        );
+        assert_eq!(live_ir_peak_lag(&ir, SR), Some(283));
+    }
+
     /// A silent leg has no peak to report.
     #[test]
     fn silent_leg_has_no_live_ir_peak() {
         let sig = white_noise(N, 0.5, 42);
         assert_eq!(live_lag(&sig, &vec![0.0; N], 0), None);
-        assert_eq!(live_ir_peak_lag(&[]), None);
+        assert_eq!(live_ir_peak_lag(&[], SR), None);
     }
 
     #[test]
