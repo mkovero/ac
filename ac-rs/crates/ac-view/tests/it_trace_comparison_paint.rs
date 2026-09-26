@@ -295,3 +295,46 @@ fn slot_runs_paint_as_a_box_strip_not_timestamp_rows() {
         "live box filled with no live frame"
     );
 }
+
+/// #256: selecting a trace does not change how its curve is drawn — one
+/// width, one colour per trace. The selection is the strip box's border.
+#[test]
+fn a_selected_slot_draws_like_an_unselected_one() {
+    let fixture = scene(Smoothing::Off);
+    let view = ViewKind::Transfer(TransferViewState::new(-10.0, -30.0));
+    let run = |slot: u8, focused: bool| StoredTrace {
+        label: "slot",
+        captured_at_utc: "2026-09-26T14:00:00Z",
+        scene: &fixture,
+        focused,
+        visible: true,
+        color_slot: usize::from(slot - 1),
+        slot: Some(slot),
+    };
+    let stored = vec![run(1, true), run(2, false)];
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(640.0, 360.0));
+        draw_view(&view, ui, None, None, &stored, None);
+    });
+    harness.run();
+    let width_of = |color: egui::Color32| -> Vec<f32> {
+        harness
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::LineSegment { stroke, .. } if stroke.color == color => {
+                    Some(stroke.width)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let one = width_of(ac_view::view::palette::compare_color(0));
+    let two = width_of(ac_view::view::palette::compare_color(1));
+    assert!(!one.is_empty() && !two.is_empty(), "both curves drawn");
+    assert!(
+        one.iter().chain(&two).all(|w| *w == one[0]),
+        "selected {one:?} vs unselected {two:?}"
+    );
+}

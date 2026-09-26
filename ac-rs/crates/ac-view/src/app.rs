@@ -868,7 +868,14 @@ impl AcViewApp {
                 let n = captured.slot;
                 let path = captured.path.display().to_string();
                 let opened = captured.opened;
-                self.with_transfer(|t| t.store_slot(n, captured.run));
+                self.with_transfer(|t| {
+                    t.store_slot(n, captured.run);
+                    // A recalled slot is selected; a live store leaves the
+                    // selection where it was (#256).
+                    if opened {
+                        t.select_slot(n);
+                    }
+                });
                 let verb = if opened {
                     "loaded from"
                 } else {

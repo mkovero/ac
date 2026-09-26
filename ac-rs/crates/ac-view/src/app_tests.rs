@@ -1403,7 +1403,10 @@ fn v_hides_the_focused_trace_and_colours_stay_put() {
             [true, false, true]
         );
     }
+    // Hiding b handed the selection to live; show all and select b again.
     app.handle_action(Action::ToggleTraceVisible, true);
+    app.handle_action(Action::CycleFocus, false);
+    app.handle_action(Action::CycleFocus, false); // b
     app.handle_action(Action::CloseFocusedRun, false); // removes b
     let ViewKind::Transfer(t) = &app.view else {
         panic!("not transfer view")
@@ -1700,4 +1703,81 @@ fn ctrl_digit_in_the_list_does_not_load() {
     press_key(&mut app, egui::Key::Num2, false, false);
     assert_eq!(app.capture_slot, Some(2));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Recalling a slot selects it; hiding the selected slot hands the
+/// selection back to live; a slot loaded with `F` is selected; a live
+/// store is not (#256).
+#[test]
+fn a_recalled_slot_is_selected() {
+    let mut app = transfer_app();
+    let captured = |slot: u8, opened: bool| {
+        Ok(crate::capture::Captured {
+            slot,
+            opened,
+            path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+            run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+        })
+    };
+    app.finish_capture_for_test(captured(2, false));
+    app.finish_capture_for_test(captured(5, false));
+    assert_eq!(
+        focus_of(&app),
+        crate::view::Focus::Live,
+        "a live store moved the selection"
+    );
+
+    let now = std::time::Instant::now();
+    app.toggle_slot(5, now); // hide
+    app.toggle_slot(5, now); // recall
+    assert_eq!(focus_of(&app), crate::view::Focus::Stored(1));
+    app.toggle_slot(5, now); // hide the selected one
+    assert_eq!(focus_of(&app), crate::view::Focus::Live);
+
+    app.finish_capture_for_test(captured(1, true)); // loaded with F
+    assert_eq!(focus_of(&app), crate::view::Focus::Stored(0));
+}
+
+/// The selection never rests on a hidden slot (Codex review): `V` on the
+/// selected slot hands it to live; `F` into a hidden slot shows it; `X`
+/// never lands on a hidden one; `Tab` skips hidden slots.
+#[test]
+fn the_selection_never_rests_on_a_hidden_slot() {
+    let mut app = transfer_app();
+    let captured = |slot: u8, opened: bool| {
+        Ok(crate::capture::Captured {
+            slot,
+            opened,
+            path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+            run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+        })
+    };
+    let now = std::time::Instant::now();
+    for n in [1, 2, 3] {
+        app.finish_capture_for_test(captured(n, false));
+    }
+    app.toggle_slot(2, now); // hide 2 (selection stays live)
+    app.handle_action(Action::CycleFocus, false);
+    assert_eq!(focus_of(&app), crate::view::Focus::Stored(0));
+    app.handle_action(Action::CycleFocus, false);
+    assert_eq!(
+        focus_of(&app),
+        crate::view::Focus::Stored(2),
+        "Tab landed on hidden 2"
+    );
+
+    app.handle_action(Action::ToggleTraceVisible, false); // V hides 3
+    assert_eq!(focus_of(&app), crate::view::Focus::Live);
+
+    app.handle_action(Action::CycleFocus, false); // 1
+    app.handle_action(Action::CloseFocusedRun, false); // X: next is hidden 2
+    assert_eq!(focus_of(&app), crate::view::Focus::Live);
+
+    app.finish_capture_for_test(captured(2, true)); // F into hidden 2
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    let i = t.loaded.iter().position(|r| r.slot == Some(2)).unwrap();
+    assert!(t.loaded[i].visible);
+    assert_eq!(t.focus, crate::view::Focus::Stored(i));
 }
