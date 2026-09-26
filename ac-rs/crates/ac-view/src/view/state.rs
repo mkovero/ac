@@ -290,6 +290,18 @@ impl TransferViewState {
         }
     }
 
+    /// A bare digit (#256): show or hide slot `n`. `false` when the slot
+    /// is empty — nothing to toggle.
+    pub fn toggle_slot_visibility(&mut self, n: u8) -> bool {
+        match self.loaded.iter_mut().find(|r| r.slot == Some(n)) {
+            Some(run) => {
+                run.visible = !run.visible;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// `Shift+V`: show every trace (#256).
     pub fn show_all(&mut self) {
         self.live_visible = true;

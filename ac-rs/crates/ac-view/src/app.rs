@@ -702,6 +702,19 @@ impl AcViewApp {
         };
     }
 
+    /// Bare digit `n` (#256): show or hide slot `n`, or say it is empty.
+    fn toggle_slot(&mut self, n: u8, now: Instant) {
+        let mut found = true;
+        self.with_transfer(|t| found = t.toggle_slot_visibility(n));
+        if !found && matches!(self.view, ViewKind::Transfer(_)) {
+            self.set_toast(
+                format!("slot {n} is empty \u{2014} Ctrl+{n} stores the live trace there"),
+                now,
+                Some(3.0),
+            );
+        }
+    }
+
     /// `Ctrl`+`n` (#256): store the live trace to slot `n`, on its own
     /// thread, and say so. Only while live rolls: a snapshot records what
     /// the daemon hears now, so storing while the picture is held would
@@ -1078,21 +1091,36 @@ impl AcViewApp {
             return;
         }
 
-        // `Ctrl`+digit: store the live trace to that slot (#256). Checked
-        // with `Ctrl` held, so a bare digit does nothing.
-        let slots: Vec<u8> = ctx.input(|i| {
-            if !i.modifiers.ctrl {
-                return Vec::new();
-            }
-            crate::keys::SLOT_KEYS
+        // Digits (#256): `Ctrl`+digit stores the live trace to that slot;
+        // a bare digit shows or hides it.
+        // `Ctrl` is read from each key event, not from the frame's current
+        // modifiers: a Ctrl released before the frame is processed must
+        // still store, not toggle (Codex review).
+        let slots: Vec<(bool, u8)> = ctx.input(|i| {
+            i.events
                 .iter()
-                .zip(1u8..)
-                .filter(|(k, _)| i.key_pressed(**k))
-                .map(|(_, n)| n)
+                .filter_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } => crate::keys::SLOT_KEYS
+                        .iter()
+                        .zip(1u8..)
+                        .find(|(k, _)| **k == *key)
+                        .map(|(_, n)| (modifiers.ctrl, n)),
+                    _ => None,
+                })
                 .collect()
         });
-        for n in slots {
-            self.store_slot_request(n, Instant::now());
+        for (ctrl, n) in slots {
+            if ctrl {
+                self.store_slot_request(n, Instant::now());
+            } else {
+                self.toggle_slot(n, Instant::now());
+            }
         }
 
         let view_id = self.view.id();
