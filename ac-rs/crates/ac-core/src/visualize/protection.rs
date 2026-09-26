@@ -51,10 +51,12 @@ pub fn clipped(buf: &[f32]) -> bool {
 
 /// Replace every column of `fresh` whose reference density sits more than
 /// [`REFERENCE_HOLD_BELOW_DB`] below the median over all columns with the
-/// matching column of `held` — the last value that cleared the threshold.
-/// With no matching held column (none yet, or the grid changed), the column
-/// is blanked by setting its coherence to 0, so the display's mask drops
-/// it. Returns how many columns were held or blanked.
+/// column of `held` at the same frequency — the last value that cleared
+/// the threshold. Matched by frequency, not position, so the grid growing
+/// downward as a deeper stage settles keeps every existing column's held
+/// value. With no held column at that frequency, the column is blanked by
+/// setting its coherence to 0, so the display's mask drops it. Returns how
+/// many columns were held or blanked.
 ///
 /// Density, `ref_level / df`: every ladder stage uses the same FFT size, so
 /// per-bin power divided by the stage's bin width is a power per hertz that
@@ -69,20 +71,27 @@ pub fn hold_weak_reference(fresh: &mut [Column], held: Option<&[Column]>) -> usi
     let mut densities: Vec<f64> = fresh.iter().map(density).collect();
     densities.sort_by(|a, b| a.total_cmp(b));
     let floor = densities[densities.len() / 2] * 10f64.powf(-REFERENCE_HOLD_BELOW_DB / 10.0);
-    let same_grid = held.filter(|h| {
-        h.len() == fresh.len() && h.iter().zip(fresh.iter()).all(|(a, b)| a.freq == b.freq)
-    });
+    // Both lists are in ascending frequency (the ladder's column grid);
+    // the grid's edges are fixed per layout, so a column keeps its exact
+    // centre frequency from one frame to the next.
+    let find = |f: f64| {
+        held.and_then(|h| {
+            h.binary_search_by(|c| c.freq.total_cmp(&f))
+                .ok()
+                .map(|i| &h[i])
+        })
+    };
     let mut count = 0;
-    for (i, col) in fresh.iter_mut().enumerate() {
+    for col in fresh.iter_mut() {
         if density(col) >= floor {
             continue;
         }
         count += 1;
-        match same_grid {
+        match find(col.freq) {
             Some(h) => {
-                col.h1 = h[i].h1;
-                col.coherence = h[i].coherence;
-                col.ref_level = h[i].ref_level;
+                col.h1 = h.h1;
+                col.coherence = h.coherence;
+                col.ref_level = h.ref_level;
             }
             None => col.coherence = 0.0,
         }
@@ -143,6 +152,27 @@ mod tests {
         ];
         assert_eq!(hold_weak_reference(&mut fresh, Some(&held)), 0);
         assert_eq!(fresh[2].h1.re, 9.0);
+    }
+
+    /// Grid growth (a deeper stage settling adds low columns) keeps the
+    /// held value of an existing column (Codex review).
+    #[test]
+    fn a_grown_grid_keeps_held_values_by_frequency() {
+        let held = vec![
+            col(1000.0, 0, 1.0, 0.5),
+            col(2000.0, 0, 1.0, 0.6),
+            col(4000.0, 0, 1.0, 0.7),
+        ];
+        let mut fresh = vec![
+            col(250.0, 1, 1.0, 2.0),
+            col(500.0, 1, 1.0, 2.0),
+            col(1000.0, 0, 1.0, 2.0),
+            col(2000.0, 0, 1.0, 2.0),
+            col(4000.0, 0, 1e-6, 9.0),
+        ];
+        assert_eq!(hold_weak_reference(&mut fresh, Some(&held)), 1);
+        assert_eq!(fresh[4].h1.re, 0.7);
+        assert!(fresh[4].coherence > 0.0, "blanked instead of held");
     }
 
     #[test]

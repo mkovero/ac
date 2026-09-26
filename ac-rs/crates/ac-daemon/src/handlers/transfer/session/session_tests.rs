@@ -901,3 +901,76 @@ fn columns_with_a_weak_reference_are_held() {
     let held = f["protection"]["held_columns"].as_u64().unwrap();
     assert!(held > 0, "no column held with the top band gone");
 }
+
+/// Codex review of #670: a long silent start (drive off, loopback reference
+/// silent, every tick paused) must not delay the Find after the drive
+/// comes on. The edge is recorded in the rings' own coordinate; in stream
+/// coordinates the Find would wait as long as the silence lasted.
+#[test]
+fn a_long_silent_start_does_not_delay_the_find() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    let silence: Vec<std::time::Instant> = (0..400)
+        .map(|k| t0 + std::time::Duration::from_millis(50 * k))
+        .collect();
+    run_silent_ref(&mut s, &silence, events(false));
+    assert_eq!(s.pushed, 0, "test setup: every tick paused");
+    let t1 = t0 + std::time::Duration::from_secs(20);
+    let edge = TickEvents {
+        drive_edge_on: true,
+        ..events(true)
+    };
+    run_correlated(&mut s, 1, 480, edge, t1);
+    // One ring's worth of driven audio (2.5 s = 50 ticks) and a little.
+    run_correlated(&mut s, 70, 480, events(true), t1);
+    assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(480));
+}
+
+/// Two pairs, two references, one of them silent (Codex review of #670):
+/// the silent one pauses — no Find, frame says so — while the other
+/// measures normally.
+#[test]
+fn a_silent_reference_pauses_only_its_own_pair() {
+    let ctx = |pos: usize, ri: usize| PairCtx {
+        pos,
+        meas_ch: 0,
+        ref_ch: ri as u32,
+        mi: 0,
+        ri,
+        meas_cal: None,
+        ref_cal: None,
+        meas_curve: None,
+        meas_voltage_check: None,
+        ref_voltage_check: None,
+    };
+    let mut s = SessionState::new(
+        statics(),
+        Window::new(SR, 4),
+        vec![ctx(0, 1), ctx(1, 2)],
+        3,
+        0.05,
+        ac_core::visualize::time_integration::TAU_FAST_S,
+    );
+    let x = noise(CHUNK * 80 + 480, 0x5eed);
+    let t0 = std::time::Instant::now();
+    let mut last = Vec::new();
+    for k in 0..70 {
+        let mut bufs = correlated_tick(&x, k);
+        bufs.push(vec![0.0; CHUNK]);
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        last = s.tick(&bufs, events(true), &drive_msg(true), now);
+    }
+    let frames: Vec<&Value> = last
+        .iter()
+        .filter(|m| m["type"] == json!("transfer_stream"))
+        .collect();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0]["protection"]["reference_absent"], json!(false));
+    assert_eq!(frames[0]["delay_samples"], json!(480));
+    assert_eq!(frames[1]["protection"]["reference_absent"], json!(true));
+    assert_eq!(
+        frames[1]["delay_attempts"],
+        json!(0),
+        "a Find ran on the silent pair"
+    );
+}

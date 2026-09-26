@@ -3050,18 +3050,20 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // reasons only:
   //  - a capture buffer with 3+ consecutive full-scale samples
   //    (|x| >= 0.99997) on any leg is thrown away;
-  //  - a tick where every pair's reference raw peak is at or below
-  //    -80 dBFS pauses processing (no Find, no analysis, no ladder input);
+  //  - a pair whose reference raw peak is at or below -80 dBFS pauses
+  //    (no Find, no analysis refresh, no ladder input for that pair);
   //  - a ladder column whose reference level sits more than 40 dB below
   //    its stage's median keeps its last good value (blanked, coherence 0,
   //    if it never had one).
   // A thrown-away or paused tick still ships a frame: the trace holds its
-  // last value, meters and drive stay live. It also leaves a gap in the
-  // ladders' input, so their snapshot replay provenance is cleared and a
-  // snapshot derives that pair Welch only.
+  // last value, meters and drive stay live. It also leaves a gap in that
+  // pair's ladder input, so its snapshot replay provenance is cleared and a
+  // snapshot derives that pair Welch only. The snapshot ring keeps the raw
+  // capture, rejected ticks included, so a snapshot's Welch estimate can
+  // include audio the live trace left out.
   "protection": {
     "clipped_buffers": <int>,            // buffers thrown away this session
-    "reference_absent": <bool>,          // this tick: paused, no reference
+    "reference_absent": <bool>,          // this tick: this pair paused, no reference
     "held_columns":    <int>             // this frame: mtw columns held
   } | null,                              // null: daemon predating #670
 
