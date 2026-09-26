@@ -100,6 +100,18 @@ pub struct AcViewApp {
     settings: Option<crate::settings::SettingsOverlay>,
     /// The typed-delay entry (`T`, transfer view, #669). `None` = closed.
     delay_entry: Option<crate::delay_entry::DelayEntry>,
+    /// A snapshot being taken on its own thread (`S`, #256). One at a time.
+    capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
+    /// The frame the live trace is held at while paused (`Z`, #256). The
+    /// meters and the fault indicator keep reading `last_frame`: a paused
+    /// picture must not hide a leg going silent or clipping while the
+    /// stimulus is still driving.
+    frozen_frame: Option<ac_core::wire::TransferFrame>,
+    /// Snapshots saved this session, for the status message's number.
+    captures_taken: usize,
+    /// The one-line status message (#256): what `S` did. Expires at the
+    /// instant held beside it; `None` = stays until replaced.
+    toast: Option<(String, Option<Instant>)>,
 
     // --- launch parameters, replayed verbatim on a settings relaunch ---
     weighting: WeightingCurve,
@@ -149,6 +161,10 @@ impl AcViewApp {
             help_open: false,
             settings: None,
             delay_entry: None,
+            capture_rx: None,
+            frozen_frame: None,
+            captures_taken: 0,
+            toast: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
             panic_keys_obstructed: false,
@@ -221,6 +237,11 @@ impl AcViewApp {
         if !self.admit_wire_version(&frame) {
             return;
         }
+        // Paused (`Z`, #256): the IR panel holds still with the trace —
+        // after the version check, so a refusal is still reported.
+        if self.transfer_paused() {
+            return;
+        }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
             self.last_ir_frame = Some(ir_frame);
         }
@@ -261,6 +282,9 @@ impl AcViewApp {
             }
         }
         self.last_frame = None;
+        // A held picture belongs to the stream being refused (#256):
+        // never show it over a later, compatible one.
+        self.frozen_frame = None;
         self.scene = None;
         self.last_scene_ranges = None;
         self.transfer_scene = None;
@@ -321,17 +345,39 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
+                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing);
                 if let Some(wire_frame) = &self.last_frame {
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
-                    self.transfer_scene = Some(ac_scene::TransferScene::from_input(
+                    let live = ac_scene::TransferScene::from_input(
                         &input,
-                        ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing),
+                        modes,
                         freq_range,
                         db_range,
                         &mut self.meters,
                         &mut self.fault,
                         now_s,
-                    ));
+                    );
+                    // Paused (`Z`, #256): the trace and readouts come from
+                    // the held frame; the meters and the fault indicator
+                    // stay live — the stimulus is still running.
+                    self.transfer_scene = Some(match (&self.frozen_frame, state.paused) {
+                        (Some(frozen), true) => {
+                            let mut held = ac_scene::TransferScene::from_input(
+                                &ac_scene::TransferInput::from_wire_frame(frozen),
+                                modes,
+                                freq_range,
+                                db_range,
+                                &mut Default::default(),
+                                &mut Default::default(),
+                                now_s,
+                            );
+                            held.meas_meter = live.meas_meter;
+                            held.ref_meter = live.ref_meter;
+                            held.fault = live.fault;
+                            held
+                        }
+                        _ => live,
+                    });
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
@@ -472,14 +518,7 @@ impl AcViewApp {
         match action {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
-            Action::TriggerSnapshot => {
-                if let Some(session) = &self.session {
-                    // Errors surface as a disconnected/no-op state,
-                    // never a crash — snapshot trigger failing (e.g.
-                    // no session) is an expected, recoverable UI path.
-                    let _ = crate::snapshot_flow::trigger_and_fetch(session.client());
-                }
-            }
+            Action::TriggerSnapshot => self.start_capture(Instant::now()),
             Action::OpenSnapshot => {
                 // File-picker wiring is UX-gated; the orchestration
                 // (snapshot_flow::open_local) is implemented and tested.
@@ -548,6 +587,21 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
+            Action::TogglePause => {
+                self.with_transfer(|t| t.toggle_pause());
+                self.frozen_frame = if self.transfer_paused() {
+                    self.last_frame.clone()
+                } else {
+                    None
+                };
+            }
+            Action::ToggleTraceVisible => self.with_transfer(|t| {
+                if shift {
+                    t.show_all();
+                } else {
+                    t.toggle_focused_visibility();
+                }
+            }),
             // -- transfer view: stimulus. Each key drives the safety
             // machine; the DriveCmd it emits (if any) goes to the daemon
             // via set_drive. The machine owns arm/fire/stop, auto-disarm,
@@ -623,6 +677,87 @@ impl AcViewApp {
         if let Some(session) = &self.session {
             session.set_drive(cmd.on, cmd.level_dbfs);
         }
+    }
+
+    /// Whether the transfer view's live display is paused (`Z`, #256).
+    fn transfer_paused(&self) -> bool {
+        matches!(&self.view, ViewKind::Transfer(t) if t.paused)
+    }
+
+    /// Set the status message; `for_s: None` keeps it until replaced.
+    fn set_toast(&mut self, text: String, now: Instant, for_s: Option<f64>) {
+        let until = for_s.map(|s| now + std::time::Duration::from_secs_f64(s));
+        self.toast = Some((text, until));
+    }
+
+    /// `S` (#256): start a capture on its own thread, and say so. The
+    /// message is the reaction the operator sees; the result replaces it.
+    fn start_capture(&mut self, now: Instant) {
+        if self.capture_rx.is_some() {
+            self.set_toast("snapshot already being taken".into(), now, Some(3.0));
+        } else if self.session.is_none() {
+            self.set_toast(
+                "no session \u{2014} nothing to snapshot".into(),
+                now,
+                Some(3.0),
+            );
+        } else {
+            self.capture_rx = Some(crate::capture::spawn(self.endpoint.clone()));
+            self.set_toast("taking snapshot\u{2026}".into(), now, None);
+        }
+    }
+
+    /// Collect a finished capture, if any: overlay it and report where it
+    /// went, or report why it failed.
+    fn poll_capture(&mut self, now: Instant) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, until)| until.is_some_and(|u| now >= u))
+        {
+            self.toast = None;
+        }
+        let Some(rx) = &self.capture_rx else { return };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("capture thread ended without a result".to_string())
+            }
+        };
+        self.capture_rx = None;
+        self.finish_capture(result, now);
+    }
+
+    fn finish_capture(&mut self, result: Result<crate::capture::Captured, String>, now: Instant) {
+        match result {
+            Ok(captured) => {
+                self.captures_taken += 1;
+                let n = self.captures_taken;
+                let path = captured.path.display().to_string();
+                self.with_transfer(|t| t.add_run(captured.run));
+                self.set_toast(
+                    format!("snapshot {n} saved \u{2014} {path}"),
+                    now,
+                    Some(5.0),
+                );
+            }
+            Err(e) => self.set_toast(format!("snapshot failed \u{2014} {e}"), now, Some(8.0)),
+        }
+    }
+
+    /// Feed a capture result directly, as the capture thread would.
+    #[cfg(test)]
+    pub(crate) fn finish_capture_for_test(
+        &mut self,
+        result: Result<crate::capture::Captured, String>,
+    ) {
+        self.finish_capture(result, Instant::now());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(|(t, _)| t.as_str())
     }
 
     /// Relay a `set_delay` to the daemon (#669). Best-effort, same
@@ -995,6 +1130,8 @@ impl AcViewApp {
                     captured_at_utc: run.captured_at_utc.as_str(),
                     scene,
                     focused: matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
+                    visible: run.visible,
+                    color_slot: run.color_slot,
                 })
                 .collect(),
             ViewKind::Spectrum(_) => Vec::new(),
@@ -1025,6 +1162,20 @@ impl AcViewApp {
                     ui.separator();
                     ui.label("↑↓ row   ←→ value   Enter apply   Esc cancel");
                 });
+        }
+
+        if let Some((text, until)) = &self.toast {
+            if until.is_some_and(|u| Instant::now() >= u) {
+                // Expired; cleared on the next pass that has `&mut self`.
+            } else {
+                egui::Area::new(egui::Id::new("ac-view-toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -12.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(text);
+                        });
+                    });
+            }
         }
 
         if let Some(entry) = &self.delay_entry {
@@ -1065,6 +1216,7 @@ impl eframe::App for AcViewApp {
         // Per-frame keepalive, gated on panic-reachability (see
         // keepalive_tick).
         self.keepalive_tick(std::time::Instant::now());
+        self.poll_capture(std::time::Instant::now());
 
         let got_new_frame = self.drain_frames();
         // Rebuild the scenes once per pass — never once per backlog

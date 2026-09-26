@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
 pub struct Endpoint {
     pub host: String,
     pub ctrl_port: u16,

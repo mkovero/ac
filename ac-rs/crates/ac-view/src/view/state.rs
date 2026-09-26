@@ -118,6 +118,13 @@ pub struct LoadedRun {
     /// non-persistence reasoning as the live view's `smoothing` field:
     /// every load opens at the honest, unsmoothed default.
     pub smoothing: ac_scene::Smoothing,
+    /// Drawn or hidden (#256, `V`). Hidden runs keep their legend row, so
+    /// nothing leaves the comparison without the operator removing it.
+    pub visible: bool,
+    /// Which comparison colour this run draws in — assigned once when the
+    /// run is added ([`TransferViewState::add_run`]), so removing one run
+    /// never recolours the others mid-comparison.
+    pub color_slot: usize,
 }
 
 impl LoadedRun {
@@ -135,6 +142,8 @@ impl LoadedRun {
             channel_role,
             sr,
             smoothing: ac_scene::Smoothing::Off,
+            visible: true,
+            color_slot: 0,
         }
     }
 }
@@ -187,6 +196,15 @@ pub struct TransferViewState {
     /// Starts on `Live` — a session that has loaded nothing yet reads
     /// exactly as it did before this issue.
     pub focus: Focus,
+    /// `Z` (#256): the live trace, meters and readouts hold still so stored
+    /// runs can be compared against a fixed picture. Frames keep arriving
+    /// and the stimulus keeps running; they are just not shown.
+    pub paused: bool,
+    /// Whether the live trace is drawn (`V` with focus on live, #256) —
+    /// hide it to compare stored runs alone.
+    pub live_visible: bool,
+    /// Next [`LoadedRun::color_slot`].
+    next_color_slot: usize,
 }
 
 impl Default for TransferViewState {
@@ -209,6 +227,42 @@ impl TransferViewState {
             ir_panel_open: false,
             loaded: Vec::new(),
             focus: Focus::Live,
+            paused: false,
+            live_visible: true,
+            next_color_slot: 0,
+        }
+    }
+
+    /// Add a stored run to the comparison with the next colour (#256).
+    pub fn add_run(&mut self, mut run: LoadedRun) {
+        run.color_slot = self.next_color_slot;
+        self.next_color_slot += 1;
+        self.loaded.push(run);
+    }
+
+    /// `Z`: pause or resume the live display (#256).
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+    }
+
+    /// `V`: show or hide the focused trace — the live one or a stored run
+    /// (#256).
+    pub fn toggle_focused_visibility(&mut self) {
+        match self.focus {
+            Focus::Live => self.live_visible = !self.live_visible,
+            Focus::Stored(idx) => {
+                if let Some(run) = self.loaded.get_mut(idx) {
+                    run.visible = !run.visible;
+                }
+            }
+        }
+    }
+
+    /// `Shift+V`: show every trace (#256).
+    pub fn show_all(&mut self) {
+        self.live_visible = true;
+        for run in &mut self.loaded {
+            run.visible = true;
         }
     }
 
@@ -238,7 +292,7 @@ impl TransferViewState {
     /// readout should name next, the same "just arrived" precedence the
     /// live view already gives the newest frame.
     pub fn add_loaded_run(&mut self, run: LoadedRun) {
-        self.loaded.push(run);
+        self.add_run(run);
         self.focus = Focus::Stored(self.loaded.len() - 1);
     }
 

@@ -109,6 +109,8 @@ fn stored_runs_paint_without_a_live_scene() {
         captured_at_utc: "2026-08-18T00:00:00Z",
         scene: &fixture,
         focused: true,
+        visible: true,
+        color_slot: 0,
     }];
 
     let mut harness = Harness::new_ui(|ui| {
@@ -152,12 +154,16 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
             captured_at_utc: "2026-08-01T00:00:00Z",
             scene: &scene_a,
             focused: true,
+            visible: true,
+            color_slot: 0,
         },
         StoredTrace {
             label: "run.acsnap",
             captured_at_utc: "2026-08-02T00:00:00Z",
             scene: &scene_b,
             focused: false,
+            visible: true,
+            color_slot: 0,
         },
     ];
 
@@ -206,6 +212,8 @@ fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
             captured_at_utc: "2026-09-24T13:02:11Z",
             scene,
             focused: true,
+            visible: true,
+            color_slot: 0,
         }];
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(900.0, 300.0));
