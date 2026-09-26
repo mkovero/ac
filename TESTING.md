@@ -202,7 +202,7 @@ command, its abbreviations, defaults and error cases.
 
 Unit tests in `audio::{jack_backend, cpal_backend, fake}`, `gpio`, and the
 `handlers/` modules. Integration binaries in `tests/`: `it_protocol`,
-`it_snapshot`, `it_set_drive`, `it_relock`, `it_scene_fixture`,
+`it_snapshot`, `it_set_drive`, `it_set_delay`, `it_scene_fixture`,
 `it_cross_tier_parity`, `it_zmq_doc_parity`, and the `#[ignore]`'d
 `it_loopback_ir`.
 
@@ -219,7 +219,7 @@ them through their `ac_core::wire` type, and requires the key set that type
 writes — nested keys included — to equal the frame's `ZMQ.md` block. That is
 the guard for a field no consumer reads: renaming `LoudnessFrame::lra_lu`
 compiles everywhere and fails here. It does not check the untyped frames'
-payloads, the keys inside `cal_tags` / `delay_evidence`, field types or
+payloads, the keys inside `cal_tags`, field types or
 values: a green run means the roster, the read-only replies and the typed
 frames' keys agree, not that the prose is true.
 

@@ -1,6 +1,4 @@
-use ac_core::visualize::transfer::{
-    capture_duration, estimate_delay_samples, h1_estimate, h1_estimate_with_delay,
-};
+use ac_core::visualize::transfer::{capture_duration, h1_estimate, h1_estimate_with_delay};
 use std::time::Instant;
 
 fn main() {
@@ -42,7 +40,7 @@ fn main() {
         let per_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
         // Simulate the transfer_stream hot loop: delay pre-computed once.
-        let d = estimate_delay_samples(&r, &m, sr).unwrap_or(0);
+        let d = h1_estimate(&r, &m, sr).delay_samples;
         let _ = h1_estimate_with_delay(&r, &m, sr, d);
         let t0 = Instant::now();
         for _ in 0..iters {

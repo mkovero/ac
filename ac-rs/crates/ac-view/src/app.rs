@@ -98,6 +98,8 @@ pub struct AcViewApp {
     help_open: bool,
     /// The settings overlay (`G`, transfer view). `None` = closed.
     settings: Option<crate::settings::SettingsOverlay>,
+    /// The typed-delay entry (`T`, transfer view, #669). `None` = closed.
+    delay_entry: Option<crate::delay_entry::DelayEntry>,
 
     // --- launch parameters, replayed verbatim on a settings relaunch ---
     weighting: WeightingCurve,
@@ -117,6 +119,9 @@ pub struct AcViewApp {
     /// hole lived.
     #[cfg(test)]
     sent_drive: Vec<crate::stimulus::DriveCmd>,
+    /// Every `set_delay` relayed, for the same reason as `sent_drive`.
+    #[cfg(test)]
+    sent_delay: Vec<Option<i64>>,
 }
 
 impl AcViewApp {
@@ -142,11 +147,14 @@ impl AcViewApp {
             version_refusal: None,
             help_open: false,
             settings: None,
+            delay_entry: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
             panic_keys_obstructed: false,
             #[cfg(test)]
             sent_drive: Vec::new(),
+            #[cfg(test)]
+            sent_delay: Vec::new(),
         }
     }
 
@@ -508,14 +516,31 @@ impl AcViewApp {
             Action::ToggleIrPanel => self.with_transfer(|t| t.toggle_ir_panel()),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
-            Action::Relock => {
-                // Best-effort, same discipline as `set_drive`: a failed
-                // send is not a crash, it is a re-lock that did not
-                // happen, and the daemon's own retry path is unaffected.
-                if let Some(session) = &self.session {
-                    let _ = session.client().call(&serde_json::json!({"cmd": "relock"}));
+            // -- transfer view: the operator's delay (#669). The values
+            // come from the scene; this crate adds nothing but the ±1 a
+            // nudge is by definition. --
+            Action::InsertDelay => {
+                if shift {
+                    self.send_delay(None);
+                } else if let Some(v) = self
+                    .transfer_scene
+                    .as_ref()
+                    .and_then(|s| s.delay_insert_samples)
+                {
+                    self.send_delay(Some(v));
                 }
             }
+            Action::NudgeDelayEarlier | Action::NudgeDelayLater => {
+                let step = if action == Action::NudgeDelayLater {
+                    1
+                } else {
+                    -1
+                };
+                if let Some(v) = self.transfer_scene.as_ref().and_then(|s| s.delay_samples) {
+                    self.send_delay(Some(v + step));
+                }
+            }
+            Action::TypeDelay => self.delay_entry = Some(Default::default()),
             // -- transfer view: stimulus. Each key drives the safety
             // machine; the DriveCmd it emits (if any) goes to the daemon
             // via set_drive. The machine owns arm/fire/stop, auto-disarm,
@@ -590,6 +615,43 @@ impl AcViewApp {
         self.sent_drive.push(cmd);
         if let Some(session) = &self.session {
             session.set_drive(cmd.on, cmd.level_dbfs);
+        }
+    }
+
+    /// Relay a `set_delay` to the daemon (#669). Best-effort, same
+    /// discipline as `set_drive`: a failed send is a delay that did not
+    /// change, visible on the next frame, never a crash.
+    fn send_delay(&mut self, samples: Option<i64>) {
+        #[cfg(test)]
+        self.sent_delay.push(samples);
+        if let Some(session) = &self.session {
+            let _ = session
+                .client()
+                .call(&serde_json::json!({"cmd": "set_delay", "samples": samples}));
+        }
+    }
+
+    /// Route a frame's typed-delay keypresses. `T` applies (an empty entry
+    /// cancels); Esc cancels — it only reaches here while the stimulus is
+    /// idle, since panic-first owns it otherwise.
+    fn handle_delay_entry_keys(&mut self, chars: &str, backspace: bool, apply: bool, esc: bool) {
+        let Some(entry) = &mut self.delay_entry else {
+            return;
+        };
+        if esc {
+            self.delay_entry = None;
+            return;
+        }
+        chars.chars().for_each(|c| entry.push(c));
+        if backspace {
+            entry.backspace();
+        }
+        if apply {
+            let value = entry.value();
+            self.delay_entry = None;
+            if value.is_some() {
+                self.send_delay(value);
+            }
         }
     }
 
@@ -803,6 +865,32 @@ impl AcViewApp {
             return;
         }
 
+        if self.delay_entry.is_some() {
+            let (chars, backspace, apply, esc) = ctx.input(|i| {
+                let chars: String = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    chars,
+                    i.key_pressed(Key::Backspace),
+                    i.key_pressed(Key::T),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            // `T` arrives as text too; it is the apply key, not a digit.
+            let chars: String = chars
+                .chars()
+                .filter(|c| !c.eq_ignore_ascii_case(&'t'))
+                .collect();
+            self.handle_delay_entry_keys(&chars, backspace, apply, esc);
+            return;
+        }
+
         let view_id = self.view.id();
         let mut pressed: Vec<(Action, bool)> = Vec::new();
         ctx.input(|i| {
@@ -930,6 +1018,16 @@ impl AcViewApp {
                     }
                     ui.separator();
                     ui.label("↑↓ row   ←→ value   Enter apply   Esc cancel");
+                });
+        }
+
+        if let Some(entry) = &self.delay_entry {
+            egui::Window::new("delay")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("delay (samples):  {}▏", entry.text()));
+                    ui.separator();
+                    ui.label("digits, -   Backspace   T apply   Esc cancel");
                 });
         }
     }

@@ -15,7 +15,7 @@
 //!
 //! # The offset is signed
 //!
-//! `estimate_delay(ref, meas)` returns `D` with `meas[n] ≈ ref[n − D]`, and on
+//! The session delay `D` (`transfer::live_ir_peak_lag`, or typed) means `meas[n] ≈ ref[n − D]`, and on
 //! today's hardware `D` is **negative** — about −19200 at 96 kHz while #216's
 //! ring skew is live. A design that assumes a non-negative offset breaks on the
 //! rig, so both directions are first-class here and both are tested.
@@ -43,7 +43,7 @@ pub struct PairAligner {
 }
 
 impl PairAligner {
-    /// `offset` is `D` from `estimate_delay(ref, meas)`: the aligner emits
+    /// `offset` is the session delay `D`: the aligner emits
     /// pairs `(meas[n], ref[n − D])`.
     pub fn new(offset: i64) -> Self {
         // Pairing meas[n] with ref[n−D] is the same as pairing meas[m+D] with

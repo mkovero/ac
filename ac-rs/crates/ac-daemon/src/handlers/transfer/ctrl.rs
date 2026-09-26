@@ -1,5 +1,5 @@
 //! CTRL commands that target a **running** `transfer_stream` worker
-//! without spawning one: `set_drive` and `relock`.
+//! without spawning one: `set_drive` and `set_delay`.
 //!
 //! Neither has a `cmd_group` entry and neither consults `check_busy` — see
 //! [`set_drive`] for why routing them through the busy guard would be wrong
@@ -68,23 +68,51 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true, "on": on, "level_dbfs": applied, "max_dbfs": MAX_EMISSION_DBFS})
 }
 
-/// `relock` (#226) — discard every pair's held delay lock in the
-/// **running** `transfer_stream` session, so the worker's next tick
-/// retries acquisition from scratch. A held lock is a maintained
-/// quantity, not a cached one: the operator asking is one of the two
-/// events that invalidate it (the other is the drive coming on, handled
-/// inside the worker loop itself).
+/// `set_delay` (#669) — set, or re-find, the delay the **running**
+/// `transfer_stream` session aligns with. The operator owns the delay, as in
+/// Smaart: the daemon finds it once at start and publishes the live IR's
+/// residual (`delay_residual`) on every frame; a client inserts that, types
+/// a value, or nudges by one sample, all through this command.
 ///
-/// Dispatched like `set_drive`: targets a live worker without spawning
-/// one, so it has no `cmd_group` entry and never consults `check_busy`.
-/// Session-wide, no `pair` selector — the flush is a session event and a
-/// per-pair variant is scope this issue does not need.
-pub fn relock(state: &ServerState, _cmd: &Value) -> Value {
-    let slot = state.relock_state.lock().unwrap();
+/// `samples`: an integer holds that delay and marks it operator-set, which
+/// no drive edge discards. `null` discards the held delay so the session
+/// finds it again from the unaligned live IR — what `relock` (#226) did.
+/// `pair`: a pair index in launch order; absent applies to every pair.
+///
+/// Dispatched like `set_drive`: targets a live worker without spawning one,
+/// so it has no `cmd_group` entry and never consults `check_busy`.
+pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
+    let samples = match cmd.get("samples") {
+        Some(Value::Null) => None,
+        Some(v) => match v.as_i64() {
+            Some(n) => Some(n),
+            None => return json!({"ok": false, "error": "'samples' must be an integer or null"}),
+        },
+        None => return json!({"ok": false, "error": "'samples' required (integer or null)"}),
+    };
+    let pair = match cmd.get("pair") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n as usize),
+            None => return json!({"ok": false, "error": "'pair' must be a non-negative integer"}),
+        },
+    };
+    let n_pairs = state
+        .snapshot_ring
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|r| r.lock().unwrap().pairs.len());
+    if let (Some(p), Some(n)) = (pair, n_pairs) {
+        if p >= n {
+            return json!({"ok": false, "error": format!("'pair' {p} out of range: session has {n} pair(s)")});
+        }
+    }
+    let slot = state.delay_requests.lock().unwrap();
     match slot.as_ref() {
         Some(r) => {
-            r.request();
-            json!({"ok": true})
+            r.push(crate::workers::DelayCmd { pair, samples });
+            json!({"ok": true, "samples": samples, "pair": pair})
         }
         None => json!({"ok": false, "error": "no transfer_stream session running"}),
     }

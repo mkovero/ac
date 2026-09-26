@@ -38,9 +38,10 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         phase_deg,
         coherence: vec![0.9; n],
         delay_ms,
-        // These fixtures stipulate a delay the estimator locked — that is
-        // what makes the de-rotation cases meaningful.
+        // These fixtures stipulate a held delay — that is what makes the
+        // de-rotation cases meaningful.
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-6.0206),

@@ -1,3 +1,5 @@
+> **Partly superseded by #669 (2026-09-26):** the delay is now found as the live IR peak and owned by the operator; there is no estimator refusal, so the `LOST LOCK` / `NO LOCK` rows below were removed. `NO REFERENCE`, `NO SIGNAL` and `CHECK ROUTING` stand; `LOCK ACQUIRED` is now `DELAY FOUND`. See `ac-rs/crates/ac-scene/src/fault.rs`.
+
 Role: worker on issue #228 (fault indicator). Read .agents/ for your role spec first,
 per CLAUDE.md.
 

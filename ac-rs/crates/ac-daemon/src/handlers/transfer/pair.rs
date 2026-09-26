@@ -2,11 +2,11 @@
 //! [`PairState`] is what the loop maintains, and [`Lock`] is the held delay
 //! estimate with the provenance a drive edge reads (#226).
 
-use serde_json::Value;
-
 use ac_core::shared::calibration::{Calibration, LayerVerdict};
 
-/// A pair's held delay lock (#226). `driving` records whether the drive
+/// A pair's held delay (#226, #669). `operator` is true when a client set
+/// it with `set_delay`; the daemon never replaces an operator-set delay.
+/// `driving` records, for a delay the daemon found, whether the drive
 /// was on at the tick this lock was accepted — the qualifier the drive
 /// off→on edge reads to decide whether this lock is stale by
 /// construction (taken against silence) or survives (taken while
@@ -18,6 +18,7 @@ use ac_core::shared::calibration::{Calibration, LayerVerdict};
 pub(super) struct Lock {
     pub(super) samples: i64,
     pub(super) driving: bool,
+    pub(super) operator: bool,
 }
 
 /// Everything about one pair that is fixed for the session: the channels
@@ -64,34 +65,16 @@ pub(super) struct PairCtx {
 /// consumed into `mtw_columns` before the fan-out rather than read
 /// inside it, so it stays a separate vec alongside.
 pub(super) struct PairState {
-    /// Delay cache: ref↔meas propagation is constant during a streaming
-    /// session (fixed hardware path), so we estimate once per pair on
-    /// warmup and reuse the result. Skipping `estimate_delay` per tick
-    /// (a 262 k-point FFT+IFFT at 2.5 s ring / 48 kHz) cuts the hot-loop
-    /// work from ~17 ms → ~3 ms and takes the refresh rate from choppy
-    /// ~8.5 Hz to the capture-interval-limited rate.
-    ///
-    /// That rate is ~16.6 Hz, not the ~10 Hz an older note claimed: the
-    /// limit is `chunk_secs` (0.05 s) plus per-tick work, and
-    /// `chunk_secs` was 0.2 when the ~10 Hz figure was written. Measured
-    /// 2026-08-06 on `--fake-audio` at 48 kHz over 30 s, two pairs,
-    /// median inter-frame gap 60.3 ms; the rig sees 17.5–18 Hz at 96 kHz.
+    /// The held delay: found once at start from the unaligned live IR's
+    /// peak, or set by the operator (#669). ref↔meas propagation is
+    /// constant on a fixed path, so the daemon does not move it by itself.
     pub(super) delay: Option<Lock>,
-    /// A pair whose delay estimate was *refused* (no prominent
-    /// correlation peak — #227) stays unlocked and is retried, because
-    /// the cause is usually transient from the software's point of view:
-    /// an unpatched reference leg or a muted source that the operator
-    /// then fixes. Retry is rate-limited because each attempt is the same
-    /// full-ring FFT+IFFT the cache above exists to avoid, and the inputs
-    /// it reads only turn over on the ring's own timescale.
+    /// A pair whose start-up Find had no peak (a silent leg) stays
+    /// unaligned and is retried, because the cause is usually one the
+    /// operator then fixes: an unpatched reference or a muted source.
     pub(super) next_attempt: Option<std::time::Instant>,
-    /// Peak-to-median prominence from the most recent attempt, locked or
-    /// refused. Published so a session that never locks still says how
-    /// far short it fell — the estimator's one empirical constant is set
-    /// from this distribution, and a bare "refused" would not measure it.
-    pub(super) prominence: Option<Value>,
-    /// How many delay estimates this pair has completed, accepted or
-    /// refused. Published as `delay_attempts` (#238).
+    /// How many start-up Finds this pair has completed, with or without a
+    /// peak. Published as `delay_attempts` (#238).
     ///
     /// This is the only thing on the wire that separates "warming up"
     /// from "refusing": both publish `delay_locked: false`, and until an
@@ -101,11 +84,10 @@ pub(super) struct PairState {
     /// a question yet — see `ac-scene::fault`.
     ///
     /// A count, not a verdict. It says the estimator ran; it says nothing
-    /// about how close the result came, which is the estimator's own
-    /// business (`delay_evidence`, diagnostic-only).
+    /// about what the result was.
     ///
     /// MONOTONE for the life of the session — never reset, including by
-    /// #226's re-locking. Resetting it would make a pair that locked and
+    /// a re-find (`set_delay` with `samples: null`). Resetting it would make a pair that locked and
     /// then started refusing read as one that has not been asked yet, and
     /// the fault indicator answers "nothing to report" to that.
     pub(super) attempts: u32,
@@ -127,7 +109,6 @@ impl PairState {
         Self {
             delay: None,
             next_attempt: None,
-            prominence: None,
             attempts: 0,
             spl_integ,
             spl_last: None,
@@ -136,11 +117,9 @@ impl PairState {
 
     /// Discard this pair's held lock and its `ladder`, and clear the
     /// retry timer so the next tick attempts acquisition immediately
-    /// rather than waiting out `RELOCK_RETRY`. Leaves `attempts` and
-    /// `prominence` untouched — the first must stay monotone (a reset
-    /// would make a locked-then-refusing pair read as one never asked),
-    /// and the second is last-attempt evidence that the next attempt
-    /// overwrites on its own.
+    /// rather than waiting out `FIND_RETRY`. Leaves `attempts` untouched —
+    /// it must stay monotone (a reset would make a found-then-silent pair
+    /// read as one never asked).
     ///
     /// Takes the ladder slot as an argument because `MtwPair` cannot live
     /// in `PairState` (see the type's note), but a flush that dropped the

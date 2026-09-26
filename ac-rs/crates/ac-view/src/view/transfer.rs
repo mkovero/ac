@@ -359,19 +359,32 @@ fn draw_delay_readout(
     scene: Option<&ac_scene::TransferScene>,
     stored: &[StoredTrace<'_>],
 ) {
-    let focused: Option<(&str, &str)> = match state.focus {
-        Focus::Live => scene.map(|s| ("live", s.delay_readout.as_str())),
+    // The live trace also carries the operator's delay control (#669):
+    // where the delay came from and what Find reads against it. A stored
+    // run has no live IR, so nothing to find.
+    let focused: Option<(&str, &str, Option<&str>)> = match state.focus {
+        Focus::Live => scene.map(|s| {
+            (
+                "live",
+                s.delay_readout.as_str(),
+                s.delay_control_readout.as_deref(),
+            )
+        }),
         Focus::Stored(idx) => stored
             .get(idx)
-            .map(|run| (run.label, run.scene.delay_readout.as_str())),
+            .map(|run| (run.label, run.scene.delay_readout.as_str(), None)),
     };
-    let Some((owner, delay)) = focused else {
+    let Some((owner, delay, control)) = focused else {
         return;
     };
     let delay_text = if stored.is_empty() {
         delay.to_string()
     } else {
         format!("delay ({owner})  {delay}")
+    };
+    let delay_text = match control {
+        Some(control) => format!("{delay_text}   {control}"),
+        None => delay_text,
     };
     text(
         painter,

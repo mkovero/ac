@@ -93,7 +93,7 @@ fn assert_refused_within(c: &Client, cmd: Value, error: &str) {
 
 fn assert_transfer_state_cleared(c: &Client) {
     assert_refused_within(c, set_drive_off(), NO_TRANSFER);
-    assert_refused_within(c, json!({"cmd": "relock"}), NO_TRANSFER);
+    assert_refused_within(c, json!({"cmd": "set_delay", "samples": null}), NO_TRANSFER);
     assert_refused_within(c, json!({"cmd": "snapshot"}), NO_TRANSFER);
 }
 

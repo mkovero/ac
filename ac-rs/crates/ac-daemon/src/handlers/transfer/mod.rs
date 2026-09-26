@@ -8,7 +8,7 @@
 //! |---|---|---|
 //! | [`request`] | the launch contract — pair parsing, [`request::TransferParams`] | a `Value` |
 //! | [`plan`] | launch resolution: ports, calibration, the reply | `ServerState` |
-//! | [`ctrl`] | `set_drive`, `relock` — CTRL commands that target a live worker | `ServerState` |
+//! | [`ctrl`] | `set_drive`, `set_delay` — CTRL commands that target a live worker | `ServerState` |
 //! | [`window`] | the analysis window's geometry and the block-lattice drain (#208) | a `Vec<f32>` |
 //! | [`pair`] | per-pair session constants and maintained state | — |
 //! | [`analysis`] | the H1 estimate and everything derived from it | rings |
@@ -37,6 +37,6 @@ mod session;
 mod window;
 mod worker;
 
-pub use ctrl::{relock, set_drive};
+pub use ctrl::{set_delay, set_drive};
 pub use probe::probe;
 pub use worker::transfer_stream;

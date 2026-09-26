@@ -212,48 +212,64 @@ pub struct TransferFrame {
     /// γ² in `[0,1]`, same length as [`Self::freqs`].
     #[serde(default)]
     pub coherence: Vec<f64>,
-    /// The session's frozen delay estimate, in samples.
+    /// The pair's delay setting, in samples: found at session start (the
+    /// unaligned live IR's peak) or set by `set_delay` (#669).
     #[serde(default)]
     pub delay_samples: i64,
     /// The same estimate in ms — τ_sess, the quantity the de-rotation
     /// mapping is written in terms of.
     #[serde(default)]
     pub delay_ms: f64,
-    /// Whether [`Self::delay_samples`] is a measured lock (#227).
+    /// Whether [`Self::delay_samples`] is a held delay — found or set (#227,
+    /// #669).
     ///
     /// `None` is a daemon that predates #227 and says nothing either way —
     /// distinct from `Some(false)`, which is a positive statement that the
     /// pair is measured UNALIGNED, either because it is still warming up or
-    /// because the estimator refused to lock. The three-way distinction is
+    /// because its live IR had no peak (a silent leg). The three-way distinction is
     /// load-bearing: `ac_scene::fault` may only report a lock fault on
     /// `Some(false)`, never on absence, and `delay_ms == 0.0` cannot stand
     /// in for it (a digital loopback legitimately reads 0.0 — #216).
     #[serde(default)]
     pub delay_locked: Option<bool>,
-    /// How many delay estimates this pair has completed, accepted or refused
-    /// (#238). `0` on a daemon predating it — and `0` is also the value that
+    /// How many start-up Finds this pair has completed, with or without a
+    /// peak (#238, #669). `0` on a daemon predating it — and `0` is also the value that
     /// keeps every consumer silent, so an older daemon's absence cannot read
     /// as "the estimator has run".
     ///
     /// This is what separates warmup from refusal: [`Self::delay_locked`] is
     /// `Some(false)` for both, and before the first attempt the pair has not
     /// been asked the question yet. A count only — nothing here says how close
-    /// the estimate came, which is [`Self::delay_evidence`]'s business and
-    /// gates nothing.
+    /// the estimate came.
     ///
     /// **Monotone for the life of the pair, and it must stay that way.** A
-    /// re-lock (#226) adds attempts; it must never reset the count. If it
+    /// re-find (`set_delay` with `samples: null`, #669) adds attempts; it must
+    /// never reset the count. If it
     /// did, `ac_scene::fault::FaultFrame::estimator_attempted` would go back
     /// to false and a pair that locked and then started refusing would read
     /// as a pair that has not been asked yet — silence, exactly the blank
     /// window #238 fixed, and reachable only in the sessions #226 exists for.
     #[serde(default)]
     pub delay_attempts: u32,
-    /// The evidence the lock decision was made on (#227); `null` before the
-    /// first attempt. DIAGNOSTIC ONLY — nothing downstream may gate on it.
-    /// Held as a raw value; typing it is a #112 follow-up.
+    /// Peak of this frame's live impulse response, as a signed offset in
+    /// samples from [`Self::delay_samples`] — Smaart's Delta Delay (#669).
+    ///
+    /// The live IR is computed after alignment by the current delay, so its
+    /// peak is what is left over: `0` when the setting matches the IR peak,
+    /// `+k` when the arrival is `k` samples later than the setting. The
+    /// absolute IR-peak arrival is `delay_samples + delay_residual`; a client
+    /// "Find" reads it, and "Insert" sends that sum as `set_delay`. The
+    /// picker is `ac_core::measurement::sweep::ir_peak`, the same one
+    /// `plot ir` and `calibrate` τ use. Range ±0.5 s (the 1 s Welch
+    /// segment). `null` on a settling frame, a silent leg, or a daemon
+    /// predating #669.
     #[serde(default)]
-    pub delay_evidence: Option<Value>,
+    pub delay_residual: Option<i64>,
+    /// `true` when [`Self::delay_samples`] was set by a client's
+    /// `set_delay`, `false` when the daemon found it at start (#669). An
+    /// operator-set delay is never replaced by the daemon.
+    #[serde(default)]
+    pub delay_operator: bool,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's

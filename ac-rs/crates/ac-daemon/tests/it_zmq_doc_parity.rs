@@ -31,8 +31,8 @@
 //!
 //! What is **not** checked, so that a green run is not read as more than it
 //! is: the payloads of the untyped DATA frames, field *types*, field
-//! *values*, the keys inside `cal_tags` and `delay_evidence` (raw subtrees,
-//! typing them is a follow-up), and the reply of every command whose handler
+//! *values*, the keys inside `cal_tags` (a raw subtree;
+//! typing it is a follow-up), and the reply of every command whose handler
 //! spawns a worker or drives an output. A green run here says the roster, the
 //! read-only replies and the typed frames' keys agree — nothing about whether
 //! the prose is true.
@@ -432,7 +432,7 @@ fn every_dispatched_command_refuses_an_unrecognised_field() {
 /// Nested keys under these are not compared: the subtrees are held as raw
 /// `serde_json::Value` on the shared type, so their keys are not the type's
 /// statement. The top-level key itself still is.
-const RAW_SUBTREES: &[&str] = &["cal_tags", "delay_evidence"];
+const RAW_SUBTREES: &[&str] = &["cal_tags"];
 
 /// The first fenced block after the first line starting with `marker`.
 fn block_after(md: &str, marker: &str) -> String {

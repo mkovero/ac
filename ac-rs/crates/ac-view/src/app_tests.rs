@@ -551,16 +551,9 @@ fn cycle_focus_and_close_focused_run_reach_transfer_view_state_through_dispatch(
     }
 }
 
-/// A refusing frame, built from the healthy fixture so only the fields
-/// the indicator reads differ.
-fn refusing_frame() -> ac_core::wire::TransferFrame {
-    refusing_frame_at_attempt(3)
-}
-
-/// The same, with the attempt count set: escalation is the later of
-/// `PERSISTENT_REFUSAL_S` and `PERSISTENT_REFUSAL_ATTEMPTS` (#247), so a
-/// test that advances the clock has to advance the count with it.
-fn refusing_frame_at_attempt(attempts: u32) -> ac_core::wire::TransferFrame {
+/// A driving frame with no delay yet, built from the healthy fixture so
+/// only the fields the indicator reads differ.
+fn unaligned_frame() -> ac_core::wire::TransferFrame {
     let mut f = transfer_frame();
     f.drive = Some(ac_core::wire::WireDrive {
         on: true,
@@ -568,85 +561,89 @@ fn refusing_frame_at_attempt(attempts: u32) -> ac_core::wire::TransferFrame {
         drivable: true,
     });
     f.delay_locked = Some(false);
-    // The estimator has answered and refused (#238), so this is a frame a
-    // current daemon could publish. It is not what makes the row paint
-    // here — `transfer_frame` carries `mtw`, so the settled gate already
-    // covers it. The field-reachable no-ladder shape is pinned in
-    // `ac-scene::fault` and in `it_transfer_geometry`.
-    f.delay_attempts = attempts;
+    f.delay_attempts = 0;
     f
 }
 
-/// #228: the refusal clock lives on the app, not on the frame, so a
-/// persistent refusal must be reachable by feeding identical frames as
-/// scene time advances. A per-frame implementation would show LOST LOCK
-/// forever and the operator would never be told to move the mic.
-#[test]
-fn a_refusal_becomes_persistent_as_scene_time_advances() {
-    let mut app = AcViewApp::new_transfer(
-        Endpoint {
-            host: "localhost".into(),
-            ctrl_port: 0,
-            data_port: 0,
-        },
-        TEST_DRIVE_MAX_DBFS,
-    );
-
-    app.ingest_frame_for_test(refusing_frame(), 0.0);
-    assert_eq!(
-        app.current_transfer_scene().expect("scene built").fault,
-        // Never locked in this session, so nothing was lost — the
-        // transient row says NO LOCK without the instruction.
-        Some(ac_scene::Fault::NoLockYet)
-    );
-
-    // The same refusal, retried at the daemon's 1 Hz, until both the
-    // clock and the attempt count have passed their thresholds. The
-    // frames still say nothing new — the row changes because the app
-    // carries the state, which is what this test is for.
-    let first = 3;
-    for n in 1..ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS {
-        app.ingest_frame_for_test(refusing_frame_at_attempt(first + n), n as f64);
-        assert_eq!(
-            app.current_transfer_scene().expect("scene rebuilt").fault,
-            Some(ac_scene::Fault::NoLockYet),
-            "escalated at attempt {n} of the refusal, before either \
-             threshold was reached"
-        );
-    }
-    app.ingest_frame_for_test(
-        refusing_frame_at_attempt(first + ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS),
-        ac_scene::fault::PERSISTENT_REFUSAL_S,
-    );
-    assert_eq!(
-        app.current_transfer_scene().expect("scene rebuilt").fault,
-        Some(ac_scene::Fault::NoLock)
-    );
+/// The fixture with a held delay of 400 whose live IR peaks 12 later.
+fn found_frame() -> ac_core::wire::TransferFrame {
+    let mut f = unaligned_frame();
+    f.delay_locked = Some(true);
+    f.delay_attempts = 1;
+    f.delay_samples = 400;
+    f.delay_residual = Some(12);
+    f
 }
 
-/// And a lock ends it, with the transient confirmation on the way past.
+/// #669: the daemon finding the delay is confirmed on the way past, and
+/// the fault state lives on the app, so identical frames clear it as
+/// scene time advances.
 #[test]
-fn a_lock_clears_the_refusal_and_confirms_itself() {
-    let mut app = AcViewApp::new_transfer(
-        Endpoint {
-            host: "localhost".into(),
-            ctrl_port: 0,
-            data_port: 0,
-        },
-        TEST_DRIVE_MAX_DBFS,
-    );
-    app.ingest_frame_for_test(refusing_frame(), 0.0);
+fn a_found_delay_confirms_itself_and_clears() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(unaligned_frame(), 0.0);
+    assert_eq!(app.current_transfer_scene().unwrap().fault, None);
 
-    let mut locked = refusing_frame();
-    locked.delay_locked = Some(true);
-    app.ingest_frame_for_test(locked.clone(), 1.0);
+    app.ingest_frame_for_test(found_frame(), 1.0);
     assert_eq!(
         app.current_transfer_scene().unwrap().fault,
-        Some(ac_scene::Fault::LockAcquired)
+        Some(ac_scene::Fault::DelayFound)
     );
-
-    app.ingest_frame_for_test(locked, 1.0 + ac_scene::fault::LOCK_ACQUIRED_HOLD_S);
+    app.ingest_frame_for_test(found_frame(), 1.0 + ac_scene::fault::DELAY_FOUND_HOLD_S);
     assert_eq!(app.current_transfer_scene().unwrap().fault, None);
+}
+
+/// `E` inserts what Find reads — the held delay plus the residual, as the
+/// scene computed it — and Shift+E asks the daemon to find again.
+#[test]
+fn e_inserts_the_found_delay_and_shift_e_finds_again() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::InsertDelay, false);
+    app.handle_action(Action::InsertDelay, true);
+    assert_eq!(app.sent_delay, vec![Some(412), None]);
+}
+
+/// `,` and `.` move the held delay by one sample.
+#[test]
+fn comma_and_period_nudge_by_one_sample() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::NudgeDelayEarlier, false);
+    app.handle_action(Action::NudgeDelayLater, false);
+    assert_eq!(app.sent_delay, vec![Some(399), Some(401)]);
+}
+
+/// Without a delay there is nothing to insert or nudge, and a guessed
+/// value would be worse than none.
+#[test]
+fn no_delay_keys_send_anything_before_a_delay_exists() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(unaligned_frame(), 0.0);
+    app.handle_action(Action::InsertDelay, false);
+    app.handle_action(Action::NudgeDelayEarlier, false);
+    app.handle_action(Action::NudgeDelayLater, false);
+    assert!(app.sent_delay.is_empty(), "sent {:?}", app.sent_delay);
+}
+
+/// `T` opens the entry; digits edit; `T` applies; an empty entry and Esc
+/// cancel without sending.
+#[test]
+fn a_typed_delay_applies_on_t_and_cancels_when_empty_or_on_esc() {
+    let mut app = transfer_app();
+    app.handle_action(Action::TypeDelay, false);
+    app.handle_delay_entry_keys("-25", false, false, false);
+    app.handle_delay_entry_keys("", true, false, false);
+    app.handle_delay_entry_keys("0", false, true, false);
+    assert_eq!(app.sent_delay, vec![Some(-20)]);
+    assert!(app.delay_entry.is_none());
+
+    app.handle_action(Action::TypeDelay, false);
+    app.handle_delay_entry_keys("", false, true, false);
+    app.handle_action(Action::TypeDelay, false);
+    app.handle_delay_entry_keys("99", false, false, true);
+    assert_eq!(app.sent_delay, vec![Some(-20)], "a cancel sent a delay");
+    assert!(app.delay_entry.is_none());
 }
 
 /// The #225 session in one test: driving, reference leg dead, and the
@@ -662,8 +659,7 @@ fn a_dead_reference_leg_names_itself_on_the_transfer_scene() {
         },
         TEST_DRIVE_MAX_DBFS,
     );
-    let mut frame = refusing_frame();
-    frame.delay_locked = Some(true);
+    let mut frame = found_frame();
     frame.ref_peak_dbfs = None;
     app.ingest_frame_for_test(frame, 0.0);
     assert_eq!(
