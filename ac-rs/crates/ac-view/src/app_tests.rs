@@ -1259,26 +1259,35 @@ fn a_finished_capture_is_overlaid_and_reported() {
     );
 }
 
-/// `Z` holds the picture: a frame that arrives while paused is not shown,
-/// and the next one after resuming is.
+/// `Z` holds the trace and readouts, but not the meters or the fault
+/// indicator: the stimulus is still running, and a leg going silent must
+/// show (Codex review). Resuming shows the newest frame.
 #[test]
-fn z_holds_the_live_picture_until_resumed() {
+fn z_holds_the_trace_but_not_the_meters() {
     let mut app = transfer_app();
     let mut a = transfer_frame();
     a.delay_ms = 1.0;
+    a.meas_peak_dbfs = Some(-30.0);
     let mut b = transfer_frame();
     b.delay_ms = 2.0;
+    b.meas_peak_dbfs = Some(-3.0);
     let now = std::time::Instant::now();
     assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
-    app.handle_action(Action::TogglePause, false);
-    assert!(!app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
-    app.rebuild_scenes(true, 1.0);
-    assert_eq!(
-        app.current_transfer_scene().unwrap().delay_readout,
-        "1.00 ms"
-    );
+    app.rebuild_scenes(true, 0.5);
+    let quiet = app.current_transfer_scene().unwrap().meas_meter.height;
     app.handle_action(Action::TogglePause, false);
     assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
+    app.rebuild_scenes(true, 1.0);
+    let held = app.current_transfer_scene().unwrap();
+    assert_eq!(
+        held.delay_readout, "1.00 ms",
+        "the trace moved while paused"
+    );
+    assert!(
+        held.meas_meter.height > quiet,
+        "the meter froze with the trace"
+    );
+    app.handle_action(Action::TogglePause, false);
     app.rebuild_scenes(true, 2.0);
     assert_eq!(
         app.current_transfer_scene().unwrap().delay_readout,
@@ -1319,5 +1328,23 @@ fn v_hides_the_focused_trace_and_colours_stay_put() {
     assert_eq!(
         t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
         [0, 2]
+    );
+}
+
+/// Opening runs from disk colours them too (Codex review): every way a
+/// run enters the comparison goes through the one colour assignment.
+#[test]
+fn opened_runs_get_distinct_colours() {
+    let mut app = transfer_app();
+    app.with_transfer(|t| {
+        t.add_loaded_run(loaded_run("a.acsnap", "2026-09-26T14:00:00Z"));
+        t.add_loaded_run(loaded_run("b.acsnap", "2026-09-26T14:01:00Z"));
+    });
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(
+        t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
+        [0, 1]
     );
 }

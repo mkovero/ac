@@ -102,6 +102,11 @@ pub struct AcViewApp {
     delay_entry: Option<crate::delay_entry::DelayEntry>,
     /// A snapshot being taken on its own thread (`S`, #256). One at a time.
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
+    /// The frame the live trace is held at while paused (`Z`, #256). The
+    /// meters and the fault indicator keep reading `last_frame`: a paused
+    /// picture must not hide a leg going silent or clipping while the
+    /// stimulus is still driving.
+    frozen_frame: Option<ac_core::wire::TransferFrame>,
     /// Snapshots saved this session, for the status message's number.
     captures_taken: usize,
     /// The one-line status message (#256): what `S` did. Expires at the
@@ -157,6 +162,7 @@ impl AcViewApp {
             settings: None,
             delay_entry: None,
             capture_rx: None,
+            frozen_frame: None,
             captures_taken: 0,
             toast: None,
             weighting: WeightingCurve::Z,
@@ -228,11 +234,12 @@ impl AcViewApp {
     /// A version refusal is not dropped silently: it enters the same
     /// `version mismatch` state a refused `transfer_stream` frame does.
     fn ingest_raw_ir_frame(&mut self, frame: serde_json::Value) {
-        // Paused (`Z`, #256): the IR panel holds still with the trace.
-        if self.transfer_paused() {
+        if !self.admit_wire_version(&frame) {
             return;
         }
-        if !self.admit_wire_version(&frame) {
+        // Paused (`Z`, #256): the IR panel holds still with the trace —
+        // after the version check, so a refusal is still reported.
+        if self.transfer_paused() {
             return;
         }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
@@ -335,17 +342,39 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
+                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing);
                 if let Some(wire_frame) = &self.last_frame {
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
-                    self.transfer_scene = Some(ac_scene::TransferScene::from_input(
+                    let live = ac_scene::TransferScene::from_input(
                         &input,
-                        ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing),
+                        modes,
                         freq_range,
                         db_range,
                         &mut self.meters,
                         &mut self.fault,
                         now_s,
-                    ));
+                    );
+                    // Paused (`Z`, #256): the trace and readouts come from
+                    // the held frame; the meters and the fault indicator
+                    // stay live — the stimulus is still running.
+                    self.transfer_scene = Some(match (&self.frozen_frame, state.paused) {
+                        (Some(frozen), true) => {
+                            let mut held = ac_scene::TransferScene::from_input(
+                                &ac_scene::TransferInput::from_wire_frame(frozen),
+                                modes,
+                                freq_range,
+                                db_range,
+                                &mut Default::default(),
+                                &mut Default::default(),
+                                now_s,
+                            );
+                            held.meas_meter = live.meas_meter;
+                            held.ref_meter = live.ref_meter;
+                            held.fault = live.fault;
+                            held
+                        }
+                        _ => live,
+                    });
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
@@ -374,14 +403,9 @@ impl AcViewApp {
         }
         match serde_json::from_value::<ac_core::wire::TransferFrame>(frame) {
             Ok(wire_frame) => {
+                self.last_frame = Some(wire_frame);
                 self.frame_parse_failures = 0;
                 self.first_malformed_since = None;
-                // Paused (`Z`, #256): the frame arrived and parsed — the
-                // connection is healthy — but the display holds still.
-                if self.transfer_paused() {
-                    return false;
-                }
-                self.last_frame = Some(wire_frame);
                 true
             }
             Err(_) => {
@@ -560,7 +584,14 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
-            Action::TogglePause => self.with_transfer(|t| t.toggle_pause()),
+            Action::TogglePause => {
+                self.with_transfer(|t| t.toggle_pause());
+                self.frozen_frame = if self.transfer_paused() {
+                    self.last_frame.clone()
+                } else {
+                    None
+                };
+            }
             Action::ToggleTraceVisible => self.with_transfer(|t| {
                 if shift {
                     t.show_all();

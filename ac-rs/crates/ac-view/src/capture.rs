@@ -45,14 +45,43 @@ pub fn file_name(captured_at_utc: &str) -> String {
     format!("{}.acsnap", captured_at_utc.replace(':', "-"))
 }
 
+/// Write `bytes` under `dir` as a file that did not exist before: the
+/// timestamp's name, or `-2`, `-3`, … appended when two captures share a
+/// second. Never overwrites a capture already on disk.
+fn write_new(dir: &Path, captured_at_utc: &str, bytes: &[u8]) -> Result<(PathBuf, String)> {
+    use std::io::Write;
+    let base = file_name(captured_at_utc);
+    let stem = base.trim_end_matches(".acsnap").to_string();
+    for n in 1.. {
+        let name = if n == 1 {
+            base.clone()
+        } else {
+            format!("{stem}-{n}.acsnap")
+        };
+        let path = dir.join(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                f.write_all(bytes)
+                    .with_context(|| format!("write {}", path.display()))?;
+                return Ok((path, name));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
+        }
+    }
+    unreachable!("an unbounded counter always finds a free name")
+}
+
 /// Trigger, fetch, write under `dir`, and derive pair 0 — one blocking
 /// call, for the capture thread.
 pub fn capture_into(client: &Client, dir: &Path) -> Result<Captured> {
     let (bytes, snap) = crate::snapshot_flow::trigger_and_fetch_bytes(client)?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let name = file_name(&snap.meta.captured_at_utc);
-    let path = dir.join(&name);
-    std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    let (path, name) = write_new(dir, &snap.meta.captured_at_utc, &bytes)?;
     let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, 0, name)?;
     Ok(Captured { path, run })
 }
@@ -81,6 +110,19 @@ mod tests {
             file_name("2026-09-26T14:30:05Z"),
             "2026-09-26T14-30-05Z.acsnap"
         );
+    }
+
+    #[test]
+    fn a_second_capture_in_the_same_second_does_not_overwrite_the_first() {
+        let dir = std::env::temp_dir().join(format!("ac-capture-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p1, _) = write_new(&dir, "2026-09-26T14:30:05Z", b"one").unwrap();
+        let (p2, n2) = write_new(&dir, "2026-09-26T14:30:05Z", b"two").unwrap();
+        assert_ne!(p1, p2);
+        assert_eq!(n2, "2026-09-26T14-30-05Z-2.acsnap");
+        assert_eq!(std::fs::read(&p1).unwrap(), b"one");
+        assert_eq!(std::fs::read(&p2).unwrap(), b"two");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

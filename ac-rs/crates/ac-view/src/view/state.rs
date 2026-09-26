@@ -292,7 +292,7 @@ impl TransferViewState {
     /// readout should name next, the same "just arrived" precedence the
     /// live view already gives the newest frame.
     pub fn add_loaded_run(&mut self, run: LoadedRun) {
-        self.loaded.push(run);
+        self.add_run(run);
         self.focus = Focus::Stored(self.loaded.len() - 1);
     }
 
