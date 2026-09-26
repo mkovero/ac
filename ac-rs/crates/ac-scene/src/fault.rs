@@ -59,7 +59,7 @@ use crate::transfer::displayed_mtw;
 /// differ — by 15 dB on the rig that found this, a mic at −30 dBFS peak
 /// against a reference at −14.5 dBFS — so a relative test would misfire on a
 /// perfectly good session.
-pub const SIGNAL_FLOOR_DBFS: f64 = -80.0;
+pub const SIGNAL_FLOOR_DBFS: f64 = ac_core::visualize::protection::REFERENCE_FLOOR_DBFS;
 
 /// Whether a state is a problem or a confirmation. The renderer picks a
 /// colour from this rather than matching on the variant, so a state added

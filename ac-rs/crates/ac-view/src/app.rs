@@ -342,7 +342,8 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
-                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing);
+                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
+                    .with_coherence_mask(state.coherence_mask);
                 if let Some(wire_frame) = &self.last_frame {
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
                     let live = ac_scene::TransferScene::from_input(
@@ -357,6 +358,8 @@ impl AcViewApp {
                     // Paused (#256) only hides the live trace, in the view;
                     // the scene keeps rolling so the meters, the fault
                     // indicator and the readouts stay live.
+                    let mut live = live;
+                    live.set_protection(wire_frame.protection.as_ref());
                     self.transfer_scene = Some(live);
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
@@ -500,6 +503,7 @@ impl AcViewApp {
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::OpenSnapshot => self.open_file_list(Instant::now()),
             Action::ExportCsv => self.export_csv(Instant::now()),
+            Action::CycleCoherenceMask => self.with_transfer(|t| t.cycle_coherence_mask()),
             Action::Quit => {
                 // Best-effort drive-off on a clean quit (§5); the dead-man
                 // is the guarantee if the process dies uncleanly.
@@ -1530,7 +1534,8 @@ fn rebuild_loaded_scenes(
                 &run.channel_role,
                 run.sr,
                 run.delay_offset_samples,
-                ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing),
+                ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
+                    .with_coherence_mask(state.coherence_mask),
                 freq_range,
                 db_range,
             )

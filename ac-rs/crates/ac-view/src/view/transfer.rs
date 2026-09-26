@@ -172,6 +172,21 @@ pub(super) fn draw_transfer(
         stored,
         live_focused,
     );
+    // Row 4 (#670): the coherence mask when not the default, and what data
+    // protection is holding back. Verbatim ac-scene strings.
+    if let Some(scene) = scene {
+        let row = [
+            scene.coherence_mask_readout.as_deref(),
+            scene.protection_readout.as_deref(),
+        ];
+        let mut at = layout.content.left_top() + egui::vec2(0.0, 4.0 * ROW_H);
+        for t in row.into_iter().flatten() {
+            at = painter
+                .text(at, Align2::LEFT_TOP, t, FontId::default(), COLOR_SIGNAL)
+                .right_top()
+                + egui::vec2(ROW_H, 0.0);
+        }
+    }
     if state.paused {
         // #256: said plainly, on the row under the delay readout (row 2 —
         // the band labels, caption and readout own rows 0–2, the meters the

@@ -43,6 +43,15 @@ pub(super) struct TickEvents {
     pub(super) mc_enabled: bool,
 }
 
+/// What [`SessionState::advance_ladders`] reads back per tick, indexed by
+/// pair: the ladder columns (after the reference-level hold), the settled
+/// rungs, and how many columns the hold kept (#670).
+type LadderTick = (
+    Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>>,
+    Vec<Vec<bool>>,
+    Vec<usize>,
+);
+
 /// Everything the streaming session maintains across ticks — and nothing
 /// else. No engine, no socket, no `Instant::now()`, no stop flag.
 ///
@@ -111,6 +120,11 @@ pub(super) struct SessionState {
     /// Capture tick, used only as the `spl` integrator's `dt` on the
     /// first step, where there is no previous timestamp to subtract.
     pub(super) chunk_secs: f64,
+    /// Each pair's last emitted ladder columns, the "last good value" the
+    /// reference-level hold falls back to (#670).
+    pub(super) held_columns: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>>,
+    /// Buffers thrown away because a leg clipped (#670). Monotone.
+    pub(super) clipped_buffers: u64,
 }
 
 impl SessionState {
@@ -161,6 +175,8 @@ impl SessionState {
             dropped: 0,
             next_seq: 0,
             chunk_secs,
+            held_columns: vec![None; n_pairs],
+            clipped_buffers: 0,
         }
     }
 
@@ -384,13 +400,12 @@ impl SessionState {
     /// offset is applied at full rate, before decimation, so it has to
     /// exist before the first sample enters — then push this tick's fresh
     /// buffers through and read the columns back.
-    pub(super) fn advance_ladders(
-        &mut self,
-        bufs: &[Vec<f32>],
-    ) -> (
-        Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>>,
-        Vec<Vec<bool>>,
-    ) {
+    ///
+    /// `push: false` (a tick thrown away, #670) builds nothing and feeds
+    /// nothing: the ladders read back what they already hold. Every column
+    /// then goes through the reference-level hold, which returns how many it
+    /// held per pair.
+    pub(super) fn advance_ladders(&mut self, bufs: &[Vec<f32>], push: bool) -> LadderTick {
         let FrameStatics {
             sr,
             spec_f_min,
@@ -405,7 +420,7 @@ impl SessionState {
             .zip(self.ladder_origins.iter_mut())
             .zip(self.pairs.iter())
         {
-            if slot.is_some() || self.ladder_failed {
+            if !push || slot.is_some() || self.ladder_failed {
                 continue;
             }
             let Some(delay) = st.delay.map(|l| l.samples) else {
@@ -435,12 +450,30 @@ impl SessionState {
             .zip(self.ctx.iter())
             .map(|(slot, ctx)| {
                 let p = slot.as_mut()?;
-                let meas = bufs.get(ctx.mi)?;
-                let refb = bufs.get(ctx.ri)?;
-                p.push(meas, refb);
+                if push {
+                    let meas = bufs.get(ctx.mi)?;
+                    let refb = bufs.get(ctx.ri)?;
+                    p.push(meas, refb);
+                }
                 p.columns(spec_f_min, spec_f_max, mtw_ppo)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // Magnitude thresholding (#670): a column whose reference is too
+        // weak keeps its last good value.
+        let mut columns = columns;
+        let mut held = vec![0usize; columns.len()];
+        for (i, cols) in columns.iter_mut().enumerate() {
+            match cols {
+                Some(c) => {
+                    held[i] = ac_core::visualize::protection::hold_weak_reference(
+                        c,
+                        self.held_columns[i].as_deref(),
+                    );
+                    self.held_columns[i] = Some(c.clone());
+                }
+                None => self.held_columns[i] = None,
+            }
+        }
         // Sampled after the push, so it describes the frame being built.
         let settled = self
             .ladders
@@ -451,7 +484,7 @@ impl SessionState {
                     .unwrap_or_default()
             })
             .collect();
-        (columns, settled)
+        (columns, settled, held)
     }
 
     /// Recompute the held H1 estimate for every pair whose
@@ -549,7 +582,39 @@ impl SessionState {
         // is the one thing they must never do.
         let tick_peaks_dbfs: Vec<Option<f64>> = bufs.iter().map(|b| raw_peak_dbfs(b)).collect();
 
-        self.push_rings(bufs);
+        // Data protection (#670, Smaart v7 pp. 97–99). A buffer with a run
+        // of full-scale samples on any captured leg is thrown away; a tick
+        // where every pair's reference leg is at the floor pauses
+        // processing. Either way the tick feeds neither the rings nor the
+        // ladders, and the trace holds its last value — the frame still
+        // ships, with live meters and drive, and says why.
+        //
+        // A thrown-away tick leaves a gap in the ladders' input, so their
+        // replay provenance is cleared: a snapshot of such a ladder derives
+        // Welch only, rather than replaying a ladder it cannot reproduce.
+        let clipped = bufs
+            .iter()
+            .any(|b| ac_core::visualize::protection::clipped(b));
+        let floor = ac_core::visualize::protection::REFERENCE_FLOOR_DBFS;
+        let reference_absent = !self.ctx.is_empty()
+            && self.ctx.iter().all(|c| {
+                tick_peaks_dbfs
+                    .get(c.ri)
+                    .copied()
+                    .flatten()
+                    .is_none_or(|p| p <= floor)
+            });
+        if clipped {
+            self.clipped_buffers += 1;
+        }
+        let process = !clipped && !reference_absent;
+        if !process {
+            for origin in &mut self.ladder_origins {
+                *origin = None;
+            }
+        } else {
+            self.push_rings(bufs);
+        }
 
         // Analysis readiness, which is NOT the same question as whether to
         // publish. `n_blocks == 0` means no ring holds a whole Welch
@@ -572,13 +637,13 @@ impl SessionState {
         // one segment because a cross-correlation needs one, not because
         // the Welch average does.
         let n_blocks = self.n_blocks();
-        if n_blocks > 0 {
+        if process && n_blocks > 0 {
             self.refresh_analysis(n_blocks, ev.mc_enabled);
             if self.find_missing_delays(ev, now) {
                 self.refresh_analysis(n_blocks, ev.mc_enabled);
             }
         }
-        let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
+        let (mtw_columns, mtw_settled, held_columns) = self.advance_ladders(bufs, process);
         // After the ladders, so a ladder built this tick records the count
         // before it. The same length the snapshot ring adds per tick.
         self.consumed += bufs.first().map(Vec::len).unwrap_or(0) as u64;
@@ -618,6 +683,11 @@ impl SessionState {
             // parallel closure above. `pos` is the pair's position in the
             // launch list, carried through `filter_map`, never the
             // post-filter Vec position.
+            frame.protection = Some(ac_core::wire::WireProtection {
+                clipped_buffers: self.clipped_buffers,
+                reference_absent,
+                held_columns: held_columns.get(pos).copied().unwrap_or(0),
+            });
             let st = &mut self.pairs[pos];
             if let (Some(raw), Some(integ)) = (spl_raw, st.spl_integ.as_mut()) {
                 let dt = st

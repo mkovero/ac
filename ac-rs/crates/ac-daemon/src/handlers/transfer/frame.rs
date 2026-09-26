@@ -161,6 +161,8 @@ pub(super) fn settling_frame(
         cmd: "transfer_stream".to_string(),
         wire_version: None,
         mtw: None,
+        // Set by the session after assembly (#670).
+        protection: None,
         freqs: Vec::new(),
         magnitude_db: Vec::new(),
         phase_deg: Vec::new(),
@@ -317,6 +319,7 @@ pub(super) fn build_pair_messages(
         cmd: "transfer_stream".to_string(),
         wire_version: None,
         mtw,
+        protection: None,
         freqs: a.freqs.clone(),
         magnitude_db: a.magnitude_db.clone(),
         phase_deg: a.phase_deg.clone(),

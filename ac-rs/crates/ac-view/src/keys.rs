@@ -37,6 +37,8 @@ pub enum Action {
     OpenSnapshot,
     /// `C` (#256): write the selected trace to CSV.
     ExportCsv,
+    /// `B` (#670): cycle the display's coherence mask.
+    CycleCoherenceMask,
     MoveCursorLeft,
     MoveCursorRight,
     ZoomFreqIn,
@@ -272,6 +274,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::ToggleTraceVisible,
         scope: Scope::Transfer,
         description: "Show / hide the focused trace (Shift: show all)",
+    },
+    Binding {
+        key: Key::B,
+        action: Action::CycleCoherenceMask,
+        scope: Scope::Transfer,
+        description: "Cycle the coherence mask (0.3 / 0.5 / 0.7 / 0.9)",
     },
     Binding {
         key: Key::C,

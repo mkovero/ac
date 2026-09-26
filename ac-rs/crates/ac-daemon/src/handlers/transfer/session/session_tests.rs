@@ -361,53 +361,58 @@ fn n_averages_climbs_to_the_window_depth_and_then_holds() {
     );
 }
 
-/// A Find with no peak must not be retried on the very next tick: its
-/// inputs only turn over on the ring's own timescale.
-///
-/// The clock is a parameter, so this asserts the interval itself. A
-/// live session could only assert it by sleeping, which is why the
-/// interval had no test before: any value at all was green.
+/// No reference, no processing (#670, Smaart v7 p. 98): a live
+/// measurement leg against a silent reference pauses analysis — no Find
+/// runs, no estimate forms — and every frame says so.
 #[test]
-fn a_find_with_no_peak_waits_out_the_retry_interval_before_trying_again() {
+fn a_silent_reference_pauses_processing() {
     let mut s = session();
     let t0 = std::time::Instant::now();
-    // Fill the ring, then hold the clock still: every tick after the
-    // first attempt is inside the retry window.
-    let warm: Vec<std::time::Instant> = (0..20)
+    let ticks: Vec<std::time::Instant> = (0..40)
         .map(|k| t0 + std::time::Duration::from_millis(50 * k))
         .collect();
-    let frames = run_silent_ref(&mut s, &warm, events(true));
-    let first = frames.last().expect("a frame once the segment is in");
+    let frames = run_silent_ref(&mut s, &ticks, events(true));
+    let last = frames.last().expect("frames still ship");
     assert_eq!(
-        first["delay_locked"],
-        json!(false),
-        "a silent reference must not produce a delay"
+        last["delay_attempts"],
+        json!(0),
+        "a Find ran without a reference"
     );
-    assert_eq!(first["delay_residual"], json!(null));
     assert_eq!(
-        first["delay_attempts"],
-        json!(1),
-        "expected exactly one attempt"
+        last["n_averages"],
+        json!(0),
+        "analysis ran without a reference"
     );
+    assert_eq!(last["protection"]["reference_absent"], json!(true));
+}
 
-    // Well inside FIND_RETRY: no second attempt.
-    let held: Vec<std::time::Instant> = (0..5)
-        .map(|k| t0 + std::time::Duration::from_millis(1000 + 50 * k))
-        .collect();
-    let frames = run_silent_ref(&mut s, &held, events(true));
-    assert_eq!(
-        frames.last().unwrap()["delay_attempts"],
-        json!(1),
-        "retried before the interval elapsed"
+/// A clipped buffer is thrown away (#670): it feeds neither the analysis
+/// nor the ladder, the frame counts it, and the ladder can no longer be
+/// replayed from a snapshot (its input has a gap).
+#[test]
+fn a_clipped_buffer_is_thrown_away_and_counted() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 60, 480, events(true), t0);
+    assert!(
+        s.mtw_provenance()[0].is_some(),
+        "precondition: ladder built"
     );
-
-    // Past it: exactly one more.
-    let after = vec![t0 + FIND_RETRY + std::time::Duration::from_millis(1500)];
-    let frames = run_silent_ref(&mut s, &after, events(true));
-    assert_eq!(
-        frames.last().unwrap()["delay_attempts"],
-        json!(2),
-        "did not retry after the interval elapsed"
+    let dropped = s.dropped;
+    let rings: Vec<usize> = s.rings.iter().map(Vec::len).collect();
+    let mut bufs = correlated_tick(&noise(CHUNK * 70 + 480, 0x5eed), 61);
+    bufs[0][100..103].copy_from_slice(&[1.0, 1.0, 1.0]);
+    let out = s.tick(&bufs, events(true), &drive_msg(true), t0);
+    let f = out
+        .iter()
+        .find(|m| m["type"] == json!("transfer_stream"))
+        .unwrap();
+    assert_eq!(f["protection"]["clipped_buffers"], json!(1));
+    assert_eq!(s.dropped, dropped);
+    assert_eq!(s.rings.iter().map(Vec::len).collect::<Vec<_>>(), rings);
+    assert!(
+        s.mtw_provenance()[0].is_none(),
+        "replay provenance survived a gap"
     );
 }
 
@@ -848,4 +853,51 @@ fn a_concurrent_reader_only_ever_sees_whole_ticks() {
             state.1
         );
     }
+}
+
+/// Magnitude thresholding through the session (#670): once the stimulus
+/// loses its top band — both legs through a steep low-pass — the columns
+/// up there stop updating and the frame counts them.
+#[test]
+fn columns_with_a_weak_reference_are_held() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    let frames = run_correlated(&mut s, 80, 480, events(true), t0);
+    let broadband = frames.last().unwrap();
+    assert_eq!(broadband["protection"]["held_columns"], json!(0));
+
+    // Four one-pole low-passes at 200 Hz: ~80 dB/decade above it.
+    let a = 1.0 - (-2.0 * std::f64::consts::PI * 200.0 / SR as f64).exp();
+    let n = CHUNK * 90 + 480;
+    let mut x: Vec<f64> = noise(n, 0x77).iter().map(|&v| v as f64).collect();
+    for _ in 0..4 {
+        let mut y = 0.0;
+        for v in x.iter_mut() {
+            y += a * (*v - y);
+            *v = y;
+        }
+    }
+    let peak = x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let x: Vec<f32> = x.iter().map(|&v| (0.5 * v / peak) as f32).collect();
+    let mut last = None;
+    for k in 0..80 {
+        let r0 = 480 + k * CHUNK;
+        let bufs = [
+            x[r0 - 480..r0 - 480 + CHUNK].to_vec(),
+            x[r0..r0 + CHUNK].to_vec(),
+        ];
+        let now = t0 + std::time::Duration::from_millis(5_000 + 50 * k as u64);
+        last = s
+            .tick(&bufs, events(true), &drive_msg(true), now)
+            .into_iter()
+            .find(|m| m["type"] == json!("transfer_stream"));
+    }
+    let f = last.unwrap();
+    assert_eq!(
+        f["protection"]["clipped_buffers"],
+        json!(0),
+        "test setup: clipped"
+    );
+    let held = f["protection"]["held_columns"].as_u64().unwrap();
+    assert!(held > 0, "no column held with the top band gone");
 }

@@ -53,6 +53,11 @@ pub struct Column {
     /// zero: the grid guarantees at least one, and criterion 1 is that
     /// guarantee made observable.
     pub bins: usize,
+    /// Mean reference power per bin in this column, blended like `h1`
+    /// (#670). Comparable only between columns of the same `stage` — each
+    /// stage runs at its own rate. The daemon's reference-level hold reads
+    /// it; nothing is drawn from it.
+    pub ref_level: f64,
 }
 
 /// Sum of one stage's bins over `[lo, hi)`, divided once.
@@ -67,7 +72,7 @@ fn stage_column(
     df: f64,
     lo: f64,
     hi: f64,
-) -> Option<(Complex<f64>, f64, usize)> {
+) -> Option<(Complex<f64>, f64, usize, f64)> {
     let (sxx, syy, sxy) = (st.sxx, st.syy, st.sxy);
     let k_lo = (lo / df).ceil().max(0.0) as usize;
     let k_hi = (hi / df).ceil().min(sxx.len() as f64) as usize;
@@ -93,7 +98,8 @@ fn stage_column(
     } else {
         0.0
     };
-    Some((h1, coh, k_hi - k_lo))
+    let nb = k_hi - k_lo;
+    Some((h1, coh, nb, axx / nb as f64))
 }
 
 /// Raw per-stage accumulator contents, in ladder order (stage 0 first).
@@ -150,18 +156,20 @@ pub fn assemble(
         if src.shallow.is_some_and(|si| stages[si].is_none()) {
             continue;
         }
-        let Some((h_deep, c_deep, n_deep)) = stage_column(deep, deep_stage.df, lo, hi) else {
+        let Some((h_deep, c_deep, n_deep, r_deep)) = stage_column(deep, deep_stage.df, lo, hi)
+        else {
             continue;
         };
 
-        let (mut h1, mut coherence, mut bins) = (h_deep, c_deep, n_deep);
+        let (mut h1, mut coherence, mut bins, mut ref_level) = (h_deep, c_deep, n_deep, r_deep);
         let mut blend = 0.0;
         if let (Some(si), w_sh) = (src.shallow, src.w_shallow) {
             let sh_stage = &ladder.stages[si];
             let sh = stages[si].as_ref().expect("checked settled above");
-            if let Some((h_sh, c_sh, n_sh)) = stage_column(sh, sh_stage.df, lo, hi) {
+            if let Some((h_sh, c_sh, n_sh, r_sh)) = stage_column(sh, sh_stage.df, lo, hi) {
                 h1 = h_deep * (1.0 - w_sh) + h_sh * w_sh;
                 coherence = c_deep * (1.0 - w_sh) + c_sh * w_sh;
+                ref_level = r_deep * (1.0 - w_sh) + r_sh * w_sh;
                 bins += n_sh;
                 blend = w_sh;
             }
@@ -183,6 +191,7 @@ pub fn assemble(
             stage: src.deep,
             blend,
             bins,
+            ref_level,
         });
     }
     out

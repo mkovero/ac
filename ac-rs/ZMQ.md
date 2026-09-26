@@ -3046,6 +3046,25 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // back to "warming up" — silence on
                                           // the fault indicator.
 
+  // Additive (#670) — data protection, Smaart v7 pp. 97–99. Physical
+  // reasons only:
+  //  - a capture buffer with 3+ consecutive full-scale samples
+  //    (|x| >= 0.99997) on any leg is thrown away;
+  //  - a tick where every pair's reference raw peak is at or below
+  //    -80 dBFS pauses processing (no Find, no analysis, no ladder input);
+  //  - a ladder column whose reference level sits more than 40 dB below
+  //    its stage's median keeps its last good value (blanked, coherence 0,
+  //    if it never had one).
+  // A thrown-away or paused tick still ships a frame: the trace holds its
+  // last value, meters and drive stay live. It also leaves a gap in the
+  // ladders' input, so their snapshot replay provenance is cleared and a
+  // snapshot derives that pair Welch only.
+  "protection": {
+    "clipped_buffers": <int>,            // buffers thrown away this session
+    "reference_absent": <bool>,          // this tick: paused, no reference
+    "held_columns":    <int>             // this frame: mtw columns held
+  } | null,                              // null: daemon predating #670
+
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
   "meas_peak_dbfs":  <float> | null,     // 20*log10(max|sample|) over this frame's
