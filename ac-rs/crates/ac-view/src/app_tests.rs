@@ -1348,3 +1348,26 @@ fn opened_runs_get_distinct_colours() {
         [0, 1]
     );
 }
+
+/// A version refusal drops the held picture with the stream it came from
+/// (Codex recheck): a later compatible frame is shown, not the old trace.
+#[test]
+fn a_version_refusal_drops_the_held_picture() {
+    let mut app = transfer_app();
+    let mut a = transfer_frame();
+    a.delay_ms = 1.0;
+    let now = std::time::Instant::now();
+    assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
+    app.handle_action(Action::TogglePause, false);
+    let mut refused = serde_json::to_value(&a).unwrap();
+    refused["wire_version"] = serde_json::json!(9_999);
+    assert!(!app.ingest_raw_frame(refused, now));
+    let mut b = transfer_frame();
+    b.delay_ms = 2.0;
+    assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
+    app.rebuild_scenes(true, 1.0);
+    assert_eq!(
+        app.current_transfer_scene().unwrap().delay_readout,
+        "2.00 ms"
+    );
+}

@@ -282,6 +282,9 @@ impl AcViewApp {
             }
         }
         self.last_frame = None;
+        // A held picture belongs to the stream being refused (#256):
+        // never show it over a later, compatible one.
+        self.frozen_frame = None;
         self.scene = None;
         self.last_scene_ranges = None;
         self.transfer_scene = None;
