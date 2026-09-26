@@ -37,7 +37,7 @@ pub mod monitor;
 pub mod transfer;
 
 pub use monitor::{LoudnessFrame, SpectrumFrame};
-pub use transfer::{IrFrame, MtwColumns, MtwStage, TransferFrame, WireDrive};
+pub use transfer::{IrFrame, MtwColumns, MtwStage, TransferFrame, WireDrive, WireProtection};
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;

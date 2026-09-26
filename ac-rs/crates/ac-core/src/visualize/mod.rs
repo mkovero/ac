@@ -8,6 +8,7 @@ pub mod cwt;
 pub mod fractional_octave;
 pub mod mtw;
 pub mod pair_derivation;
+pub mod protection;
 pub mod reassigned;
 pub mod smoothing;
 pub mod spectrum;

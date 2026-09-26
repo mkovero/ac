@@ -363,6 +363,7 @@ const TRANSFER_KEYS: &[&str] = &[
     "mtw",
     "n_averages",
     "phase_deg",
+    "protection",
     "ref_channel",
     "ref_peak_dbfs",
     "ref_spectrum",
@@ -433,6 +434,7 @@ fn test_column() -> ac_core::visualize::mtw::splice::Column {
         stage: 0,
         blend: 0.0,
         bins: 3,
+        ref_level: 1.0,
     }
 }
 

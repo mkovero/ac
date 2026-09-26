@@ -214,6 +214,9 @@ pub struct TransferViewState {
     pub live_visible: bool,
     /// Next [`LoadedRun::color_slot`].
     next_color_slot: usize,
+    /// Columns below this coherence are not drawn (#670, `B`). Display
+    /// only; the fault indicator keeps its own fixed threshold.
+    pub coherence_mask: f64,
 }
 
 impl Default for TransferViewState {
@@ -241,7 +244,18 @@ impl TransferViewState {
             // Slot runs take colours 0–8 by slot; runs opened from files
             // start after them.
             next_color_slot: 9,
+            coherence_mask: ac_scene::transfer::COHERENCE_THRESHOLD,
         }
+    }
+
+    /// `B` (#670): the next coherence mask step, wrapping.
+    pub fn cycle_coherence_mask(&mut self) {
+        let steps = ac_scene::transfer::COHERENCE_MASK_STEPS;
+        let i = steps
+            .iter()
+            .position(|m| *m == self.coherence_mask)
+            .map_or(0, |i| (i + 1) % steps.len());
+        self.coherence_mask = steps[i];
     }
 
     /// `Ctrl`+`n` (#256): put `run` in slot `n`, replacing what was there.

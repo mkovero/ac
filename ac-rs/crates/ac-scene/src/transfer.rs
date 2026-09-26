@@ -56,9 +56,15 @@ use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
 use ac_core::wire::{MtwColumns, MtwStage, TransferFrame};
 
-/// Columns below this coherence are masked out of both panes (D5 —
-/// fixed threshold, no tuning UI).
+/// Columns below this coherence are masked out of both panes by default,
+/// and — fixed, whatever the display uses — what the fault indicator's
+/// `CHECK ROUTING` rule reads (#670: the operator's mask is display policy;
+/// the fault rule does not move with it).
 pub const COHERENCE_THRESHOLD: f64 = 0.5;
+
+/// The display mask settings `B` cycles through (#670, Smaart's coherence
+/// blanking; the guide states no default, `ac` keeps 0.5).
+pub const COHERENCE_MASK_STEPS: [f64; 4] = [0.3, 0.5, 0.7, 0.9];
 
 /// Meter floor: −60 dBFS maps to a zero-height bar (§6).
 pub const METER_FLOOR_DBFS: f64 = -60.0;
@@ -184,19 +190,43 @@ impl Smoothing {
 /// They travel together into [`TransferScene::from_input`] so that adding the
 /// next one is not another positional argument on a constructor that already
 /// carries the ranges, the cross-frame state and the clock.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayModes {
     /// Which delay the phase pane is de-rotated by (D3).
     pub derot: DerotMode,
     /// Fractional-octave smoothing of both panes (#229).
     pub smoothing: Smoothing,
+    /// Columns below this coherence are not drawn (#670). Display policy
+    /// only — the fault indicator keeps [`COHERENCE_THRESHOLD`].
+    pub coherence_mask: f64,
 }
 
 impl DisplayModes {
     /// The defaults an opening session gets: session de-rotation, no
-    /// smoothing.
+    /// smoothing, the default coherence mask.
     pub fn new(derot: DerotMode, smoothing: Smoothing) -> DisplayModes {
-        DisplayModes { derot, smoothing }
+        DisplayModes {
+            derot,
+            smoothing,
+            coherence_mask: COHERENCE_THRESHOLD,
+        }
+    }
+}
+
+/// Not derived: a derived default would mask at coherence 0.0 — nothing.
+impl Default for DisplayModes {
+    fn default() -> Self {
+        DisplayModes::new(DerotMode::default(), Smoothing::default())
+    }
+}
+
+impl DisplayModes {
+    /// The same modes with a different coherence mask (#670).
+    pub fn with_coherence_mask(self, coherence_mask: f64) -> DisplayModes {
+        DisplayModes {
+            coherence_mask,
+            ..self
+        }
     }
 }
 
@@ -507,6 +537,14 @@ pub struct TransferScene {
     /// resolution: those say what the analyser resolved, this says what is on
     /// screen, and this one is authoritative for the drawn trace.
     pub smoothing_readout: Option<&'static str>,
+    /// `"coherence mask 0.70"` when the display mask is not the default
+    /// (#670); `None` at the default.
+    pub coherence_mask_readout: Option<String>,
+    /// What data protection is doing (#670): `"paused: no reference"`,
+    /// `"12 clipped buffers dropped"`, `"8 columns held (weak reference)"`,
+    /// joined with `" · "`; `None` when there is nothing to say. Set by
+    /// [`TransferScene::set_protection`] from the live frame.
+    pub protection_readout: Option<String>,
     /// Per-band resolution and settling labels for the top of the magnitude
     /// pane (#224). Empty when the frame carries no ladder description —
     /// resolution and settling vary 24x across one screen, and a screen that
@@ -746,6 +784,28 @@ impl LadderArrays {
                 stages: Vec::new(),
             },
         }
+    }
+}
+
+impl TransferScene {
+    /// Fill [`Self::protection_readout`] from a live frame's protection
+    /// state (#670).
+    pub fn set_protection(&mut self, p: Option<&ac_core::wire::WireProtection>) {
+        let Some(p) = p else {
+            self.protection_readout = None;
+            return;
+        };
+        let mut parts = Vec::new();
+        if p.reference_absent {
+            parts.push("paused: no reference".to_string());
+        }
+        if p.clipped_buffers > 0 {
+            parts.push(format!("{} clipped buffers dropped", p.clipped_buffers));
+        }
+        if p.held_columns > 0 {
+            parts.push(format!("{} columns held (weak reference)", p.held_columns));
+        }
+        self.protection_readout = (!parts.is_empty()).then(|| parts.join(" \u{b7} "));
     }
 }
 
@@ -1013,7 +1073,7 @@ impl TransferScene {
                     let valid: Vec<bool> = input
                         .coherence
                         .iter()
-                        .map(|&c| c >= COHERENCE_THRESHOLD)
+                        .map(|&c| c >= modes.coherence_mask)
                         .collect();
                     (
                         smooth_db(&input.freqs, &input.magnitude_db, &valid, bpo),
@@ -1049,8 +1109,8 @@ impl TransferScene {
                 (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
             (
-                split_on_mask(&input.coherence, mag_points),
-                split_on_mask(&input.coherence, phase_points),
+                split_on_mask(&input.coherence, modes.coherence_mask, mag_points),
+                split_on_mask(&input.coherence, modes.coherence_mask, phase_points),
             )
         } else {
             (Vec::new(), Vec::new())
@@ -1075,6 +1135,9 @@ impl TransferScene {
             delay_samples: input.delay_control.map(|c| c.samples),
             delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
             smoothing_readout: modes.smoothing.label(),
+            coherence_mask_readout: (modes.coherence_mask != COHERENCE_THRESHOLD)
+                .then(|| format!("coherence mask {:.2}", modes.coherence_mask)),
+            protection_readout: None,
             calibration_readout: input.calibration.clone(),
             // Derived from the ladder alone, never from the frame's columns:
             // the same session yields the same labels on every frame, so
@@ -1110,12 +1173,16 @@ impl TransferScene {
 /// segment wherever the mask interrupts. Masked columns are **absent** —
 /// never emitted at y=0, which would draw a line to the floor and read
 /// as a real measurement (D5).
-fn split_on_mask(coherence: &[f64], point: impl Fn(usize) -> (f64, f64)) -> Vec<Vec<(f64, f64)>> {
+fn split_on_mask(
+    coherence: &[f64],
+    mask: f64,
+    point: impl Fn(usize) -> (f64, f64),
+) -> Vec<Vec<(f64, f64)>> {
     let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut current: Vec<(f64, f64)> = Vec::new();
 
     for (i, &c) in coherence.iter().enumerate() {
-        if c < COHERENCE_THRESHOLD {
+        if c < mask {
             if !current.is_empty() {
                 segments.push(std::mem::take(&mut current));
             }
@@ -1516,6 +1583,84 @@ mod tests {
     }
 
     #[test]
+    fn protection_readout_says_what_is_held_back() {
+        let frame: TransferFrame = serde_json::from_value(serde_json::json!({
+            "type": "transfer_stream", "meas_channel": 0, "ref_channel": 1, "sr": 48000,
+            "spec_freqs": [], "meas_spectrum": [], "ref_spectrum": [], "spl": null,
+            "spl_weighting": "Z", "spl_integration": "fast"
+        }))
+        .unwrap();
+        let mut scene = TransferScene::from_input(
+            &TransferInput::from_wire_frame(&frame),
+            DisplayModes::default(),
+            (20.0, 20_000.0),
+            (-40.0, 20.0),
+            &mut (MeterState::default(), MeterState::default()),
+            &mut FaultState::default(),
+            0.0,
+        );
+        scene.set_protection(Some(&ac_core::wire::WireProtection {
+            clipped_buffers: 3,
+            reference_absent: true,
+            held_columns: 8,
+        }));
+        assert_eq!(
+            scene.protection_readout.as_deref(),
+            Some("paused: no reference \u{b7} 3 clipped buffers dropped \u{b7} 8 columns held (weak reference)")
+        );
+        scene.set_protection(Some(&Default::default()));
+        assert_eq!(scene.protection_readout, None);
+    }
+
+    /// The operator's mask moves the drawing, not the fault rule (#670):
+    /// columns at 0.6 coherence vanish under a 0.7 mask, and CHECK ROUTING
+    /// (fixed 0.5) stays dark.
+    #[test]
+    fn the_display_mask_does_not_move_the_fault_rule() {
+        let n = 20;
+        let freqs: Vec<f64> = (0..n).map(|i| 100.0 * 1.3f64.powi(i)).collect();
+        let frame: TransferFrame = serde_json::from_value(serde_json::json!({
+            "type": "transfer_stream", "meas_channel": 0, "ref_channel": 1, "sr": 48000,
+            "spec_freqs": [], "meas_spectrum": [], "ref_spectrum": [], "spl": null,
+            "spl_weighting": "Z", "spl_integration": "fast",
+            "meas_peak_dbfs": -20.0, "ref_peak_dbfs": -20.0,
+            "delay_locked": true,
+            "drive": {"on": true, "level_dbfs": -30.0, "drivable": true},
+            "mtw": {"freqs": freqs, "magnitude_db": vec![0.0; n as usize],
+                    "phase_deg": vec![0.0; n as usize], "coherence": vec![0.6; n as usize]}
+        }))
+        .unwrap();
+        let input = TransferInput::from_wire_frame(&frame);
+        let build = |mask: f64| {
+            TransferScene::from_input(
+                &input,
+                DisplayModes::new(DerotMode::Session, Smoothing::Off).with_coherence_mask(mask),
+                (20.0, 20_000.0),
+                (-40.0, 20.0),
+                &mut (MeterState::default(), MeterState::default()),
+                &mut FaultState::default(),
+                0.0,
+            )
+        };
+        let drawn = build(0.5);
+        let masked = build(0.7);
+        assert!(
+            !drawn.magnitude.segments.is_empty(),
+            "test setup: drawn at 0.5"
+        );
+        assert!(
+            masked.magnitude.segments.is_empty(),
+            "0.7 mask left columns at 0.6"
+        );
+        assert_eq!(masked.fault, None, "the display mask moved the fault rule");
+        assert_eq!(
+            masked.coherence_mask_readout.as_deref(),
+            Some("coherence mask 0.70")
+        );
+        assert_eq!(drawn.coherence_mask_readout, None);
+    }
+
+    #[test]
     fn csv_has_a_header_and_one_row_per_column() {
         let input = TransferInput {
             freqs: vec![100.0, 1000.0],
@@ -1755,7 +1900,7 @@ mod tests {
     #[test]
     fn mask_at_both_ends_produces_no_empty_edge_segments() {
         let coherence = [0.3, 0.9, 0.9, 0.3];
-        let seg = split_on_mask(&coherence, |i| (i as f64, 0.0));
+        let seg = split_on_mask(&coherence, COHERENCE_THRESHOLD, |i| (i as f64, 0.0));
         // One interior segment of the two live columns; no leading or
         // trailing empty segment.
         assert_eq!(seg.len(), 1);

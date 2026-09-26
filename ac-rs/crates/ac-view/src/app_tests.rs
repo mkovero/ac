@@ -1781,3 +1781,38 @@ fn the_selection_never_rests_on_a_hidden_slot() {
     assert!(t.loaded[i].visible);
     assert_eq!(t.focus, crate::view::Focus::Stored(i));
 }
+
+/// `B` cycles the display's coherence mask and the scene says so; the
+/// frame's protection state reaches the scene as a readout (#670).
+#[test]
+fn b_cycles_the_mask_and_protection_reaches_the_scene() {
+    let mut app = transfer_app();
+    let mut f = found_frame();
+    f.protection = Some(ac_core::wire::WireProtection {
+        clipped_buffers: 2,
+        reference_absent: false,
+        held_columns: 0,
+    });
+    app.ingest_frame_for_test(f.clone(), 0.0);
+    let scene = app.current_transfer_scene().unwrap();
+    assert_eq!(scene.coherence_mask_readout, None);
+    assert_eq!(
+        scene.protection_readout.as_deref(),
+        Some("2 clipped buffers dropped")
+    );
+    app.handle_action(Action::CycleCoherenceMask, false); // 0.5 -> 0.7
+    app.ingest_frame_for_test(f.clone(), 1.0);
+    assert_eq!(
+        app.current_transfer_scene()
+            .unwrap()
+            .coherence_mask_readout
+            .as_deref(),
+        Some("coherence mask 0.70")
+    );
+    app.handle_action(Action::CycleCoherenceMask, false); // 0.9
+    app.handle_action(Action::CycleCoherenceMask, false); // wraps to 0.3
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(t.coherence_mask, 0.3);
+}

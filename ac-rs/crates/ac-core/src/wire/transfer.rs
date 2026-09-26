@@ -38,6 +38,23 @@ use serde_json::Value;
 /// `set_drive` instead would believe the drive was live while the daemon
 /// had already silenced it — which is precisely the belief-versus-
 /// observation gap the fault indicator exists to close.
+/// Data protection (#670, Smaart v7 pp. 97–99): what the daemon held back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct WireProtection {
+    /// Capture buffers thrown away this session because a leg clipped (a
+    /// run of full-scale samples). Monotone.
+    #[serde(default)]
+    pub clipped_buffers: u64,
+    /// This tick's reference leg is at the floor: processing is paused and
+    /// the trace holds its last value until the reference returns.
+    #[serde(default)]
+    pub reference_absent: bool,
+    /// Ladder columns in this frame holding their last good value because
+    /// the reference was too weak there (or blanked, if they never had one).
+    #[serde(default)]
+    pub held_columns: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WireDrive {
     /// Applied on this tick.
@@ -315,6 +332,10 @@ pub struct TransferFrame {
     /// without saying so. A frame without this contributes no transfer trace.
     #[serde(default)]
     pub mtw: Option<MtwColumns>,
+
+    /// Data protection (#670). `None` on a daemon predating it.
+    #[serde(default)]
+    pub protection: Option<WireProtection>,
 
     // ---- fault indicator (#228) ----
     /// Observed stimulus state. `None` on a daemon predating #228.
