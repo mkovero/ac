@@ -102,13 +102,11 @@ pub struct AcViewApp {
     delay_entry: Option<crate::delay_entry::DelayEntry>,
     /// A snapshot being taken on its own thread (`S`, #256). One at a time.
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
-    /// The frame the live trace is held at while paused (`Z`, #256). The
-    /// meters and the fault indicator keep reading `last_frame`: a paused
-    /// picture must not hide a leg going silent or clipping while the
-    /// stimulus is still driving.
-    frozen_frame: Option<ac_core::wire::TransferFrame>,
     /// The slot the running capture is for.
     capture_slot: Option<u8>,
+    /// `Q` was pressed: close the window at the end of this pass. Set by
+    /// the action (which has no `egui::Context`), acted on in `ui()`.
+    quit_requested: bool,
     /// The one-line status message (#256): what `S` did. Expires at the
     /// instant held beside it; `None` = stays until replaced.
     toast: Option<(String, Option<Instant>)>,
@@ -162,8 +160,8 @@ impl AcViewApp {
             settings: None,
             delay_entry: None,
             capture_rx: None,
-            frozen_frame: None,
             capture_slot: None,
+            quit_requested: false,
             toast: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
@@ -237,11 +235,6 @@ impl AcViewApp {
         if !self.admit_wire_version(&frame) {
             return;
         }
-        // Paused (`Z`, #256): the IR panel holds still with the trace —
-        // after the version check, so a refusal is still reported.
-        if self.transfer_paused() {
-            return;
-        }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
             self.last_ir_frame = Some(ir_frame);
         }
@@ -282,9 +275,6 @@ impl AcViewApp {
             }
         }
         self.last_frame = None;
-        // A held picture belongs to the stream being refused (#256):
-        // never show it over a later, compatible one.
-        self.frozen_frame = None;
         self.scene = None;
         self.last_scene_ranges = None;
         self.transfer_scene = None;
@@ -357,27 +347,10 @@ impl AcViewApp {
                         &mut self.fault,
                         now_s,
                     );
-                    // Paused (`Z`, #256): the trace and readouts come from
-                    // the held frame; the meters and the fault indicator
-                    // stay live — the stimulus is still running.
-                    self.transfer_scene = Some(match (&self.frozen_frame, state.paused) {
-                        (Some(frozen), true) => {
-                            let mut held = ac_scene::TransferScene::from_input(
-                                &ac_scene::TransferInput::from_wire_frame(frozen),
-                                modes,
-                                freq_range,
-                                db_range,
-                                &mut Default::default(),
-                                &mut Default::default(),
-                                now_s,
-                            );
-                            held.meas_meter = live.meas_meter;
-                            held.ref_meter = live.ref_meter;
-                            held.fault = live.fault;
-                            held
-                        }
-                        _ => live,
-                    });
+                    // Paused (#256) only hides the live trace, in the view;
+                    // the scene keeps rolling so the meters, the fault
+                    // indicator and the readouts stay live.
+                    self.transfer_scene = Some(live);
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
@@ -530,6 +503,9 @@ impl AcViewApp {
                 if let Some(session) = &mut self.session {
                     session.stop();
                 }
+                // And actually exit: stopping the session alone left the
+                // window open.
+                self.quit_requested = true;
             }
             Action::MoveCursorLeft => self.with_spectrum(|s| s.move_cursor(0.95)),
             Action::MoveCursorRight => self.with_spectrum(|s| s.move_cursor(1.05)),
@@ -695,11 +671,6 @@ impl AcViewApp {
     /// Enter while not armed (#256): hold the live trace, or let it roll.
     fn toggle_live_pause(&mut self) {
         self.with_transfer(|t| t.toggle_pause());
-        self.frozen_frame = if self.transfer_paused() {
-            self.last_frame.clone()
-        } else {
-            None
-        };
     }
 
     /// Bare digit `n` (#256): show or hide slot `n`, or say it is empty.
@@ -1223,6 +1194,7 @@ impl AcViewApp {
                     focused: matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
                     visible: run.visible,
                     color_slot: run.color_slot,
+                    slot: run.slot,
                 })
                 .collect(),
             ViewKind::Spectrum(_) => Vec::new(),
@@ -1329,6 +1301,9 @@ impl eframe::App for AcViewApp {
         );
 
         self.draw_overlays(&ctx);
+        if self.quit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.request_next_repaint(&ctx);
     }
 }

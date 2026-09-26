@@ -190,56 +190,19 @@ fn warmup_paints_nothing_however_long_it_takes() {
     }
 }
 
-/// The daemon finding the delay is confirmed, briefly.
-#[test]
-fn a_found_delay_shows_a_transient_confirmation() {
-    let mut st = FaultState::default();
-    assert_eq!(st.update(&frame_in(warming(), &[]), 0.0), None);
-    assert_eq!(st.update(&healthy(&LIVE_COH), 1.0), Some(Fault::DelayFound));
-    assert_eq!(
-        st.update(&healthy(&LIVE_COH), 1.0 + DELAY_FOUND_HOLD_S - 0.1),
-        Some(Fault::DelayFound)
-    );
-    assert_eq!(
-        st.update(&healthy(&LIVE_COH), 1.0 + DELAY_FOUND_HOLD_S),
-        None
-    );
-    assert_eq!(Fault::DelayFound.severity(), Severity::Confirmation);
-    assert_eq!(Fault::CheckRouting.severity(), Severity::Fault);
-}
-
-/// A session first seen already holding a delay has nothing to confirm.
-#[test]
-fn a_delay_held_from_the_first_frame_is_not_a_find() {
-    let mut st = FaultState::default();
-    assert_eq!(st.update(&healthy(&LIVE_COH), 0.0), None);
-    assert_eq!(st.update(&healthy(&LIVE_COH), 1.0), None);
-}
-
 /// A passive session gets the both-legs-live rows: neither reads drive.
 #[test]
-fn a_non_drivable_session_still_gets_check_routing_and_the_confirmation() {
+fn a_non_drivable_session_still_gets_check_routing() {
     let mut st = FaultState::default();
     let inp = frame_in(passive(Some(true)), &DEAD_COH);
     assert_eq!(st.update(&inp, 0.0), Some(Fault::CheckRouting));
 
+    // A delay arriving is not an event on the indicator (#256).
     let mut st = FaultState::default();
     let unaligned = frame_in(passive(Some(false)), &[]);
     let found = frame_in(passive(Some(true)), &LIVE_COH);
     assert_eq!(st.update(&unaligned, 0.0), None);
-    assert_eq!(st.update(&found, 1.0), Some(Fault::DelayFound));
-}
-
-/// A fault outranks the confirmation: unrelated legs get a delay (their IR
-/// has a peak) and then a dead ladder, and the operator must read the fault.
-#[test]
-fn check_routing_outranks_the_confirmation() {
-    let mut st = FaultState::default();
-    assert_eq!(st.update(&frame_in(warming(), &[]), 0.0), None);
-    assert_eq!(
-        st.update(&healthy(&DEAD_COH), 1.0),
-        Some(Fault::CheckRouting)
-    );
+    assert_eq!(st.update(&found, 1.0), None);
 }
 
 #[test]
@@ -266,7 +229,7 @@ fn a_bad_lock_shape_is_not_check_routing() {
 /// A daemon predating #227 sends no `delay_locked`. Every other row still
 /// works, and absence is never a find.
 #[test]
-fn a_daemon_without_delay_locked_gets_no_confirmation() {
+fn a_daemon_without_delay_locked_still_gets_check_routing() {
     let mut st = FaultState::default();
     let none = |coh| {
         frame_in(

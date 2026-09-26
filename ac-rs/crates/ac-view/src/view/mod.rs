@@ -21,7 +21,7 @@
 
 mod ir;
 mod paint;
-mod palette;
+pub mod palette;
 mod spectrum;
 mod state;
 mod transfer;

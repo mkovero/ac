@@ -45,6 +45,8 @@ pub struct StoredTrace<'a> {
     pub visible: bool,
     /// Its comparison colour (#256).
     pub color_slot: usize,
+    /// Its slot (`Ctrl`+1…9), or `None` for a run opened from a file.
+    pub slot: Option<u8>,
 }
 
 /// How the content band is divided this frame.
@@ -60,13 +62,14 @@ struct TransferLayout {
 }
 
 impl TransferLayout {
-    fn new(content: Rect, stored_len: usize) -> Self {
-        // The legend reserves one row per stored run plus one for the
-        // live trace, and is carved out before the panes are sized.
-        let legend_band = if stored_len == 0 {
-            0.0
+    fn new(content: Rect, file_runs: usize, any_stored: bool) -> Self {
+        // The legend reserves one strip row (live + the nine slot boxes,
+        // #256) plus one row per run opened from a file, and is carved out
+        // before the panes are sized. Nothing stored, no legend.
+        let legend_band = if any_stored {
+            (file_runs as f32 + 1.0) * ROW_H + 8.0
         } else {
-            (stored_len as f32 + 1.0) * ROW_H + 4.0
+            0.0
         };
 
         // Two stacked panes: magnitude (top), phase (bottom). Shared x
@@ -145,20 +148,31 @@ pub(super) fn draw_transfer(
         return;
     }
 
-    let layout = TransferLayout::new(content, stored.len());
+    let layout = TransferLayout::new(
+        content,
+        stored.iter().filter(|r| r.slot.is_none()).count(),
+        !stored.is_empty(),
+    );
     let live_focused = matches!(state.focus, Focus::Live);
 
     draw_axes(painter, &layout, scene, stored);
     draw_traces(
         painter,
         &layout,
-        scene.filter(|_| state.live_visible),
+        scene.filter(|_| state.live_trace_shown()),
         stored,
         live_focused,
     );
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
-    draw_legend(painter, &layout, state, stored, live_focused);
+    draw_legend(
+        painter,
+        &layout,
+        state,
+        scene.is_some(),
+        stored,
+        live_focused,
+    );
     if state.paused {
         // #256: said plainly, on the row under the delay readout (row 2 —
         // the band labels, caption and readout own rows 0–2, the meters the
@@ -167,7 +181,7 @@ pub(super) fn draw_transfer(
             painter,
             layout.content.left_top() + egui::vec2(0.0, 3.0 * ROW_H),
             Align2::LEFT_TOP,
-            "PAUSED \u{2014} Z resumes",
+            "PAUSED \u{2014} Enter resumes",
             COLOR_SIGNAL,
         );
     }
@@ -420,79 +434,132 @@ fn draw_delay_readout(
     );
 }
 
-/// Comparison legend (#321): one row for the live trace, one per stored
-/// run, in the band reserved by [`TransferLayout`]. Filename +
-/// captured-at timestamp (attribution, criterion 1 — two runs sharing a
-/// basename, the same file opened twice or two files named identically
-/// from different session directories, stay distinguishable; QA #336
-/// correctness issue 2) and that run's own smoothing caption (criterion
-/// 2) — verbatim `ac-scene` string, blank when that run is unsmoothed,
-/// the same "absent means off" convention the single-trace caption
-/// already uses. `▸` marks focus, the one signal that also selects what
-/// `N` edits and what the delay readout above names. The live row draws
-/// even with no live scene — it is always a valid focus target once
-/// something is loaded.
+/// The comparison legend (#256): one strip — a `live` box, then a box per
+/// slot 1…9 — so what is stored and what is drawn reads at a glance.
+///
+/// - stored and shown: filled with the slot's colour, number in black;
+/// - stored and hidden: outlined in the slot's colour;
+/// - empty: a dim outline;
+/// - selected (`Tab`): a bright border.
+///
+/// The selected run's captions (estimator, smoothing) follow the strip.
+/// Runs opened from a file have no slot and keep a row each below it.
 fn draw_legend(
     painter: &Painter,
     layout: &TransferLayout,
     state: &TransferViewState,
+    live_present: bool,
     stored: &[StoredTrace<'_>],
     live_focused: bool,
 ) {
     let Some(legend_top) = layout.legend_top else {
         return;
     };
-    let live_marker = if live_focused { "▸ " } else { "  " };
-    let hidden = |visible: bool| if visible { "" } else { "  (hidden)" };
-    text(
-        painter,
-        egui::pos2(layout.content.min.x, legend_top),
-        Align2::LEFT_TOP,
-        format!("{live_marker}live{}", hidden(state.live_visible)),
-        focus_text_color(live_focused),
+    let h = ROW_H;
+    let gap = 4.0;
+    let mut x = layout.content.min.x;
+    let mut slot_box = |width: f32| {
+        let rect = Rect::from_min_size(egui::pos2(x, legend_top + 2.0), egui::vec2(width, h));
+        x += width + gap;
+        rect
+    };
+    let draw_box = |rect: Rect, label: &str, color: egui::Color32, filled: bool, focused: bool| {
+        if filled {
+            painter.rect_filled(rect, 2.0, color);
+        }
+        let border = if focused {
+            Stroke::new(2.0, COLOR_VALUE)
+        } else {
+            Stroke::new(1.0, color)
+        };
+        painter.rect_stroke(rect, 2.0, border, egui::StrokeKind::Inside);
+        let ink = if filled { egui::Color32::BLACK } else { color };
+        text(painter, rect.center(), Align2::CENTER_CENTER, label, ink);
+    };
+
+    // The live box wears the live curve's colour, and is filled only when
+    // a live curve is actually on screen.
+    draw_box(
+        slot_box(3.0 * h),
+        "live",
+        focus_stroke(live_focused).color,
+        live_present && state.live_trace_shown(),
+        live_focused,
     );
-    for (i, run) in stored.iter().enumerate() {
+    for n in 1..=crate::keys::SLOT_KEYS.len() as u8 {
+        let rect = slot_box(1.4 * h);
+        let label = n.to_string();
+        match stored.iter().find(|r| r.slot == Some(n)) {
+            Some(run) => draw_box(
+                rect,
+                &label,
+                super::palette::compare_color(run.color_slot),
+                run.visible,
+                run.focused,
+            ),
+            None => draw_box(rect, &label, COLOR_STRUCTURAL, false, false),
+        }
+    }
+
+    // A selected slot's captions after the strip; a file-opened run's stay
+    // on its own row below.
+    if let Some(run) = stored.iter().find(|r| r.focused && r.slot.is_some()) {
+        let mut next = egui::pos2(x + gap, legend_top + 2.0);
+        for caption in [
+            run.scene.estimator_readout.as_deref(),
+            run.scene.smoothing_readout,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            next = painter
+                .text(
+                    next,
+                    Align2::LEFT_TOP,
+                    caption,
+                    FontId::default(),
+                    COLOR_LABEL,
+                )
+                .right_top()
+                + egui::vec2(ROW_H, 0.0);
+        }
+    }
+
+    // Runs opened from a file: a row each, in their colour — identity,
+    // then how the trace was derived, then what was done to it (#221 UX),
+    // each its own span so a narrow window clips the captions first.
+    for (i, run) in stored.iter().filter(|r| r.slot.is_none()).enumerate() {
         let marker = if run.focused { "▸ " } else { "  " };
-        let (label, captured_at_utc) = (run.label, run.captured_at_utc);
-        // The row wears its trace's colour (#256), so a legend row and a
-        // curve are matched by eye; a hidden run's row is structural grey.
         let color = if run.visible {
             super::palette::compare_color(run.color_slot)
         } else {
             COLOR_STRUCTURAL
         };
-        // Identity, then how the trace was derived, then what was done to
-        // it (#221 UX): a narrow window clips the smoothing caption first
-        // and the estimator statement last. Each is its own span, placed
-        // after the one before it, and the two scene strings are drawn
-        // verbatim — never joined into this row's `format!`.
         let mut next = painter
             .text(
-                egui::pos2(layout.content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
+                egui::pos2(
+                    layout.content.min.x,
+                    legend_top + 6.0 + h * (i as f32 + 1.0),
+                ),
                 Align2::LEFT_TOP,
-                format!("{marker}{label}  {captured_at_utc}{}", hidden(run.visible)),
+                format!("{marker}{}  {}", run.label, run.captured_at_utc),
                 FontId::default(),
                 color,
             )
             .right_top()
             + egui::vec2(ROW_H, 0.0);
-        if let Some(estimator) = &run.scene.estimator_readout {
+        for caption in [
+            run.scene.estimator_readout.as_deref(),
+            run.scene.smoothing_readout,
+        ]
+        .into_iter()
+        .flatten()
+        {
             next = painter
-                .text(next, Align2::LEFT_TOP, estimator, FontId::default(), color)
+                .text(next, Align2::LEFT_TOP, caption, FontId::default(), color)
                 .right_top()
                 + egui::vec2(ROW_H, 0.0);
         }
-        if let Some(smoothing) = run.scene.smoothing_readout {
-            text(painter, next, Align2::LEFT_TOP, smoothing, color);
-        }
-    }
-}
-
-fn focus_text_color(focused: bool) -> egui::Color32 {
-    if focused {
-        COLOR_VALUE
-    } else {
-        COLOR_LABEL
     }
 }
 

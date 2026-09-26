@@ -576,21 +576,12 @@ fn found_frame() -> ac_core::wire::TransferFrame {
     f
 }
 
-/// #669: the daemon finding the delay is confirmed on the way past, and
-/// the fault state lives on the app, so identical frames clear it as
-/// scene time advances.
+/// A delay arriving shows no banner (#256): the readout says it.
 #[test]
-fn a_found_delay_confirms_itself_and_clears() {
+fn a_found_delay_shows_no_banner() {
     let mut app = transfer_app();
     app.ingest_frame_for_test(unaligned_frame(), 0.0);
-    assert_eq!(app.current_transfer_scene().unwrap().fault, None);
-
     app.ingest_frame_for_test(found_frame(), 1.0);
-    assert_eq!(
-        app.current_transfer_scene().unwrap().fault,
-        Some(ac_scene::Fault::DelayFound)
-    );
-    app.ingest_frame_for_test(found_frame(), 1.0 + ac_scene::fault::DELAY_FOUND_HOLD_S);
     assert_eq!(app.current_transfer_scene().unwrap().fault, None);
 }
 
@@ -1314,40 +1305,34 @@ fn enter_pauses_while_driving_and_leaves_the_drive_on() {
     assert!(t.paused);
 }
 
-/// Enter holds the trace and readouts, but not the meters or the fault
-/// indicator: the stimulus is still running, and a leg going silent must
-/// show (Codex review). Resuming shows the newest frame.
+/// Enter hides the live trace (#256): the scene keeps rolling — the
+/// readouts and meters follow the newest frame — and only the drawing
+/// leaves the live trace out, so the slots are compared on their own.
 #[test]
-fn enter_holds_the_trace_but_not_the_meters() {
+fn enter_hides_the_live_trace_and_keeps_the_scene_rolling() {
     let mut app = transfer_app();
     let mut a = transfer_frame();
     a.delay_ms = 1.0;
-    a.meas_peak_dbfs = Some(-30.0);
     let mut b = transfer_frame();
     b.delay_ms = 2.0;
-    b.meas_peak_dbfs = Some(-3.0);
     let now = std::time::Instant::now();
     assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
-    app.rebuild_scenes(true, 0.5);
-    let quiet = app.current_transfer_scene().unwrap().meas_meter.height;
     app.handle_action(Action::StimulusFireOrPause, false);
     assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
     app.rebuild_scenes(true, 1.0);
-    let held = app.current_transfer_scene().unwrap();
-    assert_eq!(
-        held.delay_readout, "1.00 ms",
-        "the trace moved while paused"
-    );
-    assert!(
-        held.meas_meter.height > quiet,
-        "the meter froze with the trace"
-    );
-    app.handle_action(Action::StimulusFireOrPause, false);
-    app.rebuild_scenes(true, 2.0);
     assert_eq!(
         app.current_transfer_scene().unwrap().delay_readout,
         "2.00 ms"
     );
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert!(t.paused && !t.live_trace_shown());
+    app.handle_action(Action::StimulusFireOrPause, false);
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert!(t.live_trace_shown());
 }
 
 /// `V` hides the focused trace — live or stored — and `Shift+V` shows all.
@@ -1402,29 +1387,6 @@ fn opened_runs_get_distinct_colours() {
         t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
         [9, 10],
         "file runs take colours after the nine slots"
-    );
-}
-
-/// A version refusal drops the held picture with the stream it came from
-/// (Codex recheck): a later compatible frame is shown, not the old trace.
-#[test]
-fn a_version_refusal_drops_the_held_picture() {
-    let mut app = transfer_app();
-    let mut a = transfer_frame();
-    a.delay_ms = 1.0;
-    let now = std::time::Instant::now();
-    assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
-    app.handle_action(Action::StimulusFireOrPause, false);
-    let mut refused = serde_json::to_value(&a).unwrap();
-    refused["wire_version"] = serde_json::json!(9_999);
-    assert!(!app.ingest_raw_frame(refused, now));
-    let mut b = transfer_frame();
-    b.delay_ms = 2.0;
-    assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
-    app.rebuild_scenes(true, 1.0);
-    assert_eq!(
-        app.current_transfer_scene().unwrap().delay_readout,
-        "2.00 ms"
     );
 }
 
@@ -1546,4 +1508,15 @@ fn digits_reach_the_slots_through_dispatch() {
         "a digit typed into the entry toggled slot 2"
     );
     assert_eq!(app.delay_entry.as_ref().map(|e| e.text()), Some("2"));
+}
+
+/// `Q` exits (#256 feedback): the drive goes off, the session stops, and
+/// the window is asked to close — not merely left sitting there.
+#[test]
+fn q_asks_the_window_to_close() {
+    let mut app = transfer_app();
+    drive(&mut app);
+    app.handle_action(Action::Quit, false);
+    assert!(app.quit_requested);
+    assert!(!app.sent_drive.last().expect("drive off relayed").on);
 }
