@@ -1,5 +1,5 @@
-//! `S` in the transfer view (#256): take a snapshot, keep it, and overlay
-//! it — off the UI thread.
+//! `Ctrl`+digit in the transfer view (#256): take a snapshot into a slot,
+//! keep it, and overlay it — off the UI thread.
 //!
 //! A snapshot is a multi-megabyte fetch plus a re-derivation of the whole
 //! captured window. Done on the UI thread it stalls the display and, worse,
@@ -21,13 +21,15 @@ use crate::zmq_client::{Client, Endpoint};
 
 /// What a finished capture hands back.
 pub struct Captured {
+    /// The slot it was taken for.
+    pub slot: u8,
     /// Where the `.acsnap` was written.
     pub path: PathBuf,
     /// Pair 0 of the snapshot, ready to overlay.
     pub run: LoadedRun,
 }
 
-/// `~/.local/share/ac/captures` — the client's own copy of every `S`
+/// `~/.local/share/ac/captures` — the client's own copy of every slot
 /// capture. Not the daemon's spool (`~/.local/state/ac/snapshots`), which
 /// is emptied when the session ends.
 pub fn captures_dir() -> PathBuf {
@@ -39,18 +41,18 @@ pub fn captures_dir() -> PathBuf {
         .join("captures")
 }
 
-/// The file name for a capture taken at `captured_at_utc` (RFC3339):
+/// The file name for slot `slot` captured at `captured_at_utc` (RFC3339):
 /// colons are not portable in file names, so they become `-`.
-pub fn file_name(captured_at_utc: &str) -> String {
-    format!("{}.acsnap", captured_at_utc.replace(':', "-"))
+pub fn file_name(slot: u8, captured_at_utc: &str) -> String {
+    format!("slot{slot}-{}.acsnap", captured_at_utc.replace(':', "-"))
 }
 
 /// Write `bytes` under `dir` as a file that did not exist before: the
 /// timestamp's name, or `-2`, `-3`, … appended when two captures share a
 /// second. Never overwrites a capture already on disk.
-fn write_new(dir: &Path, captured_at_utc: &str, bytes: &[u8]) -> Result<(PathBuf, String)> {
+fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<(PathBuf, String)> {
     use std::io::Write;
-    let base = file_name(captured_at_utc);
+    let base = base.to_string();
     let stem = base.trim_end_matches(".acsnap").to_string();
     for n in 1.. {
         let name = if n == 1 {
@@ -76,24 +78,25 @@ fn write_new(dir: &Path, captured_at_utc: &str, bytes: &[u8]) -> Result<(PathBuf
     unreachable!("an unbounded counter always finds a free name")
 }
 
-/// Trigger, fetch, write under `dir`, and derive pair 0 — one blocking
-/// call, for the capture thread.
-pub fn capture_into(client: &Client, dir: &Path) -> Result<Captured> {
+/// Trigger, fetch, write under `dir`, and derive pair 0 for `slot` — one
+/// blocking call, for the capture thread. The run is labelled `slot N`;
+/// the file keeps the full name, which the status message reports.
+pub fn capture_into(client: &Client, dir: &Path, slot: u8) -> Result<Captured> {
     let (bytes, snap) = crate::snapshot_flow::trigger_and_fetch_bytes(client)?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let (path, name) = write_new(dir, &snap.meta.captured_at_utc, &bytes)?;
-    let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, 0, name)?;
-    Ok(Captured { path, run })
+    let (path, _) = write_new(dir, &file_name(slot, &snap.meta.captured_at_utc), &bytes)?;
+    let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, 0, format!("slot {slot}"))?;
+    Ok(Captured { slot, path, run })
 }
 
 /// Run [`capture_into`] [`captures_dir`] on a thread with its own
 /// connection to `endpoint`. The receiver yields exactly one result; the
 /// error is already rendered for the status line.
-pub fn spawn(endpoint: Endpoint) -> Receiver<Result<Captured, String>> {
+pub fn spawn(endpoint: Endpoint, slot: u8) -> Receiver<Result<Captured, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = Client::connect(&endpoint)
-            .and_then(|client| capture_into(&client, &captures_dir()))
+            .and_then(|client| capture_into(&client, &captures_dir(), slot))
             .map_err(|e| format!("{e:#}"));
         let _ = tx.send(result);
     });
@@ -107,8 +110,8 @@ mod tests {
     #[test]
     fn file_names_carry_no_colons() {
         assert_eq!(
-            file_name("2026-09-26T14:30:05Z"),
-            "2026-09-26T14-30-05Z.acsnap"
+            file_name(3, "2026-09-26T14:30:05Z"),
+            "slot3-2026-09-26T14-30-05Z.acsnap"
         );
     }
 
@@ -116,10 +119,11 @@ mod tests {
     fn a_second_capture_in_the_same_second_does_not_overwrite_the_first() {
         let dir = std::env::temp_dir().join(format!("ac-capture-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (p1, _) = write_new(&dir, "2026-09-26T14:30:05Z", b"one").unwrap();
-        let (p2, n2) = write_new(&dir, "2026-09-26T14:30:05Z", b"two").unwrap();
+        let base = file_name(1, "2026-09-26T14:30:05Z");
+        let (p1, _) = write_new(&dir, &base, b"one").unwrap();
+        let (p2, n2) = write_new(&dir, &base, b"two").unwrap();
         assert_ne!(p1, p2);
-        assert_eq!(n2, "2026-09-26T14-30-05Z-2.acsnap");
+        assert_eq!(n2, "slot1-2026-09-26T14-30-05Z-2.acsnap");
         assert_eq!(std::fs::read(&p1).unwrap(), b"one");
         assert_eq!(std::fs::read(&p2).unwrap(), b"two");
         std::fs::remove_dir_all(&dir).ok();

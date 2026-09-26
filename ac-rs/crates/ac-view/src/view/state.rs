@@ -125,6 +125,9 @@ pub struct LoadedRun {
     /// run is added ([`TransferViewState::add_run`]), so removing one run
     /// never recolours the others mid-comparison.
     pub color_slot: usize,
+    /// The slot this run was stored to with `Ctrl`+digit (#256), 1–9;
+    /// `None` for a run opened from a file.
+    pub slot: Option<u8>,
 }
 
 impl LoadedRun {
@@ -144,6 +147,7 @@ impl LoadedRun {
             smoothing: ac_scene::Smoothing::Off,
             visible: true,
             color_slot: 0,
+            slot: None,
         }
     }
 }
@@ -196,9 +200,9 @@ pub struct TransferViewState {
     /// Starts on `Live` — a session that has loaded nothing yet reads
     /// exactly as it did before this issue.
     pub focus: Focus,
-    /// `Z` (#256): the live trace, meters and readouts hold still so stored
-    /// runs can be compared against a fixed picture. Frames keep arriving
-    /// and the stimulus keeps running; they are just not shown.
+    /// Enter while not armed (#256): the live trace and readouts hold
+    /// still so stored runs can be compared against a fixed picture. The
+    /// meters and fault indicator stay live; the stimulus keeps running.
     pub paused: bool,
     /// Whether the live trace is drawn (`V` with focus on live, #256) —
     /// hide it to compare stored runs alone.
@@ -229,7 +233,35 @@ impl TransferViewState {
             focus: Focus::Live,
             paused: false,
             live_visible: true,
-            next_color_slot: 0,
+            // Slot runs take colours 0–8 by slot; runs opened from files
+            // start after them.
+            next_color_slot: 9,
+        }
+    }
+
+    /// `Ctrl`+`n` (#256): put `run` in slot `n`, replacing what was there.
+    /// Slot runs sit in slot order ahead of runs opened from files, so
+    /// `Tab` walks them 1, 2, … A slot keeps its colour across
+    /// replacements. Focus stays on the trace it was on.
+    pub fn store_slot(&mut self, n: u8, mut run: LoadedRun) {
+        run.slot = Some(n);
+        run.color_slot = usize::from(n.saturating_sub(1));
+        if let Some(existing) = self.loaded.iter_mut().find(|r| r.slot == Some(n)) {
+            run.visible = existing.visible;
+            run.smoothing = existing.smoothing;
+            *existing = run;
+            return;
+        }
+        let at = self
+            .loaded
+            .iter()
+            .position(|r| r.slot.is_none_or(|s| s > n))
+            .unwrap_or(self.loaded.len());
+        self.loaded.insert(at, run);
+        if let Focus::Stored(i) = self.focus {
+            if i >= at {
+                self.focus = Focus::Stored(i + 1);
+            }
         }
     }
 
@@ -240,7 +272,7 @@ impl TransferViewState {
         self.loaded.push(run);
     }
 
-    /// `Z`: pause or resume the live display (#256).
+    /// Pause or resume the live display (#256, Enter).
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
     }

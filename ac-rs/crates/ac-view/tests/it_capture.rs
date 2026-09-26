@@ -28,7 +28,7 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
 
     let dir = alloc_home().join("captures");
     let capture_client = Client::connect(&endpoint).expect("connect (capture)");
-    let captured = ac_view::capture::capture_into(&capture_client, &dir).expect("capture");
+    let captured = ac_view::capture::capture_into(&capture_client, &dir, 4).expect("capture");
 
     assert!(captured.path.starts_with(&dir));
     assert!(
@@ -38,7 +38,9 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
     );
     let name = captured.path.file_name().unwrap().to_string_lossy();
     assert!(name.ends_with(".acsnap") && !name.contains(':'), "{name}");
-    assert_eq!(captured.run.label, name);
+    assert!(name.starts_with("slot4-"), "{name}");
+    assert_eq!(captured.run.label, "slot 4");
+    assert_eq!(captured.slot, 4);
 
     let reopened = ac_view::snapshot_flow::open_stored_transfer_run(&captured.path, 0)
         .expect("reopen the written file");
