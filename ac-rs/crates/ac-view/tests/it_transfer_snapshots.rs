@@ -302,12 +302,16 @@ fn snapshot_transfer_stored_comparison_no_live() {
             captured_at_utc: "2026-08-01T00:00:00Z",
             scene: &run_a,
             focused: true,
+            visible: true,
+            color_slot: 0,
         },
         StoredTrace {
             label: "run.acsnap",
             captured_at_utc: "2026-08-02T00:00:00Z",
             scene: &run_b,
             focused: false,
+            visible: true,
+            color_slot: 0,
         },
     ];
     let mut h = Harness::builder()

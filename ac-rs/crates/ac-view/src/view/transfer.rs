@@ -41,6 +41,10 @@ pub struct StoredTrace<'a> {
     /// Whether this run is what `N` edits and what the delay readout
     /// names right now.
     pub focused: bool,
+    /// Drawn or hidden (`V`, #256).
+    pub visible: bool,
+    /// Its comparison colour (#256).
+    pub color_slot: usize,
 }
 
 /// How the content band is divided this frame.
@@ -145,10 +149,28 @@ pub(super) fn draw_transfer(
     let live_focused = matches!(state.focus, Focus::Live);
 
     draw_axes(painter, &layout, scene, stored);
-    draw_traces(painter, &layout, scene, stored, live_focused);
+    draw_traces(
+        painter,
+        &layout,
+        scene.filter(|_| state.live_visible),
+        stored,
+        live_focused,
+    );
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
-    draw_legend(painter, &layout, stored, live_focused);
+    draw_legend(painter, &layout, state, stored, live_focused);
+    if state.paused {
+        // #256: said plainly, on the row under the delay readout (row 2 —
+        // the band labels, caption and readout own rows 0–2, the meters the
+        // right edge), so a held picture is never mistaken for a live one.
+        text(
+            painter,
+            layout.content.left_top() + egui::vec2(0.0, 3.0 * ROW_H),
+            Align2::LEFT_TOP,
+            "PAUSED \u{2014} Z resumes",
+            COLOR_SIGNAL,
+        );
+    }
 
     // Input-level meters: always on (D6), no toggle. Live-only — there is
     // no input-level reading without a live frame.
@@ -244,8 +266,11 @@ fn draw_traces(
         draw_trace(painter, &scene.magnitude, layout.mag, stroke, false);
         draw_trace(painter, &scene.phase, layout.phase, stroke, false);
     }
-    for run in stored {
-        let stroke = focus_stroke(run.focused);
+    for run in stored.iter().filter(|r| r.visible) {
+        let stroke = Stroke::new(
+            if run.focused { 2.0 } else { 1.0 },
+            super::palette::compare_color(run.color_slot),
+        );
         draw_trace(painter, &run.scene.magnitude, layout.mag, stroke, true);
         draw_trace(painter, &run.scene.phase, layout.phase, stroke, true);
     }
@@ -410,6 +435,7 @@ fn draw_delay_readout(
 fn draw_legend(
     painter: &Painter,
     layout: &TransferLayout,
+    state: &TransferViewState,
     stored: &[StoredTrace<'_>],
     live_focused: bool,
 ) {
@@ -417,17 +443,24 @@ fn draw_legend(
         return;
     };
     let live_marker = if live_focused { "▸ " } else { "  " };
+    let hidden = |visible: bool| if visible { "" } else { "  (hidden)" };
     text(
         painter,
         egui::pos2(layout.content.min.x, legend_top),
         Align2::LEFT_TOP,
-        format!("{live_marker}live"),
+        format!("{live_marker}live{}", hidden(state.live_visible)),
         focus_text_color(live_focused),
     );
     for (i, run) in stored.iter().enumerate() {
         let marker = if run.focused { "▸ " } else { "  " };
         let (label, captured_at_utc) = (run.label, run.captured_at_utc);
-        let color = focus_text_color(run.focused);
+        // The row wears its trace's colour (#256), so a legend row and a
+        // curve are matched by eye; a hidden run's row is structural grey.
+        let color = if run.visible {
+            super::palette::compare_color(run.color_slot)
+        } else {
+            COLOR_STRUCTURAL
+        };
         // Identity, then how the trace was derived, then what was done to
         // it (#221 UX): a narrow window clips the smoothing caption first
         // and the estimator statement last. Each is its own span, placed
@@ -437,7 +470,7 @@ fn draw_legend(
             .text(
                 egui::pos2(layout.content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
                 Align2::LEFT_TOP,
-                format!("{marker}{label}  {captured_at_utc}"),
+                format!("{marker}{label}  {captured_at_utc}{}", hidden(run.visible)),
                 FontId::default(),
                 color,
             )

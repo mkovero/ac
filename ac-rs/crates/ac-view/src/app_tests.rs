@@ -1221,3 +1221,103 @@ fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
     let held_ir = app.last_ir_frame.as_ref().expect("an IR frame is held");
     assert_eq!(held_ir.delay_samples, DRAIN_BACKLOG - 1);
 }
+
+// ---- #256: capture, pause, compare ----
+
+/// `S` with no session answers on screen instead of doing nothing.
+#[test]
+fn s_without_a_session_says_so() {
+    let mut app = transfer_app();
+    app.handle_action(Action::TriggerSnapshot, false);
+    assert_eq!(
+        app.toast_text(),
+        Some("no session \u{2014} nothing to snapshot")
+    );
+}
+
+/// A finished capture is overlaid and reported with its number and file;
+/// a failed one is reported with the reason.
+#[test]
+fn a_finished_capture_is_overlaid_and_reported() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        path: std::path::PathBuf::from("/c/2026-09-26T14-30-05Z.acsnap"),
+        run: loaded_run("2026-09-26T14-30-05Z.acsnap", "2026-09-26T14:30:05Z"),
+    }));
+    assert_eq!(
+        app.toast_text(),
+        Some("snapshot 1 saved \u{2014} /c/2026-09-26T14-30-05Z.acsnap")
+    );
+    match &app.view {
+        ViewKind::Transfer(state) => assert_eq!(state.loaded.len(), 1),
+        ViewKind::Spectrum(_) => panic!("not transfer view"),
+    }
+    app.finish_capture_for_test(Err("no transfer_stream session running".into()));
+    assert_eq!(
+        app.toast_text(),
+        Some("snapshot failed \u{2014} no transfer_stream session running")
+    );
+}
+
+/// `Z` holds the picture: a frame that arrives while paused is not shown,
+/// and the next one after resuming is.
+#[test]
+fn z_holds_the_live_picture_until_resumed() {
+    let mut app = transfer_app();
+    let mut a = transfer_frame();
+    a.delay_ms = 1.0;
+    let mut b = transfer_frame();
+    b.delay_ms = 2.0;
+    let now = std::time::Instant::now();
+    assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
+    app.handle_action(Action::TogglePause, false);
+    assert!(!app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
+    app.rebuild_scenes(true, 1.0);
+    assert_eq!(
+        app.current_transfer_scene().unwrap().delay_readout,
+        "1.00 ms"
+    );
+    app.handle_action(Action::TogglePause, false);
+    assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
+    app.rebuild_scenes(true, 2.0);
+    assert_eq!(
+        app.current_transfer_scene().unwrap().delay_readout,
+        "2.00 ms"
+    );
+}
+
+/// `V` hides the focused trace — live or stored — and `Shift+V` shows all.
+/// Colours stay with their run when another is removed.
+#[test]
+fn v_hides_the_focused_trace_and_colours_stay_put() {
+    let mut app = transfer_app();
+    app.with_transfer(|t| {
+        t.add_run(loaded_run("a.acsnap", "2026-09-26T14:00:00Z"));
+        t.add_run(loaded_run("b.acsnap", "2026-09-26T14:01:00Z"));
+        t.add_run(loaded_run("c.acsnap", "2026-09-26T14:02:00Z"));
+    });
+    app.handle_action(Action::ToggleTraceVisible, false); // live
+    app.handle_action(Action::CycleFocus, false);
+    app.handle_action(Action::CycleFocus, false); // b
+    app.handle_action(Action::ToggleTraceVisible, false);
+    {
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!("not transfer view")
+        };
+        assert!(!t.live_visible);
+        assert_eq!(
+            t.loaded.iter().map(|r| r.visible).collect::<Vec<_>>(),
+            [true, false, true]
+        );
+    }
+    app.handle_action(Action::ToggleTraceVisible, true);
+    app.handle_action(Action::CloseFocusedRun, false); // removes b
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert!(t.live_visible && t.loaded.iter().all(|r| r.visible));
+    assert_eq!(
+        t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
+        [0, 2]
+    );
+}

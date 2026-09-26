@@ -75,6 +75,11 @@ pub enum Action {
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
     TypeDelay,
+    /// Pause or resume the live display (#256): trace, meters and readouts
+    /// hold still; frames and stimulus keep running.
+    TogglePause,
+    /// Show or hide the focused trace (#256). Shift: show every trace.
+    ToggleTraceVisible,
     /// Toggle the IR panel (#286) — h(t) from the `visualize/ir` sidecar,
     /// live-arrival only (the sweep-derived kind is a disjoint data path,
     /// #308). Mnemonic: `H`, this display's own y-axis label.
@@ -126,7 +131,8 @@ pub struct Binding {
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
 /// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` `Tab` `X` (#321: cycle
 /// trace focus / close a stored run) `,` `.` `T` (#669: nudge / type the
-/// delay — `T` is spectrum's too, the views never share a table) +
+/// delay — `T` is spectrum's too, the views never share a table) `Z` `V`
+/// (#256: pause the live trace, show/hide the focused one — `V` likewise) +
 /// stimulus `Space` `Enter` `Esc` `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
@@ -146,7 +152,7 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::S,
         action: Action::TriggerSnapshot,
         scope: Scope::Global,
-        description: "Trigger snapshot",
+        description: "Snapshot: save and overlay it (transfer view)",
     },
     Binding {
         key: Key::F,
@@ -263,6 +269,18 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::NudgeDelayLater,
         scope: Scope::Transfer,
         description: "Delay one sample later",
+    },
+    Binding {
+        key: Key::Z,
+        action: Action::TogglePause,
+        scope: Scope::Transfer,
+        description: "Pause / resume the live trace",
+    },
+    Binding {
+        key: Key::V,
+        action: Action::ToggleTraceVisible,
+        scope: Scope::Transfer,
+        description: "Show / hide the focused trace (Shift: show all)",
     },
     Binding {
         key: Key::T,

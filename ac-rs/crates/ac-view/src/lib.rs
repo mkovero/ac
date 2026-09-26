@@ -6,6 +6,7 @@
 //! enforcement mechanism.
 
 pub mod app;
+pub mod capture;
 pub mod computes_nothing;
 pub mod delay_entry;
 pub mod fonts;

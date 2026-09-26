@@ -22,6 +22,12 @@ use crate::zmq_client::Client;
 /// from. Requires a live `transfer_stream` session (the daemon's own
 /// precondition, not re-checked here).
 pub fn trigger_and_fetch(client: &Client) -> Result<Snapshot> {
+    trigger_and_fetch_bytes(client).map(|(_, snap)| snap)
+}
+
+/// [`trigger_and_fetch`], keeping the verified `.acsnap` bytes as well, so
+/// a caller can store the file exactly as the daemon produced it.
+pub fn trigger_and_fetch_bytes(client: &Client) -> Result<(Vec<u8>, Snapshot)> {
     let reply = client.call(&json!({"cmd": "snapshot"}))?;
     if reply["ok"] != serde_json::Value::Bool(true) {
         anyhow::bail!(
@@ -35,7 +41,8 @@ pub fn trigger_and_fetch(client: &Client) -> Result<Snapshot> {
         .context("snapshot reply missing sha256")?;
 
     let bytes = client.fetch_snapshot(id, sha256)?;
-    read_acsnap(&bytes)
+    let snap = read_acsnap(&bytes)?;
+    Ok((bytes, snap))
 }
 
 /// Open a local `.acsnap` file — no daemon connection needed (D8).
@@ -97,12 +104,24 @@ pub fn rederive_scene(
 /// so the derivation carries an honest "not reprocessed under a chosen
 /// weighting" value rather than one implying an operator picked one.
 ///
-/// UI wiring (`F`) is #256's territory, not implemented here — this is
-/// the orchestration side, implemented and tested now, the same
-/// "implemented, not yet wired" pattern `Action::OpenSnapshot` already
-/// documents.
 pub fn open_stored_transfer_run(path: &Path, pair_idx: usize) -> Result<LoadedRun> {
     let snap = open_local(path)?;
+    let label = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    stored_run_from_snapshot(&snap, pair_idx, label)
+}
+
+/// One pair of an already-parsed snapshot as a [`LoadedRun`] labelled
+/// `label` — the shared half of [`open_stored_transfer_run`] and the `S`
+/// capture (#256), so a run captured live and the same file opened later
+/// derive identically.
+pub fn stored_run_from_snapshot(
+    snap: &Snapshot,
+    pair_idx: usize,
+    label: String,
+) -> Result<LoadedRun> {
     let (meas_ch, _ref_ch) = *snap
         .meta
         .session
@@ -117,10 +136,6 @@ pub fn open_stored_transfer_run(path: &Path, pair_idx: usize) -> Result<LoadedRu
         .map(|c| c.role.clone())
         .unwrap_or_else(|| format!("meas_{meas_ch}"));
     let derivation = snap.derive_pair(pair_idx, WeightingCurve::Z, None)?;
-    let label = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
     Ok(LoadedRun::new(
         label,
         snap.meta.captured_at_utc.clone(),
