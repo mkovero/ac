@@ -167,7 +167,8 @@ struct Tally {
     delay_ms: Vec<f64>,
     meas_peak: Vec<f64>,
     ref_peak: Vec<f64>,
-    prominence: Vec<f64>,
+    /// `delay_residual` (#669): the live IR peak against the held delay.
+    residual: Vec<f64>,
 }
 
 fn main() {
@@ -247,15 +248,12 @@ fn main() {
             if let Some(d) = v["delay_ms"].as_f64() {
                 t.delay_ms.push(d);
             }
-            if let Some(p) = v["delay_evidence"]["prominence"].as_f64() {
-                t.prominence.push(p);
+            if let Some(r) = v["delay_residual"].as_f64() {
+                t.residual.push(r);
             }
         }
 
         if let Some(w) = writer.as_mut() {
-            // Keep the whole delay_evidence object, candidates included:
-            // #251 wants the full candidate list, and a probe that trims it
-            // is a probe that has to be re-run.
             let row = json!({
                 "t":                  now_unix(),
                 "meas_channel":       v["meas_channel"],
@@ -266,7 +264,8 @@ fn main() {
                 "delay_attempts":     v["delay_attempts"],
                 "meas_peak_dbfs":     v["meas_peak_dbfs"],
                 "ref_peak_dbfs":      v["ref_peak_dbfs"],
-                "delay_evidence":     v["delay_evidence"],
+                "delay_residual":     v["delay_residual"],
+                "delay_operator":     v["delay_operator"],
                 "drive":              v["drive"],
             });
             writeln!(w, "{row}").expect("write --out");
@@ -289,7 +288,7 @@ fn main() {
         let mut dm = t.delay_ms.clone();
         let mut mp = t.meas_peak.clone();
         let mut rp = t.ref_peak.clone();
-        let mut pr = t.prominence.clone();
+        let mut res = t.residual.clone();
         println!(
             "pair ({m},{r}): {} frames, {} locked ({:.1}%)",
             t.frames,
@@ -297,10 +296,10 @@ fn main() {
             100.0 * t.locked as f64 / t.frames.max(1) as f64
         );
         println!(
-            "    delay median: {} samples, {} ms   prominence median: {}",
+            "    delay median: {} samples, {} ms   residual median: {} samples",
             median(&mut ds).map_or("—".into(), |v| format!("{v:.0}")),
             median(&mut dm).map_or("—".into(), |v| format!("{v:.4}")),
-            median(&mut pr).map_or("—".into(), |v| format!("{v:.1}")),
+            median(&mut res).map_or("—".into(), |v| format!("{v:+.0}")),
         );
         println!(
             "    peaks median: meas {} dBFS, ref {} dBFS",
