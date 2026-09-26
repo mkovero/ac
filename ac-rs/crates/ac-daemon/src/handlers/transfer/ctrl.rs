@@ -77,18 +77,29 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
 /// `samples`: an integer holds that delay and marks it operator-set, which
 /// no drive edge discards. `null` discards the held delay so the session
 /// finds it again from the unaligned live IR — what `relock` (#226) did.
+/// `step` instead of `samples`: move the held delay by that many samples.
 /// `pair`: a pair index in launch order; absent applies to every pair.
 ///
 /// Dispatched like `set_drive`: targets a live worker without spawning one,
 /// so it has no `cmd_group` entry and never consults `check_busy`.
 pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
-    let samples = match cmd.get("samples") {
-        Some(Value::Null) => None,
-        Some(v) => match v.as_i64() {
-            Some(n) => Some(n),
+    use crate::workers::DelayAction;
+    let action = match (cmd.get("samples"), cmd.get("step")) {
+        (Some(_), Some(_)) => {
+            return json!({"ok": false, "error": "give 'samples' or 'step', not both"})
+        }
+        (Some(Value::Null), None) => DelayAction::Find,
+        (Some(v), None) => match v.as_i64() {
+            Some(n) => DelayAction::Set(n),
             None => return json!({"ok": false, "error": "'samples' must be an integer or null"}),
         },
-        None => return json!({"ok": false, "error": "'samples' required (integer or null)"}),
+        (None, Some(v)) => match v.as_i64() {
+            Some(n) => DelayAction::Step(n),
+            None => return json!({"ok": false, "error": "'step' must be an integer"}),
+        },
+        (None, None) => {
+            return json!({"ok": false, "error": "'samples' (integer or null) or 'step' (integer) required"})
+        }
     };
     let pair = match cmd.get("pair") {
         None | Some(Value::Null) => None,
@@ -111,8 +122,8 @@ pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
     let slot = state.delay_requests.lock().unwrap();
     match slot.as_ref() {
         Some(r) => {
-            r.push(crate::workers::DelayCmd { pair, samples });
-            json!({"ok": true, "samples": samples, "pair": pair})
+            r.push(crate::workers::DelayCmd { pair, action });
+            json!({"ok": true, "pair": pair})
         }
         None => json!({"ok": false, "error": "no transfer_stream session running"}),
     }

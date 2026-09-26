@@ -1533,8 +1533,8 @@ has no reference configured.
 **Flight time from the live reference (#544, schema v12).**
 `IrStats::flight_time_s = arrival_s − (reference_latency.tau_s + offset_s)`,
 where `offset_s` comes from `report.inter_pair_offset`. It is produced only
-when (1) the arrival's cross-check and distance check (#537, below) do not
-withhold it, (2) `reference_latency` is `measured` — it passed the #471
+when (1) the distance check (#537, below) does not withhold it — the
+arrival's cross-check only warns since #669 — (2) `reference_latency` is `measured` — it passed the #471
 derived floor and the edge and xrun gates — and (3) the offset is `measured`
 or `identity`. `IrStats::latency_basis` names the basis: `Live` with the
 reference τ and offset, or `Withheld` with the first reason in this order —
@@ -3433,12 +3433,16 @@ spawning one, so it does not go through the busy guard.
 **CTRL**
 ```json
 { "cmd": "set_delay", "samples": <int> | null, "pair": <int> }
+{ "cmd": "set_delay", "step": <int>, "pair": <int> }
 ```
 
 - `samples` (required): an integer holds that delay, marked
   `delay_operator: true`, which no drive edge discards. `null` discards the
   held delay so the pair finds it again from the unaligned live IR — the old
   `relock`.
+- `step` (instead of `samples`): move the held delay by that many samples,
+  operator-set. Applied by the daemon in arrival order, so two nudges sent
+  before the next frame both land. A pair with no delay yet is left alone.
 - `pair` (optional): a pair index in launch order. Absent: every pair.
 
 Setting the value a pair already holds only marks it operator-set; a
@@ -3447,14 +3451,16 @@ offset is applied before decimation).
 
 **Reply**
 ```json
-{ "ok": true, "samples": <int> | null, "pair": <int> | null }
+{ "ok": true, "pair": <int> | null }
 ```
 
 **Errors**
 ```json
 { "ok": false, "error": "no transfer_stream session running" }
-{ "ok": false, "error": "'samples' required (integer or null)" }
+{ "ok": false, "error": "'samples' (integer or null) or 'step' (integer) required" }
+{ "ok": false, "error": "give 'samples' or 'step', not both" }
 { "ok": false, "error": "'samples' must be an integer or null" }
+{ "ok": false, "error": "'step' must be an integer" }
 { "ok": false, "error": "'pair' must be a non-negative integer" }
 { "ok": false, "error": "'pair' 2 out of range: session has 1 pair(s)" }
 ```

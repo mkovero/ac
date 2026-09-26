@@ -601,17 +601,32 @@ fn e_inserts_the_found_delay_and_shift_e_finds_again() {
     app.ingest_frame_for_test(found_frame(), 0.0);
     app.handle_action(Action::InsertDelay, false);
     app.handle_action(Action::InsertDelay, true);
-    assert_eq!(app.sent_delay, vec![Some(412), None]);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "samples": 412}),
+            serde_json::json!({"cmd": "set_delay", "samples": null}),
+        ]
+    );
 }
 
-/// `,` and `.` move the held delay by one sample.
+/// `,` and `.` step the held delay by one sample — relative, so two presses
+/// between frames are two steps, not the same value sent twice.
 #[test]
 fn comma_and_period_nudge_by_one_sample() {
     let mut app = transfer_app();
     app.ingest_frame_for_test(found_frame(), 0.0);
     app.handle_action(Action::NudgeDelayEarlier, false);
     app.handle_action(Action::NudgeDelayLater, false);
-    assert_eq!(app.sent_delay, vec![Some(399), Some(401)]);
+    app.handle_action(Action::NudgeDelayLater, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "step": -1}),
+            serde_json::json!({"cmd": "set_delay", "step": 1}),
+            serde_json::json!({"cmd": "set_delay", "step": 1}),
+        ]
+    );
 }
 
 /// Without a delay there is nothing to insert or nudge, and a guessed
@@ -635,14 +650,15 @@ fn a_typed_delay_applies_on_t_and_cancels_when_empty_or_on_esc() {
     app.handle_delay_entry_keys("-25", false, false, false);
     app.handle_delay_entry_keys("", true, false, false);
     app.handle_delay_entry_keys("0", false, true, false);
-    assert_eq!(app.sent_delay, vec![Some(-20)]);
+    let typed = vec![serde_json::json!({"cmd": "set_delay", "samples": -20})];
+    assert_eq!(app.sent_delay, typed);
     assert!(app.delay_entry.is_none());
 
     app.handle_action(Action::TypeDelay, false);
     app.handle_delay_entry_keys("", false, true, false);
     app.handle_action(Action::TypeDelay, false);
     app.handle_delay_entry_keys("99", false, false, true);
-    assert_eq!(app.sent_delay, vec![Some(-20)], "a cancel sent a delay");
+    assert_eq!(app.sent_delay, typed, "a cancel sent a delay");
     assert!(app.delay_entry.is_none());
 }
 

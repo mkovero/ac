@@ -61,6 +61,35 @@ fn mtw_present(f: &Value) -> bool {
     !f["mtw"].is_null()
 }
 
+/// Turn the drive on and keep it alive, as a client does, until a frame
+/// holds a delay. Since the Codex review of #673 the Find after a drive
+/// edge waits for a ring of driven audio (~2.5 s), longer than the 1.5 s
+/// dead-man: without keepalives the drive has dropped by then, and the
+/// delay is — correctly — found against silence.
+fn lock_while_driving(c: &Client) -> Value {
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+    loop {
+        assert_eq!(
+            c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+            json!(true)
+        );
+        let until = std::time::Instant::now() + Duration::from_millis(250);
+        while let Some(f) = c.next_frame(until.saturating_duration_since(std::time::Instant::now()))
+        {
+            if locked(&f) && f["drive"]["on"] == json!(true) {
+                return f;
+            }
+            if std::time::Instant::now() >= until {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no delay while driving"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // 6. No session running.
 // ---------------------------------------------------------------------
@@ -219,11 +248,7 @@ fn a_lock_taken_while_driving_survives_dead_man_expiry_and_resume() {
 
     // Drive on BEFORE the pair locks, so the lock's provenance is
     // `driving: true`.
-    assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
-        json!(true)
-    );
-    let locked_frame = c.frame_matching(LOCK_TIMEOUT, locked);
+    let locked_frame = lock_while_driving(&c);
     let attempts_at_lock = attempts(&locked_frame);
     assert_eq!(delay_samples(&locked_frame), LOCK_DELAY_SAMPLES);
 
@@ -273,11 +298,7 @@ fn an_operator_stop_and_restart_do_not_flush_a_lock_taken_while_driving() {
         start_correlated(&c, true, LOCK_DELAY_SAMPLES, 0.6)["ok"],
         json!(true)
     );
-    assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
-        json!(true)
-    );
-    let locked_frame = c.frame_matching(LOCK_TIMEOUT, locked);
+    let locked_frame = lock_while_driving(&c);
     let attempts_at_lock = attempts(&locked_frame);
     let mtw_at_lock = mtw_present(&locked_frame);
 
@@ -485,9 +506,37 @@ fn set_delay_refuses_malformed_requests() {
             json!({"cmd": "set_delay", "samples": 0, "pair": 1}),
             "pair out of range",
         ),
+        (
+            json!({"cmd": "set_delay", "samples": 0, "step": 1}),
+            "samples and step",
+        ),
+        (json!({"cmd": "set_delay", "step": 0.5}), "fractional step"),
     ] {
         let r = c.call(req);
         assert_eq!(r["ok"], json!(false), "{why}: {r}");
         assert!(r["error"].is_string(), "{why}: no reason given: {r}");
     }
+}
+
+/// Two steps sent back to back both land (Codex review of #673): the
+/// daemon moves the held delay, so a client pressing twice between frames
+/// moves it twice.
+#[test]
+fn back_to_back_steps_accumulate() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, false, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    c.frame_matching(LOCK_TIMEOUT, locked);
+    for _ in 0..2 {
+        assert_eq!(
+            c.call(json!({"cmd": "set_delay", "step": 1}))["ok"],
+            json!(true)
+        );
+    }
+    let moved = c.frame_matching(LOCK_TIMEOUT, |f| delay_samples(f) != LOCK_DELAY_SAMPLES);
+    assert_eq!(delay_samples(&moved), LOCK_DELAY_SAMPLES + 2, "{moved}");
+    assert_eq!(moved["delay_operator"], json!(true));
 }

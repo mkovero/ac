@@ -215,12 +215,15 @@ impl SessionState {
 
     /// Apply one `set_delay` request (#669) to the pairs it names.
     ///
-    /// A value holds that delay, operator-set, and rebuilds the ladder at
-    /// the new offset (the offset is applied before decimation, so a ladder
-    /// cannot be re-aimed). Setting the value already held only marks it
-    /// operator-set, so a repeated Insert does not restart the ladder.
-    /// `None` discards the delay so the next tick finds it again.
+    /// A value — set, or a step from the held delay — holds that delay,
+    /// operator-set, and rebuilds the ladder at the new offset (the offset
+    /// is applied before decimation, so a ladder cannot be re-aimed).
+    /// Setting the value already held only marks it operator-set, so a
+    /// repeated Insert does not restart the ladder. A step on a pair with no
+    /// delay does nothing. `Find` discards the delay so the next tick finds
+    /// it again.
     pub(super) fn apply_delay_cmd(&mut self, cmd: crate::workers::DelayCmd, engine_on: bool) {
+        use crate::workers::DelayAction;
         for (i, (st, ladder)) in self
             .pairs
             .iter_mut()
@@ -230,20 +233,27 @@ impl SessionState {
             if cmd.pair.is_some_and(|p| p != i) {
                 continue;
             }
-            match cmd.samples {
-                None => st.flush(ladder),
-                Some(samples) => {
-                    if st.delay.map(|l| l.samples) != Some(samples) {
-                        *ladder = None;
-                    }
-                    st.delay = Some(Lock {
-                        samples,
-                        driving: engine_on,
-                        operator: true,
-                    });
-                    st.next_attempt = None;
+            let held = st.delay.map(|l| l.samples);
+            let samples = match cmd.action {
+                DelayAction::Find => {
+                    st.flush(ladder);
+                    continue;
                 }
+                DelayAction::Set(v) => v,
+                DelayAction::Step(k) => match held {
+                    Some(h) => h.saturating_add(k),
+                    None => continue,
+                },
+            };
+            if held != Some(samples) {
+                *ladder = None;
             }
+            st.delay = Some(Lock {
+                samples,
+                driving: engine_on,
+                operator: true,
+            });
+            st.next_attempt = None;
         }
     }
 
@@ -255,21 +265,30 @@ impl SessionState {
     /// off* is discarded, so a dead-man drop and resume of one found while
     /// driving survives untouched — nothing about its premise changed — and
     /// an operator-set delay is never touched (#669). A pair that is
-    /// currently unlocked gets its retry timer cleared instead, so the Find
-    /// runs this tick rather than up to `FIND_RETRY` later.
-    pub(super) fn flush_locks_taken_against_silence(&mut self) {
+    /// currently unlocked gets its retry timer cleared instead.
+    ///
+    /// Either way the next Find waits for `driven_from`, the stream position
+    /// where driven audio begins: until the analysis ring starts there, it
+    /// still holds the silence the flushed delay was found against.
+    pub(super) fn flush_locks_taken_against_silence(&mut self, driven_from: u64) {
         for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
             match st.delay {
                 Some(Lock {
                     driving: false,
                     operator: false,
                     ..
-                }) => st.flush(ladder),
+                }) => {
+                    st.flush(ladder);
+                    st.find_from = Some(driven_from);
+                }
                 Some(_) => {
                     // Found while driving — the dead-man/resume thrash
                     // case — or set by the operator. Survives untouched.
                 }
-                None => st.next_attempt = None,
+                None => {
+                    st.next_attempt = None;
+                    st.find_from = Some(driven_from);
+                }
             }
         }
     }
@@ -330,8 +349,12 @@ impl SessionState {
     /// that claims a delay over an unaligned estimate.
     pub(super) fn find_missing_delays(&mut self, ev: TickEvents, now: std::time::Instant) -> bool {
         let mut found = false;
+        let ring_start = self.dropped as u64;
         for (st, held) in self.pairs.iter_mut().zip(self.analysis.iter()) {
-            if st.delay.is_some() || st.next_attempt.is_some_and(|t| now < t) {
+            if st.delay.is_some()
+                || st.next_attempt.is_some_and(|t| now < t)
+                || st.find_from.is_some_and(|at| ring_start < at)
+            {
                 continue;
             }
             let Some(a) = held.as_ref().filter(|a| a.key.delay == 0) else {
@@ -510,7 +533,10 @@ impl SessionState {
         now: std::time::Instant,
     ) -> Vec<Value> {
         if ev.drive_edge_on {
-            self.flush_locks_taken_against_silence();
+            // This tick's buffers were captured before the drive was
+            // applied, so driven audio starts after them.
+            let driven_from = self.consumed + bufs.first().map(Vec::len).unwrap_or(0) as u64;
+            self.flush_locks_taken_against_silence(driven_from);
         }
 
         // Raw capture peaks (§4.2), per unique-port index, from THIS

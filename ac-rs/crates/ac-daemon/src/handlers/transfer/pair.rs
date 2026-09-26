@@ -73,6 +73,13 @@ pub(super) struct PairState {
     /// unaligned and is retried, because the cause is usually one the
     /// operator then fixes: an unpatched reference or a muted source.
     pub(super) next_attempt: Option<std::time::Instant>,
+    /// Stream position (in samples since session start) where driven audio
+    /// begins, after a drive off→on edge (#226, #669). The Find waits until
+    /// the analysis ring starts at or after it: a Find over a ring still
+    /// holding the pre-drive silence takes a noise peak, and with no
+    /// refusal any more that peak would be held as "found while driving"
+    /// and never re-found.
+    pub(super) find_from: Option<u64>,
     /// How many start-up Finds this pair has completed, with or without a
     /// peak. Published as `delay_attempts` (#238).
     ///
@@ -109,6 +116,7 @@ impl PairState {
         Self {
             delay: None,
             next_attempt: None,
+            find_from: None,
             attempts: 0,
             spl_integ,
             spl_last: None,

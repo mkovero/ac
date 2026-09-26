@@ -119,9 +119,10 @@ pub struct AcViewApp {
     /// hole lived.
     #[cfg(test)]
     sent_drive: Vec<crate::stimulus::DriveCmd>,
-    /// Every `set_delay` relayed, for the same reason as `sent_drive`.
+    /// Every `set_delay` request relayed, for the same reason as
+    /// `sent_drive`.
     #[cfg(test)]
-    sent_delay: Vec<Option<i64>>,
+    sent_delay: Vec<serde_json::Value>,
 }
 
 impl AcViewApp {
@@ -521,23 +522,29 @@ impl AcViewApp {
             // nudge is by definition. --
             Action::InsertDelay => {
                 if shift {
-                    self.send_delay(None);
+                    self.send_delay(serde_json::json!({"samples": null}));
                 } else if let Some(v) = self
                     .transfer_scene
                     .as_ref()
                     .and_then(|s| s.delay_insert_samples)
                 {
-                    self.send_delay(Some(v));
+                    self.send_delay(serde_json::json!({"samples": v}));
                 }
             }
+            // Relative, so two presses between frames move it twice: the
+            // daemon applies each step to the delay it holds.
             Action::NudgeDelayEarlier | Action::NudgeDelayLater => {
                 let step = if action == Action::NudgeDelayLater {
                     1
                 } else {
                     -1
                 };
-                if let Some(v) = self.transfer_scene.as_ref().and_then(|s| s.delay_samples) {
-                    self.send_delay(Some(v + step));
+                if self
+                    .transfer_scene
+                    .as_ref()
+                    .is_some_and(|s| s.delay_samples.is_some())
+                {
+                    self.send_delay(serde_json::json!({"step": step}));
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
@@ -621,13 +628,12 @@ impl AcViewApp {
     /// Relay a `set_delay` to the daemon (#669). Best-effort, same
     /// discipline as `set_drive`: a failed send is a delay that did not
     /// change, visible on the next frame, never a crash.
-    fn send_delay(&mut self, samples: Option<i64>) {
+    fn send_delay(&mut self, mut request: serde_json::Value) {
+        request["cmd"] = serde_json::json!("set_delay");
         #[cfg(test)]
-        self.sent_delay.push(samples);
+        self.sent_delay.push(request.clone());
         if let Some(session) = &self.session {
-            let _ = session
-                .client()
-                .call(&serde_json::json!({"cmd": "set_delay", "samples": samples}));
+            let _ = session.client().call(&request);
         }
     }
 
@@ -649,8 +655,8 @@ impl AcViewApp {
         if apply {
             let value = entry.value();
             self.delay_entry = None;
-            if value.is_some() {
-                self.send_delay(value);
+            if let Some(v) = value {
+                self.send_delay(serde_json::json!({"samples": v}));
             }
         }
     }

@@ -110,10 +110,22 @@ impl DriveState {
 pub struct DelayCmd {
     /// Pair index in launch order; `None` applies to every pair.
     pub pair: Option<usize>,
-    /// The delay to hold, in samples. `None` discards the held delay so the
-    /// session finds it again from the unaligned live IR — what `relock`
-    /// (#226) did.
-    pub samples: Option<i64>,
+    pub action: DelayAction,
+}
+
+/// What a `set_delay` request does to a pair's held delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelayAction {
+    /// Hold this delay, in samples, operator-set.
+    Set(i64),
+    /// Move the held delay by this many samples, operator-set. Relative so
+    /// two nudges between frames both land — a client computing the value
+    /// from the last frame it drew would send the same one twice. A pair
+    /// with no delay yet has nothing to move.
+    Step(i64),
+    /// Discard the held delay so the session finds it again from the
+    /// unaligned live IR — what `relock` (#226) did.
+    Find,
 }
 
 /// `set_delay` requests waiting for a running `transfer_stream` worker

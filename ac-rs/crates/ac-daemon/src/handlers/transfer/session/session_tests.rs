@@ -9,13 +9,13 @@
 //! of zero, or of an hour, would both have stayed green.
 
 use super::*;
-use crate::workers::DelayCmd;
+use crate::workers::{DelayAction, DelayCmd};
 use serde_json::json;
 
 /// `set_delay` with `samples: null` for every pair — a re-find.
 const REFIND: DelayCmd = DelayCmd {
     pair: None,
-    samples: None,
+    action: DelayAction::Find,
 };
 
 const SR: u32 = 48_000;
@@ -475,7 +475,7 @@ fn a_set_delay_holds_the_value_and_publishes_the_residual() {
     s.apply_delay_cmd(
         DelayCmd {
             pair: None,
-            samples: Some(470),
+            action: DelayAction::Set(470),
         },
         true,
     );
@@ -502,11 +502,11 @@ fn the_drive_edge_keeps_an_operator_set_delay() {
     s.apply_delay_cmd(
         DelayCmd {
             pair: None,
-            samples: Some(470),
+            action: DelayAction::Set(470),
         },
         false,
     );
-    s.flush_locks_taken_against_silence();
+    s.flush_locks_taken_against_silence(s.consumed);
     assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(470));
 }
 
@@ -521,7 +521,7 @@ fn setting_the_held_value_keeps_the_ladder() {
     assert!(built.is_some(), "precondition: ladder built");
     let set = |samples| DelayCmd {
         pair: Some(0),
-        samples: Some(samples),
+        action: DelayAction::Set(samples),
     };
     s.apply_delay_cmd(set(480), true);
     assert_eq!(
@@ -536,6 +536,30 @@ fn setting_the_held_value_keeps_the_ladder() {
     );
 }
 
+/// Two steps queued between frames both land: the daemon moves the held
+/// delay, so a client need not know it (Codex review of #673).
+#[test]
+fn queued_steps_accumulate() {
+    let mut s = session();
+    run_correlated(&mut s, 25, 480, events(true), std::time::Instant::now());
+    let step = |k| DelayCmd {
+        pair: None,
+        action: DelayAction::Step(k),
+    };
+    s.apply_delay_cmd(step(1), true);
+    s.apply_delay_cmd(step(1), true);
+    assert_eq!(
+        s.pairs[0].delay.map(|l| (l.samples, l.operator)),
+        Some((482, true))
+    );
+    s.apply_delay_cmd(step(-3), true);
+    assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(479));
+    // Nothing to move before a delay exists.
+    let mut fresh = session();
+    fresh.apply_delay_cmd(step(1), true);
+    assert!(fresh.pairs[0].delay.is_none());
+}
+
 /// A request naming another pair leaves this one alone.
 #[test]
 fn a_set_delay_for_another_pair_is_not_applied_here() {
@@ -544,7 +568,7 @@ fn a_set_delay_for_another_pair_is_not_applied_here() {
     s.apply_delay_cmd(
         DelayCmd {
             pair: Some(1),
-            samples: Some(0),
+            action: DelayAction::Set(0),
         },
         true,
     );
@@ -565,7 +589,7 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
         silent.pairs[0].delay,
         Some(Lock { driving: false, .. })
     ));
-    silent.flush_locks_taken_against_silence();
+    silent.flush_locks_taken_against_silence(silent.consumed);
     assert!(
         silent.pairs[0].delay.is_none(),
         "a lock taken against silence survived the drive edge"
@@ -580,11 +604,49 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
     assert_eq!(frames.last().unwrap()["delay_locked"], json!(true));
     let held = driving.pairs[0].delay;
     assert!(matches!(held, Some(Lock { driving: true, .. })));
-    driving.flush_locks_taken_against_silence();
+    driving.flush_locks_taken_against_silence(driving.consumed);
     assert_eq!(
         driving.pairs[0].delay.map(|l| l.samples),
         held.map(|l| l.samples),
         "a lock taken while driving was discarded by a later drive edge"
+    );
+}
+
+/// Codex review of #673: after the drive comes on, the Find must wait for a
+/// ring of driven audio. Tested against the rejected order — re-finding on
+/// the edge tick, over a ring still holding the drive-off capture — which
+/// takes a noise peak, records it as found while driving, and never finds
+/// again.
+#[test]
+fn the_find_after_a_drive_edge_waits_for_driven_audio() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    // Drive off: two unrelated legs. The Find takes their highest IR peak.
+    for k in 0..30u32 {
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        let bufs = [noise(CHUNK, 0x1000 + k), noise(CHUNK, 0x9000 + k)];
+        s.tick(&bufs, events(false), &drive_msg(false), now);
+    }
+    assert!(
+        matches!(s.pairs[0].delay, Some(Lock { driving: false, .. })),
+        "test setup: a delay found against the unrelated legs"
+    );
+
+    // The drive comes on; from here the legs are the correlated pair.
+    let t1 = t0 + std::time::Duration::from_secs(2);
+    let edge = TickEvents {
+        drive_edge_on: true,
+        ..events(true)
+    };
+    run_correlated(&mut s, 1, 480, edge, t1);
+    assert!(
+        s.pairs[0].delay.is_none(),
+        "found on the edge tick, over the drive-off ring"
+    );
+    run_correlated(&mut s, 80, 480, events(true), t1);
+    assert_eq!(
+        s.pairs[0].delay.map(|l| (l.samples, l.driving)),
+        Some((480, true))
     );
 }
 
