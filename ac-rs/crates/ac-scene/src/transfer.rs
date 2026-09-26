@@ -903,12 +903,13 @@ impl TransferInput {
         if inputs.len() < 2 {
             return Err("an average needs two or more traces".to_string());
         }
-        if inputs.iter().any(|t| {
-            t.freqs != first.freqs
-                || t.estimator != first.estimator
-                || t.sr != first.sr
-                || t.stages != first.stages
-        }) {
+        if inputs
+            .iter()
+            .any(|t| t.sr != first.sr || t.stages != first.stages || t.estimator != first.estimator)
+        {
+            return Err("the traces differ in sample rate or analysis layout".to_string());
+        }
+        if inputs.iter().any(|t| t.freqs != first.freqs) {
             return Err("the traces are on different frequency grids".to_string());
         }
         let arrays: Vec<ac_core::visualize::average::TraceArrays<'_>> = inputs
@@ -1684,7 +1685,10 @@ mod tests {
         assert!(TransferInput::average(&[&a, &other], true).is_err());
         let mut other_rate = base(0.0, 0.9);
         other_rate.sr = 96_000;
-        assert!(TransferInput::average(&[&a, &other_rate], true).is_err());
+        assert_eq!(
+            TransferInput::average(&[&a, &other_rate], true).unwrap_err(),
+            "the traces differ in sample rate or analysis layout"
+        );
         assert!(TransferInput::average(&[&a], true).is_err());
     }
 
