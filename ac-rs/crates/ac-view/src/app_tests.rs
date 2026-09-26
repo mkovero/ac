@@ -1701,3 +1701,36 @@ fn ctrl_digit_in_the_list_does_not_load() {
     assert_eq!(app.capture_slot, Some(2));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Recalling a slot selects it; hiding the selected slot hands the
+/// selection back to live; a slot loaded with `F` is selected; a live
+/// store is not (#256).
+#[test]
+fn a_recalled_slot_is_selected() {
+    let mut app = transfer_app();
+    let captured = |slot: u8, opened: bool| {
+        Ok(crate::capture::Captured {
+            slot,
+            opened,
+            path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+            run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+        })
+    };
+    app.finish_capture_for_test(captured(2, false));
+    app.finish_capture_for_test(captured(5, false));
+    assert_eq!(
+        focus_of(&app),
+        crate::view::Focus::Live,
+        "a live store moved the selection"
+    );
+
+    let now = std::time::Instant::now();
+    app.toggle_slot(5, now); // hide
+    app.toggle_slot(5, now); // recall
+    assert_eq!(focus_of(&app), crate::view::Focus::Stored(1));
+    app.toggle_slot(5, now); // hide the selected one
+    assert_eq!(focus_of(&app), crate::view::Focus::Live);
+
+    app.finish_capture_for_test(captured(1, true)); // loaded with F
+    assert_eq!(focus_of(&app), crate::view::Focus::Stored(0));
+}

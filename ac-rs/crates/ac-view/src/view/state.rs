@@ -302,13 +302,27 @@ impl TransferViewState {
 
     /// A bare digit (#256): show or hide slot `n`. `false` when the slot
     /// is empty — nothing to toggle.
+    ///
+    /// Recalling a slot selects it; hiding the selected slot hands the
+    /// selection back to live (#256).
     pub fn toggle_slot_visibility(&mut self, n: u8) -> bool {
-        match self.loaded.iter_mut().find(|r| r.slot == Some(n)) {
-            Some(run) => {
-                run.visible = !run.visible;
-                true
-            }
-            None => false,
+        let Some(i) = self.loaded.iter().position(|r| r.slot == Some(n)) else {
+            return false;
+        };
+        let run = &mut self.loaded[i];
+        run.visible = !run.visible;
+        if run.visible {
+            self.focus = Focus::Stored(i);
+        } else if self.focus == Focus::Stored(i) {
+            self.focus = Focus::Live;
+        }
+        true
+    }
+
+    /// Select slot `n`, if stored (#256: a slot loaded with `F`).
+    pub fn select_slot(&mut self, n: u8) {
+        if let Some(i) = self.loaded.iter().position(|r| r.slot == Some(n)) {
+            self.focus = Focus::Stored(i);
         }
     }
 

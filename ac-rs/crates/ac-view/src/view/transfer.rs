@@ -161,7 +161,6 @@ pub(super) fn draw_transfer(
         &layout,
         scene.filter(|_| state.live_trace_shown()),
         stored,
-        live_focused,
     );
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
@@ -273,29 +272,29 @@ fn draw_traces(
     layout: &TransferLayout,
     scene: Option<&ac_scene::TransferScene>,
     stored: &[StoredTrace<'_>],
-    live_focused: bool,
 ) {
+    // One width for every trace, one colour per trace, whatever is
+    // selected (#256): changing a curve's look with the selection only
+    // confused which curve was which. The selection is the strip box's
+    // border.
     if let Some(scene) = scene {
-        let stroke = focus_stroke(live_focused);
+        let stroke = live_stroke();
         draw_trace(painter, &scene.magnitude, layout.mag, stroke, false);
         draw_trace(painter, &scene.phase, layout.phase, stroke, false);
     }
     for run in stored.iter().filter(|r| r.visible) {
-        let stroke = Stroke::new(
-            if run.focused { 2.0 } else { 1.0 },
-            super::palette::compare_color(run.color_slot),
-        );
+        let stroke = Stroke::new(TRACE_WIDTH, super::palette::compare_color(run.color_slot));
         draw_trace(painter, &run.scene.magnitude, layout.mag, stroke, true);
         draw_trace(painter, &run.scene.phase, layout.phase, stroke, true);
     }
 }
 
-fn focus_stroke(focused: bool) -> Stroke {
-    if focused {
-        Stroke::new(1.5, COLOR_SIGNAL)
-    } else {
-        Stroke::new(1.0, COLOR_STRUCTURAL)
-    }
+/// Every trace's line width (#256).
+const TRACE_WIDTH: f32 = 1.5;
+
+/// The live trace: always the signal colour.
+fn live_stroke() -> Stroke {
+    Stroke::new(TRACE_WIDTH, COLOR_SIGNAL)
 }
 
 /// The top of the magnitude pane carries three rows, in this order and
@@ -482,7 +481,7 @@ fn draw_legend(
     draw_box(
         slot_box(3.0 * h),
         "live",
-        focus_stroke(live_focused).color,
+        live_stroke().color,
         live_present && state.live_trace_shown(),
         live_focused,
     );
