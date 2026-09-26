@@ -32,7 +32,11 @@ pub enum Action {
     // -- global --
     ToggleHelp,
     Quit,
+    /// `F` (#256): the saved-captures list; a slot digit loads the
+    /// selected file into that slot.
     OpenSnapshot,
+    /// `C` (#256): write the selected trace to CSV.
+    ExportCsv,
     MoveCursorLeft,
     MoveCursorRight,
     ZoomFreqIn,
@@ -150,8 +154,8 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         key: Key::F,
         action: Action::OpenSnapshot,
-        scope: Scope::Global,
-        description: "Open local .acsnap file",
+        scope: Scope::Transfer,
+        description: "Saved captures: \u{2191}\u{2193} select, 1\u{2026}9 load into that slot",
     },
     Binding {
         key: Key::ArrowLeft,
@@ -268,6 +272,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::ToggleTraceVisible,
         scope: Scope::Transfer,
         description: "Show / hide the focused trace (Shift: show all)",
+    },
+    Binding {
+        key: Key::C,
+        action: Action::ExportCsv,
+        scope: Scope::Transfer,
+        description: "Write the selected trace to CSV",
     },
     Binding {
         key: Key::T,

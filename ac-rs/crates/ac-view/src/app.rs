@@ -104,6 +104,11 @@ pub struct AcViewApp {
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
     /// The slot the running capture is for.
     capture_slot: Option<u8>,
+    /// The saved-captures list (`F`, #256). `None` = closed.
+    file_list: Option<crate::file_list::FileList>,
+    /// Where `F` lists from and `C` writes to: [`crate::capture::captures_dir`],
+    /// held so a test can point it elsewhere.
+    captures_dir: std::path::PathBuf,
     /// `Q` was pressed: close the window at the end of this pass. Set by
     /// the action (which has no `egui::Context`), acted on in `ui()`.
     quit_requested: bool,
@@ -161,6 +166,8 @@ impl AcViewApp {
             delay_entry: None,
             capture_rx: None,
             capture_slot: None,
+            file_list: None,
+            captures_dir: crate::capture::captures_dir(),
             quit_requested: false,
             toast: None,
             weighting: WeightingCurve::Z,
@@ -491,10 +498,8 @@ impl AcViewApp {
         match action {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
-            Action::OpenSnapshot => {
-                // File-picker wiring is UX-gated; the orchestration
-                // (snapshot_flow::open_local) is implemented and tested.
-            }
+            Action::OpenSnapshot => self.open_file_list(Instant::now()),
+            Action::ExportCsv => self.export_csv(Instant::now()),
             Action::Quit => {
                 // Best-effort drive-off on a clean quit (§5); the dead-man
                 // is the guarantee if the process dies uncleanly.
@@ -690,6 +695,104 @@ impl AcViewApp {
         self.with_transfer(|t| t.toggle_pause());
     }
 
+    /// `F` (#256): open the saved-captures list, or close it.
+    fn open_file_list(&mut self, now: Instant) {
+        if self.file_list.take().is_some() {
+            return;
+        }
+        let dir = self.captures_dir.clone();
+        let list = crate::file_list::FileList::read(&dir);
+        if list.entries().is_empty() {
+            self.set_toast(
+                format!("no saved captures in {}", dir.display()),
+                now,
+                Some(4.0),
+            );
+        } else {
+            self.file_list = Some(list);
+        }
+    }
+
+    /// A digit in the list (#256): load the selected file into slot `n`, on
+    /// a thread like a live capture.
+    fn load_selected_into_slot(&mut self, n: u8, now: Instant) {
+        let Some(path) = self
+            .file_list
+            .as_ref()
+            .and_then(|l| l.selected_path())
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        if let Some(pending) = self.capture_slot {
+            self.set_toast(
+                format!("slot {pending} is still being stored"),
+                now,
+                Some(3.0),
+            );
+            return;
+        }
+        self.file_list = None;
+        let name = crate::file_list::FileList::name(&path);
+        self.capture_rx = Some(crate::capture::spawn_open(path, n));
+        self.capture_slot = Some(n);
+        self.set_toast(format!("loading {name} into slot {n}\u{2026}"), now, None);
+    }
+
+    /// `C` (#256): write the selected trace — live or a slot — to CSV next
+    /// to the captures, and say where.
+    fn export_csv(&mut self, now: Instant) {
+        let ViewKind::Transfer(t) = &self.view else {
+            return;
+        };
+        let (name, input) = match t.focus {
+            crate::view::Focus::Live => match &self.last_frame {
+                Some(f) => (
+                    "live".to_string(),
+                    ac_scene::TransferInput::from_wire_frame(f),
+                ),
+                None => {
+                    self.set_toast("no live trace to export".into(), now, Some(3.0));
+                    return;
+                }
+            },
+            crate::view::Focus::Stored(i) => match t.loaded.get(i) {
+                Some(run) => {
+                    let mut input = ac_scene::TransferInput::from_pair_derivation(
+                        &run.derivation,
+                        &run.channel_role,
+                        run.sr,
+                    );
+                    input.shift_delay(run.delay_offset_samples);
+                    (run.label.clone(), input)
+                }
+                None => return,
+            },
+        };
+        if input.freqs.is_empty() {
+            self.set_toast(format!("{name} has no trace yet"), now, Some(3.0));
+            return;
+        }
+        let dir = self.captures_dir.clone();
+        let base = format!(
+            "{}-{}.csv",
+            name.replace(' ', ""),
+            ac_core::shared::time::now_utc_filename_stamp()
+        );
+        // Never overwrite: a second export in the same second gets `-2`.
+        let result = std::fs::create_dir_all(&dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| crate::capture::write_new(&dir, &base, input.to_csv(&name).as_bytes()));
+        match result {
+            Ok((path, _)) => self.set_toast(
+                format!("{name} written \u{2014} {}", path.display()),
+                now,
+                Some(5.0),
+            ),
+            Err(e) => self.set_toast(format!("CSV not written \u{2014} {e:#}"), now, Some(8.0)),
+        }
+    }
+
     /// Bare digit `n` (#256): show or hide slot `n`, or say it is empty.
     fn toggle_slot(&mut self, n: u8, now: Instant) {
         let mut found = true;
@@ -764,8 +867,14 @@ impl AcViewApp {
             Ok(captured) => {
                 let n = captured.slot;
                 let path = captured.path.display().to_string();
+                let opened = captured.opened;
                 self.with_transfer(|t| t.store_slot(n, captured.run));
-                self.set_toast(format!("slot {n} stored \u{2014} {path}"), now, Some(5.0));
+                let verb = if opened {
+                    "loaded from"
+                } else {
+                    "stored \u{2014}"
+                };
+                self.set_toast(format!("slot {n} {verb} {path}"), now, Some(5.0));
             }
             Err(e) => self.set_toast(format!("storing failed \u{2014} {e}"), now, Some(8.0)),
         }
@@ -1079,6 +1188,52 @@ impl AcViewApp {
             return;
         }
 
+        // The saved-captures list (`F`, #256) takes its keys: ↑/↓ select,
+        // a digit loads into that slot, Esc or F closes. Esc reaches here
+        // only while the stimulus is idle — panic-first owns it otherwise.
+        if self.file_list.is_some() {
+            let (up, down, close, digit) = ctx.input(|i| {
+                // A bare digit loads; Ctrl+digit (store live) does nothing
+                // here, read per key event as the slot keys are.
+                let digit = i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if !modifiers.ctrl => crate::keys::SLOT_KEYS
+                        .iter()
+                        .zip(1u8..)
+                        .find(|(k, _)| **k == *key)
+                        .map(|(_, n)| n),
+                    _ => None,
+                });
+                (
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    i.key_pressed(Key::Escape) || i.key_pressed(Key::F),
+                    digit,
+                )
+            });
+            if close {
+                self.file_list = None;
+                return;
+            }
+            if let Some(list) = &mut self.file_list {
+                if up {
+                    list.move_selection(false);
+                }
+                if down {
+                    list.move_selection(true);
+                }
+            }
+            if let Some(n) = digit {
+                self.load_selected_into_slot(n, Instant::now());
+            }
+            return;
+        }
+
         // Digits (#256): `Ctrl`+digit stores the live trace to that slot;
         // a bare digit shows or hides it.
         // `Ctrl` is read from each key event, not from the frame's current
@@ -1256,6 +1411,28 @@ impl AcViewApp {
                         });
                     });
             }
+        }
+
+        if let Some(list) = &self.file_list {
+            egui::Window::new("saved captures")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    for (i, path) in list.entries().iter().enumerate() {
+                        let marker = if i == list.selected() {
+                            "\u{25b8} "
+                        } else {
+                            "  "
+                        };
+                        ui.label(format!(
+                            "{marker}{}",
+                            crate::file_list::FileList::name(path)
+                        ));
+                    }
+                    ui.separator();
+                    ui.label(
+                        "\u{2191}\u{2193} select   1\u{2026}9 load into that slot   Esc close",
+                    );
+                });
         }
 
         if let Some(entry) = &self.delay_entry {

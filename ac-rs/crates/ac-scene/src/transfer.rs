@@ -820,6 +820,34 @@ impl TransferInput {
     /// pair with no recorded ladder, a sub-window derivation — it is the
     /// Welch H₁ arrays, tagged with the segment length the derivation used,
     /// and the scene states that it is not the live ladder.
+    /// The trace as CSV (#256, `C`): a few `#` header lines naming what it
+    /// is, then `freq_hz,magnitude_db,phase_deg,coherence`, one row per
+    /// column. Unsmoothed, as measured: smoothing is a display choice.
+    /// Phase is as drawn with the trace's own delay removed (the `# delay_ms`
+    /// line), wrapped to ±180°.
+    pub fn to_csv(&self, name: &str) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("# ac transfer trace: {name}\n"));
+        out.push_str(&format!("# channel: {}\n", self.channel_role));
+        out.push_str(&format!("# sample_rate_hz: {}\n", self.sr));
+        out.push_str(&format!("# delay_ms: {:.6}\n", self.delay_ms));
+        out.push_str(
+            "# phase_deg: measured, with delay_ms removed; not the display's de-rotation mode\n",
+        );
+        out.push_str("freq_hz,magnitude_db,phase_deg,coherence\n");
+        for i in 0..self.freqs.len() {
+            let get = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
+            out.push_str(&format!(
+                "{:.4},{:.4},{:.3},{:.5}\n",
+                self.freqs[i],
+                get(&self.magnitude_db),
+                get(&self.phase_deg),
+                get(&self.coherence),
+            ));
+        }
+        out
+    }
+
     /// Move a stored run's delay by `samples` (#256, `←`/`→` on a slot):
     /// the delay a derivation removes is a pure phase term
     /// (`exp(+j·2π·f·D/sr)` on `Gxy`), so changing it by Δ rotates the
@@ -1485,6 +1513,43 @@ mod tests {
                 operator: false
             })
         );
+    }
+
+    #[test]
+    fn csv_has_a_header_and_one_row_per_column() {
+        let input = TransferInput {
+            freqs: vec![100.0, 1000.0],
+            magnitude_db: vec![-1.5, 0.25],
+            phase_deg: vec![10.0, -170.0],
+            coherence: vec![0.9, 0.99],
+            delay_ms: 3.3958,
+            delay_locked: Some(true),
+            delay_control: None,
+            meas_channel: 0,
+            ref_channel: 1,
+            meas_peak_dbfs: None,
+            ref_peak_dbfs: None,
+            channel_role: "meas_0".into(),
+            source: crate::scene::Source::Live,
+            sr: 96_000,
+            column_df: Vec::new(),
+            column_window_s: Vec::new(),
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
+            stages: Vec::new(),
+            estimator: Estimator::Ladder,
+            fault: None,
+            calibration: None,
+        };
+        let csv = input.to_csv("slot 3");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "# ac transfer trace: slot 3");
+        assert_eq!(lines[3], "# delay_ms: 3.395800");
+        assert!(lines[4].starts_with("# phase_deg: measured, with delay_ms removed"));
+        assert_eq!(lines[5], "freq_hz,magnitude_db,phase_deg,coherence");
+        assert_eq!(lines[6], "100.0000,-1.5000,10.000,0.90000");
+        assert_eq!(lines[7], "1000.0000,0.2500,-170.000,0.99000");
+        assert_eq!(lines.len(), 8);
     }
 
     /// `shift_delay` against the rejected route (a fresh derivation at the
