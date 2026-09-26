@@ -200,9 +200,10 @@ pub struct TransferViewState {
     /// Starts on `Live` — a session that has loaded nothing yet reads
     /// exactly as it did before this issue.
     pub focus: Focus,
-    /// Enter while not armed (#256): the live trace and readouts hold
-    /// still so stored runs can be compared against a fixed picture. The
-    /// meters and fault indicator stay live; the stimulus keeps running.
+    /// Enter while not armed (#256): the live trace is not drawn, so the
+    /// slots are compared on their own. Everything else keeps rolling —
+    /// meters, fault indicator, readouts, stimulus — and storing to a slot
+    /// waits until live is resumed.
     pub paused: bool,
     /// Whether the live trace is drawn (`V` with focus on live, #256) —
     /// hide it to compare stored runs alone.
@@ -270,6 +271,11 @@ impl TransferViewState {
         run.color_slot = self.next_color_slot;
         self.next_color_slot += 1;
         self.loaded.push(run);
+    }
+
+    /// Whether the live trace is drawn: shown (`V`) and not paused (#256).
+    pub fn live_trace_shown(&self) -> bool {
+        self.live_visible && !self.paused
     }
 
     /// Pause or resume the live display (#256, Enter).

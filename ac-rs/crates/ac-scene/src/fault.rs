@@ -14,7 +14,6 @@
 //! | driving, reference leg at floor | [`Fault::NoReference`] | #225, misrouted or unpatched |
 //! | driving, measurement leg at floor | [`Fault::NoSignal`] | mic unplugged, DUT off, wrong input |
 //! | both legs live, coherence low everywhere | [`Fault::CheckRouting`] | legs carry different sources |
-//! | after the daemon finds a delay | [`Fault::DelayFound`] | transient confirmation |
 //!
 //! # Drive state gates the level rows and nothing else
 //!
@@ -62,10 +61,6 @@ use crate::transfer::displayed_mtw;
 /// perfectly good session.
 pub const SIGNAL_FLOOR_DBFS: f64 = -80.0;
 
-/// How long [`Fault::DelayFound`] stays up, in scene seconds. It is a
-/// transient confirmation, not a state.
-pub const DELAY_FOUND_HOLD_S: f64 = 3.0;
-
 /// Whether a state is a problem or a confirmation. The renderer picks a
 /// colour from this rather than matching on the variant, so a state added
 /// later cannot be drawn in the wrong register by omission.
@@ -88,9 +83,6 @@ pub enum Fault {
     /// mask — the legs are carrying unrelated sources. See
     /// [`COHERENCE_ALIVE_FRACTION`] for how much "almost" is.
     CheckRouting,
-    /// The daemon just found the pair's delay — the unaligned live IR's
-    /// peak (#669). Held for [`DELAY_FOUND_HOLD_S`].
-    DelayFound,
 }
 
 impl Fault {
@@ -101,7 +93,6 @@ impl Fault {
             Fault::NoReference => "NO REFERENCE",
             Fault::NoSignal => "NO SIGNAL",
             Fault::CheckRouting => "CHECK ROUTING",
-            Fault::DelayFound => "DELAY FOUND",
         }
     }
 
@@ -118,15 +109,14 @@ impl Fault {
                 Some("measurement leg silent — check the mic, the DUT, and the input")
             }
             Fault::CheckRouting => Some("the two legs carry unrelated sources"),
-            Fault::DelayFound => None,
         }
     }
 
+    /// Every row is a fault since #256 dropped `DELAY FOUND`, the one
+    /// confirmation; [`Severity::Confirmation`] stays for the renderer's
+    /// contract.
     pub fn severity(&self) -> Severity {
-        match self {
-            Fault::DelayFound => Severity::Confirmation,
-            _ => Severity::Fault,
-        }
+        Severity::Fault
     }
 }
 
@@ -150,8 +140,9 @@ pub struct DriveState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaultFrame {
     pub drive: DriveState,
-    /// Whether the pair holds a delay (`delay_locked`). `None` is a daemon
-    /// predating #227; it permits no [`Fault::DelayFound`].
+    /// Whether the pair holds a delay (`delay_locked`). Carried for the
+    /// frame's completeness; no row reads it since #256 dropped the
+    /// `DELAY FOUND` confirmation (the operator reads the delay readout).
     pub delay_locked: Option<bool>,
 }
 
@@ -301,12 +292,7 @@ fn level_row(frame: FaultFrame, ref_dead: bool) -> Option<Fault> {
 /// The time-dependent part of the indicator, carried across frames the same
 /// way [`crate::transfer::MeterState`] carries the meter hold and clip latch.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct FaultState {
-    /// When the last false→true `delay_locked` transition happened.
-    found_at_s: Option<f64>,
-    /// Last observed `delay_locked`, to detect that transition.
-    prev_locked: Option<bool>,
-}
+pub struct FaultState {}
 
 impl FaultState {
     /// Fold one frame in at scene time `now_s` and read the indicator out.
@@ -320,7 +306,7 @@ impl FaultState {
     /// Level first, then coherence — the order the causes chain in. A dead
     /// reference leg makes everything downstream of it look wrong, so
     /// reporting the coherence it destroys instead would name the symptom
-    /// while the cause sits one row up. A fault outranks the confirmation.
+    /// while the cause sits one row up.
     pub fn update(&mut self, input: &FaultInput, now_s: f64) -> Option<Fault> {
         // A daemon that does not report its own drive gives no ground for
         // any claim about whether signal should be present. It also predates
@@ -331,27 +317,14 @@ impl FaultState {
             return None;
         };
 
-        // Bookkeeping first and unconditionally, so the confirmation is not
-        // missed because a louder row was showing when the delay landed.
-        if frame.delay_locked == Some(true) && self.prev_locked == Some(false) {
-            self.found_at_s = Some(now_s);
-        }
-        if frame.delay_locked.is_some() {
-            self.prev_locked = frame.delay_locked;
-        }
-
         let ref_dead = at_floor(input.ref_peak_dbfs);
         let meas_dead = at_floor(input.meas_peak_dbfs);
         if ref_dead || meas_dead {
             return level_row(frame, ref_dead);
         }
         // Both legs live from here.
-        if coherence_dead(input.coherence) {
-            return Some(Fault::CheckRouting);
-        }
-        self.found_at_s
-            .is_some_and(|at| now_s - at < DELAY_FOUND_HOLD_S)
-            .then_some(Fault::DelayFound)
+        let _ = now_s;
+        coherence_dead(input.coherence).then_some(Fault::CheckRouting)
     }
 
     fn reset(&mut self) {

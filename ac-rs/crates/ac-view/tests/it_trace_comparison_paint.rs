@@ -111,6 +111,7 @@ fn stored_runs_paint_without_a_live_scene() {
         focused: true,
         visible: true,
         color_slot: 0,
+        slot: None,
     }];
 
     let mut harness = Harness::new_ui(|ui| {
@@ -156,6 +157,7 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
             focused: true,
             visible: true,
             color_slot: 0,
+            slot: None,
         },
         StoredTrace {
             label: "run.acsnap",
@@ -164,6 +166,7 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
             focused: false,
             visible: true,
             color_slot: 0,
+            slot: None,
         },
     ];
 
@@ -214,6 +217,7 @@ fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
             focused: true,
             visible: true,
             color_slot: 0,
+            slot: None,
         }];
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(900.0, 300.0));
@@ -241,5 +245,44 @@ fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
     assert!(
         !texts.iter().any(|t| t.contains("not the live ladder")),
         "a replayed-ladder run must not claim to differ from the live view; painted texts: {texts:?}"
+    );
+}
+
+/// #256: slot runs show as a strip of boxes — `live` and 1…9 — not as
+/// timestamp rows; a stored-and-shown slot is a filled box.
+#[test]
+fn slot_runs_paint_as_a_box_strip_not_timestamp_rows() {
+    let fixture = scene(Smoothing::Off);
+    let view = ViewKind::Transfer(TransferViewState::new(-10.0, -30.0));
+    let stored = vec![StoredTrace {
+        label: "slot 3",
+        captured_at_utc: "2026-09-26T14:00:00Z",
+        scene: &fixture,
+        focused: false,
+        visible: true,
+        color_slot: 2,
+        slot: Some(3),
+    }];
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(640.0, 360.0));
+        draw_view(&view, ui, None, None, &stored, None);
+    });
+    harness.run();
+    let shapes = &harness.output().shapes;
+    let texts = extract_texts(shapes);
+    for want in ["live", "1", "3", "9"] {
+        assert!(texts.iter().any(|t| t == want), "{want} missing: {texts:?}");
+    }
+    assert!(
+        !texts.iter().any(|t| t.contains("2026-09-26T14:00:00Z")),
+        "slot shown as a timestamp row: {texts:?}"
+    );
+    let slot3 = ac_view::view::palette::compare_color(2);
+    assert!(
+        shapes.iter().any(|cs| matches!(
+            &cs.shape,
+            egui::Shape::Rect(r) if r.fill == slot3
+        )),
+        "slot 3 not drawn as a filled box in its colour"
     );
 }

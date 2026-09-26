@@ -304,6 +304,7 @@ fn snapshot_transfer_stored_comparison_no_live() {
             focused: true,
             visible: true,
             color_slot: 0,
+            slot: None,
         },
         StoredTrace {
             label: "run.acsnap",
@@ -312,6 +313,7 @@ fn snapshot_transfer_stored_comparison_no_live() {
             focused: false,
             visible: true,
             color_slot: 0,
+            slot: None,
         },
     ];
     let mut h = Harness::builder()

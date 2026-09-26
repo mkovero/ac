@@ -277,19 +277,18 @@ fn a_fault_row_and_its_instruction_are_painted_verbatim() {
     );
 }
 
-/// The confirmation paints too: the daemon finding the delay (#669).
+/// A delay arriving paints nothing (#256 dropped `DELAY FOUND`): the
+/// operator reads the delay readout, not a banner.
 #[test]
-fn the_delay_found_confirmation_is_painted() {
+fn a_delay_arriving_paints_no_banner() {
     let mut state = FaultState::default();
     scene_over(Some(driving(false)), 0.9, &mut state, 0.0);
     let scene = scene_over(Some(driving(true)), 0.9, &mut state, 1.0);
-    assert_eq!(scene.fault, Some(ac_scene::Fault::DelayFound));
+    assert_eq!(scene.fault, None);
     let texts = painted_texts(&scene);
     assert!(
-        texts
-            .iter()
-            .any(|t| t == ac_scene::Fault::DelayFound.label()),
-        "label missing; texts on screen: {texts:?}"
+        !texts.iter().any(|t| t == "DELAY FOUND"),
+        "texts on screen: {texts:?}"
     );
 }
 
@@ -312,7 +311,6 @@ fn a_healthy_session_paints_no_indicator() {
         ac_scene::Fault::NoReference,
         ac_scene::Fault::NoSignal,
         ac_scene::Fault::CheckRouting,
-        ac_scene::Fault::DelayFound,
     ] {
         assert!(
             !texts.iter().any(|t| t == row.label()),
