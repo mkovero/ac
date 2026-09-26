@@ -169,6 +169,9 @@ struct Tally {
     ref_peak: Vec<f64>,
     /// `delay_residual` (#669): the live IR peak against the held delay.
     residual: Vec<f64>,
+    /// Frames paused for want of a reference, and the last clip count (#670).
+    reference_absent: usize,
+    clipped_buffers: u64,
 }
 
 fn main() {
@@ -240,6 +243,12 @@ fn main() {
         if let Some(p) = v["ref_peak_dbfs"].as_f64() {
             t.ref_peak.push(p);
         }
+        if v["protection"]["reference_absent"] == json!(true) {
+            t.reference_absent += 1;
+        }
+        if let Some(c) = v["protection"]["clipped_buffers"].as_u64() {
+            t.clipped_buffers = c;
+        }
         if v["delay_locked"] == json!(true) {
             t.locked += 1;
             if let Some(d) = v["delay_samples"].as_f64() {
@@ -266,6 +275,7 @@ fn main() {
                 "ref_peak_dbfs":      v["ref_peak_dbfs"],
                 "delay_residual":     v["delay_residual"],
                 "delay_operator":     v["delay_operator"],
+                "protection":         v["protection"],
                 "drive":              v["drive"],
             });
             writeln!(w, "{row}").expect("write --out");
@@ -294,6 +304,10 @@ fn main() {
             t.frames,
             t.locked,
             100.0 * t.locked as f64 / t.frames.max(1) as f64
+        );
+        println!(
+            "    protection: {} frames paused (no reference), {} buffers dropped (clipped)",
+            t.reference_absent, t.clipped_buffers
         );
         println!(
             "    delay median: {} samples, {} ms   residual median: {} samples",
