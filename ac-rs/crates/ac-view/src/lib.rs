@@ -9,6 +9,7 @@ pub mod app;
 pub mod capture;
 pub mod computes_nothing;
 pub mod delay_entry;
+pub mod file_list;
 pub mod fonts;
 pub mod geometry;
 pub mod keys;

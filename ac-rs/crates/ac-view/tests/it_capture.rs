@@ -53,4 +53,17 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
         reopened.derivation.h1.magnitude_db,
         captured.run.derivation.h1.magnitude_db
     );
+
+    // `F`'s loader, on its thread, into another slot.
+    let loaded = ac_view::capture::spawn_open(captured.path.clone(), 7)
+        .recv()
+        .expect("loader answered")
+        .expect("load the written file");
+    assert!(loaded.opened);
+    assert_eq!(loaded.slot, 7);
+    assert_eq!(loaded.run.label, "slot 7");
+    assert_eq!(
+        loaded.run.derivation.h1.magnitude_db,
+        captured.run.derivation.h1.magnitude_db
+    );
 }

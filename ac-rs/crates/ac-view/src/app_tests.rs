@@ -629,6 +629,7 @@ fn arrows_move_the_selected_slot_not_live() {
     app.ingest_frame_for_test(found_frame(), 0.0);
     app.finish_capture_for_test(Ok(crate::capture::Captured {
         slot: 1,
+        opened: false,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
     }));
@@ -1291,6 +1292,7 @@ fn slots_replace_in_place_and_sit_in_order() {
     let captured = |slot: u8, t: &str| {
         Ok(crate::capture::Captured {
             slot,
+            opened: false,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), t),
         })
@@ -1471,6 +1473,7 @@ fn a_bare_digit_toggles_its_slot() {
     );
     app.finish_capture_for_test(Ok(crate::capture::Captured {
         slot: 3,
+        opened: false,
         path: std::path::PathBuf::from("/c/slot3.acsnap"),
         run: loaded_run("slot 3", "2026-09-26T14:00:00Z"),
     }));
@@ -1524,6 +1527,7 @@ fn digits_reach_the_slots_through_dispatch() {
     let mut app = transfer_app();
     app.finish_capture_for_test(Ok(crate::capture::Captured {
         slot: 2,
+        opened: false,
         path: std::path::PathBuf::from("/c/slot2.acsnap"),
         run: loaded_run("slot 2", "2026-09-26T14:00:00Z"),
     }));
@@ -1561,4 +1565,117 @@ fn q_asks_the_window_to_close() {
     app.handle_action(Action::Quit, false);
     assert!(app.quit_requested);
     assert!(!app.sent_drive.last().expect("drive off relayed").on);
+}
+
+fn temp_captures(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ac-view-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `F` with nothing saved says where it looked; with files it opens the
+/// list, and a digit starts loading the selected file into that slot.
+#[test]
+fn f_lists_saved_captures_and_a_digit_loads_into_that_slot() {
+    let mut app = transfer_app();
+    let dir = temp_captures("f");
+    app.captures_dir = dir.clone();
+    app.handle_action(Action::OpenSnapshot, false);
+    assert!(app.file_list.is_none());
+    assert_eq!(
+        app.toast_text().map(str::to_string),
+        Some(format!("no saved captures in {}", dir.display()))
+    );
+
+    std::fs::write(
+        dir.join("slot1-2026-09-26T14-00-00Z.acsnap"),
+        b"not a real snapshot",
+    )
+    .unwrap();
+    app.handle_action(Action::OpenSnapshot, false);
+    assert_eq!(app.file_list.as_ref().map(|l| l.entries().len()), Some(1));
+    app.load_selected_into_slot(2, std::time::Instant::now());
+    assert!(app.file_list.is_none(), "the list stays open after a load");
+    assert_eq!(app.capture_slot, Some(2));
+    assert_eq!(
+        app.toast_text(),
+        Some("loading slot1-2026-09-26T14-00-00Z.acsnap into slot 2\u{2026}")
+    );
+    // The file is not a snapshot: the load fails and says so.
+    let result = app.capture_rx.take().unwrap().recv().unwrap();
+    app.capture_slot = None;
+    app.finish_capture_for_test(result);
+    assert!(
+        app.toast_text().unwrap().starts_with("storing failed"),
+        "{:?}",
+        app.toast_text()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A load reports where from; a capture still reports where to.
+#[test]
+fn a_loaded_slot_says_where_it_came_from() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 4,
+        opened: true,
+        path: std::path::PathBuf::from("/c/old.acsnap"),
+        run: loaded_run("slot 4", "2026-09-26T14:00:00Z"),
+    }));
+    assert_eq!(app.toast_text(), Some("slot 4 loaded from /c/old.acsnap"));
+}
+
+/// `C` writes the selected trace — live or a slot, the slot with its
+/// nudge — and says where.
+#[test]
+fn c_writes_the_selected_trace_to_csv() {
+    let mut app = transfer_app();
+    let dir = temp_captures("c");
+    app.captures_dir = dir.clone();
+    app.handle_action(Action::ExportCsv, false);
+    assert_eq!(app.toast_text(), Some("no live trace to export"));
+
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ExportCsv, false);
+    assert!(
+        app.toast_text().unwrap().starts_with("live written"),
+        "{:?}",
+        app.toast_text()
+    );
+
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 1,
+        opened: false,
+        path: std::path::PathBuf::from("/c/slot1.acsnap"),
+        run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+    }));
+    app.handle_action(Action::CycleFocus, false);
+    app.handle_action(Action::NudgeDelayLater, true);
+    app.handle_action(Action::ExportCsv, false);
+    let written: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    let slot = written
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("slot1-")
+        })
+        .expect("slot CSV written");
+    let csv = std::fs::read_to_string(slot).unwrap();
+    assert!(csv.starts_with("# ac transfer trace: slot 1\n"), "{csv}");
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    let want = ac_scene::TransferInput::stored_delay_ms(&t.loaded[0].derivation)
+        + 10.0 * 1000.0 / 48_000.0;
+    assert!(csv.contains(&format!("# delay_ms: {want:.6}\n")), "{csv}");
+    assert!(csv.lines().count() > 5);
+    std::fs::remove_dir_all(&dir).ok();
 }

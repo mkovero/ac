@@ -23,6 +23,8 @@ use crate::zmq_client::{Client, Endpoint};
 pub struct Captured {
     /// The slot it was taken for.
     pub slot: u8,
+    /// Opened from a saved file (`F`) rather than captured live.
+    pub opened: bool,
     /// Where the `.acsnap` was written.
     pub path: PathBuf,
     /// Pair 0 of the snapshot, ready to overlay.
@@ -86,7 +88,12 @@ pub fn capture_into(client: &Client, dir: &Path, slot: u8) -> Result<Captured> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let (path, _) = write_new(dir, &file_name(slot, &snap.meta.captured_at_utc), &bytes)?;
     let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, 0, format!("slot {slot}"))?;
-    Ok(Captured { slot, path, run })
+    Ok(Captured {
+        slot,
+        path,
+        run,
+        opened: false,
+    })
 }
 
 /// Run [`capture_into`] [`captures_dir`] on a thread with its own
@@ -97,6 +104,28 @@ pub fn spawn(endpoint: Endpoint, slot: u8) -> Receiver<Result<Captured, String>>
     std::thread::spawn(move || {
         let result = Client::connect(&endpoint)
             .and_then(|client| capture_into(&client, &captures_dir(), slot))
+            .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Open a saved capture into slot `slot` on a thread (`F`, #256): the
+/// derivation replays the whole ring and can take a moment, so it stays off
+/// the UI thread like a live capture does.
+pub fn spawn_open(path: PathBuf, slot: u8) -> Receiver<Result<Captured, String>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let result = crate::snapshot_flow::open_stored_transfer_run(&path, 0)
+            .map(|mut run| {
+                run.label = format!("slot {slot}");
+                Captured {
+                    slot,
+                    path,
+                    run,
+                    opened: true,
+                }
+            })
             .map_err(|e| format!("{e:#}"));
         let _ = tx.send(result);
     });
