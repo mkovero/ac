@@ -1686,8 +1686,10 @@ mod tests {
         let mut other_rate = base(0.0, 0.9);
         other_rate.sr = 96_000;
         assert_eq!(
-            TransferInput::average(&[&a, &other_rate], true).unwrap_err(),
-            "the traces differ in sample rate or analysis layout"
+            TransferInput::average(&[&a, &other_rate], true)
+                .err()
+                .as_deref(),
+            Some("the traces differ in sample rate or analysis layout")
         );
         assert!(TransferInput::average(&[&a], true).is_err());
     }
