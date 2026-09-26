@@ -1480,22 +1480,29 @@ fn a_bare_digit_toggles_its_slot() {
     assert!(visible(&app));
 }
 
-/// One frame of input through the real dispatch path.
-fn press_key(app: &mut AcViewApp, key: egui::Key, ctrl: bool) {
-    let modifiers = egui::Modifiers {
+/// One frame of input through the real dispatch path: `key` pressed with
+/// `event_ctrl` on its event, the frame's modifiers at `frame_ctrl` (they
+/// differ when Ctrl is released before the frame is processed), and the
+/// digit's text event, as a real keyboard sends it.
+fn press_key(app: &mut AcViewApp, key: egui::Key, event_ctrl: bool, frame_ctrl: bool) {
+    let mods = |ctrl: bool| egui::Modifiers {
         ctrl,
         command: ctrl,
         ..Default::default()
     };
+    let mut events = vec![egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: mods(event_ctrl),
+    }];
+    if !event_ctrl {
+        events.push(egui::Event::Text(key.symbol_or_name().to_string()));
+    }
     let input = egui::RawInput {
-        events: vec![egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers,
-        }],
-        modifiers,
+        events,
+        modifiers: mods(frame_ctrl),
         ..Default::default()
     };
     let ctx = egui::Context::default();
@@ -1506,7 +1513,8 @@ fn press_key(app: &mut AcViewApp, key: egui::Key, ctrl: bool) {
 
 /// Through dispatch (Codex review): a bare digit toggles, `Ctrl`+digit
 /// stores — here refused for want of a session, which proves the route —
-/// and a digit typed into the delay entry never reaches the slots.
+/// even when Ctrl was released before the frame; and a digit typed into
+/// the delay entry lands in the entry, not on the slots.
 #[test]
 fn digits_reach_the_slots_through_dispatch() {
     let mut app = transfer_app();
@@ -1519,19 +1527,23 @@ fn digits_reach_the_slots_through_dispatch() {
         ViewKind::Transfer(t) => t.loaded[0].visible,
         ViewKind::Spectrum(_) => panic!("not transfer view"),
     };
-    press_key(&mut app, egui::Key::Num2, false);
+    press_key(&mut app, egui::Key::Num2, false, false);
     assert!(!visible(&app), "bare 2 did not hide slot 2");
-    press_key(&mut app, egui::Key::Num2, true);
-    assert!(!visible(&app), "Ctrl+2 toggled instead of storing");
+    press_key(&mut app, egui::Key::Num2, true, false);
+    assert!(
+        !visible(&app),
+        "Ctrl+2 (Ctrl released by frame time) toggled"
+    );
     assert_eq!(
         app.toast_text(),
         Some("no session \u{2014} nothing to store")
     );
 
     app.handle_action(Action::TypeDelay, false);
-    press_key(&mut app, egui::Key::Num2, false);
+    press_key(&mut app, egui::Key::Num2, false, false);
     assert!(
-        !visible(&app) && app.delay_entry.is_some(),
-        "digit escaped the entry"
+        !visible(&app),
+        "a digit typed into the entry toggled slot 2"
     );
+    assert_eq!(app.delay_entry.as_ref().map(|e| e.text()), Some("2"));
 }
