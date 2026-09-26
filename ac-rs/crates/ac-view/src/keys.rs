@@ -10,8 +10,8 @@
 //! Key letters are assigned here, once, across both views. The stimulus
 //! cluster (Space / Enter / Esc / ↑ / ↓) is reserved for the transfer
 //! view's arm→fire→stop and level control and is never given another
-//! meaning anywhere; `Q` (quit) and `S` (snapshot) are reserved
-//! globally. New M4b toggles — raw-phase, de-rotation reference, ref-
+//! meaning anywhere — except Enter, which pauses the live trace when the
+//! stimulus is not armed (#256); `Q` (quit) is reserved globally. New M4b toggles — raw-phase, de-rotation reference, ref-
 //! trace visibility, settings overlay — take the remaining letters in
 //! this same pass, so key allocation never becomes an incremental
 //! scramble across later PRs.
@@ -32,7 +32,6 @@ pub enum Action {
     // -- global --
     ToggleHelp,
     Quit,
-    TriggerSnapshot,
     OpenSnapshot,
     MoveCursorLeft,
     MoveCursorRight,
@@ -75,9 +74,6 @@ pub enum Action {
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
     TypeDelay,
-    /// Pause or resume the live display (#256): trace, meters and readouts
-    /// hold still; frames and stimulus keep running.
-    TogglePause,
     /// Show or hide the focused trace (#256). Shift: show every trace.
     ToggleTraceVisible,
     /// Toggle the IR panel (#286) — h(t) from the `visualize/ir` sidecar,
@@ -98,8 +94,8 @@ pub enum Action {
     // -- transfer view: stimulus cluster (reserved, D7/D10) --
     /// Space: Idle→Armed, or stop from Armed/Driving.
     StimulusArmOrStop,
-    /// Enter: Armed→Driving, or stop from Driving.
-    StimulusFireOrStop,
+    /// Enter: Armed→Driving; otherwise pause / resume the live trace (#256).
+    StimulusFireOrPause,
     /// Esc: cancel/stop from any state.
     StimulusCancel,
     /// ↑: raise drive level (M4b: local state; M4c wires the clamp+send).
@@ -128,12 +124,13 @@ pub struct Binding {
 /// `]`, `+`, `-` never appear; [`assert_no_forbidden_keys`] enforces it.
 ///
 /// Key ledger (so the single-pass assignment is auditable at a glance):
-/// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
+/// global `/` `Q` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
 /// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` `Tab` `X` (#321: cycle
 /// trace focus / close a stored run) `,` `.` `T` (#669: nudge / type the
-/// delay — `T` is spectrum's too, the views never share a table) `Z` `V`
-/// (#256: pause the live trace, show/hide the focused one — `V` likewise) +
-/// stimulus `Space` `Enter` `Esc` `↑` `↓`.
+/// delay — `T` is spectrum's too, the views never share a table) `V`
+/// (#256: show/hide the focused trace — `V` likewise) + stimulus `Space`
+/// `Enter` `Esc` `↑` `↓` (#256: Enter fires only when armed; otherwise it
+/// pauses the live trace) + `Ctrl`+`1`…`9` slots ([`SLOT_KEYS`]).
 pub const BINDINGS: &[Binding] = &[
     // -- global --
     Binding {
@@ -147,12 +144,6 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::Quit,
         scope: Scope::Global,
         description: "Quit",
-    },
-    Binding {
-        key: Key::S,
-        action: Action::TriggerSnapshot,
-        scope: Scope::Global,
-        description: "Snapshot: save and overlay it (transfer view)",
     },
     Binding {
         key: Key::F,
@@ -271,12 +262,6 @@ pub const BINDINGS: &[Binding] = &[
         description: "Delay one sample later",
     },
     Binding {
-        key: Key::Z,
-        action: Action::TogglePause,
-        scope: Scope::Transfer,
-        description: "Pause / resume the live trace",
-    },
-    Binding {
         key: Key::V,
         action: Action::ToggleTraceVisible,
         scope: Scope::Transfer,
@@ -315,9 +300,9 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         key: Key::Enter,
-        action: Action::StimulusFireOrStop,
+        action: Action::StimulusFireOrPause,
         scope: Scope::Transfer,
-        description: "Start driving (Enter); stop if driving",
+        description: "Start driving if armed; otherwise pause / resume the live trace",
     },
     Binding {
         key: Key::Escape,
@@ -405,11 +390,32 @@ fn key_label(key: Key) -> String {
 /// line. The overlay is per-view so it never lists a key that does
 /// nothing in the view the user is looking at.
 pub fn help_text(view: ViewId) -> String {
-    bindings_for(view)
+    let mut lines: Vec<String> = bindings_for(view)
         .map(|b| format!("{}  {}", key_label(b.key), b.description))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if view == ViewId::Transfer {
+        lines.push(format!("Ctrl+1…{}  {SLOT_HELP}", SLOT_KEYS.len()));
+    }
+    lines.join("\n")
 }
+
+/// The slot keys (#256), `Ctrl` + a digit, in slot order. Not in
+/// [`BINDINGS`]: the table has no modifiers, and a bare digit must not
+/// store anything. The app checks these with `Ctrl` held.
+pub const SLOT_KEYS: [Key; 9] = [
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+];
+
+/// The help line for [`SLOT_KEYS`].
+pub const SLOT_HELP: &str = "Store the live trace to that slot (replaces it; live must be running)";
 
 #[cfg(test)]
 mod tests {
@@ -469,7 +475,7 @@ mod tests {
                     matches!(
                         b.action,
                         Action::StimulusArmOrStop
-                            | Action::StimulusFireOrStop
+                            | Action::StimulusFireOrPause
                             | Action::StimulusCancel
                             | Action::StimulusLevelUp
                             | Action::StimulusLevelDown

@@ -107,8 +107,8 @@ pub struct AcViewApp {
     /// picture must not hide a leg going silent or clipping while the
     /// stimulus is still driving.
     frozen_frame: Option<ac_core::wire::TransferFrame>,
-    /// Snapshots saved this session, for the status message's number.
-    captures_taken: usize,
+    /// The slot the running capture is for.
+    capture_slot: Option<u8>,
     /// The one-line status message (#256): what `S` did. Expires at the
     /// instant held beside it; `None` = stays until replaced.
     toast: Option<(String, Option<Instant>)>,
@@ -163,7 +163,7 @@ impl AcViewApp {
             delay_entry: None,
             capture_rx: None,
             frozen_frame: None,
-            captures_taken: 0,
+            capture_slot: None,
             toast: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
@@ -518,7 +518,6 @@ impl AcViewApp {
         match action {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
-            Action::TriggerSnapshot => self.start_capture(Instant::now()),
             Action::OpenSnapshot => {
                 // File-picker wiring is UX-gated; the orchestration
                 // (snapshot_flow::open_local) is implemented and tested.
@@ -587,14 +586,6 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
-            Action::TogglePause => {
-                self.with_transfer(|t| t.toggle_pause());
-                self.frozen_frame = if self.transfer_paused() {
-                    self.last_frame.clone()
-                } else {
-                    None
-                };
-            }
             Action::ToggleTraceVisible => self.with_transfer(|t| {
                 if shift {
                     t.show_all();
@@ -610,9 +601,20 @@ impl AcViewApp {
                 let cmd = self.transfer_stimulus(|m, now| m.press_space(now));
                 self.send_drive(cmd);
             }
-            Action::StimulusFireOrStop => {
-                let cmd = self.transfer_stimulus(|m, now| m.press_enter(now));
-                self.send_drive(cmd);
+            // Enter (#256): fire when armed — panic-first normally takes
+            // that case before dispatch — and otherwise pause / resume the
+            // live trace, including while driving (Space and Esc stop).
+            Action::StimulusFireOrPause => {
+                let armed = matches!(
+                    &self.view,
+                    ViewKind::Transfer(t) if t.stimulus.state() == crate::stimulus::StimState::Armed
+                );
+                if armed {
+                    let cmd = self.transfer_stimulus(|m, now| m.press_enter(now));
+                    self.send_drive(cmd);
+                } else {
+                    self.toggle_live_pause();
+                }
             }
             Action::StimulusCancel => {
                 let cmd = self.transfer_stimulus(|m, now| m.press_esc(now));
@@ -690,20 +692,46 @@ impl AcViewApp {
         self.toast = Some((text, until));
     }
 
-    /// `S` (#256): start a capture on its own thread, and say so. The
-    /// message is the reaction the operator sees; the result replaces it.
-    fn start_capture(&mut self, now: Instant) {
-        if self.capture_rx.is_some() {
-            self.set_toast("snapshot already being taken".into(), now, Some(3.0));
+    /// Enter while not armed (#256): hold the live trace, or let it roll.
+    fn toggle_live_pause(&mut self) {
+        self.with_transfer(|t| t.toggle_pause());
+        self.frozen_frame = if self.transfer_paused() {
+            self.last_frame.clone()
+        } else {
+            None
+        };
+    }
+
+    /// `Ctrl`+`n` (#256): store the live trace to slot `n`, on its own
+    /// thread, and say so. Only while live rolls: a snapshot records what
+    /// the daemon hears now, so storing while the picture is held would
+    /// file a trace the operator is not looking at.
+    fn store_slot_request(&mut self, n: u8, now: Instant) {
+        if !matches!(self.view, ViewKind::Transfer(_)) {
+            return;
+        }
+        if self.transfer_paused() {
+            self.set_toast(
+                format!("live is paused \u{2014} press Enter to resume, then store slot {n}"),
+                now,
+                Some(4.0),
+            );
+        } else if let Some(pending) = self.capture_slot {
+            self.set_toast(
+                format!("slot {pending} is still being stored"),
+                now,
+                Some(3.0),
+            );
         } else if self.session.is_none() {
             self.set_toast(
-                "no session \u{2014} nothing to snapshot".into(),
+                "no session \u{2014} nothing to store".into(),
                 now,
                 Some(3.0),
             );
         } else {
-            self.capture_rx = Some(crate::capture::spawn(self.endpoint.clone()));
-            self.set_toast("taking snapshot\u{2026}".into(), now, None);
+            self.capture_rx = Some(crate::capture::spawn(self.endpoint.clone(), n));
+            self.capture_slot = Some(n);
+            self.set_toast(format!("storing slot {n}\u{2026}"), now, None);
         }
     }
 
@@ -726,23 +754,19 @@ impl AcViewApp {
             }
         };
         self.capture_rx = None;
+        self.capture_slot = None;
         self.finish_capture(result, now);
     }
 
     fn finish_capture(&mut self, result: Result<crate::capture::Captured, String>, now: Instant) {
         match result {
             Ok(captured) => {
-                self.captures_taken += 1;
-                let n = self.captures_taken;
+                let n = captured.slot;
                 let path = captured.path.display().to_string();
-                self.with_transfer(|t| t.add_run(captured.run));
-                self.set_toast(
-                    format!("snapshot {n} saved \u{2014} {path}"),
-                    now,
-                    Some(5.0),
-                );
+                self.with_transfer(|t| t.store_slot(n, captured.run));
+                self.set_toast(format!("slot {n} stored \u{2014} {path}"), now, Some(5.0));
             }
-            Err(e) => self.set_toast(format!("snapshot failed \u{2014} {e}"), now, Some(8.0)),
+            Err(e) => self.set_toast(format!("storing failed \u{2014} {e}"), now, Some(8.0)),
         }
     }
 
@@ -828,10 +852,14 @@ impl AcViewApp {
     /// bug that opened this hole was a modal (settings) added with no
     /// awareness of the stimulus invariant.
     fn panic_first(&mut self, space: bool, enter: bool, esc: bool) -> bool {
-        let live = matches!(
-            &self.view,
-            ViewKind::Transfer(t) if t.stimulus.state() != crate::stimulus::StimState::Idle
-        );
+        let state = match &self.view {
+            ViewKind::Transfer(t) => t.stimulus.state(),
+            ViewKind::Spectrum(_) => crate::stimulus::StimState::Idle,
+        };
+        let live = state != crate::stimulus::StimState::Idle;
+        // Enter belongs to the stimulus only while armed — it fires. While
+        // driving it pauses the live trace (#256); Space and Esc stop.
+        let enter = enter && state == crate::stimulus::StimState::Armed;
         if !live || !(space || enter || esc) {
             return false;
         }
@@ -1030,6 +1058,23 @@ impl AcViewApp {
                 .collect();
             self.handle_delay_entry_keys(&chars, backspace, apply, esc);
             return;
+        }
+
+        // `Ctrl`+digit: store the live trace to that slot (#256). Checked
+        // with `Ctrl` held, so a bare digit does nothing.
+        let slots: Vec<u8> = ctx.input(|i| {
+            if !i.modifiers.ctrl {
+                return Vec::new();
+            }
+            crate::keys::SLOT_KEYS
+                .iter()
+                .zip(1u8..)
+                .filter(|(k, _)| i.key_pressed(**k))
+                .map(|(_, n)| n)
+                .collect()
+        });
+        for n in slots {
+            self.store_slot_request(n, Instant::now());
         }
 
         let view_id = self.view.id();

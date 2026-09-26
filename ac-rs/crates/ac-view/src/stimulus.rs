@@ -11,7 +11,8 @@
 //! Safety invariants this type is responsible for (drive-path checklist):
 //! - launches Idle; no path reaches Driving without an explicit
 //!   arm (Space) then fire (Enter);
-//! - panic stop (Space/Enter/Esc) works from **both** Armed and Driving;
+//! - panic stop (Space/Esc) works from **both** Armed and Driving; Enter
+//!   only fires (#256 — otherwise it pauses the live trace, in the app);
 //! - Armed auto-disarms after 5 s of no {Enter, ↑, ↓} — no "armed
 //!   forever";
 //! - every level change is clamped to `drive_max_dbfs`, at every entry
@@ -101,7 +102,7 @@ impl StimulusMachine {
         }
     }
 
-    /// Enter: fire from Armed, or **stop** from Driving.
+    /// Enter: fire from Armed; nothing otherwise (#256).
     pub fn press_enter(&mut self, now: Instant) -> Option<DriveCmd> {
         match self.state {
             StimState::Armed => {
@@ -112,8 +113,9 @@ impl StimulusMachine {
                     level_dbfs: self.level_dbfs,
                 })
             }
-            StimState::Driving => self.stop(),
-            StimState::Idle => None,
+            // Enter only fires (#256): while driving it pauses the live
+            // trace instead, which the app handles. Space and Esc stop.
+            StimState::Driving | StimState::Idle => None,
         }
     }
 
@@ -266,18 +268,21 @@ mod tests {
         assert!(!off.on);
         assert_eq!(m.state(), StimState::Idle);
 
-        // From Driving, via Enter and via Esc.
-        for stop in [
-            StimulusMachine::press_enter as fn(&mut StimulusMachine, Instant) -> Option<DriveCmd>,
-            StimulusMachine::press_esc,
-        ] {
-            let mut m = StimulusMachine::new(CEILING, -30.0);
-            m.press_space(t);
-            m.press_enter(t);
-            let off = stop(&mut m, t).expect("stop from driving emits off");
-            assert!(!off.on);
-            assert_eq!(m.state(), StimState::Idle);
-        }
+        // From Driving, via Esc.
+        let mut m = StimulusMachine::new(CEILING, -30.0);
+        m.press_space(t);
+        m.press_enter(t);
+        let off = m.press_esc(t).expect("stop from driving emits off");
+        assert!(!off.on);
+        assert_eq!(m.state(), StimState::Idle);
+
+        // Enter while driving does not touch the drive (#256): it pauses
+        // the live trace, in the app. Space and Esc are the stops.
+        let mut m = StimulusMachine::new(CEILING, -30.0);
+        m.press_space(t);
+        m.press_enter(t);
+        assert_eq!(m.press_enter(t), None);
+        assert_eq!(m.state(), StimState::Driving);
 
         // From Armed (no drive was on ⇒ no off command, but state clears).
         for stop in [

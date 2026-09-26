@@ -94,7 +94,7 @@ fn stim_state(app: &AcViewApp) -> StimState {
 
 fn drive(app: &mut AcViewApp) {
     app.handle_action(Action::StimulusArmOrStop, false); // Idle -> Armed
-    app.handle_action(Action::StimulusFireOrStop, false); // Armed -> Driving
+    app.handle_action(Action::StimulusFireOrPause, false); // Armed -> Driving
     assert_eq!(stim_state(app), StimState::Driving);
 }
 
@@ -146,12 +146,13 @@ fn panic_first_stops_a_live_machine_even_with_a_modal_open() {
     assert!(!last.on, "panic must relay set_drive off");
 }
 
-// Each panic key (Space/Enter/Esc) stops from Driving through the
-// adapter — the machine's own test proves the transition; this proves
-// the app relays the off for each.
+// Each panic key (Space/Esc) stops from Driving through the adapter —
+// the machine's own test proves the transition; this proves the app
+// relays the off for each. Enter is not a stop since #256: it pauses the
+// live trace (`enter_pauses_while_driving_and_leaves_the_drive_on`).
 #[test]
 fn every_panic_key_relays_off_from_driving() {
-    for key in ["space", "enter", "esc"] {
+    for key in ["space", "esc"] {
         let mut app = transfer_app();
         drive(&mut app);
         app.sent_drive.clear();
@@ -1224,46 +1225,100 @@ fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
 
 // ---- #256: capture, pause, compare ----
 
-/// `S` with no session answers on screen instead of doing nothing.
+/// `Ctrl`+digit with no session answers on screen instead of doing nothing.
 #[test]
-fn s_without_a_session_says_so() {
+fn a_slot_store_without_a_session_says_so() {
     let mut app = transfer_app();
-    app.handle_action(Action::TriggerSnapshot, false);
+    app.store_slot_request(1, std::time::Instant::now());
     assert_eq!(
         app.toast_text(),
-        Some("no session \u{2014} nothing to snapshot")
+        Some("no session \u{2014} nothing to store")
     );
 }
 
-/// A finished capture is overlaid and reported with its number and file;
-/// a failed one is reported with the reason.
+/// Storing needs live to roll (#256): while paused it refuses and says how
+/// to resume, and starts nothing.
 #[test]
-fn a_finished_capture_is_overlaid_and_reported() {
+fn a_slot_store_while_paused_is_refused() {
     let mut app = transfer_app();
-    app.finish_capture_for_test(Ok(crate::capture::Captured {
-        path: std::path::PathBuf::from("/c/2026-09-26T14-30-05Z.acsnap"),
-        run: loaded_run("2026-09-26T14-30-05Z.acsnap", "2026-09-26T14:30:05Z"),
-    }));
+    app.handle_action(Action::StimulusFireOrPause, false); // pause (idle)
+    app.store_slot_request(5, std::time::Instant::now());
     assert_eq!(
         app.toast_text(),
-        Some("snapshot 1 saved \u{2014} /c/2026-09-26T14-30-05Z.acsnap")
+        Some("live is paused \u{2014} press Enter to resume, then store slot 5")
     );
-    match &app.view {
-        ViewKind::Transfer(state) => assert_eq!(state.loaded.len(), 1),
-        ViewKind::Spectrum(_) => panic!("not transfer view"),
-    }
+    assert!(app.capture_slot.is_none());
+}
+
+/// A stored slot is overlaid and reported; storing the same slot again
+/// replaces it in place; slots sit in number order.
+#[test]
+fn slots_replace_in_place_and_sit_in_order() {
+    let mut app = transfer_app();
+    let captured = |slot: u8, t: &str| {
+        Ok(crate::capture::Captured {
+            slot,
+            path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+            run: loaded_run(&format!("slot {slot}"), t),
+        })
+    };
+    app.finish_capture_for_test(captured(5, "2026-09-26T14:00:00Z"));
+    assert_eq!(
+        app.toast_text(),
+        Some("slot 5 stored \u{2014} /c/slot5.acsnap")
+    );
+    app.finish_capture_for_test(captured(1, "2026-09-26T14:01:00Z"));
+    app.finish_capture_for_test(captured(5, "2026-09-26T14:02:00Z"));
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(
+        t.loaded
+            .iter()
+            .map(|r| (r.slot, r.captured_at_utc.as_str(), r.color_slot))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1), "2026-09-26T14:01:00Z", 0),
+            (Some(5), "2026-09-26T14:02:00Z", 4)
+        ]
+    );
     app.finish_capture_for_test(Err("no transfer_stream session running".into()));
     assert_eq!(
         app.toast_text(),
-        Some("snapshot failed \u{2014} no transfer_stream session running")
+        Some("storing failed \u{2014} no transfer_stream session running")
     );
 }
 
-/// `Z` holds the trace and readouts, but not the meters or the fault
+/// Enter pauses unless armed, and never stops a running drive (#256):
+/// Space and Esc are the stops.
+#[test]
+fn enter_pauses_while_driving_and_leaves_the_drive_on() {
+    let mut app = transfer_app();
+    app.handle_action(Action::StimulusArmOrStop, false); // armed
+    app.handle_action(Action::StimulusFireOrPause, false); // fires
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(t.stimulus.state(), crate::stimulus::StimState::Driving);
+    assert!(!t.paused);
+    // Through panic-first, as a real Enter press arrives.
+    assert!(
+        !app.panic_first(false, true, false),
+        "Enter taken as a stop"
+    );
+    app.handle_action(Action::StimulusFireOrPause, false);
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(t.stimulus.state(), crate::stimulus::StimState::Driving);
+    assert!(t.paused);
+}
+
+/// Enter holds the trace and readouts, but not the meters or the fault
 /// indicator: the stimulus is still running, and a leg going silent must
 /// show (Codex review). Resuming shows the newest frame.
 #[test]
-fn z_holds_the_trace_but_not_the_meters() {
+fn enter_holds_the_trace_but_not_the_meters() {
     let mut app = transfer_app();
     let mut a = transfer_frame();
     a.delay_ms = 1.0;
@@ -1275,7 +1330,7 @@ fn z_holds_the_trace_but_not_the_meters() {
     assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
     app.rebuild_scenes(true, 0.5);
     let quiet = app.current_transfer_scene().unwrap().meas_meter.height;
-    app.handle_action(Action::TogglePause, false);
+    app.handle_action(Action::StimulusFireOrPause, false);
     assert!(app.ingest_raw_frame(serde_json::to_value(&b).unwrap(), now));
     app.rebuild_scenes(true, 1.0);
     let held = app.current_transfer_scene().unwrap();
@@ -1287,7 +1342,7 @@ fn z_holds_the_trace_but_not_the_meters() {
         held.meas_meter.height > quiet,
         "the meter froze with the trace"
     );
-    app.handle_action(Action::TogglePause, false);
+    app.handle_action(Action::StimulusFireOrPause, false);
     app.rebuild_scenes(true, 2.0);
     assert_eq!(
         app.current_transfer_scene().unwrap().delay_readout,
@@ -1327,7 +1382,7 @@ fn v_hides_the_focused_trace_and_colours_stay_put() {
     assert!(t.live_visible && t.loaded.iter().all(|r| r.visible));
     assert_eq!(
         t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
-        [0, 2]
+        [9, 11]
     );
 }
 
@@ -1345,7 +1400,8 @@ fn opened_runs_get_distinct_colours() {
     };
     assert_eq!(
         t.loaded.iter().map(|r| r.color_slot).collect::<Vec<_>>(),
-        [0, 1]
+        [9, 10],
+        "file runs take colours after the nine slots"
     );
 }
 
@@ -1358,7 +1414,7 @@ fn a_version_refusal_drops_the_held_picture() {
     a.delay_ms = 1.0;
     let now = std::time::Instant::now();
     assert!(app.ingest_raw_frame(serde_json::to_value(&a).unwrap(), now));
-    app.handle_action(Action::TogglePause, false);
+    app.handle_action(Action::StimulusFireOrPause, false);
     let mut refused = serde_json::to_value(&a).unwrap();
     refused["wire_version"] = serde_json::json!(9_999);
     assert!(!app.ingest_raw_frame(refused, now));
