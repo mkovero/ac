@@ -1093,16 +1093,29 @@ impl AcViewApp {
 
         // Digits (#256): `Ctrl`+digit stores the live trace to that slot;
         // a bare digit shows or hides it.
-        let (ctrl, slots): (bool, Vec<u8>) = ctx.input(|i| {
-            let pressed = crate::keys::SLOT_KEYS
+        // `Ctrl` is read from each key event, not from the frame's current
+        // modifiers: a Ctrl released before the frame is processed must
+        // still store, not toggle (Codex review).
+        let slots: Vec<(bool, u8)> = ctx.input(|i| {
+            i.events
                 .iter()
-                .zip(1u8..)
-                .filter(|(k, _)| i.key_pressed(**k))
-                .map(|(_, n)| n)
-                .collect();
-            (i.modifiers.ctrl, pressed)
+                .filter_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } => crate::keys::SLOT_KEYS
+                        .iter()
+                        .zip(1u8..)
+                        .find(|(k, _)| **k == *key)
+                        .map(|(_, n)| (modifiers.ctrl, n)),
+                    _ => None,
+                })
+                .collect()
         });
-        for n in slots {
+        for (ctrl, n) in slots {
             if ctrl {
                 self.store_slot_request(n, Instant::now());
             } else {

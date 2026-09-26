@@ -1479,3 +1479,59 @@ fn a_bare_digit_toggles_its_slot() {
     app.toggle_slot(3, now);
     assert!(visible(&app));
 }
+
+/// One frame of input through the real dispatch path.
+fn press_key(app: &mut AcViewApp, key: egui::Key, ctrl: bool) {
+    let modifiers = egui::Modifiers {
+        ctrl,
+        command: ctrl,
+        ..Default::default()
+    };
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }],
+        modifiers,
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    ctx.begin_pass(input);
+    app.dispatch_input(&ctx);
+    let _ = ctx.end_pass();
+}
+
+/// Through dispatch (Codex review): a bare digit toggles, `Ctrl`+digit
+/// stores — here refused for want of a session, which proves the route —
+/// and a digit typed into the delay entry never reaches the slots.
+#[test]
+fn digits_reach_the_slots_through_dispatch() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 2,
+        path: std::path::PathBuf::from("/c/slot2.acsnap"),
+        run: loaded_run("slot 2", "2026-09-26T14:00:00Z"),
+    }));
+    let visible = |app: &AcViewApp| match &app.view {
+        ViewKind::Transfer(t) => t.loaded[0].visible,
+        ViewKind::Spectrum(_) => panic!("not transfer view"),
+    };
+    press_key(&mut app, egui::Key::Num2, false);
+    assert!(!visible(&app), "bare 2 did not hide slot 2");
+    press_key(&mut app, egui::Key::Num2, true);
+    assert!(!visible(&app), "Ctrl+2 toggled instead of storing");
+    assert_eq!(
+        app.toast_text(),
+        Some("no session \u{2014} nothing to store")
+    );
+
+    app.handle_action(Action::TypeDelay, false);
+    press_key(&mut app, egui::Key::Num2, false);
+    assert!(
+        !visible(&app) && app.delay_entry.is_some(),
+        "digit escaped the entry"
+    );
+}
