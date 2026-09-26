@@ -642,8 +642,25 @@ fn arrows_move_the_selected_slot_not_live() {
         panic!("not transfer view")
     };
     assert_eq!(t.loaded[0].delay_offset_samples, 9);
+    let recorded = ac_scene::TransferInput::stored_delay_ms(&t.loaded[0].derivation);
+    // The Snapshot de-rotation reference is the slot as drawn, nudge
+    // included (Codex review).
+    app.with_transfer(|t| t.derot = crate::view::DerotChoice::Snapshot);
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(
+        t.derot_mode(),
+        ac_scene::DerotMode::Snapshot {
+            snapshot_delay_ms: recorded + 9.0 * 1000.0 / 48_000.0
+        }
+    );
+    app.with_transfer(|t| t.derot = crate::view::DerotChoice::Session);
+    let phase_before = app.current_loaded_scenes()[0].phase.clone();
     app.rebuild_scenes(true, 1.0);
-    assert_ne!(app.current_loaded_scenes()[0].delay_readout, before);
+    let after = &app.current_loaded_scenes()[0];
+    assert_ne!(after.delay_readout, before);
+    assert_ne!(after.phase, phase_before, "the slot's phase did not move");
 }
 
 /// Without a delay there is nothing to insert or nudge, and a guessed

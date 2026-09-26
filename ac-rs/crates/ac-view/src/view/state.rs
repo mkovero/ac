@@ -402,7 +402,12 @@ impl TransferViewState {
             Focus::Stored(idx) => self
                 .loaded
                 .get(idx)
-                .map(|run| ac_scene::TransferInput::stored_delay_ms(&run.derivation))
+                // The run's delay as drawn: recorded plus its `←`/`→`
+                // offset (#256), so live and slot share one reference.
+                .map(|run| {
+                    ac_scene::TransferInput::stored_delay_ms(&run.derivation)
+                        + run.delay_offset_samples as f64 * 1000.0 / run.sr as f64
+                })
                 .unwrap_or(self.snapshot_delay_ms),
             Focus::Live => self.snapshot_delay_ms,
         };
