@@ -1453,3 +1453,29 @@ fn settings_refuse_to_apply_while_driving() {
         Some("stop the stimulus (Space or Esc) before applying settings")
     );
 }
+
+/// A bare slot digit shows or hides that slot (#256); an empty slot says
+/// how to fill it.
+#[test]
+fn a_bare_digit_toggles_its_slot() {
+    let mut app = transfer_app();
+    let now = std::time::Instant::now();
+    app.toggle_slot(3, now);
+    assert_eq!(
+        app.toast_text(),
+        Some("slot 3 is empty \u{2014} Ctrl+3 stores the live trace there")
+    );
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 3,
+        path: std::path::PathBuf::from("/c/slot3.acsnap"),
+        run: loaded_run("slot 3", "2026-09-26T14:00:00Z"),
+    }));
+    let visible = |app: &AcViewApp| match &app.view {
+        ViewKind::Transfer(t) => t.loaded[0].visible,
+        ViewKind::Spectrum(_) => panic!("not transfer view"),
+    };
+    app.toggle_slot(3, now);
+    assert!(!visible(&app));
+    app.toggle_slot(3, now);
+    assert!(visible(&app));
+}

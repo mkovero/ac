@@ -395,13 +395,15 @@ pub fn help_text(view: ViewId) -> String {
         .collect();
     if view == ViewId::Transfer {
         lines.push(format!("Ctrl+1…{}  {SLOT_HELP}", SLOT_KEYS.len()));
+        lines.push(format!("1…{}  {SLOT_TOGGLE_HELP}", SLOT_KEYS.len()));
     }
     lines.join("\n")
 }
 
 /// The slot keys (#256), `Ctrl` + a digit, in slot order. Not in
 /// [`BINDINGS`]: the table has no modifiers, and a bare digit must not
-/// store anything. The app checks these with `Ctrl` held.
+/// store anything. The app checks these with `Ctrl` held to store, and
+/// bare to show or hide the slot.
 pub const SLOT_KEYS: [Key; 9] = [
     Key::Num1,
     Key::Num2,
@@ -413,6 +415,9 @@ pub const SLOT_KEYS: [Key; 9] = [
     Key::Num8,
     Key::Num9,
 ];
+
+/// The help line for a bare slot digit.
+pub const SLOT_TOGGLE_HELP: &str = "Show / hide that slot's trace";
 
 /// The help line for [`SLOT_KEYS`].
 pub const SLOT_HELP: &str = "Store the live trace to that slot (replaces it; live must be running)";
