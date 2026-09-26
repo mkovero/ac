@@ -1816,3 +1816,56 @@ fn b_cycles_the_mask_and_protection_reaches_the_scene() {
     };
     assert_eq!(t.coherence_mask, 0.3);
 }
+
+/// `M` averages the visible slots (#671): on with two slots, labelled,
+/// drawn as an extra trace; `Shift+M` switches weighting; hiding a slot
+/// below two says why there is no average; `Shift+C` writes it.
+#[test]
+fn m_averages_the_visible_slots() {
+    let mut app = transfer_app();
+    let dir = temp_captures("avg");
+    app.captures_dir = dir.clone();
+    let captured = |slot: u8| {
+        Ok(crate::capture::Captured {
+            slot,
+            opened: false,
+            path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+            run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+        })
+    };
+    app.finish_capture_for_test(captured(1));
+    app.finish_capture_for_test(captured(2));
+    // A run opened from a file is not a slot and stays out of the average.
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("file.acsnap", "2026-09-26T13:00:00Z")));
+    app.handle_action(Action::ToggleAverage, false);
+    assert_eq!(
+        app.toast_text(),
+        Some("average of 2 slots, coherence weighted")
+    );
+    app.rebuild_scenes(true, 0.0);
+    let refs = app.stored_run_refs();
+    assert_eq!(refs.len(), 4, "two slots, the file run, and the average");
+    assert_eq!(refs[3].label, "average of 2 slots, coherence weighted");
+    assert_eq!(refs[3].color_slot, crate::view::palette::AVERAGE_SLOT);
+
+    app.handle_action(Action::ToggleAverage, true);
+    assert_eq!(app.toast_text(), Some("average of 2 slots, plain"));
+
+    app.handle_action(Action::ExportCsv, true);
+    assert!(
+        app.toast_text().unwrap().starts_with("average written"),
+        "{:?}",
+        app.toast_text()
+    );
+
+    app.toggle_slot(2, std::time::Instant::now()); // hide: one left
+    app.rebuild_scenes(true, 1.0);
+    assert_eq!(app.stored_run_refs().len(), 3, "an average of one drawn");
+    app.handle_action(Action::ToggleAverage, false); // off
+    app.handle_action(Action::ToggleAverage, false); // on again
+    assert_eq!(
+        app.toast_text(),
+        Some("no average \u{2014} an average needs two or more traces")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

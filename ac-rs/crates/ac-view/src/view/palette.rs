@@ -38,8 +38,15 @@ pub const COMPARE_COLORS: [Color32; 9] = [
     Color32::from_rgb(0xd7, 0xaf, 0x87), // 9 sand
 ];
 
+/// The colour slot of the slot average (#671): drawn in the value colour,
+/// apart from every slot's.
+pub const AVERAGE_SLOT: usize = usize::MAX;
+
 /// The comparison colour for `slot`.
 pub fn compare_color(slot: usize) -> Color32 {
+    if slot == AVERAGE_SLOT {
+        return COLOR_VALUE;
+    }
     COMPARE_COLORS[slot % COMPARE_COLORS.len()]
 }
 

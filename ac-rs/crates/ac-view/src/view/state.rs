@@ -217,6 +217,9 @@ pub struct TransferViewState {
     /// Columns below this coherence are not drawn (#670, `B`). Display
     /// only; the fault indicator keeps its own fixed threshold.
     pub coherence_mask: f64,
+    /// The average of the visible stored runs (#671, `M`): `None` = off,
+    /// `Some(weighted)` = on, coherence-weighted or plain (`Shift+M`).
+    pub average: Option<bool>,
 }
 
 impl Default for TransferViewState {
@@ -245,7 +248,23 @@ impl TransferViewState {
             // start after them.
             next_color_slot: 9,
             coherence_mask: ac_scene::transfer::COHERENCE_THRESHOLD,
+            average: None,
         }
+    }
+
+    /// `M` (#671): show or hide the slot average — coherence-weighted
+    /// when it comes on.
+    pub fn toggle_average(&mut self) {
+        self.average = match self.average {
+            Some(_) => None,
+            None => Some(true),
+        };
+    }
+
+    /// `Shift+M` (#671): coherence weighting on or off for the average.
+    /// Turns the average on (weighted) if it was off.
+    pub fn toggle_average_weighting(&mut self) {
+        self.average = Some(!self.average.unwrap_or(false));
     }
 
     /// `B` (#670): the next coherence mask step, wrapping.
