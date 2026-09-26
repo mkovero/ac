@@ -160,15 +160,20 @@ pub fn stored_run_from_snapshot(
 /// already sets `fault: None`) — so this gives `TransferScene::from_input`
 /// a fresh, throwaway meter/fault pair each call rather than one persisted
 /// across frames: there is nothing here for a decay window to mean.
+///
+/// `delay_offset_samples` moves the run's delay from the recorded one
+/// (`←`/`→`, #256) — `TransferInput::shift_delay`.
 pub fn rederive_transfer_scene(
     derivation: &PairDerivation,
     channel_role: &str,
     sr: u32,
+    delay_offset_samples: i64,
     modes: DisplayModes,
     freq_range: (f64, f64),
     db_range: (f64, f64),
 ) -> TransferScene {
-    let input = ac_scene::TransferInput::from_pair_derivation(derivation, channel_role, sr);
+    let mut input = ac_scene::TransferInput::from_pair_derivation(derivation, channel_role, sr);
+    input.shift_delay(delay_offset_samples);
     let mut meters = (
         ac_scene::MeterState::default(),
         ac_scene::MeterState::default(),

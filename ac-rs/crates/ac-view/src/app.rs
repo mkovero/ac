@@ -547,18 +547,35 @@ impl AcViewApp {
             }
             // Relative, so two presses between frames move it twice: the
             // daemon applies each step to the delay it holds.
+            // `←`/`→` (#256): the selected trace's delay, whichever it is —
+            // live goes to the daemon as a relative step; a slot moves its
+            // own offset, drawn as a phase rotation of its stored curve.
             Action::NudgeDelayEarlier | Action::NudgeDelayLater => {
-                let step = if action == Action::NudgeDelayLater {
+                let sign = if action == Action::NudgeDelayLater {
                     1
                 } else {
                     -1
                 };
-                if self
-                    .transfer_scene
-                    .as_ref()
-                    .is_some_and(|s| s.delay_samples.is_some())
-                {
-                    self.send_delay(serde_json::json!({"step": step}));
+                let step = sign * if shift { 10 } else { 1 };
+                let focus = match &self.view {
+                    ViewKind::Transfer(t) => t.focus,
+                    ViewKind::Spectrum(_) => return,
+                };
+                match focus {
+                    crate::view::Focus::Live => {
+                        if self
+                            .transfer_scene
+                            .as_ref()
+                            .is_some_and(|s| s.delay_samples.is_some())
+                        {
+                            self.send_delay(serde_json::json!({"step": step}));
+                        }
+                    }
+                    crate::view::Focus::Stored(i) => self.with_transfer(|t| {
+                        if let Some(run) = t.loaded.get_mut(i) {
+                            run.delay_offset_samples += step;
+                        }
+                    }),
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
@@ -1328,6 +1345,7 @@ fn rebuild_loaded_scenes(
                 &run.derivation,
                 &run.channel_role,
                 run.sr,
+                run.delay_offset_samples,
                 ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing),
                 freq_range,
                 db_range,
