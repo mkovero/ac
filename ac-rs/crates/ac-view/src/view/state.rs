@@ -298,6 +298,7 @@ impl TransferViewState {
                 }
             }
         }
+        self.settle_focus();
     }
 
     /// A bare digit (#256): show or hide slot `n`. `false` when the slot
@@ -319,9 +320,11 @@ impl TransferViewState {
         true
     }
 
-    /// Select slot `n`, if stored (#256: a slot loaded with `F`).
+    /// Show and select slot `n`, if stored (#256: a slot loaded with `F`
+    /// is recalled, whatever the slot's old visibility).
     pub fn select_slot(&mut self, n: u8) {
         if let Some(i) = self.loaded.iter().position(|r| r.slot == Some(n)) {
+            self.loaded[i].visible = true;
             self.focus = Focus::Stored(i);
         }
     }
@@ -367,13 +370,27 @@ impl TransferViewState {
     /// `Tab`: move focus to the next trace — live, then each stored run
     /// in load order, wrapping back to live. A no-op (`Live` stays
     /// `Live`) when nothing is loaded.
+    ///
+    /// Hidden slots are skipped (#256): the selection never rests on a
+    /// curve that is not drawn.
     pub fn cycle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Live if self.loaded.is_empty() => Focus::Live,
-            Focus::Live => Focus::Stored(0),
-            Focus::Stored(idx) if idx + 1 < self.loaded.len() => Focus::Stored(idx + 1),
-            Focus::Stored(_) => Focus::Live,
+        let from = match self.focus {
+            Focus::Live => 0,
+            Focus::Stored(idx) => idx + 1,
         };
+        self.focus = (from..self.loaded.len())
+            .find(|&i| self.loaded[i].visible)
+            .map_or(Focus::Live, Focus::Stored);
+    }
+
+    /// Put the selection back on live if it rests on a hidden or removed
+    /// run (#256).
+    fn settle_focus(&mut self) {
+        if let Focus::Stored(idx) = self.focus {
+            if self.loaded.get(idx).is_none_or(|r| !r.visible) {
+                self.focus = Focus::Live;
+            }
+        }
     }
 
     /// `X`: close the focused stored run. A no-op when focus is `Live` —
@@ -390,6 +407,7 @@ impl TransferViewState {
             } else {
                 Focus::Live
             };
+            self.settle_focus();
         }
     }
 
