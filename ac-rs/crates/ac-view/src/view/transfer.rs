@@ -165,7 +165,14 @@ pub(super) fn draw_transfer(
     );
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
-    draw_legend(painter, &layout, state, stored, live_focused);
+    draw_legend(
+        painter,
+        &layout,
+        state,
+        scene.is_some(),
+        stored,
+        live_focused,
+    );
     if state.paused {
         // #256: said plainly, on the row under the delay readout (row 2 —
         // the band labels, caption and readout own rows 0–2, the meters the
@@ -441,6 +448,7 @@ fn draw_legend(
     painter: &Painter,
     layout: &TransferLayout,
     state: &TransferViewState,
+    live_present: bool,
     stored: &[StoredTrace<'_>],
     live_focused: bool,
 ) {
@@ -469,11 +477,13 @@ fn draw_legend(
         text(painter, rect.center(), Align2::CENTER_CENTER, label, ink);
     };
 
+    // The live box wears the live curve's colour, and is filled only when
+    // a live curve is actually on screen.
     draw_box(
         slot_box(3.0 * h),
         "live",
-        COLOR_LABEL,
-        state.live_trace_shown(),
+        focus_stroke(live_focused).color,
+        live_present && state.live_trace_shown(),
         live_focused,
     );
     for n in 1..=crate::keys::SLOT_KEYS.len() as u8 {
@@ -491,8 +501,9 @@ fn draw_legend(
         }
     }
 
-    // The selected run's captions after the strip.
-    if let Some(run) = stored.iter().find(|r| r.focused) {
+    // A selected slot's captions after the strip; a file-opened run's stay
+    // on its own row below.
+    if let Some(run) = stored.iter().find(|r| r.focused && r.slot.is_some()) {
         let mut next = egui::pos2(x + gap, legend_top + 2.0);
         for caption in [
             run.scene.estimator_readout.as_deref(),
@@ -514,7 +525,9 @@ fn draw_legend(
         }
     }
 
-    // Runs opened from a file: a row each, in their colour.
+    // Runs opened from a file: a row each, in their colour — identity,
+    // then how the trace was derived, then what was done to it (#221 UX),
+    // each its own span so a narrow window clips the captions first.
     for (i, run) in stored.iter().filter(|r| r.slot.is_none()).enumerate() {
         let marker = if run.focused { "▸ " } else { "  " };
         let color = if run.visible {
@@ -522,16 +535,31 @@ fn draw_legend(
         } else {
             COLOR_STRUCTURAL
         };
-        text(
-            painter,
-            egui::pos2(
-                layout.content.min.x,
-                legend_top + 6.0 + h * (i as f32 + 1.0),
-            ),
-            Align2::LEFT_TOP,
-            format!("{marker}{}  {}", run.label, run.captured_at_utc),
-            color,
-        );
+        let mut next = painter
+            .text(
+                egui::pos2(
+                    layout.content.min.x,
+                    legend_top + 6.0 + h * (i as f32 + 1.0),
+                ),
+                Align2::LEFT_TOP,
+                format!("{marker}{}  {}", run.label, run.captured_at_utc),
+                FontId::default(),
+                color,
+            )
+            .right_top()
+            + egui::vec2(ROW_H, 0.0);
+        for caption in [
+            run.scene.estimator_readout.as_deref(),
+            run.scene.smoothing_readout,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            next = painter
+                .text(next, Align2::LEFT_TOP, caption, FontId::default(), color)
+                .right_top()
+                + egui::vec2(ROW_H, 0.0);
+        }
     }
 }
 

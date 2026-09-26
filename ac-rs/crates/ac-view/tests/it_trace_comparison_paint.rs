@@ -285,4 +285,13 @@ fn slot_runs_paint_as_a_box_strip_not_timestamp_rows() {
         )),
         "slot 3 not drawn as a filled box in its colour"
     );
+    // No live scene: the `live` box must not claim a curve (Codex review).
+    let live = ac_view::view::palette::COLOR_STRUCTURAL;
+    assert!(
+        !shapes.iter().any(|cs| matches!(
+            &cs.shape,
+            egui::Shape::Rect(r) if r.fill == live
+        )),
+        "live box filled with no live frame"
+    );
 }
