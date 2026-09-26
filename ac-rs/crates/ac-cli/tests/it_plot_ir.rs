@@ -307,43 +307,38 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     }
     // #346 AC4 / #378: the onset rule must still reach the terminal in
     // its own labelled block, and the onset-to-arrival distance must say it
-    // is not used. Row 2 under `arrival` names the band-limited peak rule
-    // (#537); this run has no distance, and row 3 of the onset block says so.
+    // is not used. This run has no distance, and row 3 of the onset block
+    // says so.
     assert!(
         stdout.contains("onset         at sample ")
             && stdout.contains("(AIC change-point pick, 10.0 ms window)"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
     );
-    assert!(
-        stdout.contains("from peak of IR high-passed at 2 kHz (zero-phase)"),
-        "arrival row 2 must name the band-limited peak rule (#346 AC4, #537):\n{stdout}"
-    );
-    // #537: the arrival's lobe margin, its own SNR gate and the cross-check
-    // against the broadband peak print on a passing run, thresholds and
-    // target included, so a pass is not silent. A fake loopback's two peaks
-    // are the same sample. No distance was typed, and the distance row says
-    // the flight time was not checked against one (architect revision 3).
+    // #669: the arrival is the peak, as in Smaart; a fake loopback's
+    // high-passed and broadband peaks are the same sample, so no advisory.
+    // No distance was typed, and the distance row says the flight time was
+    // not checked against one (#537 architect revision 3).
     for want in [
-        "                second lobe ",
-        "dB down (required \u{2265} 3.0 dB)",
+        "                from peak (largest magnitude sample)",
         "  distance      not given \u{2014} flight time not checked (token: 1m)",
-        "  arrival SNR   ",
-        "(above 2 kHz, required \u{2265} 35.0 dB)",
-        "                ISO 3382-1:2009 \u{a7}A.3.4 trigger (\u{2212}20 dB) above noise peaks",
-        "  broadband \u{394}   +0 samples  (+0.000 ms, broadband peak \u{2212} arrival)",
-        "                to broadband peak at sample ",
-        ", 0.0 dB (first \u{2265} \u{2212}6.0 dB)",
-        "                tolerance \u{b1}96 samples (\u{b1}2.0 ms), rig-scored on 1 speaker",
     ] {
         assert!(
             stdout.contains(want),
-            "passing run missing {want:?} (#537):\n{stdout}"
+            "passing run missing {want:?} (#669):\n{stdout}"
         );
     }
-    assert!(
-        !stdout.contains("check: IR below"),
-        "an agreeing cross-check prints no check row (#537):\n{stdout}"
-    );
+    for gone in [
+        "above 2 kHz: peak",
+        "check: IR below",
+        "second lobe",
+        "arrival SNR",
+        "broadband \u{394}",
+    ] {
+        assert!(
+            !stdout.contains(gone),
+            "{gone:?} must not print on a loopback (#669):\n{stdout}"
+        );
+    }
     assert!(
         !stdout.contains("5 cm earlier"),
         "no edge-guard row, pass or fail, may print without a causal bound:\n{stdout}"
@@ -373,7 +368,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "the ref latency line is always printed (#460):\n{stdout}"
     );
     assert!(
-        stdout.contains("118 samples before arrival, not used for flight time"),
+        stdout.contains("118 samples before high-passed peak, not used for flight time"),
         "onset-to-arrival distance must print as not used (#378, #537):\n{stdout}"
     );
     assert!(
@@ -506,7 +501,7 @@ fn plot_ir_with_no_arguments_runs_and_passes_the_default_sweep() {
         // #550: on a clean loopback the arrival is the peak, so the live
         // path takes the `arrival and peak` anchor.
         "                floor ends ",
-        " samples before arrival and peak, sample ",
+        " samples before peak, sample ",
         "                scored for this sweep's band, length, window",
         "rectangular window, 19200 samples (400.00 ms)",
     ] {

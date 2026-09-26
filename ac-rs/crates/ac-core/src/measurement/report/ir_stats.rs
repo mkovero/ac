@@ -85,7 +85,7 @@ use crate::shared::calibration::{
 ///
 /// **Region (#550).** When the band-limited arrival (#537) is trusted —
 /// its SNR measured over a non-empty floor before it, and its standing
-/// not [`ArrivalCrossCheck::BandLimitedSnrLow`] (`floor_anchor` holds the
+/// not [`HighPassCheck::BandLimitedSnrLow`] (`floor_anchor` holds the
 /// rule) — the floor ends one guard band before the *earlier* of that
 /// arrival and the broadband peak ([`IrStats::pre_impulse_floor_anchor`]).
 /// Otherwise it ends before the broadband peak, the region #501 scored: on
@@ -212,9 +212,9 @@ pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnr
 
 /// Minimum pre-impulse SNR of the high-passed IR, in dB, below which the
 /// band-limited arrival withholds the flight time (#537,
-/// [`ArrivalCrossCheck::BandLimitedSnrLow`]). Applies only to a measured
+/// [`HighPassCheck::BandLimitedSnrLow`]). Applies only to a measured
 /// SNR: a pick with no floor before it is
-/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] (#577). Separate from
+/// [`HighPassCheck::BandLimitedSnrUnmeasured`] (#577). Separate from
 /// [`PRE_IMPULSE_SNR_MIN_DB`], which gates the broadband deconvolution and
 /// keeps its meaning.
 ///
@@ -239,7 +239,7 @@ pub fn pre_impulse_snr_scope(report: &MeasurementReport) -> Option<PreImpulseSnr
 /// cleared this value may end [`PRE_IMPULSE_SNR_MIN_DB`]'s floor before
 /// the broadband peak. An unmeasured SNR — a pick inside the guard band,
 /// with no floor under it — does not count as clearing it for that floor,
-/// and its standing is [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`]
+/// and its standing is [`HighPassCheck::BandLimitedSnrUnmeasured`]
 /// (#577). The noise crest of the high-passed IR over the
 /// default window is about 13 dB (√(2 ln W), derived; 11.5–12.9 dB
 /// measured on noise-only draws). Lowering this toward it lets a noise
@@ -258,7 +258,7 @@ pub const ARRIVAL_SNR_MIN_DB: f64 = 35.0;
 pub const ARRIVAL_SNR_BASIS: &str =
     "ISO 3382-1:2009 \u{a7}A.3.4 trigger (\u{2212}20 dB) above noise peaks";
 
-/// How far the broadband peak compared against ([`ArrivalCrossCheck`]'s
+/// How far the broadband peak compared against ([`HighPassCheck`]'s
 /// `r`) may sit from the band-limited arrival, either way, before the
 /// cross-check names the disagreement (#537), in seconds.
 ///
@@ -275,7 +275,7 @@ pub const ARRIVAL_CROSS_CHECK_TOLERANCE_S: f64 = 0.002;
 pub const ARRIVAL_CROSS_CHECK_BASIS: &str = "rig-scored on 1 speaker";
 
 /// An earlier high-passed sample within this many dB of the band-limited
-/// maximum makes the arrival [`ArrivalCrossCheck::EarlierComparable`]
+/// maximum makes the arrival [`HighPassCheck::EarlierComparable`]
 /// (#537): the pick may be a later, stronger path than the first one.
 ///
 /// Provenance (#537 architect revision 4): assumed, the level borrowed from
@@ -322,7 +322,7 @@ pub const DISTANCE_SPEED_OF_SOUND_REL_TOL: f64 = 0.02;
 
 /// A second local maximum of the high-passed IR within one corner period of
 /// the pick and less than this many dB below it makes the arrival
-/// [`ArrivalCrossCheck::ArrivalAmbiguous`] (#537 architect revision 2): the
+/// [`HighPassCheck::ArrivalAmbiguous`] (#537 architect revision 2): the
 /// pick may be one half-cycle off its pulse's first lobe.
 ///
 /// Provenance: measured. Healthy picks on the pupu captures (2026-09-18,
@@ -333,7 +333,7 @@ pub const DISTANCE_SPEED_OF_SOUND_REL_TOL: f64 = 0.02;
 pub const ARRIVAL_LOBE_MARGIN_MIN_DB: f64 = 3.0;
 
 /// How far below the broadband maximum a peak may sit and still be the one
-/// [`ArrivalCrossCheck`] compares the arrival against (`r`, #537 architect
+/// [`HighPassCheck`] compares the arrival against (`r`, #537 architect
 /// revision 2): the earliest local maximum of `|h|` at or after
 /// `arrival − tolerance` within this many dB of the maximum.
 ///
@@ -351,7 +351,7 @@ pub const ARRIVAL_BROADBAND_COMPARABLE_DB: f64 = 6.0;
 
 /// [`ARRIVAL_CROSS_CHECK_TOLERANCE_S`] at `sample_rate_hz`, rounded to whole
 /// samples — the bound the cross-check compares against.
-pub fn arrival_cross_check_tolerance_samples(sample_rate_hz: u32) -> i64 {
+pub fn high_pass_check_tolerance_samples(sample_rate_hz: u32) -> i64 {
     (ARRIVAL_CROSS_CHECK_TOLERANCE_S * sample_rate_hz as f64).round() as i64
 }
 
@@ -359,16 +359,16 @@ pub fn arrival_cross_check_tolerance_samples(sample_rate_hz: u32) -> i64 {
 /// against the broadband IR.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BandLimitedArrival {
-    pub(crate) arrival_index: usize,
-    pub(crate) source: ArrivalSource,
+    pub(crate) high_pass_index: usize,
+    pub(crate) source: HighPassSource,
     pub(crate) band_limited_snr_db: Option<f64>,
-    /// The pick's lobe margin; see [`IrStats::arrival_lobe_margin_db`].
+    /// The pick's lobe margin; see [`IrStats::high_pass_lobe_margin_db`].
     pub(crate) lobe_margin_db: Option<f64>,
-    /// See [`IrStats::arrival_lobe_offset`].
+    /// See [`IrStats::high_pass_lobe_offset`].
     pub(crate) lobe_offset: Option<i64>,
     /// See [`IrStats::broadband_delta_level_db`].
     pub(crate) broadband_delta_level_db: Option<f64>,
-    pub(crate) cross_check: ArrivalCrossCheck,
+    pub(crate) cross_check: HighPassCheck,
 }
 
 /// `r`: the peak of the broadband IR `linear_ir` the arrival is compared
@@ -422,11 +422,11 @@ impl ArrivalRule {
 /// Pick the arrival of `linear_ir` off the IR high-passed at
 /// [`ARRIVAL_HIGH_PASS_CORNER_HZ`] and cross-check it against the broadband
 /// IR, whose argmax is `peak_index` (#537). The standings are checked in
-/// [`ArrivalCrossCheck`]'s order; the first that fires is the result.
+/// [`HighPassCheck`]'s order; the first that fires is the result.
 ///
 /// When the stimulus does not reach [`BAND_LIMIT_MIN_F2_RATIO`] times the
-/// corner, the arrival is the broadband peak ([`ArrivalSource::Peak`]) and
-/// the standing is [`ArrivalCrossCheck::BandLimitUnavailable`].
+/// corner, the arrival is the broadband peak ([`HighPassSource::Peak`]) and
+/// the standing is [`HighPassCheck::BandLimitUnavailable`].
 pub(crate) fn band_limited_arrival(
     linear_ir: &[f64],
     sample_rate_hz: u32,
@@ -453,13 +453,13 @@ pub(crate) fn band_limited_arrival_under(
     let corner_hz = ARRIVAL_HIGH_PASS_CORNER_HZ;
     if !band_limit_available(sample_rate_hz, f2_hz, corner_hz) {
         return BandLimitedArrival {
-            arrival_index: peak_index,
-            source: ArrivalSource::Peak,
+            high_pass_index: peak_index,
+            source: HighPassSource::Peak,
             band_limited_snr_db: None,
             lobe_margin_db: None,
             lobe_offset: None,
             broadband_delta_level_db: None,
-            cross_check: ArrivalCrossCheck::BandLimitUnavailable {
+            cross_check: HighPassCheck::BandLimitUnavailable {
                 band_top_hz: band_limit_top_hz(sample_rate_hz, f2_hz),
                 required_hz: BAND_LIMIT_MIN_F2_RATIO * corner_hz,
             },
@@ -473,7 +473,7 @@ pub(crate) fn band_limited_arrival_under(
     // non-empty all-zero floor's `+inf` stays a measured value.
     let snr_measured = pre_impulse_region_len(h_hp.len(), arrival_index) > 0;
     let snr_db = pre_impulse_snr_db(&h_hp, arrival_index);
-    let tolerance = arrival_cross_check_tolerance_samples(sample_rate_hz);
+    let tolerance = high_pass_check_tolerance_samples(sample_rate_hz);
     let lobe_window = lobe_window_samples(sample_rate_hz, corner_hz);
 
     // Row 3: the pick against its neighbouring half-cycles, ±1 corner
@@ -497,21 +497,21 @@ pub(crate) fn band_limited_arrival_under(
     let mut broadband_delta_level_db = None;
     // A NaN SNR (a non-finite IR) withholds like a low one.
     let cross_check = if !snr_measured {
-        ArrivalCrossCheck::BandLimitedSnrUnmeasured
+        HighPassCheck::BandLimitedSnrUnmeasured
     } else if snr_db.is_nan() || snr_db < rule.snr_min_db {
-        ArrivalCrossCheck::BandLimitedSnrLow { snr_db }
+        HighPassCheck::BandLimitedSnrLow { snr_db }
     } else if let Some(l) = lobe.filter(|l| l.margin_db < ARRIVAL_LOBE_MARGIN_MIN_DB) {
-        ArrivalCrossCheck::ArrivalAmbiguous {
+        HighPassCheck::ArrivalAmbiguous {
             margin_db: l.margin_db,
             offset: l.offset,
         }
     } else if let Some(level_db) = earlier_level_db.filter(|l| *l >= -rule.earlier_comparable_db) {
-        ArrivalCrossCheck::EarlierComparable {
+        HighPassCheck::EarlierComparable {
             index: earlier.0,
             level_db,
         }
     } else if argmax_gap < -tolerance {
-        ArrivalCrossCheck::BroadbandEarlier { gap: argmax_gap }
+        HighPassCheck::BroadbandEarlier { gap: argmax_gap }
     } else {
         // The argmax is at or after `arrival − tolerance` here, so `r`
         // exists and is no later than it.
@@ -520,20 +520,71 @@ pub(crate) fn band_limited_arrival_under(
         broadband_delta_level_db = Some(level_db);
         let gap = r as i64 - arrival_index as i64;
         if gap > tolerance {
-            ArrivalCrossCheck::BroadbandLater { gap }
+            HighPassCheck::BroadbandLater { gap }
         } else {
-            ArrivalCrossCheck::Agrees { gap }
+            HighPassCheck::Agrees { gap }
         }
     };
     BandLimitedArrival {
-        arrival_index,
-        source: ArrivalSource::BandLimitedPeak { corner_hz },
+        high_pass_index: arrival_index,
+        source: HighPassSource::BandLimitedPeak { corner_hz },
         band_limited_snr_db: snr_measured.then_some(snr_db),
         lobe_margin_db: Some(lobe_margin_db),
         lobe_offset: lobe.map(|l| l.offset),
         broadband_delta_level_db,
         cross_check,
     }
+}
+
+/// The high-passed IR peaks clearly earlier than the broadband peak (#669):
+/// on a speaker, usually the direct sound ahead of a stronger room mode. An
+/// advisory beside the arrival, never a replacement for it — the operator
+/// owns the delay, as in Smaart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighPassAdvisory {
+    /// The high-pass corner, Hz.
+    pub corner_hz: f64,
+    /// How far before the broadband peak the high-passed peak sits, samples
+    /// (positive).
+    pub earlier_samples: i64,
+    /// The broadband IR's level at the high-passed peak re the broadband
+    /// peak, dB (negative: down).
+    pub level_db: f64,
+}
+
+/// [`HighPassAdvisory`] when the high-passed pick is trusted — its SNR,
+/// lobe and earlier-energy guards held, [`HighPassCheck::Agrees`] or
+/// [`HighPassCheck::BroadbandLater`] — and sits more than
+/// [`high_pass_check_tolerance_samples`] before the peak. An untrusted pick
+/// (noise, a half-cycle off) advises nothing.
+fn high_pass_advisory(
+    linear_ir: &[f64],
+    sample_rate_hz: u32,
+    source: &HighPassSource,
+    check: &HighPassCheck,
+    high_pass_index: usize,
+    peak_index: usize,
+) -> Option<HighPassAdvisory> {
+    let HighPassSource::BandLimitedPeak { corner_hz } = *source else {
+        return None;
+    };
+    if !matches!(
+        check,
+        HighPassCheck::Agrees { .. } | HighPassCheck::BroadbandLater { .. }
+    ) {
+        return None;
+    }
+    let earlier_samples = peak_index as i64 - high_pass_index as i64;
+    if earlier_samples <= high_pass_check_tolerance_samples(sample_rate_hz) {
+        return None;
+    }
+    let peak = linear_ir[peak_index].abs();
+    let at = linear_ir[high_pass_index].abs();
+    (peak > 0.0 && at > 0.0).then(|| HighPassAdvisory {
+        corner_hz,
+        earlier_samples,
+        level_db: 20.0 * (at / peak).log10(),
+    })
 }
 
 impl MeasurementReport {
@@ -543,16 +594,15 @@ impl MeasurementReport {
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
     ///
-    /// Arrival (`delay_samples`/`arrival_s`) is the magnitude peak of the IR
-    /// high-passed at [`ARRIVAL_HIGH_PASS_CORNER_HZ`] with zero phase
-    /// ([`ArrivalSource::BandLimitedPeak`], #537, operator ruling 2026-09-18),
-    /// guarded by its lobe margin and cross-checked against the broadband IR
-    /// in [`IrStats::arrival_cross_check`]. When the stimulus does not reach
-    /// an octave above the corner it is the broadband peak, with the flight
-    /// time withheld
-    /// ([`ArrivalSource::Peak`]). The onset estimate
-    /// ([`crate::measurement::sweep::estimate_onset`]) is anchored on that
-    /// arrival and carried beside it as a diagnostic, with its standing in
+    /// Arrival (`delay_samples`/`arrival_s`) is the broadband IR peak
+    /// (`ir_peak`) — Smaart's Delay Finder rule, the picker transfer's Find
+    /// and `calibrate` τ use (#669). The IR high-passed at
+    /// [`ARRIVAL_HIGH_PASS_CORNER_HZ`] with zero phase (#537) is picked too,
+    /// guarded and cross-checked in [`IrStats::high_pass_check`]; it anchors
+    /// the noise floor (#550) and yields [`IrStats::high_pass_advisory`], and
+    /// changes no arrival. The onset estimate
+    /// ([`crate::measurement::sweep::estimate_onset`]) is anchored on the
+    /// high-passed pick and carried beside it as a diagnostic, with its standing in
     /// [`IrStats::onset_standing`]; it does not affect any number (#346
     /// architect revision 4, operator decision 2026-09-16).
     /// When this report carries both a measured same-capture reference
@@ -580,21 +630,26 @@ impl MeasurementReport {
         // would peak at.
         let centre = window_len / 2;
 
-        // #537: the arrival comes from the zero-phase high-passed IR and is
-        // cross-checked against the broadband peak above.
+        // #669: the arrival is the broadband IR peak — Smaart's Delay
+        // Finder rule, and the picker transfer and τ use. The zero-phase
+        // high-passed pick (#537) is kept for two jobs that are not the
+        // arrival: the noise floor's anchor below (#550), and an advisory
+        // when it sits clearly earlier than the peak.
+        let arrival_index = peak_index;
         let BandLimitedArrival {
-            arrival_index,
-            source: arrival_source,
+            high_pass_index,
+            source: high_pass_source,
             band_limited_snr_db,
-            lobe_margin_db: arrival_lobe_margin_db,
-            lobe_offset: arrival_lobe_offset,
+            lobe_margin_db: high_pass_lobe_margin_db,
+            lobe_offset: high_pass_lobe_offset,
             broadband_delta_level_db,
-            cross_check: arrival_cross_check,
+            cross_check: high_pass_check,
         } = band_limited_arrival(linear_ir, *sample_rate_hz, f2_hz, peak_index);
 
-        // The broadband floor before the arrival: the onset picker's floor
-        // below, and the measured condition of the verdict's floor anchor.
-        let arrival_region = pre_impulse_region(linear_ir, arrival_index);
+        // The broadband floor before the high-passed pick: the onset
+        // picker's floor below, and the measured condition of the verdict's
+        // floor anchor.
+        let high_pass_region = pre_impulse_region(linear_ir, high_pass_index);
 
         // #550: the verdict's floor ends before the first *trusted*
         // response, not before the broadband peak alone, which can sit a
@@ -603,11 +658,11 @@ impl MeasurementReport {
         // stays the broadband peak. Same formula `ac-daemon`'s τ gate calls
         // (#368), with the anchor passed separately.
         let (floor_anchor_index, pre_impulse_floor_anchor) = floor_anchor(
-            arrival_index,
+            high_pass_index,
             peak_index,
-            &arrival_source,
-            &arrival_cross_check,
-            arrival_region.len(),
+            &high_pass_source,
+            &high_pass_check,
+            high_pass_region.len(),
         );
         let pre_region = pre_impulse_region(linear_ir, floor_anchor_index);
         let pre_impulse_floor_end = pre_region.len();
@@ -620,7 +675,7 @@ impl MeasurementReport {
         // floor is taken from the broadband IR before the arrival the onset
         // is searched ahead of, not before the broadband peak, which can sit
         // a room mode later.
-        let onset_floor = onset_floor(arrival_region);
+        let onset_floor = onset_floor(high_pass_region);
 
         // The earliest sample the capture's own geometry admits as an onset
         // (#460): pure flight time from the same-capture reference latency
@@ -637,9 +692,12 @@ impl MeasurementReport {
         // and it withholds nothing: the live reading is what is subtracted.
         let arrival_check = arrival_check(self, *sample_rate_hz);
 
+        // The onset diagnostic stays anchored on the high-passed pick: it
+        // searches for energy ahead of the first trusted response, which a
+        // late room-mode peak is not.
         let onset = crate::measurement::sweep::estimate_onset(
             linear_ir,
-            arrival_index,
+            high_pass_index,
             *sample_rate_hz,
             onset_floor,
             &causal_bound,
@@ -649,10 +707,10 @@ impl MeasurementReport {
         let onset_index = onset.index;
         let onset_rule = onset.rule;
 
-        // The arrival is a peak — band-limited when the band allows (#537),
-        // never the onset: the bounded onset's pre-registered rig check
-        // refused to conclude (pupu, 2026-09-16, 0/12 captures passed the
-        // edge guard), and a peak is what pairs with a peak-picked τ (#351).
+        // The arrival is the peak, never the onset: the bounded onset's
+        // pre-registered rig check refused to conclude (pupu, 2026-09-16,
+        // 0/12 captures passed the edge guard), and a peak is what pairs
+        // with a peak-picked τ (#351) and with transfer's Find (#669).
         let delay_samples = arrival_index as i64 - centre as i64;
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
@@ -665,17 +723,24 @@ impl MeasurementReport {
         // and a refused `interface_latency.session_check` no longer withholds
         // anything, since the value it judged is not subtracted.
         //
-        // #537: an arrival its cross-check disputes is never subtracted
-        // from — the pick may not be the first path's delay.
+        // #669: the high-passed pick no longer withholds anything — the
+        // arrival is the peak, and the operator reads the advisory beside it.
         //
-        // #537 architect revision 3: nor is one that falls below the
+        // #537 architect revision 3: an arrival that falls below the
         // earliest arrival a typed distance allows (#552: no late edge). The check scores the live-basis
         // subtraction whether or not another layer withholds it, so a
         // read-out can name every reason a flight time is missing.
         let latency_basis = latency_basis(self);
         let distance_check = distance_check(self, arrival_s, &latency_basis);
+        let high_pass_advisory = high_pass_advisory(
+            linear_ir,
+            *sample_rate_hz,
+            &high_pass_source,
+            &high_pass_check,
+            high_pass_index,
+            peak_index,
+        );
         let flight_time_s = match &latency_basis {
-            _ if arrival_cross_check.withholds_flight_time() => None,
             _ if distance_check.withholds_flight_time() => None,
             LatencyBasis::Live { .. } => latency_basis.latency_s().map(|l| arrival_s - l),
             LatencyBasis::Withheld(_) => None,
@@ -689,13 +754,15 @@ impl MeasurementReport {
             onset_index,
             onset_rule,
             causal_bound,
-            arrival_source,
+            high_pass_source,
             arrival_index,
+            high_pass_index,
+            high_pass_advisory,
             band_limited_snr_db,
-            arrival_lobe_margin_db,
-            arrival_lobe_offset,
+            high_pass_lobe_margin_db,
+            high_pass_lobe_offset,
             broadband_delta_level_db,
-            arrival_cross_check,
+            high_pass_check,
             onset_standing,
             delay_samples,
             arrival_s,
@@ -968,7 +1035,7 @@ pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64]
 ///
 /// The floor ends before the arrival only when the arrival is *trusted*:
 /// band-limited, its SNR measured (a non-empty floor before it), and its
-/// standing not [`ArrivalCrossCheck::BandLimitedSnrLow`]. Otherwise it ends
+/// standing not [`HighPassCheck::BandLimitedSnrLow`]. Otherwise it ends
 /// before the peak, the region #501 scored. An untrusted pick is not used:
 /// on a noise-only capture the high-passed argmax lands early and at
 /// random, and a floor cut short before it accepted 9 of 400 noise-only
@@ -976,7 +1043,7 @@ pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64]
 ///
 /// The standing alone does not decide trust. A pick inside the guard band
 /// has an empty floor, so its SNR was never measured; its standing is
-/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] (#577). Before #577 its
+/// [`HighPassCheck::BandLimitedSnrUnmeasured`] (#577). Before #577 its
 /// `+inf` cleared [`ARRIVAL_SNR_MIN_DB`], and trusting it emptied the
 /// verdict's floor on 11 of 400 noise-only draws, and the refusal then
 /// blamed a peak that sat far outside the guard band (#550 revision 4).
@@ -987,22 +1054,19 @@ pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64]
 fn floor_anchor(
     arrival_index: usize,
     peak_index: usize,
-    arrival_source: &ArrivalSource,
-    arrival_cross_check: &ArrivalCrossCheck,
+    high_pass_source: &HighPassSource,
+    high_pass_check: &HighPassCheck,
     arrival_floor_len: usize,
 ) -> (usize, PreImpulseAnchor) {
     match arrival_index.cmp(&peak_index) {
         std::cmp::Ordering::Equal => (peak_index, PreImpulseAnchor::ArrivalAndPeak),
         std::cmp::Ordering::Greater => (peak_index, PreImpulseAnchor::Peak),
         std::cmp::Ordering::Less => {
-            if !matches!(arrival_source, ArrivalSource::BandLimitedPeak { .. }) {
+            if !matches!(high_pass_source, HighPassSource::BandLimitedPeak { .. }) {
                 (peak_index, PreImpulseAnchor::Peak)
             } else if arrival_floor_len == 0 {
                 (peak_index, PreImpulseAnchor::PeakArrivalUnmeasured)
-            } else if matches!(
-                arrival_cross_check,
-                ArrivalCrossCheck::BandLimitedSnrLow { .. }
-            ) {
+            } else if matches!(high_pass_check, HighPassCheck::BandLimitedSnrLow { .. }) {
                 (peak_index, PreImpulseAnchor::PeakArrivalNotTrusted)
             } else {
                 (arrival_index, PreImpulseAnchor::Arrival)
@@ -1115,7 +1179,7 @@ pub struct IrStats {
     pub window_len: usize,
     /// Index of the broadband peak-magnitude sample within the gated IR.
     /// What [`Self::pre_impulse_snr_db`] and [`Self::verdict`] are read
-    /// from, and what [`Self::arrival_cross_check`] compares the arrival
+    /// from, and what [`Self::high_pass_check`] compares the arrival
     /// against. The arrival itself is [`Self::arrival_index`] (#537).
     pub peak_index: usize,
     /// `|linear_ir[peak_index]|`.
@@ -1139,24 +1203,30 @@ pub struct IrStats {
     /// lacked (#460). Carries the bound's inputs so a read-out prints them
     /// rather than re-deriving them; `min_admissible_index()` is the index.
     pub causal_bound: CausalBound,
-    /// Which rule produced `delay_samples` / `arrival_s` (#346 acceptance
-    /// criterion 4): [`ArrivalSource::BandLimitedPeak`], or
-    /// [`ArrivalSource::Peak`] when the band does not allow it (#537).
-    pub arrival_source: ArrivalSource,
-    /// Index of the arrival within the gated IR: the peak of the IR
-    /// high-passed per [`Self::arrival_source`], or [`Self::peak_index`]
-    /// when the source is [`ArrivalSource::Peak`]. What `delay_samples` /
-    /// `arrival_s` are derived from. On a multi-way loudspeaker a peak sits
-    /// a group-delay offset past the wavefront, so the arrival carries that
-    /// offset (#346); the high-pass removes a late low-frequency maximum
-    /// (#537), not that offset.
+    /// How [`Self::high_pass_index`] was picked (#537):
+    /// [`HighPassSource::BandLimitedPeak`], or [`HighPassSource::Peak`] when
+    /// the band does not allow it.
+    pub high_pass_source: HighPassSource,
+    /// Index of the arrival within the gated IR: [`Self::peak_index`], the
+    /// broadband peak (#669, Smaart's Delay Finder rule). What
+    /// `delay_samples` / `arrival_s` are derived from. On a multi-way
+    /// loudspeaker the peak sits a group-delay offset past the wavefront
+    /// (#346), and on a speaker in a room a low-frequency mode can outweigh
+    /// the direct sound (#537) — [`Self::high_pass_advisory`] says so; the
+    /// operator decides.
     pub arrival_index: usize,
+    /// Index of the peak of the IR high-passed per
+    /// [`Self::high_pass_source`] (#537) — the noise floor's anchor (#550)
+    /// and the onset search's, never the arrival.
+    pub high_pass_index: usize,
+    /// See [`HighPassAdvisory`].
+    pub high_pass_advisory: Option<HighPassAdvisory>,
     /// Pre-impulse SNR of the high-passed IR at [`Self::arrival_index`],
     /// in dB, gated at [`ARRIVAL_SNR_MIN_DB`]. `None` when it was not
     /// measured, and the standing says which: the arrival is not
-    /// band-limited ([`ArrivalCrossCheck::BandLimitUnavailable`]), or the
+    /// band-limited ([`HighPassCheck::BandLimitUnavailable`]), or the
     /// pick sits inside the guard band so no floor precedes it
-    /// ([`ArrivalCrossCheck::BandLimitedSnrUnmeasured`], #577). `+inf` only
+    /// ([`HighPassCheck::BandLimitedSnrUnmeasured`], #577). `+inf` only
     /// over a non-empty all-zero floor, which is a measurement.
     pub band_limited_snr_db: Option<f64>,
     /// How far the largest other local maximum of the high-passed IR within
@@ -1164,20 +1234,20 @@ pub struct IrStats {
     /// architect revision 2), gated at [`ARRIVAL_LOBE_MARGIN_MIN_DB`].
     /// `+inf` when there is no other maximum in that window; `None` when
     /// the arrival is not band-limited.
-    pub arrival_lobe_margin_db: Option<f64>,
+    pub high_pass_lobe_margin_db: Option<f64>,
     /// Where that maximum sits, `lobe − arrival` in signed samples
     /// (negative: before the arrival). `None` when there is none, or the
     /// arrival is not band-limited.
-    pub arrival_lobe_offset: Option<i64>,
+    pub high_pass_lobe_offset: Option<i64>,
     /// Level of the broadband peak the Δ is measured to (`r`), in dB re the
     /// broadband maximum: 0 when `r` is the maximum itself. `Some` on
     /// `Agrees` and `BroadbandLater` only — `BroadbandEarlier` measures to
     /// the maximum, and the other standings measure no Δ.
     pub broadband_delta_level_db: Option<f64>,
-    /// The arrival's guards and cross-check against the broadband IR (#537). Some
-    /// standings withhold [`Self::flight_time_s`]; see
-    /// [`ArrivalCrossCheck::withholds_flight_time`].
-    pub arrival_cross_check: ArrivalCrossCheck,
+    /// The high-passed pick's guards and cross-check against the broadband
+    /// IR (#537); see [`HighPassCheck::disputes_the_pick`]. Withholds
+    /// nothing since #669.
+    pub high_pass_check: HighPassCheck,
     /// The onset diagnostic's standing: the first of `onset_standing`'s
     /// conditions that failed, or [`OnsetStanding::Unscored`] when all
     /// held. It does not affect any number on this struct.
@@ -1205,13 +1275,13 @@ pub struct IrStats {
     /// arrival minus this capture's own peak-picked reference τ and the
     /// offset between the two pairs, measured once in one capture. With the
     /// arrival band-limited (#537) it is a **band-limited delay estimate at
-    /// the corner** of [`Self::arrival_source`]: the same IR reads
+    /// the corner** of [`Self::high_pass_source`]: the same IR reads
     /// differently at another corner, and nothing here identifies the
     /// direct path. [`Self::distance_check`] is the only evidence about the
     /// path, and it says only whether the number is not earlier than the
     /// typed distance allows, and by how much it exceeds `d/c`.
     ///
-    /// `None` whenever [`Self::arrival_cross_check`] or
+    /// `None` whenever [`Self::high_pass_check`] or
     /// [`Self::distance_check`] withholds it, and whenever
     /// [`Self::latency_basis`] is [`LatencyBasis::Withheld`] — no reference
     /// configured, no valid reference reading, no offset on file, or a
@@ -1259,33 +1329,34 @@ pub struct IrStats {
 
 impl IrStats {
     /// The broadband Δ, signed samples, read from the standing rather than
-    /// recomputed ([`ArrivalCrossCheck::gap`]): `r − arrival`, or `argmax −
+    /// recomputed ([`HighPassCheck::gap`]): `r − arrival`, or `argmax −
     /// arrival` on `BroadbandEarlier`. `None` on standings that measured no
     /// gap.
     pub fn broadband_delta_samples(&self) -> Option<i64> {
-        self.arrival_cross_check.gap()
+        self.high_pass_check.gap()
     }
 
     /// The sample the pre-impulse floor is anchored on (#550): the
-    /// arrival or the peak, whichever [`Self::pre_impulse_floor_anchor`]
-    /// names.
+    /// high-passed peak or the peak, whichever
+    /// [`Self::pre_impulse_floor_anchor`] names.
     pub fn pre_impulse_floor_anchor_index(&self) -> usize {
         match self.pre_impulse_floor_anchor {
             PreImpulseAnchor::Peak
             | PreImpulseAnchor::PeakArrivalNotTrusted
             | PreImpulseAnchor::PeakArrivalUnmeasured => self.peak_index,
-            PreImpulseAnchor::Arrival | PreImpulseAnchor::ArrivalAndPeak => self.arrival_index,
+            PreImpulseAnchor::Arrival | PreImpulseAnchor::ArrivalAndPeak => self.high_pass_index,
         }
     }
 
     /// Where the pre-impulse floor ends, as `ac-cli` prints it line by line
     /// and `ac-scene` joins with `, ` (#550 UX): `floor ends 1200 samples
-    /// before arrival, sample 21246`. On
+    /// before high-passed peak, sample 21246`. On
     /// [`PreImpulseAnchor::PeakArrivalNotTrusted`] a second line names the
     /// earlier pick that was set aside and why, without its sample: `not
-    /// before arrival — arrival SNR 12.2 dB, required ≥ 35.0 dB`. On
-    /// [`PreImpulseAnchor::PeakArrivalUnmeasured`] the second line is the
-    /// fixed `not before arrival — ` + [`ARRIVAL_SNR_UNMEASURED_REASON`]: it
+    /// before high-passed peak — high-passed SNR 12.2 dB, required ≥ 35.0
+    /// dB`. On [`PreImpulseAnchor::PeakArrivalUnmeasured`] the second line
+    /// is the fixed `not before high-passed peak — ` +
+    /// [`ARRIVAL_SNR_UNMEASURED_REASON`]: it
     /// never formats the arrival SNR, which was not measured there (#577). Empty
     /// when the floor region is — the verdict's reason already says there
     /// is no floor.
@@ -1301,15 +1372,15 @@ impl IrStats {
         )];
         match self.pre_impulse_floor_anchor {
             PreImpulseAnchor::PeakArrivalNotTrusted => {
-                if let ArrivalCrossCheck::BandLimitedSnrLow { snr_db } = self.arrival_cross_check {
+                if let HighPassCheck::BandLimitedSnrLow { snr_db } = self.high_pass_check {
                     lines.push(format!(
-                        "not before arrival \u{2014} {}",
+                        "not before high-passed peak \u{2014} {}",
                         arrival_snr_low_reason(snr_db)
                     ));
                 }
             }
             PreImpulseAnchor::PeakArrivalUnmeasured => lines.push(format!(
-                "not before arrival \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}"
+                "not before high-passed peak \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}"
             )),
             PreImpulseAnchor::Arrival
             | PreImpulseAnchor::Peak
@@ -1321,17 +1392,17 @@ impl IrStats {
 
 /// Why a band-limited arrival inside the guard band was not trusted for the
 /// pre-impulse floor (#550 UX revision 4), and why
-/// [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`] withholds the flight time
+/// [`HighPassCheck::BandLimitedSnrUnmeasured`] withholds the flight time
 /// (#577): there was no floor before it to measure its SNR against. A fixed
 /// string, so an unmeasured SNR never prints as a number.
-pub const ARRIVAL_SNR_UNMEASURED_REASON: &str = "arrival SNR unmeasured, no floor before it";
+pub const ARRIVAL_SNR_UNMEASURED_REASON: &str = "high-passed SNR unmeasured, no floor before it";
 
 /// Why a band-limited arrival was not trusted (#537, #550):
 /// `arrival SNR 12.2 dB, required ≥ 35.0 dB`. One string for the flight
 /// time's withheld reason and the pre-impulse floor line, so the two
 /// cannot drift.
 pub fn arrival_snr_low_reason(snr_db: f64) -> String {
-    format!("arrival SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB")
+    format!("high-passed SNR {snr_db:.1} dB, required \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB")
 }
 
 /// Which index [`IrStats::pre_impulse_snr_db`]'s floor ends before, and
@@ -1343,7 +1414,7 @@ pub enum PreImpulseAnchor {
     /// peak — the room-mode case #550 fixes.
     Arrival,
     /// The broadband peak precedes the arrival
-    /// ([`ArrivalCrossCheck::BroadbandEarlier`]), trusted or not, or there
+    /// ([`HighPassCheck::BroadbandEarlier`]), trusted or not, or there
     /// is no band-limited arrival. The region is the one #501 scored. An
     /// earlier band-limited arrival that was set aside is never this
     /// variant: see [`Self::PeakArrivalNotTrusted`] and
@@ -1353,7 +1424,7 @@ pub enum PreImpulseAnchor {
     /// no band-limited arrival. The region is the one #501 scored.
     ArrivalAndPeak,
     /// The band-limited arrival precedes the peak but missed its own SNR
-    /// gate ([`ArrivalCrossCheck::BandLimitedSnrLow`]), so the floor ends
+    /// gate ([`HighPassCheck::BandLimitedSnrLow`]), so the floor ends
     /// before the peak — the region #501 scored — and may contain that
     /// pick.
     PeakArrivalNotTrusted,
@@ -1361,7 +1432,7 @@ pub enum PreImpulseAnchor {
     /// band, so there was no floor to measure its SNR against (#550
     /// revision 4). The floor ends before the peak — the region #501
     /// scored. Decided before the standing, on the same region length that
-    /// makes the standing [`ArrivalCrossCheck::BandLimitedSnrUnmeasured`]
+    /// makes the standing [`HighPassCheck::BandLimitedSnrUnmeasured`]
     /// (#577).
     PeakArrivalUnmeasured,
 }
@@ -1370,9 +1441,11 @@ impl PreImpulseAnchor {
     /// The anchor's word in the floor line.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Arrival => "arrival",
-            Self::Peak | Self::PeakArrivalNotTrusted | Self::PeakArrivalUnmeasured => "peak",
-            Self::ArrivalAndPeak => "arrival and peak",
+            Self::Arrival => "high-passed peak",
+            Self::Peak
+            | Self::PeakArrivalNotTrusted
+            | Self::PeakArrivalUnmeasured
+            | Self::ArrivalAndPeak => "peak",
         }
     }
 }
@@ -1461,7 +1534,7 @@ pub enum IrVerdict {
 /// decision 2026-09-16); `BandLimitedPeak` is #537's, with its rig check
 /// on that issue.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ArrivalSource {
+pub enum HighPassSource {
     /// The broadband magnitude peak (argmax |h|). Only when the band does
     /// not allow [`Self::BandLimitedPeak`].
     Peak,
@@ -1478,7 +1551,7 @@ pub enum ArrivalSource {
 /// allows one. Every standing that doubts the pick
 /// withholds; only `BroadbandLater` marks a produced value.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ArrivalCrossCheck {
+pub enum HighPassCheck {
     /// The stimulus does not reach
     /// [`crate::measurement::sweep::BAND_LIMIT_MIN_F2_RATIO`] times the
     /// corner: `band_top_hz` (the payload's `f2_hz`, capped at Nyquist)
@@ -1521,17 +1594,21 @@ pub enum ArrivalCrossCheck {
     Agrees { gap: i64 },
 }
 
-impl ArrivalCrossCheck {
-    /// Whether this standing withholds [`IrStats::flight_time_s`].
-    pub fn withholds_flight_time(&self) -> bool {
+impl HighPassCheck {
+    /// Whether this standing disputes the high-passed pick as the first
+    /// path's peak: it may be noise, a half-cycle off, or behind earlier
+    /// energy. A disputed pick anchors nothing and advises nothing. Until
+    /// #669 these standings withheld the flight time; the arrival is now the
+    /// broadband peak, and they withhold nothing.
+    pub fn disputes_the_pick(&self) -> bool {
         matches!(
             self,
-            ArrivalCrossCheck::BandLimitUnavailable { .. }
-                | ArrivalCrossCheck::BandLimitedSnrUnmeasured
-                | ArrivalCrossCheck::BandLimitedSnrLow { .. }
-                | ArrivalCrossCheck::ArrivalAmbiguous { .. }
-                | ArrivalCrossCheck::EarlierComparable { .. }
-                | ArrivalCrossCheck::BroadbandEarlier { .. }
+            HighPassCheck::BandLimitUnavailable { .. }
+                | HighPassCheck::BandLimitedSnrUnmeasured
+                | HighPassCheck::BandLimitedSnrLow { .. }
+                | HighPassCheck::ArrivalAmbiguous { .. }
+                | HighPassCheck::EarlierComparable { .. }
+                | HighPassCheck::BroadbandEarlier { .. }
         )
     }
 
@@ -1540,9 +1617,9 @@ impl ArrivalCrossCheck {
     /// `BroadbandEarlier`. `None` where no gap was measured.
     pub fn gap(&self) -> Option<i64> {
         match *self {
-            ArrivalCrossCheck::Agrees { gap }
-            | ArrivalCrossCheck::BroadbandLater { gap }
-            | ArrivalCrossCheck::BroadbandEarlier { gap } => Some(gap),
+            HighPassCheck::Agrees { gap }
+            | HighPassCheck::BroadbandLater { gap }
+            | HighPassCheck::BroadbandEarlier { gap } => Some(gap),
             _ => None,
         }
     }
@@ -1702,7 +1779,7 @@ mod tests {
     use crate::shared::calibration::LayerVerdict;
 
     /// The arrival source every band-limited fixture here expects (#537).
-    const BAND_LIMITED: ArrivalSource = ArrivalSource::BandLimitedPeak {
+    const BAND_LIMITED: HighPassSource = HighPassSource::BandLimitedPeak {
         corner_hz: ARRIVAL_HIGH_PASS_CORNER_HZ,
     };
 
@@ -1995,8 +2072,8 @@ mod tests {
         assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
         assert!((stats.arrival_s - (peak_true as f64 - centre as f64) / 48_000.0).abs() < 1e-12);
         assert!(stats.onset_rule.contains("no causal bound"));
-        assert_eq!(stats.arrival_source, BAND_LIMITED);
-        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(stats.high_pass_source, BAND_LIMITED);
+        assert_eq!(stats.high_pass_index, stats.peak_index);
         assert_eq!(stats.onset_standing, OnsetStanding::NoCausalBound);
     }
 
@@ -2067,8 +2144,8 @@ mod tests {
         assert_eq!(stats.onset_index, wavefront, "test setup");
         assert_ne!(wavefront, peak_true, "test setup");
 
-        assert_eq!(stats.arrival_source, BAND_LIMITED);
-        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(stats.high_pass_source, BAND_LIMITED);
+        assert_eq!(stats.high_pass_index, stats.peak_index);
         assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
         assert_ne!(
             stats.delay_samples,
@@ -2110,8 +2187,8 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(stats.onset_standing, OnsetStanding::Unscored, "test setup");
         assert_eq!(stats.onset_index, wavefront, "test setup");
-        assert_eq!(stats.arrival_source, BAND_LIMITED);
-        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(stats.high_pass_source, BAND_LIMITED);
+        assert_eq!(stats.high_pass_index, stats.peak_index);
         let ft = stats.flight_time_s.expect("flight time");
         let peak_ft = (peak_true as f64 - centre as f64) / sr as f64 - tau_s;
         let onset_ft = (wavefront as f64 - centre as f64) / sr as f64 - tau_s;
@@ -2279,8 +2356,8 @@ mod tests {
             stats.onset_standing,
             stats.onset_rule
         );
-        assert_eq!(stats.arrival_source, BAND_LIMITED);
-        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(stats.high_pass_source, BAND_LIMITED);
+        assert_eq!(stats.high_pass_index, stats.peak_index);
         assert_eq!(stats.delay_samples, stats.peak_index as i64 - centre as i64);
     }
 
@@ -3106,7 +3183,7 @@ mod tests {
     /// used before this issue — lands on the mode. The arrival must be `t0`,
     /// standing `BroadbandLater`, and the flight time produced but marked.
     #[test]
-    fn room_mode_after_the_direct_sound_does_not_move_the_arrival() {
+    fn a_room_mode_after_the_direct_sound_is_the_arrival_with_an_advisory() {
         let RoomModeCapture {
             mut report,
             t0,
@@ -3130,36 +3207,45 @@ mod tests {
         assert_eq!(stats.verdict, IrVerdict::Ok, "test setup");
         assert_eq!(stats.peak_index, mode_peak);
         assert!(
-            stats.arrival_index.abs_diff(t0) <= 1,
+            stats.high_pass_index.abs_diff(t0) <= 1,
             "arrival {} must be t0 {t0} ± 1",
-            stats.arrival_index
+            stats.high_pass_index
         );
-        assert_eq!(stats.arrival_source, BAND_LIMITED);
+        assert_eq!(stats.high_pass_source, BAND_LIMITED);
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::BroadbandLater {
-                gap: mode_peak as i64 - stats.arrival_index as i64
+            stats.high_pass_check,
+            HighPassCheck::BroadbandLater {
+                gap: mode_peak as i64 - stats.high_pass_index as i64
             }
         );
         assert!(stats.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
         let centre = linear_ir.len() / 2;
-        let ft = stats
-            .flight_time_s
-            .expect("BroadbandLater produces the flight time");
-        let want = (stats.arrival_index as f64 - centre as f64) / sr as f64 - tau_s;
+        // #669: the arrival is the peak — the room mode — and the direct
+        // sound the high-pass found is the advisory beside it.
+        assert_eq!(stats.arrival_index, mode_peak);
+        let ft = stats.flight_time_s.expect("the peak's flight time");
+        let want = (mode_peak as f64 - centre as f64) / sr as f64 - tau_s;
         assert!((ft - want).abs() < 1e-12, "{ft} vs {want}");
+        let advisory = stats
+            .high_pass_advisory
+            .expect("the direct sound is advised");
+        assert_eq!(
+            advisory.earlier_samples,
+            mode_peak as i64 - stats.high_pass_index as i64
+        );
+        assert!(advisory.level_db < 0.0);
         assert!(
-            !stats.arrival_cross_check.withholds_flight_time()
-                && !matches!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees { .. }),
+            !stats.high_pass_check.disputes_the_pick()
+                && !matches!(stats.high_pass_check, HighPassCheck::Agrees { .. }),
             "the flight time is marked, not plain"
         );
         // Architect revision 2 checked this shape offline: margin 29.6 dB.
-        let margin = stats.arrival_lobe_margin_db.unwrap();
+        let margin = stats.high_pass_lobe_margin_db.unwrap();
         assert!(margin >= ARRIVAL_LOBE_MARGIN_MIN_DB, "margin {margin}");
         assert_eq!(stats.broadband_delta_level_db, Some(0.0), "r is the mode");
         assert_eq!(
             stats.broadband_delta_samples(),
-            Some(mode_peak as i64 - stats.arrival_index as i64)
+            Some(mode_peak as i64 - stats.high_pass_index as i64)
         );
     }
 
@@ -3178,15 +3264,15 @@ mod tests {
         } = direct_plus_room_mode_report();
         let clean = report.ir_stats().unwrap();
         assert!(clean.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
-        assert!(clean.arrival_index.abs_diff(t0) <= 1, "test setup");
+        assert!(clean.high_pass_index.abs_diff(t0) <= 1, "test setup");
         assert_eq!(clean.peak_index, mode_peak, "test setup");
         assert_eq!(clean.pre_impulse_floor_anchor, PreImpulseAnchor::Arrival);
-        let guard = clean.arrival_index - clean.pre_impulse_floor_end;
+        let guard = clean.high_pass_index - clean.pre_impulse_floor_end;
         assert_eq!(
             clean.pre_impulse_floor_lines(),
             vec![format!(
-                "floor ends {guard} samples before arrival, sample {}",
-                clean.arrival_index
+                "floor ends {guard} samples before high-passed peak, sample {}",
+                clean.high_pass_index
             )]
         );
 
@@ -3208,7 +3294,7 @@ mod tests {
             });
         let (ir, stats) = noised.expect("no noise level took the arrival under its SNR gate");
         assert_eq!(
-            stats.arrival_index, clean.arrival_index,
+            stats.high_pass_index, clean.high_pass_index,
             "the noise moved the pick, so this is not the same arrival set aside"
         );
         // The mode's crest is flat, so the noise may slide the broadband
@@ -3218,8 +3304,8 @@ mod tests {
             peak.abs_diff(mode_peak) <= 48,
             "argmax {peak} left the mode crest at {mode_peak}"
         );
-        let ArrivalCrossCheck::BandLimitedSnrLow { snr_db } = stats.arrival_cross_check else {
-            panic!("standing {:?}", stats.arrival_cross_check)
+        let HighPassCheck::BandLimitedSnrLow { snr_db } = stats.high_pass_check else {
+            panic!("standing {:?}", stats.high_pass_check)
         };
         assert_eq!(
             stats.pre_impulse_floor_anchor,
@@ -3235,7 +3321,7 @@ mod tests {
             vec![
                 format!("floor ends {guard} samples before peak, sample {peak}"),
                 format!(
-                    "not before arrival \u{2014} arrival SNR {snr_db:.1} dB, required \
+                    "not before high-passed peak \u{2014} high-passed SNR {snr_db:.1} dB, required \
                      \u{2265} {ARRIVAL_SNR_MIN_DB:.1} dB"
                 ),
             ]
@@ -3250,14 +3336,14 @@ mod tests {
     #[test]
     fn floor_anchor_table() {
         let (arrival, peak) = (21_246usize, 23_545usize);
-        let agrees = ArrivalCrossCheck::Agrees { gap: 0 };
-        let low = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 12.2 };
-        let unmeasured = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
-        let earlier = ArrivalCrossCheck::BroadbandEarlier {
+        let agrees = HighPassCheck::Agrees { gap: 0 };
+        let low = HighPassCheck::BandLimitedSnrLow { snr_db: 12.2 };
+        let unmeasured = HighPassCheck::BandLimitedSnrUnmeasured;
+        let earlier = HighPassCheck::BroadbandEarlier {
             gap: arrival as i64 - peak as i64,
         };
         let floor = 20_046usize;
-        let rows: [(usize, usize, ArrivalSource, &ArrivalCrossCheck, usize, _); 8] = [
+        let rows: [(usize, usize, HighPassSource, &HighPassCheck, usize, _); 8] = [
             (
                 arrival,
                 peak,
@@ -3285,7 +3371,7 @@ mod tests {
             (
                 peak,
                 peak,
-                ArrivalSource::Peak,
+                HighPassSource::Peak,
                 &agrees,
                 floor,
                 (peak, PreImpulseAnchor::ArrivalAndPeak),
@@ -3317,7 +3403,7 @@ mod tests {
             (
                 arrival,
                 peak,
-                ArrivalSource::Peak,
+                HighPassSource::Peak,
                 &agrees,
                 floor,
                 (peak, PreImpulseAnchor::Peak),
@@ -3350,18 +3436,18 @@ mod tests {
         .len();
         let guard = peak - stats.pre_impulse_floor_end;
         stats.band_limited_snr_db = None;
-        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrUnmeasured;
+        stats.high_pass_check = HighPassCheck::BandLimitedSnrUnmeasured;
         stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalUnmeasured;
         let lines = stats.pre_impulse_floor_lines();
         assert_eq!(
             lines,
             vec![
                 format!("floor ends {guard} samples before peak, sample {peak}"),
-                "not before arrival \u{2014} arrival SNR unmeasured, no floor before it"
+                "not before high-passed peak \u{2014} high-passed SNR unmeasured, no floor before it"
                     .to_string(),
             ]
         );
-        let arrival = stats.arrival_index.to_string();
+        let arrival = stats.high_pass_index.to_string();
         for line in &lines {
             assert!(
                 !line.contains("inf") && !line.contains('\u{221e}') && !line.contains(&arrival),
@@ -3369,12 +3455,12 @@ mod tests {
             );
         }
 
-        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 12.2 };
+        stats.high_pass_check = HighPassCheck::BandLimitedSnrLow { snr_db: 12.2 };
         stats.pre_impulse_floor_anchor = PreImpulseAnchor::PeakArrivalNotTrusted;
         assert_eq!(
             stats.pre_impulse_floor_lines()[1],
             format!(
-                "not before arrival \u{2014} {}",
+                "not before high-passed peak \u{2014} {}",
                 arrival_snr_low_reason(12.2)
             )
         );
@@ -3434,11 +3520,8 @@ mod tests {
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
-        assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::Agrees { gap: 0 }
-        );
-        assert_eq!(stats.arrival_index, CC_T0);
+        assert_eq!(stats.high_pass_check, HighPassCheck::Agrees { gap: 0 });
+        assert_eq!(stats.high_pass_index, CC_T0);
         assert_eq!(stats.broadband_delta_samples(), Some(0));
         assert!(stats.flight_time_s.is_some());
     }
@@ -3453,16 +3536,18 @@ mod tests {
         ir[CC_T0] = 0.5;
         ir[reflection] = 0.5 * 10f64.powf(2.0 / 20.0);
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
-        assert_eq!(stats.arrival_index, reflection, "test setup");
+        assert_eq!(stats.high_pass_index, reflection, "test setup");
         assert_eq!(stats.peak_index, reflection, "test setup");
-        match stats.arrival_cross_check {
-            ArrivalCrossCheck::EarlierComparable { index, level_db } => {
+        match stats.high_pass_check {
+            HighPassCheck::EarlierComparable { index, level_db } => {
                 assert_eq!(index, CC_T0);
                 assert!((level_db + 2.0).abs() < 0.05, "level {level_db}");
             }
             other => panic!("expected EarlierComparable, got {other:?}"),
         }
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// The same pair 20.5 dB apart does not fire: the bound is 20 dB
@@ -3475,20 +3560,20 @@ mod tests {
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
         assert!(
             matches!(
-                stats.arrival_cross_check,
-                ArrivalCrossCheck::EarlierComparable { .. }
+                stats.high_pass_check,
+                HighPassCheck::EarlierComparable { .. }
             ),
             "{:?}",
-            stats.arrival_cross_check
+            stats.high_pass_check
         );
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
         ir[CC_T0 + 288] = 0.5 * 10f64.powf(20.5 / 20.0);
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
         assert!(
-            matches!(stats.arrival_cross_check, ArrivalCrossCheck::Agrees { .. }),
+            matches!(stats.high_pass_check, HighPassCheck::Agrees { .. }),
             "{:?}",
-            stats.arrival_cross_check
+            stats.high_pass_check
         );
     }
 
@@ -3506,12 +3591,14 @@ mod tests {
         ir[CC_T0] += 0.3;
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
         assert_eq!(stats.peak_index, lf_centre, "test setup");
-        assert_eq!(stats.arrival_index, CC_T0);
+        assert_eq!(stats.high_pass_index, CC_T0);
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::BroadbandEarlier { gap: -480 }
+            stats.high_pass_check,
+            HighPassCheck::BroadbandEarlier { gap: -480 }
         );
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// White noise raised until the high-passed IR's pre-impulse SNR is
@@ -3524,10 +3611,12 @@ mod tests {
         let snr = stats.band_limited_snr_db.unwrap();
         assert!(snr < ARRIVAL_SNR_MIN_DB, "test setup: SNR {snr}");
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::BandLimitedSnrLow { snr_db: snr }
+            stats.high_pass_check,
+            HighPassCheck::BandLimitedSnrLow { snr_db: snr }
         );
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// #577: a high-passed pick inside the guard band (index < len/32) has
@@ -3552,14 +3641,16 @@ mod tests {
         );
 
         let stats = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
-        assert_eq!(stats.arrival_index, t0);
+        assert_eq!(stats.high_pass_index, t0);
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::BandLimitedSnrUnmeasured
+            stats.high_pass_check,
+            HighPassCheck::BandLimitedSnrUnmeasured
         );
         assert_eq!(stats.band_limited_snr_db, None);
-        assert!(stats.arrival_cross_check.withholds_flight_time());
-        assert_eq!(stats.flight_time_s, None);
+        assert!(stats.high_pass_check.disputes_the_pick());
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// A sweep that ends at 2 kHz has no octave above the 2 kHz corner: the
@@ -3571,26 +3662,28 @@ mod tests {
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
         let stats = cross_check_report(ir, 2_000.0).ir_stats().unwrap();
-        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
-        assert_eq!(stats.arrival_index, stats.peak_index);
+        assert_eq!(stats.high_pass_source, HighPassSource::Peak);
+        assert_eq!(stats.high_pass_index, stats.peak_index);
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::BandLimitUnavailable {
+            stats.high_pass_check,
+            HighPassCheck::BandLimitUnavailable {
                 band_top_hz: 2_000.0,
                 required_hz: 4_000.0
             }
         );
         assert_eq!(stats.band_limited_snr_db, None);
-        assert_eq!(stats.arrival_lobe_margin_db, None);
+        assert_eq!(stats.high_pass_lobe_margin_db, None);
         assert_eq!(stats.broadband_delta_samples(), None);
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
         // The edge: exactly an octave above the corner is band-limited.
         let mut ir = cc_floor();
         ir[CC_T0] = 0.5;
         let stats = cross_check_report(ir, 4_000.0).ir_stats().unwrap();
         assert_eq!(
-            stats.arrival_source,
-            ArrivalSource::BandLimitedPeak {
+            stats.high_pass_source,
+            HighPassSource::BandLimitedPeak {
                 corner_hz: ARRIVAL_HIGH_PASS_CORNER_HZ
             }
         );
@@ -3599,8 +3692,8 @@ mod tests {
     /// The tolerance is 2.0 ms in whole samples.
     #[test]
     fn cross_check_tolerance_is_two_ms_in_samples() {
-        assert_eq!(arrival_cross_check_tolerance_samples(96_000), 192);
-        assert_eq!(arrival_cross_check_tolerance_samples(48_000), 96);
+        assert_eq!(high_pass_check_tolerance_samples(96_000), 192);
+        assert_eq!(high_pass_check_tolerance_samples(48_000), 96);
     }
 
     /// A direct impulse at `CC_T0` plus a minimum-phase resonance (a
@@ -3672,29 +3765,28 @@ mod tests {
         assert!(lobe.margin_db < ARRIVAL_LOBE_MARGIN_MIN_DB, "{lobe:?}");
 
         let stats = cross_check_report(ir, 4_000.0).ir_stats().unwrap();
-        assert_eq!(stats.arrival_index, rejected, "same pick, now guarded");
+        assert_eq!(stats.high_pass_index, rejected, "same pick, now guarded");
         assert_eq!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::ArrivalAmbiguous {
+            stats.high_pass_check,
+            HighPassCheck::ArrivalAmbiguous {
                 margin_db: lobe.margin_db,
                 offset: lobe.offset,
             }
         );
-        assert_eq!(stats.arrival_lobe_margin_db, Some(lobe.margin_db));
-        assert_eq!(stats.arrival_lobe_offset, Some(lobe.offset));
+        assert_eq!(stats.high_pass_lobe_margin_db, Some(lobe.margin_db));
+        assert_eq!(stats.high_pass_lobe_offset, Some(lobe.offset));
         assert!(stats.band_limited_snr_db.unwrap() >= ARRIVAL_SNR_MIN_DB);
         assert_eq!(stats.broadband_delta_samples(), None);
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
 
         let full = cross_check_report(ringing_direct_sound(None), 20_000.0)
             .ir_stats()
             .unwrap();
-        assert_eq!(full.arrival_index, CC_T0);
-        assert!(full.arrival_lobe_margin_db.unwrap() >= ARRIVAL_LOBE_MARGIN_MIN_DB);
-        assert!(matches!(
-            full.arrival_cross_check,
-            ArrivalCrossCheck::Agrees { .. }
-        ));
+        assert_eq!(full.high_pass_index, CC_T0);
+        assert!(full.high_pass_lobe_margin_db.unwrap() >= ARRIVAL_LOBE_MARGIN_MIN_DB);
+        assert!(matches!(full.high_pass_check, HighPassCheck::Agrees { .. }));
         assert!(full.flight_time_s.is_some());
     }
 
@@ -3730,7 +3822,7 @@ mod tests {
             ir
         };
         let flip = 10f64.powf(0.3 / 20.0);
-        let tolerance = arrival_cross_check_tolerance_samples(96_000);
+        let tolerance = high_pass_check_tolerance_samples(96_000);
         let mut gaps = Vec::new();
         for (name, lobe, mode, argmax) in [
             ("mode is the maximum", 1.0, flip, mode_at),
@@ -3739,13 +3831,13 @@ mod tests {
             let stats = cross_check_report(build(lobe, mode), 20_000.0)
                 .ir_stats()
                 .unwrap();
-            assert_eq!(stats.arrival_index, CC_T0, "{name}");
+            assert_eq!(stats.high_pass_index, CC_T0, "{name}");
             assert_eq!(stats.peak_index, argmax, "{name}: test setup");
             // The rejected rule, inline: the gap to the argmax.
-            let argmax_gap = stats.peak_index as i64 - stats.arrival_index as i64;
+            let argmax_gap = stats.peak_index as i64 - stats.high_pass_index as i64;
             gaps.push(argmax_gap > tolerance);
-            match stats.arrival_cross_check {
-                ArrivalCrossCheck::Agrees { gap } => {
+            match stats.high_pass_check {
+                HighPassCheck::Agrees { gap } => {
                     assert!((gap - 125).abs() <= 1, "{name}: gap {gap}");
                 }
                 ref other => panic!("{name}: expected Agrees, got {other:?}"),
@@ -3774,17 +3866,15 @@ mod tests {
             ir[CC_T0] += 1.0;
             let s = cross_check_report(ir, 20_000.0).ir_stats().unwrap();
             let snr = s.band_limited_snr_db.unwrap();
-            let low = matches!(
-                s.arrival_cross_check,
-                ArrivalCrossCheck::BandLimitedSnrLow { .. }
-            );
+            let low = matches!(s.high_pass_check, HighPassCheck::BandLimitedSnrLow { .. });
             assert_eq!(
                 low,
                 snr < ARRIVAL_SNR_MIN_DB,
                 "amp {amp}: SNR {snr}, {:?}",
-                s.arrival_cross_check
+                s.high_pass_check
             );
-            assert_eq!(low, s.flight_time_s.is_none(), "amp {amp}");
+            // #669: the gate decides trust in the pick, not the flight time.
+            assert!(s.flight_time_s.is_some(), "amp {amp}");
             saw_low |= low;
             saw_ok |= !low;
         }
@@ -3813,7 +3903,7 @@ mod tests {
         }
         let report = cross_check_report(ir, 20_000.0);
         let stats = report.ir_stats().unwrap();
-        assert_eq!(stats.arrival_index, t0, "test setup");
+        assert_eq!(stats.high_pass_index, t0, "test setup");
         assert!(stats.peak_index > CC_LEN - 1_000, "test setup");
         let MeasurementData::ImpulseResponse { linear_ir, .. } = &report.data[0].data else {
             unreachable!()
@@ -3937,8 +4027,8 @@ mod tests {
             }
             assert_eq!(stats.flight_time_s.is_none(), early, "{distance}");
             assert_eq!(
-                stats.arrival_cross_check,
-                ArrivalCrossCheck::Agrees { gap: 0 },
+                stats.high_pass_check,
+                HighPassCheck::Agrees { gap: 0 },
                 "the IR side agrees; only the distance withholds"
             );
         }
@@ -3996,8 +4086,8 @@ mod tests {
         });
         let stats = r.ir_stats().unwrap();
         assert!(matches!(
-            stats.arrival_cross_check,
-            ArrivalCrossCheck::EarlierComparable { .. }
+            stats.high_pass_check,
+            HighPassCheck::EarlierComparable { .. }
         ));
         match stats.distance_check {
             DistanceCheck::Consistent { excess_s, .. } => {
@@ -4005,7 +4095,9 @@ mod tests {
             }
             ref other => panic!("{other:?}"),
         }
-        assert_eq!(stats.flight_time_s, None);
+        // #669: a disputed high-passed pick withholds nothing — the
+        // arrival is the peak.
+        assert!(stats.flight_time_s.is_some());
     }
 
     /// A single spike `excess` samples past `d/c` at `distance_m`, in a 1 s
@@ -4044,11 +4136,7 @@ mod tests {
             ),
             ref other => panic!("{other:?}"),
         }
-        assert!(
-            stats.flight_time_s.is_some(),
-            "{:?}",
-            stats.arrival_cross_check
-        );
+        assert!(stats.flight_time_s.is_some(), "{:?}", stats.high_pass_check);
     }
 
     /// #552 AC 5: the Genelec 1083's measured +0.574 ms (#539 step 2), at
@@ -4062,11 +4150,7 @@ mod tests {
             }
             ref other => panic!("{other:?}"),
         }
-        assert!(
-            stats.flight_time_s.is_some(),
-            "{:?}",
-            stats.arrival_cross_check
-        );
+        assert!(stats.flight_time_s.is_some(), "{:?}", stats.high_pass_check);
     }
 
     /// Replay (#537 rig check step 0): print the revised rule's reading of
@@ -4111,12 +4195,12 @@ mod tests {
                  arrival_snr={} distance_check={}",
                 path.file_name().unwrap().to_string_lossy(),
                 f2.unwrap_or(f64::NAN),
-                s.arrival_cross_check,
+                s.high_pass_check,
                 s.delay_samples,
                 flight,
                 s.broadband_delta_samples(),
-                opt(s.arrival_lobe_margin_db),
-                s.arrival_lobe_offset,
+                opt(s.high_pass_lobe_margin_db),
+                s.high_pass_lobe_offset,
                 opt(s.band_limited_snr_db),
                 distance,
             );
@@ -4133,9 +4217,8 @@ mod tests {
 #[cfg(test)]
 mod default_sweep_tests {
     use super::{
-        ir_verdict, pre_impulse_region, ArrivalCrossCheck, ArrivalSource, IrVerdict,
-        PreImpulseAnchor, ARRIVAL_SNR_MIN_DB, ARRIVAL_SNR_UNMEASURED_REASON,
-        PRE_IMPULSE_SNR_MIN_DB,
+        ir_verdict, pre_impulse_region, HighPassCheck, HighPassSource, IrVerdict, PreImpulseAnchor,
+        ARRIVAL_SNR_MIN_DB, ARRIVAL_SNR_UNMEASURED_REASON, PRE_IMPULSE_SNR_MIN_DB,
     };
     use crate::measurement::sweep::{
         deconvolve_full, extract_irs, inverse_sweep, ir_default_window_len, ir_peak, log_sweep,
@@ -4488,7 +4571,7 @@ mod default_sweep_tests {
                 );
                 let stats = shipped_stats(draw.linear.clone(), sr);
 
-                let anchor = stats.arrival_index.min(stats.peak_index);
+                let anchor = stats.high_pass_index.min(stats.peak_index);
                 let rejected = ir_verdict(
                     stats.peak_magnitude,
                     pre_impulse_region(&draw.linear, anchor),
@@ -4511,19 +4594,19 @@ mod default_sweep_tests {
                 // #577: the arrival standing refuses on every draw, and a
                 // pick with no floor before it is unmeasured, never passed.
                 assert!(
-                    stats.arrival_cross_check.withholds_flight_time(),
+                    stats.high_pass_check.disputes_the_pick(),
                     "{sr} Hz seed {seed}: noise-only draw's arrival standing {:?} produces \
                      a flight time",
-                    stats.arrival_cross_check
+                    stats.high_pass_check
                 );
                 let arrival_floor_empty =
-                    pre_impulse_region(&draw.linear, stats.arrival_index).is_empty();
+                    pre_impulse_region(&draw.linear, stats.high_pass_index).is_empty();
                 assert_eq!(
-                    stats.arrival_cross_check == ArrivalCrossCheck::BandLimitedSnrUnmeasured,
+                    stats.high_pass_check == HighPassCheck::BandLimitedSnrUnmeasured,
                     arrival_floor_empty,
                     "{sr} Hz seed {seed}: standing {:?} at arrival {}",
-                    stats.arrival_cross_check,
-                    stats.arrival_index
+                    stats.high_pass_check,
+                    stats.high_pass_index
                 );
                 if arrival_floor_empty {
                     assert_eq!(
@@ -4535,15 +4618,15 @@ mod default_sweep_tests {
                 // (#577). Such a pick is not trusted (revision 4): the floor
                 // stays before the peak and the verdict is the one before
                 // #550, exactly.
-                if stats.arrival_index < stats.peak_index
-                    && pre_impulse_region(&draw.linear, stats.arrival_index).is_empty()
+                if stats.high_pass_index < stats.peak_index
+                    && pre_impulse_region(&draw.linear, stats.high_pass_index).is_empty()
                 {
                     unmeasured_arrivals += 1;
                     assert_eq!(
                         stats.pre_impulse_floor_anchor,
                         PreImpulseAnchor::PeakArrivalUnmeasured,
                         "{sr} Hz seed {seed}: unmeasured arrival at {}",
-                        stats.arrival_index
+                        stats.high_pass_index
                     );
                     assert_eq!(
                         stats.pre_impulse_floor_end,
@@ -4562,7 +4645,7 @@ mod default_sweep_tests {
                             lines.get(1).map(String::as_str),
                             Some(
                                 format!(
-                                    "not before arrival \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}"
+                                    "not before high-passed peak \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}"
                                 )
                                 .as_str()
                             ),
@@ -4609,14 +4692,15 @@ mod default_sweep_tests {
                 let peak_region_empty =
                     pre_impulse_region(&draw.linear, stats.peak_index).is_empty();
 
-                let rev3_trusted =
-                    matches!(stats.arrival_source, ArrivalSource::BandLimitedPeak { .. })
-                        && !matches!(
-                            stats.arrival_cross_check,
-                            ArrivalCrossCheck::BandLimitedSnrLow { .. }
-                        );
+                let rev3_trusted = matches!(
+                    stats.high_pass_source,
+                    HighPassSource::BandLimitedPeak { .. }
+                ) && !matches!(
+                    stats.high_pass_check,
+                    HighPassCheck::BandLimitedSnrLow { .. }
+                );
                 let rev3_anchor = if rev3_trusted {
-                    stats.arrival_index.min(stats.peak_index)
+                    stats.high_pass_index.min(stats.peak_index)
                 } else {
                     stats.peak_index
                 };

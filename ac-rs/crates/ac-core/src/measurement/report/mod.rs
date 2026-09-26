@@ -59,8 +59,8 @@ mod provenance;
 #[cfg(test)]
 pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
-    arrival_cross_check_tolerance_samples, arrival_snr_low_reason, pre_impulse_snr_scope,
-    ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, DistanceWindow, IrStats,
+    arrival_snr_low_reason, high_pass_check_tolerance_samples, pre_impulse_snr_scope, ArrivalCheck,
+    DistanceCheck, DistanceWindow, HighPassAdvisory, HighPassCheck, HighPassSource, IrStats,
     IrVerdict, LatencyBasis, LiveOffset, OnsetStanding, PreImpulseAnchor, PreImpulseSnrScope,
     ScoredSweepParam, WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
     ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
