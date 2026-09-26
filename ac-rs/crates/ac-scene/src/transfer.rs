@@ -880,6 +880,64 @@ impl TransferInput {
     /// pair with no recorded ladder, a sub-window derivation — it is the
     /// Welch H₁ arrays, tagged with the segment length the derivation used,
     /// and the scene states that it is not the live ladder.
+    /// The average of stored traces (#671, Smaart's Trace Average):
+    /// magnitude in dB and phase from unit phasors, coherence-weighted when
+    /// `coherence_weighted`, per `ac_core::visualize::average`. The traces
+    /// must share one frequency grid and one estimator — Smaart likewise
+    /// requires the same FFT size and sample rate — or the average is
+    /// refused with the reason. The result carries the other members'
+    /// column provenance (identical, by that check) and no live state.
+    pub fn average(
+        inputs: &[&TransferInput],
+        coherence_weighted: bool,
+    ) -> Result<TransferInput, String> {
+        let Some(first) = inputs.first() else {
+            return Err("nothing to average".to_string());
+        };
+        if inputs.len() < 2 {
+            return Err("an average needs two or more traces".to_string());
+        }
+        if inputs
+            .iter()
+            .any(|t| t.freqs != first.freqs || t.estimator != first.estimator)
+        {
+            return Err("the traces are on different frequency grids".to_string());
+        }
+        let arrays: Vec<ac_core::visualize::average::TraceArrays<'_>> = inputs
+            .iter()
+            .map(|t| ac_core::visualize::average::TraceArrays {
+                magnitude_db: &t.magnitude_db,
+                phase_deg: &t.phase_deg,
+                coherence: &t.coherence,
+            })
+            .collect();
+        let avg = ac_core::visualize::average::average(&arrays, coherence_weighted);
+        Ok(TransferInput {
+            freqs: first.freqs.clone(),
+            magnitude_db: avg.magnitude_db,
+            phase_deg: avg.phase_deg,
+            coherence: avg.coherence,
+            delay_ms: inputs.iter().map(|t| t.delay_ms).sum::<f64>() / inputs.len() as f64,
+            delay_locked: None,
+            delay_control: None,
+            meas_channel: -1,
+            ref_channel: -1,
+            meas_peak_dbfs: None,
+            ref_peak_dbfs: None,
+            channel_role: "average".to_string(),
+            source: first.source,
+            sr: first.sr,
+            column_df: first.column_df.clone(),
+            column_window_s: first.column_window_s.clone(),
+            column_n: first.column_n.clone(),
+            column_bins: first.column_bins.clone(),
+            stages: first.stages.clone(),
+            estimator: first.estimator,
+            fault: None,
+            calibration: None,
+        })
+    }
+
     /// The trace as CSV (#256, `C`): a few `#` header lines naming what it
     /// is, then `freq_hz,magnitude_db,phase_deg,coherence`, one row per
     /// column. Unsmoothed, as measured: smoothing is a display choice.
@@ -1580,6 +1638,37 @@ mod tests {
                 operator: false
             })
         );
+    }
+
+    #[test]
+    fn average_refuses_mismatched_grids_and_averages_matching_ones() {
+        let base = |mag: f64, coh: f64| {
+            let frame: TransferFrame = serde_json::from_value(serde_json::json!({
+                "type": "transfer_stream", "meas_channel": 0, "ref_channel": 1, "sr": 48000,
+                "spec_freqs": [], "meas_spectrum": [], "ref_spectrum": [], "spl": null,
+                "spl_weighting": "Z", "spl_integration": "fast",
+                "mtw": {"freqs": [100.0, 1000.0], "magnitude_db": [mag, mag],
+                        "phase_deg": [0.0, 0.0], "coherence": [coh, coh]}
+            }))
+            .unwrap();
+            TransferInput::from_wire_frame(&frame)
+        };
+        let a = base(0.0, 0.9);
+        let b = base(6.0, 0.3);
+        let avg = TransferInput::average(&[&a, &b], true).unwrap();
+        assert!(
+            (avg.magnitude_db[0] - 1.5).abs() < 1e-9,
+            "{}",
+            avg.magnitude_db[0]
+        );
+        assert!((avg.coherence[0] - 0.6).abs() < 1e-9);
+        let plain = TransferInput::average(&[&a, &b], false).unwrap();
+        assert!((plain.magnitude_db[0] - 3.0).abs() < 1e-9);
+
+        let mut other = base(0.0, 0.9);
+        other.freqs = vec![100.0, 2000.0];
+        assert!(TransferInput::average(&[&a, &other], true).is_err());
+        assert!(TransferInput::average(&[&a], true).is_err());
     }
 
     #[test]

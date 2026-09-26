@@ -145,6 +145,45 @@ pub fn stored_run_from_snapshot(
     ))
 }
 
+/// A stored run's trace as drawn: its derivation, moved by its `←`/`→`
+/// offset (#256). The one place a run becomes a `TransferInput`, shared by
+/// the scene build, CSV export and the average (#671).
+pub fn run_input(run: &LoadedRun) -> ac_scene::TransferInput {
+    let mut input =
+        ac_scene::TransferInput::from_pair_derivation(&run.derivation, &run.channel_role, run.sr);
+    input.shift_delay(run.delay_offset_samples);
+    input
+}
+
+/// The average of the visible stored runs (#671) as a trace, with a label
+/// for the legend: `Ok(None)` when the average is off; `Err` with the
+/// reason when it cannot be formed (fewer than two visible runs, or runs on
+/// different grids).
+pub fn average_input(
+    state: &crate::view::TransferViewState,
+) -> Result<Option<(ac_scene::TransferInput, String)>, String> {
+    let Some(weighted) = state.average else {
+        return Ok(None);
+    };
+    let inputs: Vec<ac_scene::TransferInput> = state
+        .loaded
+        .iter()
+        .filter(|r| r.visible)
+        .map(run_input)
+        .collect();
+    let refs: Vec<&ac_scene::TransferInput> = inputs.iter().collect();
+    let avg = ac_scene::TransferInput::average(&refs, weighted)?;
+    let how = if weighted {
+        "coherence weighted"
+    } else {
+        "plain"
+    };
+    Ok(Some((
+        avg,
+        format!("average of {} slots, {how}", refs.len()),
+    )))
+}
+
 /// Build (or rebuild) a stored run's [`TransferScene`] from its held
 /// [`PairDerivation`] under `modes` — the transfer-view analogue of
 /// [`rederive_scene`], called again every time the operator changes that
