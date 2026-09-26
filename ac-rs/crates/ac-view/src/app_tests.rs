@@ -1427,3 +1427,29 @@ fn a_version_refusal_drops_the_held_picture() {
         "2.00 ms"
     );
 }
+
+/// Settings never apply under a live stimulus (Codex review, #256): with
+/// Enter no longer a stop while driving, it can reach an open overlay, and
+/// applying relaunches the session. It refuses and says what stops it.
+#[test]
+fn settings_refuse_to_apply_while_driving() {
+    let mut app = transfer_app();
+    drive(&mut app);
+    app.settings = Some(crate::settings::SettingsOverlay::from_config(
+        &ac_core::config::Config::default(),
+        -30.0,
+    ));
+    app.handle_settings_keys(SettingsKeys {
+        enter: true,
+        ..Default::default()
+    });
+    assert!(
+        app.settings.is_some(),
+        "settings applied under a live drive"
+    );
+    assert_eq!(stim_state(&app), StimState::Driving);
+    assert_eq!(
+        app.toast_text(),
+        Some("stop the stimulus (Space or Esc) before applying settings")
+    );
+}

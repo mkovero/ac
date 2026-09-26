@@ -932,8 +932,26 @@ impl AcViewApp {
             overlay.adjust_value(true);
         }
         if ev.enter {
+            // Never relaunch under a live stimulus (Codex review, #256):
+            // Enter is no longer a stop while driving, so it can reach
+            // here with the drive on. Space and Esc stop it first.
+            let stim_live = matches!(
+                &self.view,
+                ViewKind::Transfer(t) if t.stimulus.state() != crate::stimulus::StimState::Idle
+            );
+            if stim_live {
+                self.set_toast(
+                    "stop the stimulus (Space or Esc) before applying settings".into(),
+                    Instant::now(),
+                    Some(4.0),
+                );
+                return;
+            }
             // Persist (last-writer-wins) then relaunch on the new
             // channels and reseed the stimulus start level.
+            let Some(overlay) = &mut self.settings else {
+                return;
+            };
             match overlay.apply(None) {
                 Ok(applied) => {
                     self.settings = None;
