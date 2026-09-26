@@ -168,7 +168,8 @@ pub fn average_input(
     let inputs: Vec<ac_scene::TransferInput> = state
         .loaded
         .iter()
-        .filter(|r| r.visible)
+        // Slots only: a run opened from a file is not part of "the slots".
+        .filter(|r| r.visible && r.slot.is_some())
         .map(run_input)
         .collect();
     let refs: Vec<&ac_scene::TransferInput> = inputs.iter().collect();

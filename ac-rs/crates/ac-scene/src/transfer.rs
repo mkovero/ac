@@ -887,6 +887,12 @@ impl TransferInput {
     /// requires the same FFT size and sample rate — or the average is
     /// refused with the reason. The result carries the other members'
     /// column provenance (identical, by that check) and no live state.
+    ///
+    /// Each member's phase has its own delay removed, and the average
+    /// combines them as they are: a spatial average of each position's
+    /// response aligned to itself, as Smaart averages stored traces. The
+    /// average therefore has no single delay; `delay_ms` is `NaN`, which
+    /// the readout and the CSV header show as such.
     pub fn average(
         inputs: &[&TransferInput],
         coherence_weighted: bool,
@@ -897,10 +903,12 @@ impl TransferInput {
         if inputs.len() < 2 {
             return Err("an average needs two or more traces".to_string());
         }
-        if inputs
-            .iter()
-            .any(|t| t.freqs != first.freqs || t.estimator != first.estimator)
-        {
+        if inputs.iter().any(|t| {
+            t.freqs != first.freqs
+                || t.estimator != first.estimator
+                || t.sr != first.sr
+                || t.stages != first.stages
+        }) {
             return Err("the traces are on different frequency grids".to_string());
         }
         let arrays: Vec<ac_core::visualize::average::TraceArrays<'_>> = inputs
@@ -917,7 +925,7 @@ impl TransferInput {
             magnitude_db: avg.magnitude_db,
             phase_deg: avg.phase_deg,
             coherence: avg.coherence,
-            delay_ms: inputs.iter().map(|t| t.delay_ms).sum::<f64>() / inputs.len() as f64,
+            delay_ms: f64::NAN,
             delay_locked: None,
             delay_control: None,
             meas_channel: -1,
@@ -949,9 +957,11 @@ impl TransferInput {
         out.push_str(&format!("# channel: {}\n", self.channel_role));
         out.push_str(&format!("# sample_rate_hz: {}\n", self.sr));
         out.push_str(&format!("# delay_ms: {:.6}\n", self.delay_ms));
-        out.push_str(
-            "# phase_deg: measured, with delay_ms removed; not the display's de-rotation mode\n",
-        );
+        out.push_str(if self.delay_ms.is_nan() {
+            "# phase_deg: an average of traces, each with its own delay removed\n"
+        } else {
+            "# phase_deg: measured, with delay_ms removed; not the display's de-rotation mode\n"
+        });
         out.push_str("freq_hz,magnitude_db,phase_deg,coherence\n");
         for i in 0..self.freqs.len() {
             let get = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
@@ -1665,9 +1675,16 @@ mod tests {
         let plain = TransferInput::average(&[&a, &b], false).unwrap();
         assert!((plain.magnitude_db[0] - 3.0).abs() < 1e-9);
 
+        assert!(avg.delay_ms.is_nan(), "an average has no single delay");
+        assert!(avg
+            .to_csv("average")
+            .contains("# phase_deg: an average of traces, each with its own delay removed"));
         let mut other = base(0.0, 0.9);
         other.freqs = vec![100.0, 2000.0];
         assert!(TransferInput::average(&[&a, &other], true).is_err());
+        let mut other_rate = base(0.0, 0.9);
+        other_rate.sr = 96_000;
+        assert!(TransferInput::average(&[&a, &other_rate], true).is_err());
         assert!(TransferInput::average(&[&a], true).is_err());
     }
 
