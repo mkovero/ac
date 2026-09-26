@@ -128,6 +128,9 @@ pub struct LoadedRun {
     /// The slot this run was stored to with `Ctrl`+digit (#256), 1–9;
     /// `None` for a run opened from a file.
     pub slot: Option<u8>,
+    /// Samples added to the recorded delay by `←`/`→` (#256), applied as a
+    /// phase rotation when the scene is built.
+    pub delay_offset_samples: i64,
 }
 
 impl LoadedRun {
@@ -148,6 +151,7 @@ impl LoadedRun {
             visible: true,
             color_slot: 0,
             slot: None,
+            delay_offset_samples: 0,
         }
     }
 }

@@ -67,9 +67,11 @@ pub enum Action {
     /// the unaligned IR (`set_delay` null), for a setting so far off that the
     /// residual cannot reach the arrival.
     InsertDelay,
-    /// Move the delay one sample earlier (#669).
+    /// Move the selected trace's delay one sample earlier, ten with Shift
+    /// (#669, #256: `←`, live or slot).
     NudgeDelayEarlier,
-    /// Move the delay one sample later (#669).
+    /// Move the selected trace's delay one sample later, ten with Shift
+    /// (#669, #256: `→`, live or slot).
     NudgeDelayLater,
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
@@ -154,13 +156,13 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         key: Key::ArrowLeft,
         action: Action::MoveCursorLeft,
-        scope: Scope::Global,
+        scope: Scope::Spectrum,
         description: "Move cursor to previous column",
     },
     Binding {
         key: Key::ArrowRight,
         action: Action::MoveCursorRight,
-        scope: Scope::Global,
+        scope: Scope::Spectrum,
         description: "Move cursor to next column",
     },
     Binding {
@@ -250,16 +252,16 @@ pub const BINDINGS: &[Binding] = &[
         description: "Insert found delay (Shift: find again)",
     },
     Binding {
-        key: Key::Comma,
+        key: Key::ArrowLeft,
         action: Action::NudgeDelayEarlier,
         scope: Scope::Transfer,
-        description: "Delay one sample earlier",
+        description: "Selected trace's delay one sample earlier (Shift: ten)",
     },
     Binding {
-        key: Key::Period,
+        key: Key::ArrowRight,
         action: Action::NudgeDelayLater,
         scope: Scope::Transfer,
-        description: "Delay one sample later",
+        description: "Selected trace's delay one sample later (Shift: ten)",
     },
     Binding {
         key: Key::V,

@@ -820,6 +820,24 @@ impl TransferInput {
     /// pair with no recorded ladder, a sub-window derivation — it is the
     /// Welch H₁ arrays, tagged with the segment length the derivation used,
     /// and the scene states that it is not the live ladder.
+    /// Move a stored run's delay by `samples` (#256, `←`/`→` on a slot):
+    /// the delay a derivation removes is a pure phase term
+    /// (`exp(+j·2π·f·D/sr)` on `Gxy`), so changing it by Δ rotates the
+    /// phase by `360·f·Δ/sr` degrees and leaves magnitude and coherence
+    /// alone. Exact for the Welch estimate; for replayed ladder columns it
+    /// is the same phase, without re-running the ladder's alignment. The
+    /// delay readout follows (`delay_ms`).
+    pub fn shift_delay(&mut self, samples: i64) {
+        if samples == 0 || self.sr == 0 {
+            return;
+        }
+        let dt = samples as f64 / self.sr as f64;
+        for (phi, f) in self.phase_deg.iter_mut().zip(&self.freqs) {
+            *phi = wrap_deg(*phi + 360.0 * f * dt);
+        }
+        self.delay_ms += dt * 1000.0;
+    }
+
     pub fn from_pair_derivation(d: &PairDerivation, channel_role: &str, sr: u32) -> TransferInput {
         let ladder = d.mtw.as_ref().filter(|m| m.lengths_agree());
         let (arrays, estimator) = match ladder {
@@ -1467,6 +1485,38 @@ mod tests {
                 operator: false
             })
         );
+    }
+
+    /// `shift_delay` against the rejected route (a fresh derivation at the
+    /// shifted delay): same phase, same magnitude, readout moved.
+    #[test]
+    fn shift_delay_matches_a_derivation_at_the_shifted_delay() {
+        use ac_core::visualize::pair_derivation::derive_pair;
+        use ac_core::visualize::weighting_curves::WeightingCurve;
+        let sr = 48_000u32;
+        let n = 3 * sr as usize;
+        let mut x = 1u32;
+        let sig: Vec<f32> = (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 8) as f32 / (1 << 23) as f32 - 1.0
+            })
+            .collect();
+        let meas: Vec<f32> = (0..n)
+            .map(|i| if i >= 100 { sig[i - 100] } else { 0.0 })
+            .collect();
+        let at = |d| derive_pair(&sig, &meas, sr, d, None, None, WeightingCurve::Z);
+        let mut shifted = TransferInput::from_pair_derivation(&at(100), "m", sr);
+        shifted.shift_delay(7);
+        let direct = TransferInput::from_pair_derivation(&at(107), "m", sr);
+        assert!((shifted.delay_ms - direct.delay_ms).abs() < 1e-9);
+        for (i, (a, b)) in shifted.phase_deg.iter().zip(&direct.phase_deg).enumerate() {
+            let d = wrap_deg(a - b).abs();
+            assert!(d < 1e-6, "bin {i}: {a} vs {b}");
+        }
+        for (a, b) in shifted.magnitude_db.iter().zip(&direct.magnitude_db) {
+            assert!((a - b).abs() < 1e-9, "magnitude moved: {a} vs {b}");
+        }
     }
 
     #[test]

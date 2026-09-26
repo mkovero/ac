@@ -96,6 +96,7 @@ fn changing_one_runs_smoothing_leaves_the_other_runs_scene_byte_identical() {
             &run.derivation,
             &run.channel_role,
             run.sr,
+            run.delay_offset_samples,
             ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing),
             FREQ_RANGE,
             DB_RANGE,

@@ -605,20 +605,45 @@ fn e_inserts_the_found_delay_and_shift_e_finds_again() {
 /// `,` and `.` step the held delay by one sample — relative, so two presses
 /// between frames are two steps, not the same value sent twice.
 #[test]
-fn comma_and_period_nudge_by_one_sample() {
+fn arrows_step_the_live_delay_by_one_or_ten() {
     let mut app = transfer_app();
     app.ingest_frame_for_test(found_frame(), 0.0);
     app.handle_action(Action::NudgeDelayEarlier, false);
     app.handle_action(Action::NudgeDelayLater, false);
-    app.handle_action(Action::NudgeDelayLater, false);
+    app.handle_action(Action::NudgeDelayLater, true);
     assert_eq!(
         app.sent_delay,
         vec![
             serde_json::json!({"cmd": "set_delay", "step": -1}),
             serde_json::json!({"cmd": "set_delay", "step": 1}),
-            serde_json::json!({"cmd": "set_delay", "step": 1}),
+            serde_json::json!({"cmd": "set_delay", "step": 10}),
         ]
     );
+}
+
+/// With a slot selected, `←`/`→` move that slot's delay and nothing else
+/// (#256): the daemon hears nothing, and the slot's readout follows.
+#[test]
+fn arrows_move_the_selected_slot_not_live() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 1,
+        path: std::path::PathBuf::from("/c/slot1.acsnap"),
+        run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+    }));
+    app.handle_action(Action::CycleFocus, false); // slot 1
+    app.rebuild_scenes(true, 0.0);
+    let before = app.current_loaded_scenes()[0].delay_readout.clone();
+    app.handle_action(Action::NudgeDelayLater, true);
+    app.handle_action(Action::NudgeDelayEarlier, false);
+    assert!(app.sent_delay.is_empty(), "a slot nudge reached the daemon");
+    let ViewKind::Transfer(t) = &app.view else {
+        panic!("not transfer view")
+    };
+    assert_eq!(t.loaded[0].delay_offset_samples, 9);
+    app.rebuild_scenes(true, 1.0);
+    assert_ne!(app.current_loaded_scenes()[0].delay_readout, before);
 }
 
 /// Without a delay there is nothing to insert or nudge, and a guessed
