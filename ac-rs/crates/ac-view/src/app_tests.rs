@@ -1676,6 +1676,28 @@ fn c_writes_the_selected_trace_to_csv() {
     let want = ac_scene::TransferInput::stored_delay_ms(&t.loaded[0].derivation)
         + 10.0 * 1000.0 / 48_000.0;
     assert!(csv.contains(&format!("# delay_ms: {want:.6}\n")), "{csv}");
-    assert!(csv.lines().count() > 5);
+    assert!(csv.lines().count() > 6);
+    // A second export in the same second never overwrites the first.
+    let before = std::fs::read_dir(&dir).unwrap().count();
+    app.handle_action(Action::ExportCsv, false);
+    app.handle_action(Action::ExportCsv, false);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), before + 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// In the list, a bare digit loads and Ctrl+digit does nothing (Codex
+/// review): Ctrl+digit means "store live", which the list must not turn
+/// into a load.
+#[test]
+fn ctrl_digit_in_the_list_does_not_load() {
+    let mut app = transfer_app();
+    let dir = temp_captures("ctrl");
+    app.captures_dir = dir.clone();
+    std::fs::write(dir.join("a.acsnap"), b"x").unwrap();
+    app.handle_action(Action::OpenSnapshot, false);
+    press_key(&mut app, egui::Key::Num2, true, true);
+    assert!(app.capture_slot.is_none() && app.file_list.is_some());
+    press_key(&mut app, egui::Key::Num2, false, false);
+    assert_eq!(app.capture_slot, Some(2));
     std::fs::remove_dir_all(&dir).ok();
 }

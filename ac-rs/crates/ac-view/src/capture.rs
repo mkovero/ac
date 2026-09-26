@@ -52,15 +52,18 @@ pub fn file_name(slot: u8, captured_at_utc: &str) -> String {
 /// Write `bytes` under `dir` as a file that did not exist before: the
 /// timestamp's name, or `-2`, `-3`, … appended when two captures share a
 /// second. Never overwrites a capture already on disk.
-fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<(PathBuf, String)> {
+pub(crate) fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<(PathBuf, String)> {
     use std::io::Write;
     let base = base.to_string();
-    let stem = base.trim_end_matches(".acsnap").to_string();
+    let (stem, ext) = match base.rsplit_once('.') {
+        Some((stem, ext)) => (stem.to_string(), format!(".{ext}")),
+        None => (base.clone(), String::new()),
+    };
     for n in 1.. {
         let name = if n == 1 {
             base.clone()
         } else {
-            format!("{stem}-{n}.acsnap")
+            format!("{stem}-{n}{ext}")
         };
         let path = dir.join(&name);
         match std::fs::OpenOptions::new()

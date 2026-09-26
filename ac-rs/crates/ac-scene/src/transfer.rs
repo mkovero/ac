@@ -831,6 +831,9 @@ impl TransferInput {
         out.push_str(&format!("# channel: {}\n", self.channel_role));
         out.push_str(&format!("# sample_rate_hz: {}\n", self.sr));
         out.push_str(&format!("# delay_ms: {:.6}\n", self.delay_ms));
+        out.push_str(
+            "# phase_deg: measured, with delay_ms removed; not the display's de-rotation mode\n",
+        );
         out.push_str("freq_hz,magnitude_db,phase_deg,coherence\n");
         for i in 0..self.freqs.len() {
             let get = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
@@ -1542,10 +1545,11 @@ mod tests {
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines[0], "# ac transfer trace: slot 3");
         assert_eq!(lines[3], "# delay_ms: 3.395800");
-        assert_eq!(lines[4], "freq_hz,magnitude_db,phase_deg,coherence");
-        assert_eq!(lines[5], "100.0000,-1.5000,10.000,0.90000");
-        assert_eq!(lines[6], "1000.0000,0.2500,-170.000,0.99000");
-        assert_eq!(lines.len(), 7);
+        assert!(lines[4].starts_with("# phase_deg: measured, with delay_ms removed"));
+        assert_eq!(lines[5], "freq_hz,magnitude_db,phase_deg,coherence");
+        assert_eq!(lines[6], "100.0000,-1.5000,10.000,0.90000");
+        assert_eq!(lines[7], "1000.0000,0.2500,-170.000,0.99000");
+        assert_eq!(lines.len(), 8);
     }
 
     /// `shift_delay` against the rejected route (a fresh derivation at the

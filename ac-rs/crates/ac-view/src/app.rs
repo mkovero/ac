@@ -774,20 +774,22 @@ impl AcViewApp {
             return;
         }
         let dir = self.captures_dir.clone();
-        let path = dir.join(format!(
+        let base = format!(
             "{}-{}.csv",
             name.replace(' ', ""),
             ac_core::shared::time::now_utc_filename_stamp()
-        ));
-        let result =
-            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, input.to_csv(&name)));
+        );
+        // Never overwrite: a second export in the same second gets `-2`.
+        let result = std::fs::create_dir_all(&dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| crate::capture::write_new(&dir, &base, input.to_csv(&name).as_bytes()));
         match result {
-            Ok(()) => self.set_toast(
+            Ok((path, _)) => self.set_toast(
                 format!("{name} written \u{2014} {}", path.display()),
                 now,
                 Some(5.0),
             ),
-            Err(e) => self.set_toast(format!("CSV not written \u{2014} {e}"), now, Some(8.0)),
+            Err(e) => self.set_toast(format!("CSV not written \u{2014} {e:#}"), now, Some(8.0)),
         }
     }
 
@@ -1191,11 +1193,22 @@ impl AcViewApp {
         // only while the stimulus is idle — panic-first owns it otherwise.
         if self.file_list.is_some() {
             let (up, down, close, digit) = ctx.input(|i| {
-                let digit = crate::keys::SLOT_KEYS
-                    .iter()
-                    .zip(1u8..)
-                    .find(|(k, _)| i.key_pressed(**k))
-                    .map(|(_, n)| n);
+                // A bare digit loads; Ctrl+digit (store live) does nothing
+                // here, read per key event as the slot keys are.
+                let digit = i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if !modifiers.ctrl => crate::keys::SLOT_KEYS
+                        .iter()
+                        .zip(1u8..)
+                        .find(|(k, _)| **k == *key)
+                        .map(|(_, n)| n),
+                    _ => None,
+                });
                 (
                     i.key_pressed(Key::ArrowUp),
                     i.key_pressed(Key::ArrowDown),
