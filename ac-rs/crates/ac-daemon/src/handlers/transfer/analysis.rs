@@ -93,6 +93,11 @@ pub(super) struct PairAnalysis {
     pub(super) spl_raw: Option<f64>,
     /// Phase 4b sidecar payload, absent when the IFFT produced nothing.
     pub(super) ir: Option<IrPayload>,
+    /// Peak of the full-resolution live IR, as a signed offset from
+    /// `key.delay` (#669): the residual a client reads as Delta Delay, and
+    /// — on an estimate computed unaligned — the start-up Find's answer.
+    /// Taken before the sidecar's downsampling, so it is sample-exact.
+    pub(super) ir_peak_lag: Option<i64>,
 }
 
 /// The `visualize/ir` sidecar's per-analysis content. The channel and
@@ -129,10 +134,10 @@ pub(super) fn analyse_pair(
     let meas = rings.get(ctx.mi)?.as_slice();
     let refb = rings.get(ctx.ri)?.as_slice();
 
-    // An unlocked pair (still warming up, or refused by the prominence
-    // gate — #227) is measured unaligned rather than aligned to a guess.
-    // `delay_locked` on the frame is what keeps that distinguishable: a
-    // refused pair and a genuine 0-sample digital loopback both report
+    // An unlocked pair (still warming up, or a silent leg with no IR peak)
+    // is measured unaligned — which is also what its start-up Find reads.
+    // `delay_locked` on the frame is what keeps that distinguishable: an
+    // unlocked pair and a genuine 0-sample digital loopback both report
     // `delay_ms` 0.0, and #216 established that the loopback case is
     // legitimately 0.0, so the number alone cannot carry the difference.
     let result = ac_core::visualize::transfer::h1_estimate_with_delay(refb, meas, sr, key.delay);
@@ -243,6 +248,7 @@ pub(super) fn analyse_pair(
     // calibrated IR goes through the sweep measurement, not
     // `transfer_stream`.
     let ir_full = ac_core::visualize::transfer::impulse_response_from_h(&result.re, &result.im);
+    let ir_peak_lag = ac_core::visualize::transfer::live_ir_peak_lag(&ir_full, sr);
     let ir = if ir_full.is_empty() {
         None
     } else {
@@ -278,5 +284,6 @@ pub(super) fn analyse_pair(
         ref_spectrum,
         spl_raw,
         ir,
+        ir_peak_lag,
     })
 }

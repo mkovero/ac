@@ -26,6 +26,7 @@ fn transfer_scene() -> TransferScene {
         coherence: vec![0.9; 3],
         delay_ms: 4.82,
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),

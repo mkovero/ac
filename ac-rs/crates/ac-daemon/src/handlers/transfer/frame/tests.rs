@@ -194,6 +194,7 @@ fn locked_pair_reports_delay_locked_true() {
     st.delay = Some(Lock {
         samples: 0,
         driving: true,
+        operator: false,
     });
     let (_, batch, _) = call(&test_ctx(), &st, &test_statics(), &rings, &[None, None]).unwrap();
     assert_eq!(batch[0]["delay_locked"], true);
@@ -344,9 +345,10 @@ const TRANSFER_KEYS: &[&str] = &[
     "cmd",
     "coherence",
     "delay_attempts",
-    "delay_evidence",
     "delay_locked",
     "delay_ms",
+    "delay_operator",
+    "delay_residual",
     "delay_samples",
     "drive",
     "drive.drivable",
@@ -620,8 +622,7 @@ fn consumers_read_back_what_the_builder_was_given() {
     assert_eq!(input.stages, statics.mtw_stages);
     let fault = input.fault.as_ref().expect("drive state present");
     assert!(fault.drive.on && fault.drive.drivable);
-    assert!(fault.settled);
-    assert_eq!(fault.delay_attempts, 0);
+    assert_eq!(fault.delay_locked, Some(false));
 
     let fault_input = ac_scene::FaultInput::from_wire_frame(&frame);
     assert_eq!(fault_input.coherence, [col.coherence; 2].as_slice());

@@ -1,4 +1,5 @@
-//! ZMQ integration tests for `relock` and the drive off→on flush (#226).
+//! ZMQ integration tests for `set_delay` (#669) and the drive off→on flush
+//! (#226). `set_delay` with `samples: null` is the re-find `relock` used to be.
 //!
 //! `fake_correlated_pair` (see `it_set_drive.rs`'s doc for why it, not the
 //! plain idle tone) gives a deterministic delay to lock onto — the fake
@@ -60,16 +61,45 @@ fn mtw_present(f: &Value) -> bool {
     !f["mtw"].is_null()
 }
 
+/// Turn the drive on and keep it alive, as a client does, until a frame
+/// holds a delay. Since the Codex review of #673 the Find after a drive
+/// edge waits for a ring of driven audio (~2.5 s), longer than the 1.5 s
+/// dead-man: without keepalives the drive has dropped by then, and the
+/// delay is — correctly — found against silence.
+fn lock_while_driving(c: &Client) -> Value {
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+    loop {
+        assert_eq!(
+            c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+            json!(true)
+        );
+        let until = std::time::Instant::now() + Duration::from_millis(250);
+        while let Some(f) = c.next_frame(until.saturating_duration_since(std::time::Instant::now()))
+        {
+            if locked(&f) && f["drive"]["on"] == json!(true) {
+                return f;
+            }
+            if std::time::Instant::now() >= until {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no delay while driving"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // 6. No session running.
 // ---------------------------------------------------------------------
 
 #[test]
-fn relock_with_no_session_running_errors_instead_of_panicking() {
+fn set_delay_with_no_session_running_errors_instead_of_panicking() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "relock"}));
+    let r = c.call(json!({"cmd": "set_delay", "samples": null}));
     assert_eq!(r["ok"], json!(false), "{r}");
     assert_eq!(r["error"], json!("no transfer_stream session running"));
 
@@ -82,7 +112,7 @@ fn relock_with_no_session_running_errors_instead_of_panicking() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path() {
+fn refind_unlocks_and_refinds_the_same_lag_on_a_static_fake_path() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     assert_eq!(
@@ -94,16 +124,19 @@ fn relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path() {
     assert_eq!(delay_samples(&before), LOCK_DELAY_SAMPLES);
     let attempts_before = attempts(&before);
 
-    assert_eq!(c.call(json!({"cmd": "relock"}))["ok"], json!(true));
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": null}))["ok"],
+        json!(true)
+    );
 
     // `flush_pair` clears `next_delay_attempt` precisely so the retry runs
-    // on the SAME worker tick as the flush, not up to `RELOCK_RETRY` later
+    // on the SAME worker tick as the flush, not up to `FIND_RETRY` later
     // — and on a clean deterministic signal that retry succeeds
     // immediately, so the unlocked intermediate is internal state
     // (`pair_delays[i] = None`) that never survives to a published wire
     // frame. `delay_attempts` strictly increasing is what's actually
     // observable here, and is the flush's real fingerprint — see test
-    // `delay_attempts_never_resets_across_manual_and_drive_edge_relocks`
+    // `delay_attempts_never_resets_across_refinds_and_drive_edges`
     // for the property this stands in for.
     let after = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && attempts(f) > attempts_before);
     assert_eq!(
@@ -118,7 +151,7 @@ fn relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn relock_drops_and_rebuilds_the_mtw_ladder() {
+fn refind_drops_and_rebuilds_the_mtw_ladder() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     assert_eq!(
@@ -132,11 +165,14 @@ fn relock_drops_and_rebuilds_the_mtw_ladder() {
     let settled = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && mtw_present(f));
     let attempts_before = attempts(&settled);
 
-    assert_eq!(c.call(json!({"cmd": "relock"}))["ok"], json!(true));
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": null}))["ok"],
+        json!(true)
+    );
 
     // The delay lock itself can re-settle within the same worker tick as
     // the flush on a clean deterministic signal (see
-    // `relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path`),
+    // `refind_unlocks_and_refinds_the_same_lag_on_a_static_fake_path`),
     // so `!locked` is not a reliable flush signal here. The ladder is:
     // `mtw[i] = None` is followed by a *fresh* `MtwPair` built the same
     // tick the new lock lands, and a fresh ladder needs several ticks of
@@ -181,7 +217,7 @@ fn a_lock_taken_with_drive_off_is_discarded_on_the_first_drive_on() {
     // The edge must flush: the attempt count strictly increases once it
     // relocks. (Flush and re-lock can land in the same worker tick on a
     // clean deterministic signal — see
-    // `relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path`
+    // `refind_unlocks_and_refinds_the_same_lag_on_a_static_fake_path`
     // — so `attempts` increasing, not an observed `!locked` frame, is
     // the flush's reliable wire fingerprint.)
     let after = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && attempts(f) > attempts_before);
@@ -212,11 +248,7 @@ fn a_lock_taken_while_driving_survives_dead_man_expiry_and_resume() {
 
     // Drive on BEFORE the pair locks, so the lock's provenance is
     // `driving: true`.
-    assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
-        json!(true)
-    );
-    let locked_frame = c.frame_matching(LOCK_TIMEOUT, locked);
+    let locked_frame = lock_while_driving(&c);
     let attempts_at_lock = attempts(&locked_frame);
     assert_eq!(delay_samples(&locked_frame), LOCK_DELAY_SAMPLES);
 
@@ -266,11 +298,7 @@ fn an_operator_stop_and_restart_do_not_flush_a_lock_taken_while_driving() {
         start_correlated(&c, true, LOCK_DELAY_SAMPLES, 0.6)["ok"],
         json!(true)
     );
-    assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
-        json!(true)
-    );
-    let locked_frame = c.frame_matching(LOCK_TIMEOUT, locked);
+    let locked_frame = lock_while_driving(&c);
     let attempts_at_lock = attempts(&locked_frame);
     let mtw_at_lock = mtw_present(&locked_frame);
 
@@ -314,7 +342,7 @@ fn an_operator_stop_and_restart_do_not_flush_a_lock_taken_while_driving() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn delay_attempts_never_resets_across_manual_and_drive_edge_relocks() {
+fn delay_attempts_never_resets_across_refinds_and_drive_edges() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     assert_eq!(
@@ -331,12 +359,15 @@ fn delay_attempts_never_resets_across_manual_and_drive_edge_relocks() {
     // worker tick on a clean deterministic signal, so `attempts`
     // increasing — not an observed `!locked` frame — is the flush's
     // reliable wire fingerprint; see
-    // `relock_unlocks_and_relocks_to_the_same_lag_on_a_static_fake_path`.)
-    assert_eq!(c.call(json!({"cmd": "relock"}))["ok"], json!(true));
+    // `refind_unlocks_and_refinds_the_same_lag_on_a_static_fake_path`.)
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": null}))["ok"],
+        json!(true)
+    );
     let f1 = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && attempts(f) > high_water);
     assert!(
         attempts(&f1) > high_water,
-        "manual relock did not advance attempts"
+        "manual re-find did not advance attempts"
     );
     high_water = attempts(&f1);
 
@@ -349,18 +380,163 @@ fn delay_attempts_never_resets_across_manual_and_drive_edge_relocks() {
     let f2 = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && attempts(f) > high_water);
     assert!(
         attempts(&f2) > high_water,
-        "drive-edge relock did not advance attempts"
+        "drive-edge re-find did not advance attempts"
     );
     high_water = attempts(&f2);
 
     // A third manual press on a now-driving-acquired lock must not lose
     // ground either.
-    assert_eq!(c.call(json!({"cmd": "relock"}))["ok"], json!(true));
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": null}))["ok"],
+        json!(true)
+    );
     let f3 = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && attempts(f) > high_water);
     assert!(
         attempts(&f3) > high_water,
-        "attempts went backwards or stalled across a third relock: {} -> {}",
+        "attempts went backwards or stalled across a third re-find: {} -> {}",
         high_water,
         attempts(&f3)
     );
+}
+
+// ---------------------------------------------------------------------
+// #669: the operator owns the delay.
+// ---------------------------------------------------------------------
+
+fn residual(f: &Value) -> Option<i64> {
+    f["delay_residual"].as_i64()
+}
+
+/// A typed delay is held as typed and marked operator-set, and the frame's
+/// residual is what is left over: the path's 400 against a setting of 390
+/// reads +10. Find → Insert is then `set_delay(delay_samples + residual)`,
+/// after which the residual reads 0.
+#[test]
+fn a_typed_delay_is_held_and_the_residual_reads_the_difference() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, false, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    let found = c.frame_matching(LOCK_TIMEOUT, |f| locked(f) && residual(f).is_some());
+    assert_eq!(delay_samples(&found), LOCK_DELAY_SAMPLES);
+    assert_eq!(residual(&found), Some(0));
+    assert_eq!(found["delay_operator"], json!(false));
+
+    let r = c.call(json!({"cmd": "set_delay", "samples": LOCK_DELAY_SAMPLES - 10}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let typed = c.frame_matching(LOCK_TIMEOUT, |f| {
+        delay_samples(f) == LOCK_DELAY_SAMPLES - 10 && residual(f).is_some()
+    });
+    assert_eq!(typed["delay_operator"], json!(true));
+    assert_eq!(residual(&typed), Some(10));
+
+    let insert = delay_samples(&typed) + residual(&typed).unwrap();
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": insert, "pair": 0}))["ok"],
+        json!(true)
+    );
+    let inserted = c.frame_matching(LOCK_TIMEOUT, |f| {
+        delay_samples(f) == LOCK_DELAY_SAMPLES && f["delay_operator"] == json!(true)
+    });
+    assert_eq!(residual(&inserted), Some(0));
+}
+
+/// A delay the operator set while the drive was off survives the drive
+/// coming on: nothing the daemon does by itself replaces it.
+#[test]
+fn an_operator_delay_survives_the_drive_edge() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, true, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    c.frame_matching(LOCK_TIMEOUT, locked);
+    assert_eq!(
+        c.call(json!({"cmd": "set_delay", "samples": 123}))["ok"],
+        json!(true)
+    );
+    let typed = c.frame_matching(LOCK_TIMEOUT, |f| delay_samples(f) == 123);
+    let attempts_at_set = attempts(&typed);
+    assert_eq!(
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        json!(true)
+    );
+    let driving = c.frame_matching(LOCK_TIMEOUT, |f| f["drive"]["on"] == json!(true));
+    for f in std::iter::once(driving).chain((0..10).map(|_| {
+        c.next_frame(Duration::from_secs(3))
+            .expect("no frame after drive on")
+    })) {
+        assert_eq!(
+            delay_samples(&f),
+            123,
+            "the drive edge replaced a typed delay: {f}"
+        );
+        assert_eq!(attempts(&f), attempts_at_set);
+    }
+}
+
+/// Malformed requests are refused with a reason, never coerced: a delay
+/// that silently became 0 would look exactly like a digital loopback.
+#[test]
+fn set_delay_refuses_malformed_requests() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, false, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    for (req, why) in [
+        (json!({"cmd": "set_delay"}), "missing samples"),
+        (
+            json!({"cmd": "set_delay", "samples": 1.5}),
+            "fractional samples",
+        ),
+        (
+            json!({"cmd": "set_delay", "samples": "400"}),
+            "string samples",
+        ),
+        (
+            json!({"cmd": "set_delay", "samples": 0, "pair": -1}),
+            "negative pair",
+        ),
+        (
+            json!({"cmd": "set_delay", "samples": 0, "pair": 1}),
+            "pair out of range",
+        ),
+        (
+            json!({"cmd": "set_delay", "samples": 0, "step": 1}),
+            "samples and step",
+        ),
+        (json!({"cmd": "set_delay", "step": 0.5}), "fractional step"),
+    ] {
+        let r = c.call(req);
+        assert_eq!(r["ok"], json!(false), "{why}: {r}");
+        assert!(r["error"].is_string(), "{why}: no reason given: {r}");
+    }
+}
+
+/// Two steps sent back to back both land (Codex review of #673): the
+/// daemon moves the held delay, so a client pressing twice between frames
+/// moves it twice.
+#[test]
+fn back_to_back_steps_accumulate() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, false, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    c.frame_matching(LOCK_TIMEOUT, locked);
+    for _ in 0..2 {
+        assert_eq!(
+            c.call(json!({"cmd": "set_delay", "step": 1}))["ok"],
+            json!(true)
+        );
+    }
+    let moved = c.frame_matching(LOCK_TIMEOUT, |f| delay_samples(f) != LOCK_DELAY_SAMPLES);
+    assert_eq!(delay_samples(&moved), LOCK_DELAY_SAMPLES + 2, "{moved}");
+    assert_eq!(moved["delay_operator"], json!(true));
 }

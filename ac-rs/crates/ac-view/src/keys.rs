@@ -62,10 +62,19 @@ pub enum Action {
     /// Open the settings overlay (channels + start level). M4b binds it;
     /// M4c (#182) implements the overlay itself.
     OpenSettings,
-    /// Re-estimate delay lock on every pair, flushing that pair's running
-    /// averages (#226). Sends `relock` to the daemon; the daemon's own
-    /// warmup/retry path does the re-acquisition.
-    Relock,
+    /// Insert the found delay (#669): `set_delay` to the held delay plus the
+    /// live IR's residual — Smaart's Find → Insert, one key because the
+    /// residual is on screen already. Shift: discard and find again from
+    /// the unaligned IR (`set_delay` null), for a setting so far off that the
+    /// residual cannot reach the arrival.
+    InsertDelay,
+    /// Move the delay one sample earlier (#669).
+    NudgeDelayEarlier,
+    /// Move the delay one sample later (#669).
+    NudgeDelayLater,
+    /// Open the typed-delay entry (#669): digits in samples, `T` again to
+    /// apply.
+    TypeDelay,
     /// Toggle the IR panel (#286) — h(t) from the `visualize/ir` sidecar,
     /// live-arrival only (the sweep-derived kind is a disjoint data path,
     /// #308). Mnemonic: `H`, this display's own y-axis label.
@@ -116,8 +125,9 @@ pub struct Binding {
 /// Key ledger (so the single-pass assignment is auditable at a glance):
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
 /// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` `Tab` `X` (#321: cycle
-/// trace focus / close a stored run) + stimulus `Space` `Enter` `Esc`
-/// `↑` `↓`.
+/// trace focus / close a stored run) `,` `.` `T` (#669: nudge / type the
+/// delay — `T` is spectrum's too, the views never share a table) +
+/// stimulus `Space` `Enter` `Esc` `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
     Binding {
@@ -238,9 +248,27 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         key: Key::E,
-        action: Action::Relock,
+        action: Action::InsertDelay,
         scope: Scope::Transfer,
-        description: "Re-estimate delay (flushes averages)",
+        description: "Insert found delay (Shift: find again)",
+    },
+    Binding {
+        key: Key::Comma,
+        action: Action::NudgeDelayEarlier,
+        scope: Scope::Transfer,
+        description: "Delay one sample earlier",
+    },
+    Binding {
+        key: Key::Period,
+        action: Action::NudgeDelayLater,
+        scope: Scope::Transfer,
+        description: "Delay one sample later",
+    },
+    Binding {
+        key: Key::T,
+        action: Action::TypeDelay,
+        scope: Scope::Transfer,
+        description: "Type a delay in samples (T again to apply)",
     },
     Binding {
         key: Key::H,
@@ -349,6 +377,8 @@ fn key_label(key: Key) -> String {
         Key::Space => "Space".to_string(),
         Key::Enter => "Enter".to_string(),
         Key::Escape => "Esc".to_string(),
+        Key::Comma => ",".to_string(),
+        Key::Period => ".".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -480,7 +510,15 @@ mod tests {
     fn help_text_never_contains_a_raw_debug_name() {
         for view in [ViewId::Spectrum, ViewId::Transfer] {
             let text = help_text(view);
-            for name in ["Slash", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"] {
+            for name in [
+                "Slash",
+                "ArrowLeft",
+                "ArrowRight",
+                "ArrowUp",
+                "ArrowDown",
+                "Comma",
+                "Period",
+            ] {
                 assert!(!text.contains(name), "{view:?} help leaked {name}");
             }
         }

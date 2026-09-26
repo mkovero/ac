@@ -238,6 +238,52 @@ pub fn format_delay_readout(delay_ms: f64) -> DelayReadout {
     }
 }
 
+/// The operator's delay control on a live frame (#669): the setting, the
+/// live IR's residual against it (Smaart's Delta Delay), and who set it.
+///
+/// `None` on [`TransferInput::delay_control`] for a snapshot derivation, a
+/// daemon predating #669, or a pair with no delay yet — there is nothing to
+/// insert or nudge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelayControl {
+    /// The held delay, in samples (`delay_samples`).
+    pub samples: i64,
+    /// Peak of the live IR as an offset from [`Self::samples`]
+    /// (`delay_residual`); `None` on a frame that carries none.
+    pub residual: Option<i64>,
+    /// Whether [`Self::samples`] was set by the operator (`delay_operator`).
+    pub operator: bool,
+}
+
+impl DelayControl {
+    pub fn from_wire_frame(frame: &TransferFrame) -> Option<DelayControl> {
+        (frame.delay_locked == Some(true)).then_some(DelayControl {
+            samples: frame.delay_samples,
+            residual: frame.delay_residual,
+            operator: frame.delay_operator,
+        })
+    }
+
+    /// What "Insert" sends as `set_delay`: the absolute IR-peak arrival.
+    pub fn insert_samples(&self) -> Option<i64> {
+        self.residual.map(|r| self.samples + r)
+    }
+
+    /// `"set · find +12 smp (+0.25 ms)"` — where the delay came from, and
+    /// what Find reads against it right now.
+    pub fn readout(&self, sr: u32) -> String {
+        let source = if self.operator { "set" } else { "found" };
+        match self.residual {
+            Some(r) if sr > 0 => {
+                let ms = r as f64 * 1000.0 / sr as f64;
+                format!("{source} · find {r:+} smp ({ms:+.2} ms)")
+            }
+            Some(r) => format!("{source} · find {r:+} smp"),
+            None => format!("{source} · find —"),
+        }
+    }
+}
+
 /// One band's resolution-and-settling label (#224): where it sits on the
 /// shared log-frequency axis, and the exact string to draw there.
 ///
@@ -442,6 +488,14 @@ pub struct TransferScene {
     pub phase_axis: crate::ticks::Axis,
     /// `"2.50 ms"` — τ_sess, milliseconds only (#391).
     pub delay_readout: String,
+    /// [`DelayControl::readout`] on a live frame with a delay; `None`
+    /// otherwise (#669).
+    pub delay_control_readout: Option<String>,
+    /// The held delay in samples, for a ±1 nudge; `None` without a
+    /// [`DelayControl`].
+    pub delay_samples: Option<i64>,
+    /// What "Insert" sends ([`DelayControl::insert_samples`]).
+    pub delay_insert_samples: Option<i64>,
     /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
     /// (#229).
     ///
@@ -586,6 +640,8 @@ pub struct TransferInput {
     /// [`TransferFrame::delay_locked`]'s three-way meaning. Consumed by
     /// [`crate::fault`], not by the delay readout itself (#391).
     pub delay_locked: Option<bool>,
+    /// The operator's delay control (#669); `None` off the live path.
+    pub delay_control: Option<DelayControl>,
     /// This pair's channel numbers — distinct from [`Self::channel_role`],
     /// which is a display label, not a wire identity.
     pub meas_channel: i64,
@@ -728,6 +784,7 @@ impl TransferInput {
             coherence,
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
+            delay_control: DelayControl::from_wire_frame(frame),
             meas_channel: frame.meas_channel,
             ref_channel: frame.ref_channel,
             meas_peak_dbfs: frame.meas_peak_dbfs,
@@ -812,6 +869,7 @@ impl TransferInput {
             // derivation states the delay it was built with and makes no
             // claim about whether it was a measured lock.
             delay_locked: None,
+            delay_control: None,
             // `PairDerivation` carries no wire channel identity — a
             // `channel_role` label is all the caller has (see above). `-1`
             // is never a real channel number.
@@ -967,6 +1025,9 @@ impl TransferScene {
             mag_axis: crate::ticks::db_axis(db_min, db_max),
             phase_axis: crate::ticks::phase_axis(),
             delay_readout: delay.delay_readout,
+            delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
+            delay_samples: input.delay_control.map(|c| c.samples),
+            delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
             smoothing_readout: modes.smoothing.label(),
             calibration_readout: input.calibration.clone(),
             // Derived from the ladder alone, never from the frame's columns:
@@ -1271,6 +1332,7 @@ mod tests {
                 coherence: vec![coh; 3],
                 delay_ms: 0.0,
                 delay_locked: Some(true),
+                delay_control: None,
                 meas_channel: 0,
                 ref_channel: 1,
                 meas_peak_dbfs: Some(-20.0),
@@ -1359,6 +1421,54 @@ mod tests {
     /// rig figures (`work/rig/rig-243-343-results.md`, 2026-08-18).
     // ─── delay readout — ms only (#391) ─────────────────────────────────
 
+    // ─── operator delay control (#669) ─────────────────────────────────
+
+    #[test]
+    fn delay_control_reads_source_and_residual() {
+        let c = DelayControl {
+            samples: 470,
+            residual: Some(12),
+            operator: true,
+        };
+        assert_eq!(c.readout(48_000), "set · find +12 smp (+0.25 ms)");
+        assert_eq!(c.insert_samples(), Some(482));
+        let found = DelayControl {
+            operator: false,
+            residual: Some(-3),
+            ..c
+        };
+        assert_eq!(found.readout(48_000), "found · find -3 smp (-0.06 ms)");
+        let none = DelayControl {
+            residual: None,
+            ..c
+        };
+        assert_eq!(none.readout(48_000), "set · find —");
+        assert_eq!(none.insert_samples(), None);
+    }
+
+    /// Nothing to insert or nudge on a pair without a delay.
+    #[test]
+    fn delay_control_is_absent_without_a_held_delay() {
+        let mut f: TransferFrame = serde_json::from_str(
+            r#"{"type":"transfer_stream","delay_samples":400,"delay_residual":0,
+                "delay_operator":false,"delay_locked":false,
+                "meas_channel":0,"ref_channel":1,"sr":48000,
+                "spec_freqs":[],"meas_spectrum":[],"ref_spectrum":[],"spl":null,
+                "spl_weighting":"Z","spl_integration":"fast"}"#,
+        )
+        .unwrap();
+        assert_eq!(DelayControl::from_wire_frame(&f), None);
+        f.delay_locked = Some(true);
+        assert_eq!(
+            DelayControl::from_wire_frame(&f),
+            Some(DelayControl {
+                samples: 400,
+                residual: Some(0),
+                operator: false
+            })
+        );
+    }
+
     #[test]
     fn delay_readout_is_ms_only_regardless_of_lock_state() {
         // #391 removed the ms → m conversion entirely — the readout is
@@ -1433,6 +1543,7 @@ mod tests {
             coherence: vec![0.9; 3],
             delay_ms: 0.0,
             delay_locked: Some(true),
+            delay_control: None,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1486,6 +1597,7 @@ mod tests {
             coherence: vec![0.9, 0.9, 0.9, 0.9],
             delay_ms: 0.0,
             delay_locked: Some(true),
+            delay_control: None,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,

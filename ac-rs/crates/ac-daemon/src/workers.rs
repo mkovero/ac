@@ -105,35 +105,57 @@ impl DriveState {
     }
 }
 
-/// Session-wide re-lock request for a running `transfer_stream` worker
-/// (#226). A monotone generation counter rather than a bool, so two
-/// requests arriving inside one worker tick cannot be swallowed into one
-/// and so the worker-side test is deterministic: the worker compares
-/// against the last generation it consumed, not against a flag a second
-/// press before the next poll would silently coalesce into the first.
-pub struct RelockRequest {
-    generation: AtomicU64,
+/// One `set_delay` request for a running `transfer_stream` session (#669).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelayCmd {
+    /// Pair index in launch order; `None` applies to every pair.
+    pub pair: Option<usize>,
+    pub action: DelayAction,
 }
 
-impl RelockRequest {
-    pub fn new() -> RelockRequest {
-        RelockRequest {
-            generation: AtomicU64::new(0),
+/// What a `set_delay` request does to a pair's held delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelayAction {
+    /// Hold this delay, in samples, operator-set.
+    Set(i64),
+    /// Move the held delay by this many samples, operator-set. Relative so
+    /// two nudges between frames both land — a client computing the value
+    /// from the last frame it drew would send the same one twice. A pair
+    /// with no delay yet has nothing to move.
+    Step(i64),
+    /// Discard the held delay so the session finds it again from the
+    /// unaligned live IR — what `relock` (#226) did.
+    Find,
+}
+
+/// `set_delay` requests waiting for a running `transfer_stream` worker
+/// (#669). A queue rather than a latest-value slot, so two requests landing
+/// inside one worker tick both apply, in order — a nudge followed by a
+/// second nudge must move the delay twice.
+pub struct DelayRequests {
+    queue: Mutex<Vec<DelayCmd>>,
+}
+
+impl DelayRequests {
+    pub fn new() -> DelayRequests {
+        DelayRequests {
+            queue: Mutex::new(Vec::new()),
         }
     }
 
-    /// Ask for a re-lock. The worker's next poll sees a changed
-    /// generation even if a prior request was already consumed this tick.
-    pub fn request(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
+    pub fn push(&self, cmd: DelayCmd) {
+        with_unpoisoned(&self.queue, |q| q.push(cmd));
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+    /// Everything queued since the previous drain, oldest first.
+    pub fn drain(&self) -> Vec<DelayCmd> {
+        let mut out = Vec::new();
+        with_unpoisoned(&self.queue, |q| out = std::mem::take(q));
+        out
     }
 }
 
-impl Default for RelockRequest {
+impl Default for DelayRequests {
     fn default() -> Self {
         Self::new()
     }

@@ -1533,8 +1533,8 @@ has no reference configured.
 **Flight time from the live reference (#544, schema v12).**
 `IrStats::flight_time_s = arrival_s − (reference_latency.tau_s + offset_s)`,
 where `offset_s` comes from `report.inter_pair_offset`. It is produced only
-when (1) the arrival's cross-check and distance check (#537, below) do not
-withhold it, (2) `reference_latency` is `measured` — it passed the #471
+when (1) the distance check (#537, below) does not withhold it — the
+arrival's cross-check only warns since #669 — (2) `reference_latency` is `measured` — it passed the #471
 derived floor and the edge and xrun gates — and (3) the offset is `measured`
 or `identity`. `IrStats::latency_basis` names the basis: `Live` with the
 reference τ and offset, or `Withheld` with the first reason in this order —
@@ -1551,7 +1551,7 @@ inside the interface mixer (one leg through the DSP mixer, the other direct).
 Those are carried by the offset only for the exact topology it was measured
 on, and refused everywhere else.
 
-**Band-limited arrival (#537).** `IrStats::arrival_s` / `delay_samples` are
+**Band-limited arrival (#537), one picker with transfer (#669).** `IrStats::arrival_s` / `delay_samples` are
 read at `IrStats::arrival_index`: the magnitude peak of `linear_ir`
 high-passed at 2 kHz with zero phase (a 4th-order Butterworth run forward
 and backward, `ArrivalSource::BandLimitedPeak { corner_hz }`), not the
@@ -1560,10 +1560,14 @@ corner**, not an identified direct path: on a real loudspeaker it moves
 with the corner (the same pupu captures read +634 samples of flight at
 1 kHz and +596 at 2 kHz), and in the residual cases stated below it lands
 on a later path than the first. A zero-phase filter leaves a pure delay's peak on the same sample,
-so the arrival still pairs with `calibrate`'s peak-picked τ. When the
+so the arrival still pairs with `calibrate`'s peak-picked τ. `transfer_stream`'s
+start-up Find and `delay_residual` take the same pick on the live IR
+(`band_limited_peak`, the corner above), so `plot_ir` and transfer give the
+same delay on one path: on pupu at 1 m the sweep IR's broadband peak was a
+room mode 2302 samples after the direct sound, while both high-passed picks
+landed within one sample of each other. When the
 payload's `f2_hz` (capped at Nyquist) is below twice the corner, the arrival
-is the broadband peak (`ArrivalSource::Peak`) and the flight time is
-withheld. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
+is the broadband peak (`ArrivalSource::Peak`), with a warning. `peak_index`, `pre_impulse_snr_db` and `verdict` stay broadband,
 but since #550 the floor under `pre_impulse_snr_db` ends one guard band
 before the band-limited arrival when that arrival is trusted and precedes
 the peak, and before the peak otherwise (`IrStats::pre_impulse_floor_anchor`,
@@ -1572,19 +1576,22 @@ floor before the arrival, so a pick inside the guard band does not count) and
 its standing is not `BandLimitedSnrLow`.
 Derived on read, so a report written earlier re-reads with the new figure.
 `IrStats::arrival_cross_check` guards the pick and compares it with the
-broadband IR, first match wins: `BandLimitUnavailable` (withheld);
+broadband IR, first match wins. Since #669 none of them withholds the flight
+time: a standing that disputes the arrival
+(`ArrivalCrossCheck::disputes_the_arrival`) is printed as a `warning:` row
+under it — the operator owns the delay. The standings: `BandLimitUnavailable`;
 `BandLimitedSnrUnmeasured` (#577: the high-passed pick sits inside the guard
-band, so no floor precedes it and `band_limited_snr_db` is `None` — withheld);
+band, so no floor precedes it and `band_limited_snr_db` is `None`);
 `BandLimitedSnrLow` (the high-passed IR's pre-impulse SNR
 `band_limited_snr_db` is below 35 dB — ISO 3382-1:2009 §A.3.4's −20 dB
-trigger above the background's peaks — withheld); `ArrivalAmbiguous`
+trigger above the background's peaks); `ArrivalAmbiguous`
 (another local maximum of the high-passed IR within one corner period is
-less than 3 dB below the pick — withheld); `EarlierComparable` (a
+less than 3 dB below the pick); `EarlierComparable` (a
 high-passed sample more than one corner period before the arrival is within
-20 dB of it — withheld); `BroadbandEarlier` (the broadband maximum is more
-than 2.0 ms earlier — withheld); `BroadbandLater` (the earliest broadband
+20 dB of it); `BroadbandEarlier` (the broadband maximum is more
+than 2.0 ms earlier); `BroadbandLater` (the earliest broadband
 peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
-than 2.0 ms later — produced and marked); `Agrees`. The onset diagnostic
+than 2.0 ms later — marked); `Agrees`. The onset diagnostic
 searches before the arrival, not the broadband peak.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
@@ -2976,22 +2983,23 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "delay_samples":   <int>,
   "delay_ms":        <float>,
 
-  // Additive (#227) — whether `delay_samples` is a measured lock.
-  "delay_locked":    <bool>,             // false while the pair is still warming
-                                          // up, and when the estimator refused to
-                                          // lock (no sufficiently prominent
-                                          // cross-correlation peak: unpatched
-                                          // reference, dead mic, or two inputs
-                                          // carrying unrelated sources).
-                                          //
-                                          // `delay_samples` is never negative on an
-                                          // accepted lock: the mic cannot lead the
-                                          // electrical reference, so the estimator
-                                          // selects over non-negative lags only. A
-                                          // peak outside that range is reported —
-                                          // `noncausal_peak_lag` below — but never
-                                          // selected, and it does not by itself
-                                          // cause a refusal.
+  // The pair's delay setting (#669). Found once at session start — the
+  // peak of the UNALIGNED live impulse response, Smaart's Delay Finder rule,
+  // taken on the IR high-passed at 2 kHz as `plot_ir` takes its arrival
+  // (`band_limited_peak`, see `plot_ir`) — or
+  // set by a client with `set_delay`. The daemon never moves a delay by
+  // itself after that, except to re-find one it found against silence when
+  // the drive comes on (see `set_drive`). The operator owns the delay.
+  "delay_locked":    <bool>,             // whether `delay_samples` is a held
+                                          // delay, found or set. False while the
+                                          // pair is still warming up, and when
+                                          // its live IR had no peak at all (a
+                                          // silent leg: unpatched reference,
+                                          // muted source). There is no other
+                                          // refusal: two unrelated inputs still
+                                          // have a highest IR peak, and it is
+                                          // taken — coherence, not a gate, says
+                                          // the measurement is not of one path.
                                           //
                                           // When false, `delay_samples` is 0 and
                                           // the pair is measured UNALIGNED — the
@@ -3002,145 +3010,41 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
 
-  // Additive (#238) — how many delay estimates this pair has completed,
-  // accepted or refused. 0 before the first attempt, and absent entirely on
-  // a daemon predating #238 (consumers must default it to 0, never to "it
-  // ran": absence is not evidence that the estimator answered).
+  // Additive (#669) — Smaart's Delta Delay: the peak of this frame's live
+  // IR as a signed offset in samples from `delay_samples`. The live IR is
+  // computed after alignment, so this is what is left over: 0 when the
+  // setting sits on the IR peak, +k when the peak is k samples later. The
+  // absolute IR-peak arrival is `delay_samples + delay_residual`; a client's
+  // "Find" reads it and "Insert" sends that sum as `set_delay`. Same
+  // high-passed pick as the start-up Find. Aligning a
+  // delay speaker to the main is reading this with each one playing.
   //
-  // 0 is not observable from a #238 daemon: the same full-ring condition
-  // gates the first estimate and the first published frame, so every frame a
-  // subscriber receives already carries >= 1 (asserted in it_protocol.rs).
-  // It is the default for the field's absence, not a state to build a warmup
-  // display around.
-  "delay_attempts":  <int>,              // the estimator has answered N times
-                                          //
-                                          // This is what separates warming up
-                                          // from refusing. `delay_locked` is
-                                          // false for both, so the flag alone
-                                          // cannot carry it, and a fault
+  // Range ±0.5 s (the 1 s Welch segment); a true delay outside it wraps.
+  // `null` on a settling frame and on a silent leg. Sample-exact: taken from
+  // the full-resolution IR, not the downsampled `visualize/ir` sidecar.
+  "delay_residual":  <int> | null,
+
+  // Additive (#669) — true when `delay_samples` was set by `set_delay`,
+  // false when the daemon found it. An operator-set delay survives every
+  // drive edge.
+  "delay_operator":  <bool>,
+
+  // Additive (#238) — how many start-up Finds this pair has completed, with
+  // or without a peak. 0 before the first, and absent entirely on a daemon
+  // predating #238 (consumers must default it to 0, never to "it ran").
+  "delay_attempts":  <int>,              // This is what separates warming up
+                                          // from a silent leg. `delay_locked`
+                                          // is false for both, and a fault
                                           // indicator that paints on warmup
                                           // gets ignored (#228, #238).
                                           //
-                                          // The first attempt runs only once
-                                          // the rings hold a full Welch
-                                          // segment, so a clock started from
-                                          // this field starts from the first
-                                          // moment a lock was possible — not
-                                          // from session start.
-                                          //
                                           // MONOTONE FOR THE LIFE OF THE
-                                          // PAIR. A re-lock (#226) adds
-                                          // attempts and must never reset the
-                                          // count: a consumer that reads
-                                          // "has the estimator answered" from
-                                          // it would see a locked-then-
-                                          // refusing pair fall back to
-                                          // "warming up", which is silence on
-                                          // the fault indicator — the blank
-                                          // window #238 removed, reappearing
-                                          // only in the sessions #226 is for.
-                                          //
-                                          // WHY THIS IS NOT `delay_evidence`
-                                          // BY ANOTHER NAME. The rule below
-                                          // forbids gating on the evidence,
-                                          // including reading its
-                                          // null-versus-present to infer that
-                                          // an attempt happened. That rule
-                                          // protects the estimator's
-                                          // thresholds and its choice of what
-                                          // to publish. A count carries no
-                                          // threshold: it says the estimator
-                                          // answered, not how close the answer
-                                          // came. The estimator may change
-                                          // NOISE_FLOOR_PROMINENCE, its search
-                                          // range, its peak rule, or refuse
-                                          // for a reason not yet invented, and
-                                          // every consumer of this field stays
-                                          // correct. Anything that wants to
-                                          // know *why* it refused is gating,
-                                          // and belongs on the estimator's
-                                          // side of the line.
-
-  // Additive (#227) — the evidence the lock decision was made on, present
-  // whether the estimate was accepted or refused. `null` before the first
-  // attempt. DIAGNOSTIC ONLY: nothing downstream may gate on any of it, the
-  // thresholds are the estimator's to own.
-  //
-  // This exists so the estimator's thresholds can be set from recorded
-  // captures instead of another physical rig session (handoff-rig-session-2
-  // Run C). A refusal's evidence is the valuable case — it is what separates
-  // "move the microphone" from "the threshold is wrong".
-  //
-  // REPEATED EVERY FRAME even though it only changes when a lock is
-  // attempted. That is deliberate, not an oversight to optimise away: DATA
-  // is a PUB socket, the lock happens once at warmup, and a subscriber that
-  // attaches a second later would never see a once-published value. A
-  // capture script or a reconnecting viewer must get the evidence from the
-  // next frame it receives. Measured cost is 1220 bytes against a ~190 kB
-  // frame — 0.64%, against six 2000-point float arrays that dominate it.
-  "delay_evidence": {
-    "prominence":   <float>,             // peak_value / median_value. Accepted at
-                                          // >= 24. Sets NOISE_FLOOR_PROMINENCE.
-    "peak_lag":     <int>,               // lag of the strongest CAUSAL peak — what a
-                                          // global-maximum rule would return over the
-                                          // range the estimator may select from.
-                                          // Differs from `delay_samples` exactly
-                                          // when earliest-peak moved the estimate
-                                          // off a reflection. Every threshold is
-                                          // measured against this.
-    "peak_value":   <float>,             // |rho| at peak_lag
-    "noncausal_peak_lag":   <int>,       // lag of the strongest peak among the
-    "noncausal_peak_value": <float>,     // NEGATIVE lags, and |rho| there. Nothing
-                                          // physical arrives before the reference
-                                          // carries it, so this is never selected
-                                          // and no threshold is measured against it.
-                                          // It is published because a peak there is
-                                          // a real observation: #216's ring skew put
-                                          // every session 0.2 s negative, and a
-                                          // stimulus onset inside the correlation
-                                          // window throws ripples across the lag
-                                          // range. Both show as this standing clear
-                                          // of `negative_lag_median`. Exceeding
-                                          // `peak_value` is NOT a refusal on its own
-                                          // — rig session 2's -826 ms lock had the
-                                          // true arrival at +4.52 ms, still there
-                                          // and still recoverable. 0.0 when the
-                                          // search range holds no negative lags.
-    "median_value": <float>,             // median |rho| over the searched lags
-    "negative_lag_median": <float>,      // median |rho| over the NEGATIVE lags only,
-                                          // where a causal path puts no signal at
-                                          // all. `median_value` is taken over every
-                                          // lag, and on a reverberant path most lags
-                                          // hold reverberation — so the floor
-                                          // `prominence` divides by is contaminated
-                                          // by the thing it discriminates against.
-                                          // This one is not. Published so the next
-                                          // session can re-threshold offline; it
-                                          // decides nothing today. 0.0 when the
-                                          // search range holds no negative lags.
-    "candidates": [                      // local maxima within 12 dB of the peak,
-      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept — PLUS
-    ]                                    // `delay_samples`, `peak_lag` and
-  },                                     // `noncausal_peak_lag`, always present
-                                          // whatever their rank, so a list may hold
-                                          // up to 35. Lags are unique: the extras are
-                                          // inserted only when the rank cut dropped
-                                          // them, so a replay may sum or histogram
-                                          // the list without double-counting. Rank
-                                          // alone dropped the
-                                          // accepted arrival at 3 m, where it was
-                                          // weaker than 32 peaks of the reverberant
-                                          // cluster: the capture then could not
-                                          // reproduce the daemon's own decision,
-                                          // which is the whole point of recording it.
-                                          // 12 dB is wider than the 6 dB the
-                                          // estimator accepts, on purpose: the
-                                          // arrivals that say whether 6 dB is too
-                                          // generous are the ones it rejects.
-                                          // Sets DIRECT_PEAK_FRACTION — prominence
-                                          // alone cannot, since it says nothing
-                                          // about where the direct arrival sits
-                                          // relative to the reflection beating it.
+                                          // PAIR. A re-find (`set_delay` with
+                                          // `samples: null`) adds attempts and
+                                          // must never reset the count, or a
+                                          // found-then-silent pair would fall
+                                          // back to "warming up" — silence on
+                                          // the fault indicator.
 
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
@@ -3284,22 +3188,22 @@ and those frames say so: `n_averages` is **0** and `freqs`,
 `magnitude_db`, `phase_deg`, `coherence`, `spec_freqs`, `meas_spectrum`
 and `ref_spectrum` are all **empty arrays**, with `spl` and `mtw` `null`.
 Every other field is real: `drive`, `meas_peak_dbfs` / `ref_peak_dbfs`,
-`cal_tags`, `delay_attempts` (0 — the estimator has not been asked yet),
+`cal_tags`, `delay_attempts` (0 — no Find has run yet),
 `sr`, and the channel numbers. The key set is identical to an analysing
 frame's; only the contents differ.
 
 Read `n_averages > 0` to select frames that carry an estimate. Do not
 read an empty `magnitude_db` as a fault: it means "not yet", which is
 exactly the distinction `n_averages` exists to make. `delay_attempts: 0`
-alongside it means the estimator has not run, not that it refused —
-`delay_attempts >= 1` with `delay_locked: false` is a refusal (#227/#238).
+alongside it means no Find has run yet — `delay_attempts >= 1` with
+`delay_locked: false` is a silent leg, whose live IR had no peak (#238, #669).
 
 This is why publication no longer waits: the drive state, the capture
 peaks and the attempt count never depended on the analysis window, and
 withholding them meant that for the first second of a session a client
 could not distinguish a daemon that had not started from one whose drive
-had already dead-manned. The delay estimate keeps its own gate at one
-segment, because a cross-correlation needs one.
+had already dead-manned. The start-up Find keeps its own gate at one
+segment, because the live IR it reads needs one.
 
 **Frame rate is not analysis rate.** Frames ship every capture tick,
 about 20/s per pair. The Welch estimate behind `freqs`, `magnitude_db`,
@@ -3313,7 +3217,8 @@ tells that apart from a stationary DUT.
 What does move every frame: `mtw` (the ladder is a push pipeline fed the
 fresh capture buffers), `meas_peak_dbfs` / `ref_peak_dbfs`, `drive`,
 `spl` (the F/S integrator steps every tick over the held broadband
-level), `delay_locked` and `delay_attempts`.
+level), `delay_locked`, `delay_operator` and `delay_attempts`.
+`delay_residual` moves with the analysis, once per hop.
 
 The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
 it was derived from.
@@ -3388,7 +3293,7 @@ toggled on/off in the UI without re-issuing the transfer command.
   "meas_channel":  <int>,
   "delay_samples": <int>,
   "delay_ms":      <float>,
-  "delay_locked":  <bool>,           // #227 — see transfer_stream above. When
+  "delay_locked":  <bool>,           // see transfer_stream above. When
                                      // false the IR is UNALIGNED, so the peak
                                      // sits at the true path delay rather than
                                      // at t=0.
@@ -3502,51 +3407,67 @@ UI-driven session goes through `set_drive`, so the UI is always covered.
 **Sessions always launch with drive off** unless the legacy launch-time
 `drive` param says otherwise. `ac transfer` never sets it.
 
-An `on: false → true` transition discards a per-pair delay lock **that
-was acquired while the drive was off**, flushing that pair's averages and
-re-settling (2.56 s at the bottom stage). A lock acquired while driving is
-kept, so the dead-man expiring and the client resuming does not disturb a
-running measurement. `on: true → false`, a level change, and a repeated
-`on: true` keepalive never discard a lock. `delay_attempts` counts the
-re-estimate and never resets. See `relock`, below, for the manual half of
-this (#226).
+An `on: false → true` transition discards a per-pair delay **that the
+daemon found while the drive was off** — a Find against silence — and finds
+it again, flushing that pair's averages and re-settling (2.56 s at the
+bottom stage). A delay found while driving is kept, so the dead-man
+expiring and the client resuming does not disturb a running measurement,
+and a delay set with `set_delay` is never discarded (#669). `on: true →
+false`, a level change, and a repeated `on: true` keepalive never discard a
+delay. `delay_attempts` counts the re-find and never resets.
 
 ---
 
-### `relock`
+### `set_delay`
 
-Discards every pair's held delay lock in the **running** `transfer_stream`
-session (#226), so each pair's next tick retries acquisition from
-scratch. A held lock is a maintained quantity, not a cached one: this is
-the operator half of what invalidates it — the other half is the drive
-off→on transition documented under `set_drive`, above, and both go
-through the same flush.
+Sets, or re-finds, the delay the **running** `transfer_stream` session
+aligns with (#669). The operator owns the delay, as in Smaart: the daemon
+finds it once at start and publishes the live IR's residual
+(`delay_residual`) on every frame; a client inserts that, types a value,
+or nudges by one sample — all through this command. Replaces `relock`
+(#226).
 
 Dispatched like `set_drive`/`snapshot`: targets a live worker rather than
 spawning one, so it does not go through the busy guard.
 
 **CTRL**
 ```json
-{ "cmd": "relock" }
+{ "cmd": "set_delay", "samples": <int> | null, "pair": <int> }
+{ "cmd": "set_delay", "step": <int>, "pair": <int> }
 ```
 
-No arguments — session-wide, not per-pair. A per-pair variant is scope
-this command does not need.
+- `samples` (required): an integer holds that delay, marked
+  `delay_operator: true`, which no drive edge discards. `null` discards the
+  held delay so the pair finds it again from the unaligned live IR — the old
+  `relock`.
+- `step` (instead of `samples`): move the held delay by that many samples,
+  operator-set. Applied by the daemon in arrival order, so two nudges sent
+  before the next frame both land. A pair with no delay yet is left alone.
+- `pair` (optional): a pair index in launch order. Absent: every pair.
+
+Setting the value a pair already holds only marks it operator-set; a
+different value restarts that pair's `mtw` ladder at the new offset (the
+offset is applied before decimation).
 
 **Reply**
 ```json
-{ "ok": true }
+{ "ok": true, "pair": <int> | null }
 ```
 
 **Errors**
 ```json
 { "ok": false, "error": "no transfer_stream session running" }
+{ "ok": false, "error": "'samples' (integer or null) or 'step' (integer) required" }
+{ "ok": false, "error": "give 'samples' or 'step', not both" }
+{ "ok": false, "error": "'samples' must be an integer or null" }
+{ "ok": false, "error": "'step' must be an integer" }
+{ "ok": false, "error": "'pair' must be a non-negative integer" }
+{ "ok": false, "error": "'pair' 2 out of range: session has 1 pair(s)" }
 ```
 
 **What it does not touch.** `delay_attempts` keeps counting and never
-resets — a re-lock is another attempt, not evidence the pair was never
-asked. `delay_evidence` (the last attempt's prominence/peak data) is
-overwritten by the next attempt, not cleared by the request itself.
+resets — a re-find is another attempt, not evidence the pair was never
+asked.
 
 ---
 

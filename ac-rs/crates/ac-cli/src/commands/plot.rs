@@ -1529,8 +1529,8 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
                 lines.extend(check.map(|c| format!("{CONT_INDENT}check: {c}")));
                 lines
             }
-            // Only the arrival or distance guards withhold with a live
-            // basis, and `flight_time_block` names those before calling here.
+            // Only the distance guard withholds with a live basis, and
+            // `flight_time_block` names it before calling here.
             None => vec![format!("{label}withheld")],
         };
     };
@@ -1549,13 +1549,14 @@ fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String
     lines
 }
 
-/// The `flight time` block with #537's guards folded in. A reason that
-/// withholds the flight time on the IR side (the cross-check) or against the
-/// typed distance takes the `withheld` row — fixing the latency would not
-/// help — in that order, then the latency basis (#544); each further reason
-/// gets one `also:` row. Otherwise [`flight_time_line`] prints, with the
-/// standing's mark (if any) directly under the value, above the drift line:
-/// the mark qualifies the arrival, which is upstream of the latency.
+/// The `flight time` block with #537's guards folded in. Only the typed
+/// distance and the latency basis (#544) withhold: a distance reason takes
+/// the `withheld` row — fixing the latency would not help — and the basis an
+/// `also:` row. A cross-check standing that disputes the arrival withholds
+/// nothing since #669: it prints as a `warning:` row directly under the
+/// value (or as an `also:` row under a withheld one), like `BroadbandLater`'s
+/// mark, above the drift line — both qualify the arrival, which is upstream
+/// of the latency.
 fn flight_time_block(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::{
         arrival_snr_low_reason, ArrivalCrossCheck, ARRIVAL_EARLIER_COMPARABLE_DB,
@@ -1581,21 +1582,29 @@ fn flight_time_block(stats: &ac_core::measurement::report::IrStats) -> Vec<Strin
         }
         ArrivalCrossCheck::BroadbandLater { .. } | ArrivalCrossCheck::Agrees { .. } => None,
     };
-    let distance = distance_withheld_reason(stats);
-    if cross_check.is_some() || distance.is_some() {
-        let mut reasons = cross_check.into_iter().chain(distance);
-        let first = reasons.next().expect("at least one reason");
+    if let Some(first) = distance_withheld_reason(stats) {
         let mut lines = vec![format!(
             "{}withheld \u{2014} {first}",
             label_prefix("flight time")
         )];
         let basis = basis_withheld_reason(stats).map(|(reason, _)| reason);
-        for also in reasons.chain(basis) {
+        for also in cross_check.into_iter().chain(basis) {
             lines.push(format!("{CONT_INDENT}also: {also}"));
         }
         return lines;
     }
     let mut lines = flight_time_line(stats);
+    if let Some(warning) = cross_check {
+        // Under a produced value, directly beneath it; under a withheld
+        // one, after its `check:` row, so the row and its places stay
+        // together.
+        let at = if stats.flight_time_s.is_some() {
+            1
+        } else {
+            lines.len()
+        };
+        lines.insert(at, format!("{CONT_INDENT}warning: {warning}"));
+    }
     if let ArrivalCrossCheck::BroadbandLater { gap } = stats.arrival_cross_check {
         lines.insert(
             1,
@@ -4023,11 +4032,8 @@ mod tests {
             );
         }
         assert_eq!(
-            flight_time_block(&stats),
-            [format!(
-                "{}withheld \u{2014} {ARRIVAL_SNR_UNMEASURED_REASON}",
-                label_prefix("flight time")
-            )]
+            flight_time_block(&stats)[1],
+            format!("{CONT_INDENT}warning: {ARRIVAL_SNR_UNMEASURED_REASON}")
         );
 
         let mut silent = stats.clone();
@@ -4193,27 +4199,29 @@ mod tests {
             distance_lines(&stats),
             ["  distance      2 m: not checked \u{2014} flight time withheld (above)"]
         );
+        // Withheld upstream: since #669 only the latency basis does that
+        // with a scored distance.
+        let mut stats = withheld(stats, WithheldBasis::NoReference);
         stats.flight_time_s = None;
-        stats.arrival_cross_check = ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 31.2 };
         stats.distance_check = distance_scored(0.5, 198.0);
         assert_eq!(
             distance_lines(&stats),
             ["  distance      0.5 m: not checked \u{2014} flight time withheld (above)"]
         );
         assert_eq!(
-            flight_time_block(&stats),
-            [format!(
-                "{}withheld \u{2014} arrival SNR 31.2 dB, required \u{2265} 35.0 dB",
+            flight_time_block(&stats)[0],
+            format!(
+                "{}withheld \u{2014} no reference loopback configured",
                 label_prefix("flight time")
-            )]
+            )
         );
     }
 
-    /// UX revision 3's precedence: IR side, then distance, then the latency
-    /// basis (#544) — the first takes the `withheld` row, each further reason
-    /// one `also:` row. A moved reference is not a reason any more.
+    /// Precedence since #669: the distance takes the `withheld` row, then
+    /// the arrival's warning and the latency basis (#544) each one `also:`
+    /// row. A moved reference is not a reason any more.
     #[test]
-    fn withheld_reasons_run_cross_check_then_distance_then_basis() {
+    fn withheld_reasons_run_distance_then_warning_then_basis() {
         let mut stats = withheld(
             headline_stats(),
             WithheldBasis::OffsetNotMeasured {
@@ -4237,10 +4245,10 @@ mod tests {
             flight_time_block(&stats),
             [
                 format!(
-                    "{}withheld \u{2014} earlier peak within 20.0 dB (above)",
+                    "{}withheld \u{2014} earlier than 2 m allows (below)",
                     label_prefix("flight time")
                 ),
-                format!("{CONT_INDENT}also: earlier than 2 m allows (below)"),
+                format!("{CONT_INDENT}also: earlier peak within 20.0 dB (above)"),
                 format!("{CONT_INDENT}also: offset not measured for this pair (below)"),
             ]
         );
@@ -4265,7 +4273,6 @@ mod tests {
             margin_db: 0.93,
             offset: -17,
         };
-        stats.flight_time_s = None;
         assert_eq!(
             second_lobe_line(&stats),
             Some(format!(
@@ -4273,11 +4280,8 @@ mod tests {
             ))
         );
         assert_eq!(
-            flight_time_block(&stats),
-            [format!(
-                "{}withheld \u{2014} second lobe within 3.0 dB (above)",
-                label_prefix("flight time")
-            )]
+            flight_time_block(&stats)[1],
+            format!("{CONT_INDENT}warning: second lobe within 3.0 dB (above)")
         );
         stats.arrival_lobe_margin_db = Some(f64::INFINITY);
         stats.arrival_lobe_offset = None;
@@ -4356,58 +4360,60 @@ mod tests {
         assert!(delta[2].contains("tolerance"));
     }
 
-    /// Each withholding standing takes the `withheld` row, naming its
-    /// evidence row.
+    /// #669: a standing that disputes the arrival prints the flight time
+    /// with the reason on a `warning:` row directly under it — never
+    /// `withheld`.
     #[test]
-    fn withholding_standings_name_their_reason_on_the_flight_time_row() {
+    fn disputing_standings_warn_under_the_flight_time() {
         let cases = [
             (
                 ArrivalCrossCheck::BandLimitUnavailable {
                     band_top_hz: 2_000.0,
                     required_hz: 4_000.0,
                 },
-                "withheld \u{2014} sweep ends at 2000 Hz, needs \u{2265} 4000 Hz",
+                "sweep ends at 2000 Hz, needs \u{2265} 4000 Hz",
             ),
             (
                 ArrivalCrossCheck::BandLimitedSnrLow { snr_db: 14.2 },
-                "withheld \u{2014} arrival SNR 14.2 dB, required \u{2265} 35.0 dB",
+                "arrival SNR 14.2 dB, required \u{2265} 35.0 dB",
             ),
             (
                 ArrivalCrossCheck::ArrivalAmbiguous {
                     margin_db: 0.93,
                     offset: -17,
                 },
-                "withheld \u{2014} second lobe within 3.0 dB (above)",
+                "second lobe within 3.0 dB (above)",
             ),
             (
                 ArrivalCrossCheck::EarlierComparable {
                     index: 312,
                     level_db: -14.2,
                 },
-                "withheld \u{2014} earlier peak within 20.0 dB (above)",
+                "earlier peak within 20.0 dB (above)",
             ),
             (
                 ArrivalCrossCheck::BroadbandEarlier { gap: -410 },
-                "withheld \u{2014} broadband peak is earlier (see broadband \u{394})",
+                "broadband peak is earlier (see broadband \u{394})",
             ),
         ];
         for (standing, want) in cases {
-            let mut stats = stats_with(None, ArrivalCheck::Agree);
+            let mut stats = stats_with(Some(596.0 / 96_000.0), ArrivalCheck::Agree);
             stats.arrival_cross_check = standing.clone();
+            let lines = flight_time_block(&stats);
+            assert_eq!(lines[0], flight_time_line(&stats)[0], "{standing:?}");
             assert_eq!(
-                flight_time_block(&stats),
-                vec![format!("{}{want}", label_prefix("flight time"))],
+                lines[1],
+                format!("{CONT_INDENT}warning: {want}"),
                 "{standing:?}"
             );
         }
     }
 
-    /// Withheld for two reasons: the arrival's takes the row, the basis's
-    /// follows on one `also:` row in the flight time row's words (#544). A
-    /// moved reference adds no row — tested against the rejected `also: ref
-    /// Δ is not zero`.
+    /// A basis-withheld flight time keeps its `check:` row with it; the
+    /// arrival's warning follows (#669). A moved reference adds no row —
+    /// tested against the rejected `also: ref Δ is not zero`.
     #[test]
-    fn a_second_reason_follows_on_an_also_row() {
+    fn a_withheld_basis_keeps_its_check_row_and_the_warning_follows() {
         let mut stats = withheld(
             stats_with(None, ArrivalCheck::Agree),
             WithheldBasis::NoReference,
@@ -4417,15 +4423,24 @@ mod tests {
             flight_time_block(&stats),
             vec![
                 format!(
-                    "{}withheld \u{2014} arrival SNR 14.2 dB, required \u{2265} 35.0 dB",
+                    "{}withheld \u{2014} no reference loopback configured",
                     label_prefix("flight time")
                 ),
-                format!("{CONT_INDENT}also: no reference loopback configured"),
+                format!(
+                    "{CONT_INDENT}check: ref out / ref in wiring, README \u{a7} Reference wiring"
+                ),
+                format!("{CONT_INDENT}warning: arrival SNR 14.2 dB, required \u{2265} 35.0 dB"),
             ]
         );
         stats.latency_basis = live_identity();
+        stats.flight_time_s = Some(596.0 / 96_000.0);
         stats.arrival_check = moved_by(16);
-        assert_eq!(flight_time_block(&stats).len(), 1);
+        stats.arrival_cross_check = ArrivalCrossCheck::Agrees { gap: 0 };
+        assert_eq!(
+            flight_time_block(&stats).len(),
+            2,
+            "value and drift rows only"
+        );
     }
 
     /// `EarlierComparable`: the evidence row under the source row.
@@ -4471,7 +4486,7 @@ mod tests {
     /// rows say why they are absent, and there is no `second lobe` row.
     #[test]
     fn band_limit_unavailable_rows_say_why() {
-        let mut stats = stats_with(None, ArrivalCheck::Agree);
+        let mut stats = stats_with(Some(596.0 / 96_000.0), ArrivalCheck::Agree);
         stats.arrival_source = ArrivalSource::Peak;
         stats.band_limited_snr_db = None;
         stats.arrival_lobe_margin_db = None;
@@ -4484,11 +4499,8 @@ mod tests {
         let why = "sweep ends at 2000 Hz, needs \u{2265} 4000 Hz";
         let mut mismatch = stats.clone();
         assert_eq!(
-            flight_time_block(&stats),
-            [format!(
-                "{}withheld \u{2014} {why}",
-                label_prefix("flight time")
-            )]
+            flight_time_block(&stats)[1],
+            format!("{CONT_INDENT}warning: {why}")
         );
         mismatch.arrival_check = ArrivalCheck::Mismatch(TauDisagreement {
             reading1_s: 0.0,
@@ -4498,14 +4510,11 @@ mod tests {
             period_size: Some(256),
             periods: None,
         });
-        // #544: a moved reference is not an `also:` reason.
-        assert_eq!(
-            flight_time_block(&mismatch),
-            [format!(
-                "{}withheld \u{2014} {why}",
-                label_prefix("flight time")
-            )]
-        );
+        // #544: a moved reference is a drift row, not a reason; the
+        // warning stays directly under the value.
+        let rows = flight_time_block(&mismatch);
+        assert_eq!(rows[1], format!("{CONT_INDENT}warning: {why}"));
+        assert!(rows[2].contains("ref \u{394} -3 samples"), "{rows:?}");
         assert_eq!(second_lobe_line(&stats), None);
         assert_eq!(
             arrival_snr_lines(&stats),

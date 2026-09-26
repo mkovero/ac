@@ -697,13 +697,13 @@ fn xcorr(meas: &[f32], refch: &[f32], max_lag: usize) -> Vec<f64> {
 }
 
 /// #204 rev. 2, pin 2: a routed drive *adds* to an external correlated
-/// pair, and `it_relock.rs` locks through that sum. It can because the
+/// pair, and `it_set_delay.rs` locks through that sum. It can because the
 /// generator's noise is seeded per channel, so it is uncorrelated between
 /// meas and ref and the pair's lag still wins. The rejected shape — the
 /// generator block duplicated identically onto both channels, as a real
 /// loopback would carry it — is computed here too: its lag-0 term is the
-/// one that grows, which is what would let relock lock at 0. This records
-/// the coupling between the generator's per-channel seeding and relock's
+/// one that grows, which is what would let a re-find lock at 0. This records
+/// the coupling between the generator's per-channel seeding and a re-find's
 /// lag assertions.
 #[test]
 fn correlated_pair_lag_survives_a_routed_drive() {

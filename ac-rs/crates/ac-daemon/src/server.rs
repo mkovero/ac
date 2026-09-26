@@ -83,12 +83,12 @@ pub struct ServerState {
     /// `snapshot_ring`'s "only while a transfer session runs" rule.
     /// Populated at worker start, cleared at stop.
     pub drive_state: Arc<Mutex<Option<Arc<crate::workers::DriveState>>>>,
-    /// Session-wide re-lock request for the active `transfer_stream`
-    /// session (#226). `None` when no transfer session runs — the
-    /// `relock` handler's precondition is exactly this check, mirroring
+    /// Queued `set_delay` requests for the active `transfer_stream`
+    /// session (#669). `None` when no transfer session runs — the
+    /// `set_delay` handler's precondition is exactly this check, mirroring
     /// `drive_state`'s lifecycle. Populated at worker start, cleared at
     /// stop.
-    pub relock_state: Arc<Mutex<Option<Arc<crate::workers::RelockRequest>>>>,
+    pub delay_requests: Arc<Mutex<Option<Arc<crate::workers::DelayRequests>>>>,
     /// Spooled `.acsnap` files, keyed by `id` (= the file's own sha256 —
     /// content-addressed, so identical snapshots share one spool entry
     /// and no separate ID generator/dependency is needed). Cleared at
@@ -258,7 +258,7 @@ pub fn run(
         cal_reply_tx: Arc::new(Mutex::new(None)),
         snapshot_ring: Arc::new(Mutex::new(None)),
         drive_state: Arc::new(Mutex::new(None)),
-        relock_state: Arc::new(Mutex::new(None)),
+        delay_requests: Arc::new(Mutex::new(None)),
         snapshot_spool: Arc::new(Mutex::new(HashMap::new())),
         playback_ports_cache: Arc::new(Mutex::new(None)),
         capture_ports_cache: Arc::new(Mutex::new(None)),
@@ -843,9 +843,9 @@ const COMMANDS: &[Command] = &[
         run: handlers::set_drive,
     },
     Command {
-        name: "relock",
-        fields: &[],
-        run: handlers::relock,
+        name: "set_delay",
+        fields: &["pair", "samples", "step"],
+        run: handlers::set_delay,
     },
     Command {
         name: "snapshot",

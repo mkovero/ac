@@ -88,7 +88,7 @@ fn apply_mic_curve_linear(
 
 /// Derive H1 + calibrated spectra + SPL for one pair from raw ref/meas
 /// samples. `delay_samples` is the pre-estimated ref↔meas propagation
-/// delay (see `estimate_delay_samples`); `weighting` is the session's
+/// delay (the session's held setting, see `transfer::live_ir_peak_lag`); `weighting` is the session's
 /// (or, for reprocessing, the caller's chosen) SPL weighting curve.
 pub fn derive_pair(
     ref_samples: &[f32],

@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod computes_nothing;
+pub mod delay_entry;
 pub mod fonts;
 pub mod geometry;
 pub mod keys;

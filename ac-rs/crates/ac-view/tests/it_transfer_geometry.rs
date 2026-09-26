@@ -35,6 +35,7 @@ fn masked_scene() -> TransferScene {
         coherence,
         delay_ms: 0.0,
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: None,
@@ -155,6 +156,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         coherence: vec![0.9; N],
         delay_ms: 0.0,
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),
@@ -193,134 +195,101 @@ fn painted_texts(scene: &TransferScene) -> Vec<String> {
     extract_texts(&harness.output().shapes)
 }
 
-/// #228 AC: the indicator's label reaches the painted output verbatim.
+/// A scene over `coherence` everywhere, folded through the caller's
+/// `FaultState` so a transition across frames can be observed.
+fn scene_over(
+    fault: Option<ac_scene::fault::FaultFrame>,
+    coherence: f64,
+    state: &mut FaultState,
+    now_s: f64,
+) -> TransferScene {
+    let inp = TransferInput {
+        freqs: freqs(),
+        magnitude_db: vec![0.0; N],
+        phase_deg: vec![0.0; N],
+        coherence: vec![coherence; N],
+        delay_ms: 0.0,
+        delay_locked: Some(true),
+        delay_control: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        meas_peak_dbfs: Some(-30.0),
+        ref_peak_dbfs: Some(-14.5),
+        channel_role: "meas_0".to_string(),
+        source: Source::Live,
+        sr: 48_000,
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
+        stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Ladder,
+        fault,
+        calibration: None,
+    };
+    let mut meters = (MeterState::default(), MeterState::default());
+    TransferScene::from_input(
+        &inp,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        state,
+        now_s,
+    )
+}
+
+fn driving(delay_locked: bool) -> ac_scene::fault::FaultFrame {
+    ac_scene::fault::FaultFrame {
+        drive: ac_scene::fault::DriveState {
+            on: true,
+            drivable: true,
+        },
+        delay_locked: Some(delay_locked),
+    }
+}
+
+/// #228 AC: the indicator's label and its instruction reach the painted
+/// output verbatim.
 ///
 /// The scene-level tests prove the state machine picks the right row; this
 /// proves the row survives to the screen. Without it, a scene field that
 /// nothing draws would pass every other test in the tree — which is the
 /// same hole the derot scene-accessor test exists to close, one layer up.
 #[test]
-fn a_fault_row_is_painted_verbatim_from_ac_scene() {
-    let refusing = ac_scene::fault::FaultFrame {
-        drive: ac_scene::fault::DriveState {
-            on: true,
-            drivable: true,
-        },
-        delay_locked: Some(false),
-        // The field case #238 unblocked: no lock, so no ladder, so never
-        // settled — the state the display used to paint nothing for.
-        settled: false,
-        delay_attempts: 1,
-    };
-    // Never locked in this session, so the transient row is NO LOCK rather
-    // than LOST LOCK: nothing was lost.
-    let scene = scene_with(Some(refusing), 0.0);
-    assert_eq!(scene.fault, Some(ac_scene::Fault::NoLockYet));
+fn a_fault_row_and_its_instruction_are_painted_verbatim() {
+    let scene = scene_over(Some(driving(true)), 0.1, &mut FaultState::default(), 0.0);
+    assert_eq!(scene.fault, Some(ac_scene::Fault::CheckRouting));
 
     let texts = painted_texts(&scene);
-    assert!(
-        texts
-            .iter()
-            .any(|t| t == ac_scene::Fault::NoLockYet.label()),
-        "the fault label was not painted; texts on screen: {texts:?}"
-    );
-}
-
-/// The persistent row paints its instruction too — the whole point of
-/// separating it from the transient one is that the operator is told to
-/// move something.
-#[test]
-fn the_persistent_row_paints_its_instruction() {
-    let refusing = ac_scene::fault::FaultFrame {
-        drive: ac_scene::fault::DriveState {
-            on: true,
-            drivable: true,
-        },
-        delay_locked: Some(false),
-        // The field case #238 unblocked: no lock, so no ladder, so never
-        // settled — the state the display used to paint nothing for.
-        settled: false,
-        delay_attempts: 1,
-    };
-    // Never locked in this session, so the transient row is NO LOCK rather
-    // than LOST LOCK: nothing was lost.
-    // One FaultState, a frame per retry: escalation is the later of
-    // PERSISTENT_REFUSAL_S and PERSISTENT_REFUSAL_ATTEMPTS (#247), so the
-    // attempt count has to advance with the clock rather than sit at 1.
-    let mut meters = (MeterState::default(), MeterState::default());
-    let mut fault = FaultState::default();
-    let build = |now_s: f64,
-                 attempts: u32,
-                 meters: &mut (MeterState, MeterState),
-                 fault: &mut FaultState| {
-        let inp_fault = Some(ac_scene::fault::FaultFrame {
-            delay_attempts: attempts,
-            ..refusing
-        });
-        let inp = TransferInput {
-            freqs: freqs(),
-            magnitude_db: vec![0.0; N],
-            phase_deg: vec![0.0; N],
-            coherence: vec![0.9; N],
-            delay_ms: 0.0,
-            delay_locked: Some(true),
-            meas_channel: 0,
-            ref_channel: 1,
-            meas_peak_dbfs: Some(-30.0),
-            ref_peak_dbfs: Some(-14.5),
-            channel_role: "meas_0".to_string(),
-            source: Source::Live,
-            sr: 48_000,
-            column_df: Vec::new(),
-            column_window_s: Vec::new(),
-            column_n: Vec::new(),
-            column_bins: Vec::new(),
-            stages: Vec::new(),
-            estimator: ac_scene::transfer::Estimator::Ladder,
-            fault: inp_fault,
-            calibration: None,
-        };
-        TransferScene::from_input(
-            &inp,
-            DisplayModes::new(DerotMode::Session, Smoothing::Off),
-            FREQ_RANGE,
-            DB_RANGE,
-            meters,
-            fault,
-            now_s,
-        )
-    };
-    assert_eq!(
-        build(0.0, 1, &mut meters, &mut fault).fault,
-        Some(ac_scene::Fault::NoLockYet)
-    );
-    // The daemon's 1 Hz retry: attempt n lands at t = n - 1.
-    for n in 2..ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS {
-        assert_eq!(
-            build(n as f64 - 1.0, n, &mut meters, &mut fault).fault,
-            Some(ac_scene::Fault::NoLockYet),
-            "escalated at attempt {n}, before either threshold was reached"
-        );
-    }
-    let scene = build(
-        ac_scene::fault::PERSISTENT_REFUSAL_S,
-        ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS,
-        &mut meters,
-        &mut fault,
-    );
-    assert_eq!(scene.fault, Some(ac_scene::Fault::NoLock));
-
-    let texts = painted_texts(&scene);
-    let detail = ac_scene::Fault::NoLock
+    let detail = ac_scene::Fault::CheckRouting
         .detail()
         .expect("has an instruction");
     assert!(
-        texts.iter().any(|t| t == ac_scene::Fault::NoLock.label()),
-        "label missing; texts on screen: {texts:?}"
+        texts
+            .iter()
+            .any(|t| t == ac_scene::Fault::CheckRouting.label()),
+        "the fault label was not painted; texts on screen: {texts:?}"
     );
     assert!(
         texts.iter().any(|t| t == detail),
         "instruction missing; texts on screen: {texts:?}"
+    );
+}
+
+/// The confirmation paints too: the daemon finding the delay (#669).
+#[test]
+fn the_delay_found_confirmation_is_painted() {
+    let mut state = FaultState::default();
+    scene_over(Some(driving(false)), 0.9, &mut state, 0.0);
+    let scene = scene_over(Some(driving(true)), 0.9, &mut state, 1.0);
+    assert_eq!(scene.fault, Some(ac_scene::Fault::DelayFound));
+    let texts = painted_texts(&scene);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == ac_scene::Fault::DelayFound.label()),
+        "label missing; texts on screen: {texts:?}"
     );
 }
 
@@ -334,8 +303,6 @@ fn a_healthy_session_paints_no_indicator() {
             drivable: true,
         },
         delay_locked: Some(true),
-        settled: true,
-        delay_attempts: 1,
     };
     let scene = scene_with(Some(healthy), 0.0);
     assert_eq!(scene.fault, None);
@@ -345,10 +312,7 @@ fn a_healthy_session_paints_no_indicator() {
         ac_scene::Fault::NoReference,
         ac_scene::Fault::NoSignal,
         ac_scene::Fault::CheckRouting,
-        ac_scene::Fault::LostLock,
-        ac_scene::Fault::NoLockYet,
-        ac_scene::Fault::NoLock,
-        ac_scene::Fault::LockAcquired,
+        ac_scene::Fault::DelayFound,
     ] {
         assert!(
             !texts.iter().any(|t| t == row.label()),
@@ -437,6 +401,7 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         coherence: vec![0.9; N],
         delay_ms,
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),

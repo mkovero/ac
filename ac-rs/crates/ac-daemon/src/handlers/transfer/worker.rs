@@ -15,7 +15,7 @@ use crate::audio::make_engine;
 use crate::handlers::snapshot::{SnapshotRingState, SpoolEntry};
 use crate::handlers::{busy_guard, cfg_guard, send_pub, spawn_worker};
 use crate::server::ServerState;
-use crate::workers::{with_unpoisoned, DriveState, RelockRequest, StoppingEngine};
+use crate::workers::{with_unpoisoned, DelayRequests, DriveState, StoppingEngine};
 
 use super::plan::SessionPlan;
 use super::session::{SessionState, TickEvents};
@@ -50,7 +50,7 @@ pub(super) fn drive_out_ports(drivable: bool, out_port: &str, ref_out_port: &str
 }
 
 type DriveSlot = Arc<Mutex<Option<Arc<DriveState>>>>;
-type RelockSlot = Arc<Mutex<Option<Arc<RelockRequest>>>>;
+type DelayRequestsSlot = Arc<Mutex<Option<Arc<DelayRequests>>>>;
 type SnapshotRingSlot = Arc<Mutex<Option<Arc<Mutex<SnapshotRingState>>>>>;
 type SnapshotSpool = Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>;
 
@@ -58,7 +58,7 @@ type SnapshotSpool = Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>;
 /// from the moment they are published until the guard drops (#432).
 ///
 /// Built by [`TransferSessionGuard::publish`], which is also what publishes
-/// `drive_state`, `relock_state` and the snapshot ring, so no line of code sits between a slot
+/// `drive_state`, `delay_requests` and the snapshot ring, so no line of code sits between a slot
 /// becoming visible and something being responsible for clearing it. Moved
 /// into the worker, it is dropped on every way out of the thread — normal
 /// completion, an early `return` when the engine will not open or start, or
@@ -69,40 +69,40 @@ type SnapshotSpool = Arc<Mutex<std::collections::HashMap<String, SpoolEntry>>>;
 /// without a daemon.
 struct TransferSessionGuard {
     drive_state_slot: DriveSlot,
-    relock_state_slot: RelockSlot,
+    delay_requests_slot: DelayRequestsSlot,
     snapshot_ring_slot: SnapshotRingSlot,
     snapshot_spool: SnapshotSpool,
     drive_state: Arc<DriveState>,
-    relock_state: Arc<RelockRequest>,
+    delay_requests: Arc<DelayRequests>,
     snapshot_ring: Arc<Mutex<SnapshotRingState>>,
 }
 
 impl TransferSessionGuard {
-    /// Publish `drive_state`, `relock_state` and the (pending) snapshot ring
+    /// Publish `drive_state`, `delay_requests` and the (pending) snapshot ring
     /// into their slots and take ownership of clearing them, along with the
     /// spool the worker fills.
     fn publish(
         drive_state_slot: DriveSlot,
-        relock_state_slot: RelockSlot,
+        delay_requests_slot: DelayRequestsSlot,
         snapshot_ring_slot: SnapshotRingSlot,
         snapshot_spool: SnapshotSpool,
         drive_state: Arc<DriveState>,
-        relock_state: Arc<RelockRequest>,
+        delay_requests: Arc<DelayRequests>,
         snapshot_ring: Arc<Mutex<SnapshotRingState>>,
     ) -> TransferSessionGuard {
         let guard = TransferSessionGuard {
             drive_state_slot,
-            relock_state_slot,
+            delay_requests_slot,
             snapshot_ring_slot,
             snapshot_spool,
             drive_state,
-            relock_state,
+            delay_requests,
             snapshot_ring,
         };
         let drive = guard.drive_state.clone();
         with_unpoisoned(&guard.drive_state_slot, |slot| *slot = Some(drive));
-        let relock = guard.relock_state.clone();
-        with_unpoisoned(&guard.relock_state_slot, |slot| *slot = Some(relock));
+        let delay = guard.delay_requests.clone();
+        with_unpoisoned(&guard.delay_requests_slot, |slot| *slot = Some(delay));
         let ring = guard.snapshot_ring.clone();
         with_unpoisoned(&guard.snapshot_ring_slot, |slot| *slot = Some(ring));
         guard
@@ -125,7 +125,7 @@ impl Drop for TransferSessionGuard {
     // accepts a poisoned lock.
     fn drop(&mut self) {
         clear_if_own(&self.drive_state_slot, &self.drive_state);
-        clear_if_own(&self.relock_state_slot, &self.relock_state);
+        clear_if_own(&self.delay_requests_slot, &self.delay_requests);
 
         // Snapshot ring/spool lifecycle ends with the session (deliverable
         // 3's retention policy — module doc, `handlers/snapshot.rs`). The
@@ -142,7 +142,7 @@ impl Drop for TransferSessionGuard {
 /// session owns for its lifetime.
 ///
 /// Separate from [`SessionPlan`] because the split is not cosmetic —
-/// `drive_state`, `relock_state` and the snapshot ring are constructed and
+/// `drive_state`, `delay_requests` and the snapshot ring are constructed and
 /// published *before*
 /// the worker spawns, which is what closes the race described in
 /// [`transfer_stream`]. A plan built and then handed over could not have
@@ -171,7 +171,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // client is exactly that caller. Constructing it here closes the race
     // structurally rather than narrowing it.
     //
-    // `relock_state` is published alongside it for the same structural
+    // `delay_requests` is published alongside it for the same structural
     // reason: closing the window between the CTRL reply and the worker
     // actually existing, rather than narrowing it.
     //
@@ -193,11 +193,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     )));
     let session = TransferSessionGuard::publish(
         state.drive_state.clone(),
-        state.relock_state.clone(),
+        state.delay_requests.clone(),
         state.snapshot_ring.clone(),
         state.snapshot_spool.clone(),
         Arc::new(DriveState::new(plan.drive, plan.level_dbfs)),
-        Arc::new(RelockRequest::new()),
+        Arc::new(DelayRequests::new()),
         snapshot_ring,
     );
 
@@ -290,7 +290,7 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         session: guard,
     } = io;
     let drive_state = &guard.drive_state;
-    let relock_state = &guard.relock_state;
+    let delay_requests = &guard.delay_requests;
 
     // Every `return` and panic from here on drops `guard` (and, once it
     // exists, `eng`), which is what clears this session's slots.
@@ -403,15 +403,6 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
     // nothing new by default.
     let mut drain_telemetry = crate::audio::drain_telemetry::DrainTelemetry::from_env(sr);
 
-    // Last `relock` generation consumed (#226). Seeded from the
-    // request state's own start value rather than 0 so a generation
-    // already at some count from a prior worker's Arc (there isn't
-    // one — this Arc is fresh per session) can never be mistaken for
-    // a pending request; harmless either way, but this is the value
-    // that makes "no request yet" mean the same thing here as it does
-    // in `RelockRequest::new`.
-    let mut last_relock_gen = relock_state.generation();
-
     while !stop.load(Ordering::Relaxed) {
         // Contiguous drain (#207). `capture_multi` would clear the ring
         // before waiting, discarding whatever accrued while the previous
@@ -506,15 +497,14 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         // pair rather than compared against commanded state.
         let drive_edge_on = !prev_engine_on && engine_on;
 
-        // Manual re-lock (#226), read right after the drive poll so a
-        // re-lock request and the tick's delay attempt never
-        // interleave — `SessionState::tick` consumes it before
-        // acquisition. The flush it triggers, and the drive-edge flush
-        // beside it, both live in the session because both are
-        // decisions about held locks and neither needs the engine.
-        let relock_gen = relock_state.generation();
-        let relock_requested = relock_gen != last_relock_gen;
-        last_relock_gen = relock_gen;
+        // Operator delay requests (#669), applied right after the drive
+        // poll and before the tick, so a request and the tick's start-up
+        // Find never interleave. The drive-edge flush lives in the session
+        // beside it: both are decisions about held delays, and neither
+        // needs the engine.
+        for cmd in delay_requests.drain() {
+            session.apply_delay_cmd(cmd, engine_on);
+        }
 
         // Observed drive state (#228). Built from `engine_on`/`engine_level`
         // — what was actually applied to the engine on this tick, after the
@@ -547,7 +537,6 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
             TickEvents {
                 engine_on,
                 drive_edge_on,
-                relock_requested,
                 mc_enabled: mic_corr_enabled.load(Ordering::Relaxed),
             },
             &drive_msg,
@@ -613,7 +602,7 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
 /// block set a replay reconstructs and which ladder it continues. Updating
 /// them under two separate guards around `SessionState::tick` let `snapshot`
 /// clone tick K's samples beside tick K−1's ladder origin; when K flushed and
-/// rebuilt the ladder (a `relock`, a drive edge), the file then replayed a
+/// rebuilt the ladder (a `set_delay`, a drive edge), the file then replayed a
 /// retired ladder through K and matched no published frame (#221, Codex
 /// review of PR #662).
 ///
@@ -679,7 +668,7 @@ mod tests {
     /// The four slots a `ServerState` would hand a session, all empty.
     struct Slots {
         drive: DriveSlot,
-        relock: RelockSlot,
+        delay: DelayRequestsSlot,
         ring: SnapshotRingSlot,
         spool: SnapshotSpool,
     }
@@ -688,7 +677,7 @@ mod tests {
         fn new() -> Slots {
             Slots {
                 drive: Arc::new(Mutex::new(None)),
-                relock: Arc::new(Mutex::new(None)),
+                delay: Arc::new(Mutex::new(None)),
                 ring: Arc::new(Mutex::new(None)),
                 spool: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
@@ -697,21 +686,18 @@ mod tests {
         fn publish(&self) -> TransferSessionGuard {
             TransferSessionGuard::publish(
                 self.drive.clone(),
-                self.relock.clone(),
+                self.delay.clone(),
                 self.ring.clone(),
                 self.spool.clone(),
                 Arc::new(DriveState::new(false, -40.0)),
-                Arc::new(RelockRequest::new()),
+                Arc::new(DelayRequests::new()),
                 pending_ring(),
             )
         }
 
         fn assert_all_cleared(&self) {
             assert!(self.drive.lock().unwrap().is_none(), "drive slot left set");
-            assert!(
-                self.relock.lock().unwrap().is_none(),
-                "relock slot left set"
-            );
+            assert!(self.delay.lock().unwrap().is_none(), "delay slot left set");
             assert!(
                 self.ring.lock().unwrap().is_none(),
                 "snapshot ring left set"
@@ -754,11 +740,11 @@ mod tests {
     /// runs, and holds the pending ring — so `snapshot` in that window sees a
     /// session that is starting, never an empty slot.
     #[test]
-    fn publish_makes_drive_and_relock_visible_before_any_worker_runs() {
+    fn publish_makes_drive_and_delay_visible_before_any_worker_runs() {
         let slots = Slots::new();
         let guard = slots.publish();
         assert!(slots.drive.lock().unwrap().is_some());
-        assert!(slots.relock.lock().unwrap().is_some());
+        assert!(slots.delay.lock().unwrap().is_some());
         {
             let ring = slots.ring.lock().unwrap();
             let ring = ring.as_ref().expect("ring slot set before any worker");
@@ -796,15 +782,15 @@ mod tests {
         let guard = slots.publish();
         fill_worker_slots(&guard);
 
-        let (drive, relock, ring, spool) = (
+        let (drive, delay, ring, spool) = (
             slots.drive.clone(),
-            slots.relock.clone(),
+            slots.delay.clone(),
             slots.ring.clone(),
             slots.spool.clone(),
         );
         let poisoner = std::thread::spawn(move || {
             let _d = drive.lock().unwrap();
-            let _r = relock.lock().unwrap();
+            let _r = delay.lock().unwrap();
             let _g = ring.lock().unwrap();
             let _s = spool.lock().unwrap();
             panic!("poison every slot");
@@ -816,7 +802,7 @@ mod tests {
 
         for poisoned in [
             slots.drive.is_poisoned(),
-            slots.relock.is_poisoned(),
+            slots.delay.is_poisoned(),
             slots.ring.is_poisoned(),
             slots.spool.is_poisoned(),
         ] {
@@ -825,33 +811,33 @@ mod tests {
         slots.assert_all_cleared();
     }
 
-    /// #432: a finishing session must not clear drive/relock state a
+    /// #432: a finishing session must not clear drive/delay state a
     /// successor has since published; #188 extends that to the snapshot
     /// ring, now published at handler time too. Goes red if the
     /// `Arc::ptr_eq` check in `clear_if_own` is dropped, or if the ring is
     /// cleared unconditionally.
     #[test]
-    fn guard_leaves_a_successors_drive_and_relock_state_alone() {
+    fn guard_leaves_a_successors_drive_and_delay_requests_alone() {
         let slots = Slots::new();
         let guard = slots.publish();
         let successor_drive = Arc::new(DriveState::new(false, -40.0));
-        let successor_relock = Arc::new(RelockRequest::new());
+        let successor_delay = Arc::new(DelayRequests::new());
         let successor_ring = pending_ring();
         *slots.drive.lock().unwrap() = Some(successor_drive.clone());
-        *slots.relock.lock().unwrap() = Some(successor_relock.clone());
+        *slots.delay.lock().unwrap() = Some(successor_delay.clone());
         *slots.ring.lock().unwrap() = Some(successor_ring.clone());
 
         drop(guard);
 
         let drive = slots.drive.lock().unwrap();
-        let relock = slots.relock.lock().unwrap();
+        let delay = slots.delay.lock().unwrap();
         let ring = slots.ring.lock().unwrap();
         assert!(drive
             .as_ref()
             .is_some_and(|d| Arc::ptr_eq(d, &successor_drive)));
-        assert!(relock
+        assert!(delay
             .as_ref()
-            .is_some_and(|r| Arc::ptr_eq(r, &successor_relock)));
+            .is_some_and(|r| Arc::ptr_eq(r, &successor_delay)));
         assert!(ring
             .as_ref()
             .is_some_and(|r| Arc::ptr_eq(r, &successor_ring)));

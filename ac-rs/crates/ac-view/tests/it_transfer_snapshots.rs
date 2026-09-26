@@ -121,6 +121,7 @@ fn transfer_scene_from(estimator: ac_scene::transfer::Estimator) -> TransferScen
         // file's module doc: references need regenerating on the real
         // adapter after this change.
         delay_locked: Some(true),
+        delay_control: None,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-6.0),

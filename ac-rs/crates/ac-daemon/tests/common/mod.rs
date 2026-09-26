@@ -146,7 +146,7 @@ fn await_own_daemon(child: &mut Child, ctrl_port: u16) -> Result<(), String> {
 /// This is a deadline, not a delay: the loop breaks on the first reply, so a
 /// generous value costs nothing on the happy path and only lengthens the
 /// failure case. The per-binary values it replaces ranged 3–10 s; the
-/// longest wins so the relock tests, which spawn under load, keep their
+/// longest wins so the set_delay tests, which spawn under load, keep their
 /// margin.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -516,7 +516,7 @@ impl<'a> Client<'a> {
     }
 
     /// The next frame matching `pred`, within `timeout` — polls one frame
-    /// at a time rather than a fixed settle window, since the relock tests
+    /// at a time rather than a fixed settle window, since the set_delay tests
     /// care about a transition (locked → unlocked → locked) that a
     /// fixed-delay snapshot could straddle or miss entirely.
     pub fn frame_matching(&self, timeout: Duration, pred: impl Fn(&Value) -> bool) -> Value {

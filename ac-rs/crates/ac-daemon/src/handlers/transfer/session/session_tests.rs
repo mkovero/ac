@@ -2,14 +2,21 @@
 //! daemon.
 //!
 //! Everything here was previously reachable only from a live ZMQ session:
-//! the warmup gate, the block count the frame reports, the two lock
-//! flushes and the refusal retry timer all lived inside the worker
-//! closure. `it_relock` covers three of them end to end and is the right
-//! test for the protocol, but it cannot advance the clock, so the retry
-//! interval below had no test at all — a `RELOCK_RETRY` of zero, or of an
-//! hour, would both have stayed green.
+//! the warmup gate, the block count the frame reports, the delay flushes
+//! and the no-peak retry timer all lived inside the worker closure.
+//! `it_set_delay` covers the protocol end to end, but it cannot advance the
+//! clock, so the retry interval below had no test at all — a `FIND_RETRY`
+//! of zero, or of an hour, would both have stayed green.
 
 use super::*;
+use crate::workers::{DelayAction, DelayCmd};
+use serde_json::json;
+
+/// `set_delay` with `samples: null` for every pair — a re-find.
+const REFIND: DelayCmd = DelayCmd {
+    pair: None,
+    action: DelayAction::Find,
+};
 
 const SR: u32 = 48_000;
 const CHUNK: usize = (SR as usize) / 20; // 0.05 s, the capture tick
@@ -73,7 +80,6 @@ fn events(engine_on: bool) -> TickEvents {
     TickEvents {
         engine_on,
         drive_edge_on: false,
-        relock_requested: false,
         mc_enabled: false,
     }
 }
@@ -112,9 +118,9 @@ fn run_correlated(
     out
 }
 
-/// Uncorrelated legs: the estimator has nothing to lock to and must
-/// refuse rather than pick the tallest noise peak (#227).
-fn run_uncorrelated(
+/// A live measurement leg against a silent reference: H is zero, the live
+/// IR has no peak, and the start-up Find has nothing to report.
+fn run_silent_ref(
     s: &mut SessionState,
     ticks: &[std::time::Instant],
     ev: TickEvents,
@@ -122,7 +128,7 @@ fn run_uncorrelated(
     let mut out = Vec::new();
     for (k, &now) in ticks.iter().enumerate() {
         let meas = noise(CHUNK, 0x1000 + k as u32);
-        let refb = noise(CHUNK, 0x9000 + k as u32);
+        let refb = vec![0.0; CHUNK];
         out.extend(
             s.tick(&[meas, refb], ev, &drive_msg(ev.engine_on), now)
                 .into_iter()
@@ -278,11 +284,12 @@ fn a_changed_lock_re_analyses_before_the_next_hop() {
     let before = run_correlated(&mut s, 1, 480, events(false), t0);
     let before = before.last().unwrap().clone();
 
-    // Move the lock without moving the ring — the drive edge and
-    // `relock` both do this in the middle of a hop.
+    // Move the delay without moving the ring — the drive edge and
+    // `set_delay` both do this in the middle of a hop.
     s.pairs[0].delay = Some(Lock {
         samples: 1200,
         driving: false,
+        operator: false,
     });
     let after = run_correlated(&mut s, 1, 480, events(false), t0);
     let after = after.last().unwrap();
@@ -354,15 +361,14 @@ fn n_averages_climbs_to_the_window_depth_and_then_holds() {
     );
 }
 
-/// A refused estimate must not be retried on the very next tick: each
-/// attempt is the same full-ring FFT+IFFT the delay cache exists to
-/// avoid, and its inputs only turn over on the ring's own timescale.
+/// A Find with no peak must not be retried on the very next tick: its
+/// inputs only turn over on the ring's own timescale.
 ///
 /// The clock is a parameter, so this asserts the interval itself. A
-/// live session could only assert it by sleeping, which is why
-/// `RELOCK_RETRY` had no test before: any value at all was green.
+/// live session could only assert it by sleeping, which is why the
+/// interval had no test before: any value at all was green.
 #[test]
-fn a_refused_delay_waits_out_the_retry_interval_before_trying_again() {
+fn a_find_with_no_peak_waits_out_the_retry_interval_before_trying_again() {
     let mut s = session();
     let t0 = std::time::Instant::now();
     // Fill the ring, then hold the clock still: every tick after the
@@ -370,24 +376,25 @@ fn a_refused_delay_waits_out_the_retry_interval_before_trying_again() {
     let warm: Vec<std::time::Instant> = (0..20)
         .map(|k| t0 + std::time::Duration::from_millis(50 * k))
         .collect();
-    let frames = run_uncorrelated(&mut s, &warm, events(true));
+    let frames = run_silent_ref(&mut s, &warm, events(true));
     let first = frames.last().expect("a frame once the segment is in");
     assert_eq!(
         first["delay_locked"],
         json!(false),
-        "uncorrelated legs must not lock"
+        "a silent reference must not produce a delay"
     );
+    assert_eq!(first["delay_residual"], json!(null));
     assert_eq!(
         first["delay_attempts"],
         json!(1),
         "expected exactly one attempt"
     );
 
-    // Well inside RELOCK_RETRY: no second attempt.
+    // Well inside FIND_RETRY: no second attempt.
     let held: Vec<std::time::Instant> = (0..5)
         .map(|k| t0 + std::time::Duration::from_millis(1000 + 50 * k))
         .collect();
-    let frames = run_uncorrelated(&mut s, &held, events(true));
+    let frames = run_silent_ref(&mut s, &held, events(true));
     assert_eq!(
         frames.last().unwrap()["delay_attempts"],
         json!(1),
@@ -395,8 +402,8 @@ fn a_refused_delay_waits_out_the_retry_interval_before_trying_again() {
     );
 
     // Past it: exactly one more.
-    let after = vec![t0 + RELOCK_RETRY + std::time::Duration::from_millis(1500)];
-    let frames = run_uncorrelated(&mut s, &after, events(true));
+    let after = vec![t0 + FIND_RETRY + std::time::Duration::from_millis(1500)];
+    let frames = run_silent_ref(&mut s, &after, events(true));
     assert_eq!(
         frames.last().unwrap()["delay_attempts"],
         json!(2),
@@ -404,11 +411,28 @@ fn a_refused_delay_waits_out_the_retry_interval_before_trying_again() {
     );
 }
 
-/// `relock` (#226) discards the held lock, and the attempt counter
-/// stays monotone across it — a pair that locked and then started
-/// refusing must not read as one never asked (`ac-scene::fault`).
+/// The start-up Find takes the unaligned live IR's peak, and the frame
+/// that first claims the delay already carries the estimate aligned to it:
+/// residual 0, not the 480 the unaligned estimate read.
 #[test]
-fn a_relock_request_drops_the_lock_and_leaves_the_attempt_count_monotone() {
+fn the_start_up_find_locks_to_the_ir_peak_and_publishes_aligned() {
+    let mut s = session();
+    let frames = run_correlated(&mut s, 25, 480, events(true), std::time::Instant::now());
+    let first = frames
+        .iter()
+        .find(|f| f["delay_locked"] == json!(true))
+        .expect("correlated pair found no delay");
+    assert_eq!(first["delay_samples"], json!(480));
+    assert_eq!(first["delay_residual"], json!(0));
+    assert_eq!(first["delay_operator"], json!(false));
+}
+
+/// `set_delay` with `samples: null` discards the held delay and finds it
+/// again, and the attempt counter stays monotone across it — a pair that
+/// found a delay and then went silent must not read as one never asked
+/// (`ac-scene::fault`).
+#[test]
+fn a_refind_drops_the_delay_and_leaves_the_attempt_count_monotone() {
     let mut s = session();
     let t0 = std::time::Instant::now();
     let frames = run_correlated(&mut s, 25, 480, events(true), t0);
@@ -421,23 +445,138 @@ fn a_relock_request_drops_the_lock_and_leaves_the_attempt_count_monotone() {
     assert_eq!(locked["delay_samples"], json!(480));
     let attempts_before = locked["delay_attempts"].as_u64().unwrap();
 
-    let ev = TickEvents {
-        relock_requested: true,
-        ..events(true)
-    };
-    // The flush lands before this tick's own acquisition, so the pair
-    // re-locks within the same tick — what changes is the attempt
-    // count, which must have gone up rather than reset.
-    let after = run_correlated(&mut s, 1, 480, ev, t0 + std::time::Duration::from_secs(5));
+    s.apply_delay_cmd(REFIND, true);
+    assert!(s.pairs[0].delay.is_none());
+    // The pair finds again within the next tick — what changes is the
+    // attempt count, which must have gone up rather than reset.
+    let after = run_correlated(
+        &mut s,
+        1,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(5),
+    );
     let f = after.last().unwrap();
     assert!(
         f["delay_attempts"].as_u64().unwrap() > attempts_before,
-        "relock did not cause a new attempt"
+        "a re-find did not cause a new attempt"
+    );
+    assert_eq!(f["delay_samples"], json!(480));
+}
+
+/// An operator-set delay is held as typed, published as operator-set, and
+/// the residual reads what is left over: the true 480 against a setting of
+/// 470 leaves +10 — Smaart's Delta Delay (#669).
+#[test]
+fn a_set_delay_holds_the_value_and_publishes_the_residual() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 25, 480, events(true), t0);
+    s.apply_delay_cmd(
+        DelayCmd {
+            pair: None,
+            action: DelayAction::Set(470),
+        },
+        true,
+    );
+    let f = run_correlated(
+        &mut s,
+        1,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(2),
+    );
+    let f = f.last().unwrap();
+    assert_eq!(f["delay_samples"], json!(470));
+    assert_eq!(f["delay_operator"], json!(true));
+    assert_eq!(f["delay_residual"], json!(10));
+}
+
+/// Nothing the daemon does by itself replaces an operator-set delay: not a
+/// drive edge, even for a delay set while the drive was off.
+#[test]
+fn the_drive_edge_keeps_an_operator_set_delay() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 25, 480, events(false), t0);
+    s.apply_delay_cmd(
+        DelayCmd {
+            pair: None,
+            action: DelayAction::Set(470),
+        },
+        false,
+    );
+    s.flush_locks_taken_against_silence(s.consumed);
+    assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(470));
+}
+
+/// Inserting the value already held marks it operator-set without
+/// restarting the ladder; a new value rebuilds it at the new offset.
+#[test]
+fn setting_the_held_value_keeps_the_ladder() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 30, 480, events(true), t0);
+    let built = s.mtw_provenance()[0].clone();
+    assert!(built.is_some(), "precondition: ladder built");
+    let set = |samples| DelayCmd {
+        pair: Some(0),
+        action: DelayAction::Set(samples),
+    };
+    s.apply_delay_cmd(set(480), true);
+    assert_eq!(
+        s.mtw_provenance()[0],
+        built,
+        "a no-op insert restarted the ladder"
+    );
+    s.apply_delay_cmd(set(481), true);
+    assert!(
+        s.mtw_provenance()[0].is_none(),
+        "a new offset kept the old ladder"
     );
 }
 
+/// Two steps queued between frames both land: the daemon moves the held
+/// delay, so a client need not know it (Codex review of #673).
+#[test]
+fn queued_steps_accumulate() {
+    let mut s = session();
+    run_correlated(&mut s, 25, 480, events(true), std::time::Instant::now());
+    let step = |k| DelayCmd {
+        pair: None,
+        action: DelayAction::Step(k),
+    };
+    s.apply_delay_cmd(step(1), true);
+    s.apply_delay_cmd(step(1), true);
+    assert_eq!(
+        s.pairs[0].delay.map(|l| (l.samples, l.operator)),
+        Some((482, true))
+    );
+    s.apply_delay_cmd(step(-3), true);
+    assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(479));
+    // Nothing to move before a delay exists.
+    let mut fresh = session();
+    fresh.apply_delay_cmd(step(1), true);
+    assert!(fresh.pairs[0].delay.is_none());
+}
+
+/// A request naming another pair leaves this one alone.
+#[test]
+fn a_set_delay_for_another_pair_is_not_applied_here() {
+    let mut s = session();
+    run_correlated(&mut s, 25, 480, events(true), std::time::Instant::now());
+    s.apply_delay_cmd(
+        DelayCmd {
+            pair: Some(1),
+            action: DelayAction::Set(0),
+        },
+        true,
+    );
+    assert_eq!(s.pairs[0].delay.map(|l| l.samples), Some(480));
+}
+
 /// The drive off→on edge discards a lock taken against silence and
-/// keeps one taken while driving (#226). `it_relock` covers both over
+/// keeps one taken while driving (#226). `it_set_delay` covers both over
 /// ZMQ; here they are two assertions on the same held state.
 #[test]
 fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driving() {
@@ -450,7 +589,7 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
         silent.pairs[0].delay,
         Some(Lock { driving: false, .. })
     ));
-    silent.flush_locks_taken_against_silence();
+    silent.flush_locks_taken_against_silence(silent.consumed);
     assert!(
         silent.pairs[0].delay.is_none(),
         "a lock taken against silence survived the drive edge"
@@ -465,11 +604,49 @@ fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driv
     assert_eq!(frames.last().unwrap()["delay_locked"], json!(true));
     let held = driving.pairs[0].delay;
     assert!(matches!(held, Some(Lock { driving: true, .. })));
-    driving.flush_locks_taken_against_silence();
+    driving.flush_locks_taken_against_silence(driving.consumed);
     assert_eq!(
         driving.pairs[0].delay.map(|l| l.samples),
         held.map(|l| l.samples),
         "a lock taken while driving was discarded by a later drive edge"
+    );
+}
+
+/// Codex review of #673: after the drive comes on, the Find must wait for a
+/// ring of driven audio. Tested against the rejected order — re-finding on
+/// the edge tick, over a ring still holding the drive-off capture — which
+/// takes a noise peak, records it as found while driving, and never finds
+/// again.
+#[test]
+fn the_find_after_a_drive_edge_waits_for_driven_audio() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    // Drive off: two unrelated legs. The Find takes their highest IR peak.
+    for k in 0..30u32 {
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        let bufs = [noise(CHUNK, 0x1000 + k), noise(CHUNK, 0x9000 + k)];
+        s.tick(&bufs, events(false), &drive_msg(false), now);
+    }
+    assert!(
+        matches!(s.pairs[0].delay, Some(Lock { driving: false, .. })),
+        "test setup: a delay found against the unrelated legs"
+    );
+
+    // The drive comes on; from here the legs are the correlated pair.
+    let t1 = t0 + std::time::Duration::from_secs(2);
+    let edge = TickEvents {
+        drive_edge_on: true,
+        ..events(true)
+    };
+    run_correlated(&mut s, 1, 480, edge, t1);
+    assert!(
+        s.pairs[0].delay.is_none(),
+        "found on the edge tick, over the drive-off ring"
+    );
+    run_correlated(&mut s, 80, 480, events(true), t1);
+    assert_eq!(
+        s.pairs[0].delay.map(|l| (l.samples, l.driving)),
+        Some((480, true))
     );
 }
 
@@ -526,7 +703,7 @@ fn a_flush_clears_the_ladder_provenance() {
         s.mtw_provenance()[0].is_some(),
         "precondition: ladder built"
     );
-    s.flush_all();
+    s.apply_delay_cmd(REFIND, true);
     assert!(
         s.mtw_provenance()[0].is_none(),
         "provenance outlived the ladder it describes"
@@ -589,13 +766,10 @@ fn a_flush_tick_commits_its_samples_and_its_provenance_together() {
     );
 
     let bufs = correlated_tick(&x, 30);
-    let ev = TickEvents {
-        relock_requested: true,
-        ..events(true)
-    };
+    s.apply_delay_cmd(REFIND, true);
     s.tick(
         &bufs,
-        ev,
+        events(true),
         &drive_msg(true),
         t0 + std::time::Duration::from_secs(2),
     );
@@ -651,12 +825,11 @@ fn a_concurrent_reader_only_ever_sees_whole_ticks() {
     let mut committed: Vec<Committed> = vec![(0, vec![None], vec![None])];
     for k in 0..n {
         let bufs = correlated_tick(&x, k);
-        let ev = TickEvents {
-            relock_requested: k > 0 && k % 30 == 0,
-            ..events(true)
-        };
+        if k > 0 && k % 30 == 0 {
+            s.apply_delay_cmd(REFIND, true);
+        }
         let now = t0 + std::time::Duration::from_millis(50 * k as u64);
-        s.tick(&bufs, ev, &drive_msg(true), now);
+        s.tick(&bufs, events(true), &drive_msg(true), now);
         super::super::worker::commit_tick(&ring, &bufs, &s);
         committed.push((s.consumed, s.mtw_provenance(), s.delay_samples()));
     }

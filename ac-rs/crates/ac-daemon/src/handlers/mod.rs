@@ -59,7 +59,7 @@ pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
 pub use test_software::test_software;
-pub use transfer::{probe, relock, set_drive, transfer_stream};
+pub use transfer::{probe, set_delay, set_drive, transfer_stream};
 /// #628: the unrecognised-field check `server::dispatch` runs before any
 /// handler.
 pub(crate) use wire::{unrecognised_fields, unrecognised_refusal};
@@ -1024,7 +1024,7 @@ mod resolve_output_by_channel_tests {
             cal_reply_tx: Arc::new(Mutex::new(None)),
             snapshot_ring: Arc::new(Mutex::new(None)),
             drive_state: Arc::new(Mutex::new(None)),
-            relock_state: Arc::new(Mutex::new(None)),
+            delay_requests: Arc::new(Mutex::new(None)),
             snapshot_spool: Arc::new(Mutex::new(HashMap::new())),
             playback_ports_cache: Arc::new(Mutex::new(None)),
             capture_ports_cache: Arc::new(Mutex::new(None)),

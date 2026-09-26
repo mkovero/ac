@@ -1509,3 +1509,34 @@ fn plot_ir_done_frame_reports_a_failed_write_and_does_not_recreate_the_dir() {
         "plot_ir recreated the removed report directory"
     );
 }
+
+/// #669 acceptance on fake audio: `plot_ir` and a transfer session's
+/// start-up Find read the same delay off the same 400-sample path — one
+/// picker (`ir_peak`), two ways of measuring the IR. The fake paths are
+/// exact, so the two agree to the sample here; the rig tolerance is the
+/// PR's to state.
+#[test]
+fn plot_ir_and_transfer_find_the_same_delay() {
+    const DELAY: i64 = 400;
+    let d = Daemon::spawn_with(
+        None,
+        &[("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", &DELAY.to_string())],
+    );
+    let (_, report) = report_for(&Client::new(&d), plot_ir_request(json!({})));
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.delay_samples, DELAY, "plot_ir arrival");
+
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+        "fake_correlated_pair": {"gain": 0.6, "delay_samples": DELAY},
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let f = c.frame_matching(Duration::from_secs(20), |f| {
+        f["delay_locked"] == json!(true) && f["delay_residual"].is_i64()
+    });
+    assert_eq!(f["delay_samples"], json!(DELAY), "transfer Find: {f}");
+    assert_eq!(f["delay_residual"], json!(0), "{f}");
+    assert_eq!(f["delay_operator"], json!(false));
+}

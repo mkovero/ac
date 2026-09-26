@@ -8,7 +8,7 @@
 //! `Vec` of samples.
 
 use rayon::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use ac_core::shared::calibration::Calibration;
 
@@ -17,16 +17,16 @@ use super::frame::{build_pair_messages, raw_peak_dbfs, FrameStatics, TickInputs}
 use super::pair::{Lock, PairCtx, PairState};
 use super::window::{drain_to_block_lattice, Window};
 
-/// Retry interval for a refused delay estimate — see
+/// Retry interval for a start-up Find that had no peak — see
 /// [`PairState::next_attempt`].
-pub(super) const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+pub(super) const FIND_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What this tick observed outside the analysis: the drive state the
-/// worker actually applied to its engine, the two events that invalidate
-/// a lock, and the global mic-correction toggle.
+/// worker actually applied to its engine, the drive edge that invalidates
+/// a delay found against silence, and the global mic-correction toggle.
 ///
 /// Sampled once per tick by the worker and handed in whole, so every pair
-/// in a frame agrees about all four. The drive poll itself stays in the
+/// in a frame agrees about all three. The drive poll itself stays in the
 /// worker because applying it needs the engine; what reaches the analysis
 /// is the observation, never the command (#228).
 #[derive(Debug, Clone, Copy)]
@@ -38,8 +38,6 @@ pub(super) struct TickEvents {
     /// False→true transition of `engine_on` since the previous tick
     /// (#226): the signal a lock was taken against just changed.
     pub(super) drive_edge_on: bool,
-    /// A `relock` request arrived since the previous tick (#226).
-    pub(super) relock_requested: bool,
     /// `mic_correction_enabled`, sampled once so a frame cannot be built
     /// half-corrected.
     pub(super) mc_enabled: bool,
@@ -172,7 +170,7 @@ impl SessionState {
         self.rings.len()
     }
 
-    /// Each pair's held lock, in launch order, for the snapshot ring's
+    /// Each pair's held delay, in launch order, for the snapshot ring's
     /// provenance copy.
     pub(super) fn delay_samples(&self) -> Vec<Option<i64>> {
         self.pairs
@@ -215,10 +213,47 @@ impl SessionState {
             .collect()
     }
 
-    /// Discard every pair's lock and ladder — a `relock` request (#226).
-    pub(super) fn flush_all(&mut self) {
-        for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
-            st.flush(ladder);
+    /// Apply one `set_delay` request (#669) to the pairs it names.
+    ///
+    /// A value — set, or a step from the held delay — holds that delay,
+    /// operator-set, and rebuilds the ladder at the new offset (the offset
+    /// is applied before decimation, so a ladder cannot be re-aimed).
+    /// Setting the value already held only marks it operator-set, so a
+    /// repeated Insert does not restart the ladder. A step on a pair with no
+    /// delay does nothing. `Find` discards the delay so the next tick finds
+    /// it again.
+    pub(super) fn apply_delay_cmd(&mut self, cmd: crate::workers::DelayCmd, engine_on: bool) {
+        use crate::workers::DelayAction;
+        for (i, (st, ladder)) in self
+            .pairs
+            .iter_mut()
+            .zip(self.ladders.iter_mut())
+            .enumerate()
+        {
+            if cmd.pair.is_some_and(|p| p != i) {
+                continue;
+            }
+            let held = st.delay.map(|l| l.samples);
+            let samples = match cmd.action {
+                DelayAction::Find => {
+                    st.flush(ladder);
+                    continue;
+                }
+                DelayAction::Set(v) => v,
+                DelayAction::Step(k) => match held {
+                    Some(h) => h.saturating_add(k),
+                    None => continue,
+                },
+            };
+            if held != Some(samples) {
+                *ladder = None;
+            }
+            st.delay = Some(Lock {
+                samples,
+                driving: engine_on,
+                operator: true,
+            });
+            st.next_attempt = None;
         }
     }
 
@@ -226,21 +261,34 @@ impl SessionState {
     /// not by drift, not by a threshold — the instant a drive that was off
     /// starts driving, because the signal producing it just changed.
     ///
-    /// The qualifier: only a lock acquired *while the drive was off* is
-    /// discarded, so a dead-man drop and resume of a lock taken while
-    /// driving survives untouched — nothing about that lock's premise
-    /// changed. A pair that is currently unlocked gets its retry timer
-    /// cleared instead, so acquisition is attempted this tick rather than
-    /// up to `RELOCK_RETRY` later.
-    pub(super) fn flush_locks_taken_against_silence(&mut self) {
+    /// The qualifier: only a delay the daemon *found while the drive was
+    /// off* is discarded, so a dead-man drop and resume of one found while
+    /// driving survives untouched — nothing about its premise changed — and
+    /// an operator-set delay is never touched (#669). A pair that is
+    /// currently unlocked gets its retry timer cleared instead.
+    ///
+    /// Either way the next Find waits for `driven_from`, the stream position
+    /// where driven audio begins: until the analysis ring starts there, it
+    /// still holds the silence the flushed delay was found against.
+    pub(super) fn flush_locks_taken_against_silence(&mut self, driven_from: u64) {
         for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
             match st.delay {
-                Some(Lock { driving: false, .. }) => st.flush(ladder),
-                Some(Lock { driving: true, .. }) => {
-                    // Acquired while driving — the dead-man/resume thrash
-                    // case. Survives untouched.
+                Some(Lock {
+                    driving: false,
+                    operator: false,
+                    ..
+                }) => {
+                    st.flush(ladder);
+                    st.find_from = Some(driven_from);
                 }
-                None => st.next_attempt = None,
+                Some(_) => {
+                    // Found while driving — the dead-man/resume thrash
+                    // case — or set by the operator. Survives untouched.
+                }
+                None => {
+                    st.next_attempt = None;
+                    st.find_from = Some(driven_from);
+                }
             }
         }
     }
@@ -287,65 +335,49 @@ impl SessionState {
             .unwrap_or(0)
     }
 
-    /// Estimate any pair's missing delay, rate-limited. Runs at most once
-    /// per pair per `RELOCK_RETRY` while unlocked, and not at all once
-    /// locked: ref↔meas propagation is constant during a session (fixed
-    /// hardware path), and each attempt is a full-ring FFT+IFFT.
-    pub(super) fn acquire_missing_locks(&mut self, ev: TickEvents, now: std::time::Instant) {
-        let sr = self.statics.sr;
-        for (ctx, st) in self.ctx.iter().zip(self.pairs.iter_mut()) {
-            if st.delay.is_some() {
+    /// Start-up Find (#669): take any unlocked pair's delay from the peak
+    /// of its unaligned live IR — the held analysis, computed at delay 0 —
+    /// which is Smaart's Delay Finder rule and the picker `plot ir` and τ
+    /// use. No FFT of its own: [`Self::refresh_analysis`] already ran it.
+    ///
+    /// A pair whose IR has no peak (a silent leg) stays unaligned and is
+    /// retried after [`FIND_RETRY`]. There is no other refusal: the operator
+    /// owns the delay and reads coherence, not a gate, to judge it.
+    ///
+    /// Returns whether any pair found a delay, so the caller can recompute
+    /// its estimate aligned in the same tick rather than publish a frame
+    /// that claims a delay over an unaligned estimate.
+    pub(super) fn find_missing_delays(&mut self, ev: TickEvents, now: std::time::Instant) -> bool {
+        let mut found = false;
+        let ring_start = self.dropped as u64;
+        for (st, held) in self.pairs.iter_mut().zip(self.analysis.iter()) {
+            if st.delay.is_some()
+                || st.next_attempt.is_some_and(|t| now < t)
+                || st.find_from.is_some_and(|at| ring_start < at)
+            {
                 continue;
             }
-            if st.next_attempt.is_some_and(|t| now < t) {
-                continue;
-            }
-            let (Some(meas), Some(refb)) = (self.rings.get(ctx.mi), self.rings.get(ctx.ri)) else {
+            let Some(a) = held.as_ref().filter(|a| a.key.delay == 0) else {
                 continue;
             };
-            let est = ac_core::visualize::transfer::estimate_delay_detailed(
-                refb.as_slice(),
-                meas.as_slice(),
-                sr,
-            );
             // `driving` is this tick's observed engine state — the
             // provenance a future drive edge (#226) reads to decide
-            // whether this lock is stale by construction.
-            st.delay = est.lag.map(|samples| Lock {
+            // whether this delay was found against silence.
+            st.delay = a.ir_peak_lag.map(|samples| Lock {
                 samples,
                 driving: ev.engine_on,
+                operator: false,
             });
-            // Counted here rather than at the top of the loop: this is the
-            // branch where an estimate actually ran, so the count means
-            // "the estimator has answered", not "the loop reached the
-            // retry site".
+            // Counted where a Find actually read an IR, so the count means
+            // "the pair has been asked", not "the loop reached this site".
             st.attempts = st.attempts.saturating_add(1);
-            // Full lock evidence, not just the ratio: the competing peaks
-            // are what make DIRECT_PEAK_FRACTION settleable offline, and
-            // they cannot be reconstructed from a finished session.
-            st.prominence = Some(json!({
-                "prominence":   est.prominence,
-                "peak_lag":     est.peak_lag,
-                "peak_value":   est.peak_value,
-                // The strongest peak the estimator is not allowed to
-                // select. Published so ring skew (#216) and stimulus-onset
-                // ripples stay diagnosable from a capture rather than
-                // needing another rig session.
-                "noncausal_peak_lag":   est.noncausal_peak_lag,
-                "noncausal_peak_value": est.noncausal_peak_value,
-                "median_value": est.median_value,
-                // Uncontaminated noise floor for the offline
-                // re-thresholding experiment; see
-                // DelayEstimate::negative_lag_median.
-                "negative_lag_median": est.negative_lag_median,
-                "candidates":   est.candidates.iter()
-                    .map(|c| json!({"lag": c.lag, "value": c.value}))
-                    .collect::<Vec<_>>(),
-            }));
-            if est.lag.is_none() {
-                st.next_attempt = Some(now + RELOCK_RETRY);
+            if st.delay.is_none() {
+                st.next_attempt = Some(now + FIND_RETRY);
+            } else {
+                found = true;
             }
         }
+        found
     }
 
     /// Build each pair's ladder once its alignment offset is known — the
@@ -500,13 +532,11 @@ impl SessionState {
         drive_msg: &ac_core::wire::WireDrive,
         now: std::time::Instant,
     ) -> Vec<Value> {
-        // Consumed before this tick's own estimate, so a re-lock request
-        // and the tick's delay attempt never interleave.
-        if ev.relock_requested {
-            self.flush_all();
-        }
         if ev.drive_edge_on {
-            self.flush_locks_taken_against_silence();
+            // This tick's buffers were captured before the drive was
+            // applied, so driven audio starts after them.
+            let driven_from = self.consumed + bufs.first().map(Vec::len).unwrap_or(0) as u64;
+            self.flush_locks_taken_against_silence(driven_from);
         }
 
         // Raw capture peaks (§4.2), per unique-port index, from THIS
@@ -533,7 +563,7 @@ impl SessionState {
         // dead-man, so a client that sets the drive and waits for a lock
         // without sending keepalives has the drive expire *before* the
         // first delay attempt, takes its lock against silence, and loses
-        // it on the next drive edge. `it_relock`'s two survives-a-resume
+        // it on the next drive edge. `it_set_delay`'s two survives-a-resume
         // tests are that sequence.
         //
         // Separating them does not by itself widen anything — `n_averages`
@@ -543,8 +573,10 @@ impl SessionState {
         // the Welch average does.
         let n_blocks = self.n_blocks();
         if n_blocks > 0 {
-            self.acquire_missing_locks(ev, now);
             self.refresh_analysis(n_blocks, ev.mc_enabled);
+            if self.find_missing_delays(ev, now) {
+                self.refresh_analysis(n_blocks, ev.mc_enabled);
+            }
         }
         let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
         // After the ladders, so a ladder built this tick records the count
