@@ -537,8 +537,7 @@ pub struct TransferScene {
     pub delay_samples: Option<i64>,
     /// What "Insert" sends ([`DelayControl::insert_samples`]).
     pub delay_insert_samples: Option<i64>,
-    /// Delay tracking is on for this pair (#687); `false` with no held
-    /// delay, where the frame says nothing about it.
+    /// Delay tracking is on for this pair (#687), held delay or not.
     pub delay_tracking: bool,
     /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
     /// (#229).
@@ -694,6 +693,10 @@ pub struct TransferInput {
     pub delay_locked: Option<bool>,
     /// The operator's delay control (#669); `None` off the live path.
     pub delay_control: Option<DelayControl>,
+    /// Delay tracking is on for this pair (#687), whether or not it holds
+    /// a delay yet — a pair switched on while silent must still read as on
+    /// (Codex review: `Y` would otherwise send `track: true` again).
+    pub delay_tracking: bool,
     /// This pair's channel numbers — distinct from [`Self::channel_role`],
     /// which is a display label, not a wire identity.
     pub meas_channel: i64,
@@ -859,6 +862,7 @@ impl TransferInput {
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
             delay_control: DelayControl::from_wire_frame(frame),
+            delay_tracking: frame.delay_tracking,
             meas_channel: frame.meas_channel,
             ref_channel: frame.ref_channel,
             meas_peak_dbfs: frame.meas_peak_dbfs,
@@ -943,6 +947,7 @@ impl TransferInput {
             delay_ms: f64::NAN,
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             meas_channel: -1,
             ref_channel: -1,
             meas_peak_dbfs: None,
@@ -1059,6 +1064,7 @@ impl TransferInput {
             // claim about whether it was a measured lock.
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             // `PairDerivation` carries no wire channel identity — a
             // `channel_role` label is all the caller has (see above). `-1`
             // is never a real channel number.
@@ -1217,7 +1223,7 @@ impl TransferScene {
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
             delay_samples: input.delay_control.map(|c| c.samples),
             delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
-            delay_tracking: input.delay_control.is_some_and(|c| c.tracking),
+            delay_tracking: input.delay_tracking,
             smoothing_readout: modes.smoothing.label(),
             coherence_mask_readout: (modes.coherence_mask != COHERENCE_THRESHOLD)
                 .then(|| format!("coherence mask {:.2}", modes.coherence_mask)),
@@ -1530,6 +1536,7 @@ mod tests {
                 delay_ms: 0.0,
                 delay_locked: Some(true),
                 delay_control: None,
+                delay_tracking: false,
                 meas_channel: 0,
                 ref_channel: 1,
                 meas_peak_dbfs: Some(-20.0),
@@ -1807,6 +1814,7 @@ mod tests {
             delay_ms: 3.3958,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1941,6 +1949,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1995,6 +2004,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,

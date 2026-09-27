@@ -304,6 +304,10 @@ impl SessionState {
     /// still holds the silence the flushed delay was found against.
     pub(super) fn flush_locks_taken_against_silence(&mut self, driven_from: u64) {
         for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
+            // Tracking evidence from before the stimulus changed is not
+            // evidence about what follows it, whatever happens to the lock.
+            st.track_candidate = None;
+            st.track_from = Some(driven_from);
             match st.delay {
                 Some(Lock {
                     driving: false,
@@ -437,7 +441,11 @@ impl SessionState {
             .zip(self.analysis.iter())
             .zip(self.processing.iter())
         {
-            if !st.tracking || !processing {
+            if !st.tracking {
+                continue;
+            }
+            // Paused this tick: its candidate was cleared in `tick`.
+            if !processing {
                 continue;
             }
             let Some(lock) = st.delay else {
@@ -448,6 +456,10 @@ impl SessionState {
                 continue;
             };
             let ring_start = a.key.dropped as u64;
+            if st.track_from.is_some_and(|at| ring_start < at) {
+                st.track_candidate = None;
+                continue;
+            }
             let ring_len = (window.nperseg + window.step * a.key.n_blocks.saturating_sub(1)) as u64;
             let obs = super::pair::TrackObservation {
                 residual: a.ir_peak_lag,
@@ -696,6 +708,14 @@ impl SessionState {
             .iter()
             .map(|&absent| !clipped && !absent)
             .collect();
+        // A pause (#670) is a gap in tracking's evidence (#687): what
+        // follows must confirm itself on two windows. Cleared here, not in
+        // `track_delays`, which a tick with every pair paused never reaches.
+        for (st, &processing) in self.pairs.iter_mut().zip(self.processing.iter()) {
+            if !processing {
+                st.track_candidate = None;
+            }
+        }
         let push = self.processing.iter().any(|&p| p);
 
         if ev.drive_edge_on {

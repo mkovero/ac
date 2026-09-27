@@ -1042,3 +1042,71 @@ fn without_tracking_an_operator_delay_stays_put() {
     assert!(frames.iter().all(|f| f["delay_samples"] == json!(460)));
     assert_eq!(frames.last().unwrap()["delay_tracking"], json!(false));
 }
+
+/// Codex review of #687: a pause (#670) or a drive edge clears tracking's
+/// candidate, so the next move needs two windows from after it.
+#[test]
+fn a_pause_or_a_drive_edge_clears_the_tracking_candidate() {
+    let t0 = std::time::Instant::now();
+    let with_candidate = || {
+        let mut s = session();
+        run_correlated(&mut s, 25, 480, events(true), t0);
+        for action in [DelayAction::Track(true), DelayAction::Set(460)] {
+            s.apply_delay_cmd(DelayCmd { pair: None, action }, true);
+        }
+        run_correlated(
+            &mut s,
+            12,
+            480,
+            events(true),
+            t0 + std::time::Duration::from_secs(2),
+        );
+        assert!(
+            s.pairs[0].track_candidate.is_some(),
+            "no candidate to clear"
+        );
+        s
+    };
+
+    let mut paused = with_candidate();
+    run_silent_ref(
+        &mut paused,
+        &[t0 + std::time::Duration::from_secs(4)],
+        events(true),
+    );
+    assert_eq!(
+        paused.pairs[0].track_candidate, None,
+        "a pause kept the candidate"
+    );
+
+    let mut edged = with_candidate();
+    let edge = TickEvents {
+        drive_edge_on: true,
+        ..events(true)
+    };
+    run_correlated(
+        &mut edged,
+        1,
+        480,
+        edge,
+        t0 + std::time::Duration::from_secs(4),
+    );
+    assert_eq!(
+        edged.pairs[0].track_candidate, None,
+        "a drive edge kept the candidate"
+    );
+    assert!(edged.pairs[0].track_from.is_some());
+    // No window before the edge may count: the delay stays put until one
+    // after it has been confirmed by another.
+    let frames = run_correlated(
+        &mut edged,
+        30,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(5),
+    );
+    assert!(
+        frames.iter().all(|f| f["delay_samples"] == json!(460)),
+        "moved on pre-edge evidence"
+    );
+}

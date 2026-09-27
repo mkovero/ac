@@ -439,6 +439,9 @@ impl AcViewApp {
                     // the scene keeps rolling so the meters, the fault
                     // indicator and the readouts stay live.
                     live.set_protection(wire_frame.protection.as_ref());
+                    if pair.track_pending == Some(live.delay_tracking) {
+                        pair.track_pending = None;
+                    }
                     pair.scene = Some(live);
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
@@ -698,11 +701,16 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
-            // `Y` (#687): the daemon owns the rule; this only flips it.
+            // `Y` (#687): the daemon owns the rule; this only flips it,
+            // from what was last asked if the frame has not caught up.
             Action::ToggleDelayTracking => {
-                let on = !self
-                    .current_transfer_scene()
+                let i = self.selected_pair();
+                let shown = self.live[i]
+                    .scene
+                    .as_ref()
                     .is_some_and(|s| s.delay_tracking);
+                let on = !self.live[i].track_pending.unwrap_or(shown);
+                self.live[i].track_pending = Some(on);
                 self.send_delay(serde_json::json!({"track": on}));
             }
             Action::ToggleTraceVisible => self.with_transfer(|t| {
@@ -1844,6 +1852,10 @@ struct LivePair {
     fault: ac_scene::FaultState,
     /// Built from `frame` every pass in the transfer view.
     scene: Option<ac_scene::TransferScene>,
+    /// The tracking state `Y` last asked for (#687), until a frame shows
+    /// it: two presses before the next frame then toggle twice instead of
+    /// sending the same value (Codex review).
+    track_pending: Option<bool>,
 }
 
 /// The version-mismatch state's cross-frame record (#112).

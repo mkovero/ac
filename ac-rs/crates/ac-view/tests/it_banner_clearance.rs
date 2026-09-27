@@ -35,6 +35,7 @@ fn transfer_scene() -> TransferScene {
         delay_ms: 0.0,
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),

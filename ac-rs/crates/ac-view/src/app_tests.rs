@@ -2108,3 +2108,35 @@ fn y_toggles_delay_tracking_from_what_the_frame_says() {
         ]
     );
 }
+
+/// Codex review of #687: two `Y` presses before the next frame toggle
+/// twice rather than sending the same value.
+#[test]
+fn y_toggles_twice_between_frames() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "track": true, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0}),
+        ]
+    );
+}
+
+/// Codex review of #687: a pair switched on while it holds no delay reads
+/// as on, so `Y` turns it off.
+#[test]
+fn y_reads_tracking_on_a_pair_without_a_delay() {
+    let mut app = transfer_app();
+    let mut unlocked = unaligned_frame();
+    unlocked.delay_tracking = true;
+    app.ingest_frame_for_test(unlocked, 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0})]
+    );
+}

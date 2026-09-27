@@ -111,6 +111,10 @@ pub(super) struct PairState {
     pub(super) tracking: bool,
     /// The residual tracking is waiting to see confirmed (#687).
     pub(super) track_candidate: Option<TrackCandidate>,
+    /// Rings position (the `dropped` coordinate) after a drive edge before
+    /// which a window is not tracking evidence: it still holds audio from
+    /// before the stimulus changed (Codex review of #687).
+    pub(super) track_from: Option<u64>,
 }
 
 /// One analysis window's residual, held until an independent window
@@ -196,6 +200,7 @@ impl PairState {
             spl_last: None,
             tracking: false,
             track_candidate: None,
+            track_from: None,
         }
     }
 
