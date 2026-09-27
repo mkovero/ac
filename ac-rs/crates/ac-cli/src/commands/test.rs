@@ -130,7 +130,10 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         let path = io::output_dir(cfg).join(format!("test_dut_{}.csv", io::timestamp()));
         match save_suite_csv(&suite.rows, &path) {
             Ok(()) => println!("  saved  {}\n", path.display()),
-            Err(e) => eprintln!("  error: could not write {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("  error: could not write {}: {e}", path.display());
+                std::process::exit(1);
+            }
         }
     }
     if !suite.ok() {
@@ -149,6 +152,9 @@ struct Suite {
     rows: Vec<Value>,
     /// `tests_run + dmm_run` from `done`; `None` until `done` arrives.
     reported: Option<u64>,
+    /// `done` said a `stop` cut the suite short — ours or another
+    /// client's. The rows that did run can match `tests_run` and all pass.
+    stopped: bool,
     /// An `error` frame or a timeout ended the run early.
     broken: bool,
 }
@@ -159,6 +165,7 @@ impl Suite {
     /// failure, not an empty success.
     fn ok(&self) -> bool {
         !self.broken
+            && !self.stopped
             && !self.rows.is_empty()
             && self.reported == Some(self.rows.len() as u64)
             && self.rows.iter().all(row_passed)
@@ -240,6 +247,7 @@ fn consume(suite: &mut Suite, cmd_name: &str, (topic, data): (String, Value)) ->
         "done" => {
             let count = |k: &str| data.get(k).and_then(Value::as_u64).unwrap_or(0);
             suite.reported = Some(count("tests_run") + count("dmm_run"));
+            suite.stopped = data.get("stopped").and_then(Value::as_bool) == Some(true);
             let mut lines = vec![String::new()];
             lines.extend(summary_lines(suite));
             if let Some(line) = io::xrun_warning_line(count("xruns")) {
@@ -317,6 +325,9 @@ fn summary_lines(suite: &Suite) -> Vec<String> {
     } else {
         format!("  {passed} of {received} pass")
     }];
+    if suite.stopped {
+        lines.push("  stopped before the suite finished".to_owned());
+    }
     if let Some(reported) = suite.reported.filter(|&n| n != received) {
         lines.push(format!(
             "  warning: the daemon reports {reported} tests run, {received} results arrived"
@@ -325,19 +336,34 @@ fn summary_lines(suite: &Suite) -> Vec<String> {
     lines
 }
 
-/// `test dut compare`: the daemon waits up to 300 s for `dut_reply`, then
-/// runs the bypass pass whether or not anything was bypassed (ZMQ.md). So
-/// the reply is sent only on a real Enter; with no terminal to answer from
-/// the run is stopped instead of producing unbypassed "bypass" rows.
-/// Returns whether the bypass pass will run.
+/// How long `test dut compare` waits for Enter at the bypass prompt.
+///
+/// Coupled to the daemon's `DUT_REPLY_DEADLINE` (300 s, `test_dut.rs`):
+/// past that the daemon runs the bypass pass whether or not anything was
+/// bypassed, and a `dut_reply` sent later is still acknowledged. So this
+/// must end first, with room for the `stop` to arrive; a test reads the
+/// daemon's value. 30 s of margin is assumed, not measured — a `stop`
+/// round trip on one host takes milliseconds.
+const BYPASS_ANSWER: std::time::Duration = std::time::Duration::from_secs(270);
+
+/// `test dut compare`: the daemon waits for `dut_reply`, then runs the
+/// bypass pass whether or not anything was bypassed (ZMQ.md). So the reply
+/// is sent only on a real Enter within [`BYPASS_ANSWER`]; with no answer —
+/// stdin closed, or nobody there — the run is stopped instead of producing
+/// unbypassed "bypass" rows. Returns whether the bypass pass will run.
 fn answer_bypass_prompt(client: &mut AcClient, message: &str) -> bool {
-    println!("\n  {message}");
-    let mut line = String::new();
-    let answered = matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0);
+    println!("\n  {message} (within {} s)", BYPASS_ANSWER.as_secs());
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Left blocked on stdin if nobody answers; the process exits soon after.
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = tx.send(matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0));
+    });
+    let answered = rx.recv_timeout(BYPASS_ANSWER).unwrap_or(false);
     let cmd = if answered {
         serde_json::json!({"cmd": "dut_reply"})
     } else {
-        eprintln!("  error: no answer on stdin, stopping before the bypass pass");
+        eprintln!("  error: no answer at the prompt, stopping before the bypass pass");
         serde_json::json!({"cmd": "stop", "name": "test_dut"})
     };
     check_ack(client.send_cmd(&cmd, None), "test_dut");
@@ -561,6 +587,49 @@ mod tests {
         assert!(lines
             .contains(&"  warning: the daemon reports 2 tests run, 1 results arrived".to_owned()));
         assert!(!suite.ok());
+    }
+
+    /// Codex review: a stop (another client's `ac stop`) after one passing
+    /// check leaves one row and `tests_run: 1` — a match, all pass. Only
+    /// `stopped` tells it from a complete suite.
+    #[test]
+    fn a_stopped_suite_fails_even_when_every_row_passed() {
+        let (suite, lines, _) = feed(
+            "test_hardware",
+            vec![
+                hw("Noise floor", true, "-120 dBFS", "< -80 dBFS"),
+                frame(
+                    "done",
+                    json!({"cmd": "test_hardware", "tests_run": 1, "dmm_run": 0,
+                                     "stopped": true}),
+                ),
+            ],
+        );
+        assert!(lines.contains(&"  stopped before the suite finished".to_owned()));
+        assert!(!suite.ok());
+    }
+
+    /// The prompt must give up before the daemon runs the bypass pass on
+    /// its own; the daemon's deadline is read from its source so a change
+    /// there breaks this test instead of reopening the race.
+    #[test]
+    fn the_bypass_prompt_ends_before_the_daemons_deadline() {
+        let src = include_str!("../../../ac-daemon/src/handlers/test_dut.rs");
+        let line = src
+            .lines()
+            .find(|l| l.starts_with("const DUT_REPLY_DEADLINE"))
+            .expect("DUT_REPLY_DEADLINE in test_dut.rs");
+        let secs: u64 = line
+            .split("from_secs(")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("cannot read seconds from {line:?}"));
+        assert!(
+            BYPASS_ANSWER + std::time::Duration::from_secs(10)
+                <= std::time::Duration::from_secs(secs),
+            "BYPASS_ANSWER {BYPASS_ANSWER:?} leaves under 10 s before the daemon's {secs} s"
+        );
     }
 
     #[test]

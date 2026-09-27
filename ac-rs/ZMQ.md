@@ -3786,12 +3786,14 @@ those two fields will fail on the DMM rows.
   "cmd":        "test_hardware",
   "tests_run":  <int>, "tests_pass": <int>,
   "dmm_run":    <int>, "dmm_pass":   <int>,
+  "stopped":    <bool>,
   "xruns":      <int>
 }
 ```
 
 A `stop` cuts the suite between tests, so `tests_run` is the number that
-actually ran, not the size of the suite.
+actually ran, not the size of the suite. `stopped` is `true` when a `stop`
+ended the run, so a client can tell a cut-short suite from a complete one.
 
 ---
 
@@ -3861,8 +3863,10 @@ track whether it sent `dut_reply` itself.
 
 **Terminal frame** (`done`):
 ```json
-{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "xruns": <int> }
+{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "stopped": <bool>, "xruns": <int> }
 ```
+
+`stopped` as in `test_hardware`.
 
 ---
 

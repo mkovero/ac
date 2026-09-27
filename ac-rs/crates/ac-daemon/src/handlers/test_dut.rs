@@ -22,6 +22,12 @@ use super::{
     resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
 
+/// How long the compare pass waits for `dut_reply` before running the
+/// bypass pass anyway. `ac-cli` (`commands/test.rs`, `BYPASS_ANSWER`) gives
+/// up and sends `stop` before this, so a late Enter can never confirm a
+/// bypass the daemon already ran without; its test reads this line.
+const DUT_REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 const THD_LEVELS_DBFS: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0];
 const CLIPPING_LEVELS_DBFS: &[f64] = &[
     -30.0, -27.0, -24.0, -21.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0,
@@ -218,7 +224,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                 }),
             );
 
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            let deadline = std::time::Instant::now() + DUT_REPLY_DEADLINE;
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -264,6 +270,8 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             &json!({
                 "cmd": "test_dut",
                 "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
+                // See test_hardware's `stopped` (#619).
+                "stopped": stop.load(Ordering::Relaxed),
                 "backend": backend,
             }),
         );

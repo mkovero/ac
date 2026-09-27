@@ -70,11 +70,15 @@ fn test_dut_compare_prints_rows_and_stops_when_nobody_answers_the_prompt() {
     assert!(stdout.contains("  With DUT"), "{ctx}");
     assert!(stdout.contains("Bypass DUT and press Enter"), "{ctx}");
     assert!(
-        stderr.contains("no answer on stdin, stopping before the bypass pass"),
+        stderr.contains("no answer at the prompt, stopping before the bypass pass"),
         "{ctx}"
     );
     assert!(!stdout.contains("  Bypass\n"), "bypass pass ran\n{ctx}");
     assert!(stdout.contains("  5 of 5 pass"), "{ctx}");
+    assert!(
+        stdout.contains("  stopped before the suite finished"),
+        "{ctx}"
+    );
     assert_eq!(
         out.status.code(),
         Some(1),
