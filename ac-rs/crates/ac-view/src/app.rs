@@ -104,6 +104,9 @@ pub struct AcViewApp {
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
     /// The slot the running capture is for.
     capture_slot: Option<u8>,
+    /// The slot average's scene and legend label (#671), rebuilt every pass
+    /// with the stored runs. `None` when off or when it cannot be formed.
+    average_scene: Option<(ac_scene::TransferScene, String)>,
     /// The saved-captures list (`F`, #256). `None` = closed.
     file_list: Option<crate::file_list::FileList>,
     /// Where `F` lists from and `C` writes to: [`crate::capture::captures_dir`],
@@ -167,6 +170,7 @@ impl AcViewApp {
             capture_rx: None,
             capture_slot: None,
             file_list: None,
+            average_scene: None,
             captures_dir: crate::capture::captures_dir(),
             quit_requested: false,
             toast: None,
@@ -366,6 +370,27 @@ impl AcViewApp {
                 // zoom/pan or an `N` press on a stored run must reach its
                 // curve exactly as reliably as the live one's.
                 self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range);
+                // The slot average (#671), drawn like a stored run in its
+                // own colour, unsmoothed, under the same mask.
+                self.average_scene = crate::snapshot_flow::average_input(state)
+                    .ok()
+                    .flatten()
+                    .map(|(input, label)| {
+                        let scene = ac_scene::TransferScene::from_input(
+                            &input,
+                            ac_scene::DisplayModes::new(
+                                ac_scene::DerotMode::Session,
+                                Default::default(),
+                            )
+                            .with_coherence_mask(state.coherence_mask),
+                            freq_range,
+                            db_range,
+                            &mut Default::default(),
+                            &mut Default::default(),
+                            0.0,
+                        );
+                        (scene, label)
+                    });
                 self.scene = None;
             }
         }
@@ -502,8 +527,9 @@ impl AcViewApp {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::OpenSnapshot => self.open_file_list(Instant::now()),
-            Action::ExportCsv => self.export_csv(Instant::now()),
+            Action::ExportCsv => self.export_csv(shift, Instant::now()),
             Action::CycleCoherenceMask => self.with_transfer(|t| t.cycle_coherence_mask()),
+            Action::ToggleAverage => self.toggle_average(shift, Instant::now()),
             Action::Quit => {
                 // Best-effort drive-off on a clean quit (§5); the dead-man
                 // is the guarantee if the process dies uncleanly.
@@ -699,6 +725,26 @@ impl AcViewApp {
         self.with_transfer(|t| t.toggle_pause());
     }
 
+    /// `M` / `Shift+M` (#671): the slot average on or off, or its weighting;
+    /// the status line says what it averages, or why it cannot.
+    fn toggle_average(&mut self, weighting: bool, now: Instant) {
+        self.with_transfer(|t| {
+            if weighting {
+                t.toggle_average_weighting();
+            } else {
+                t.toggle_average();
+            }
+        });
+        let ViewKind::Transfer(t) = &self.view else {
+            return;
+        };
+        match crate::snapshot_flow::average_input(t) {
+            Ok(Some((_, label))) => self.set_toast(label, now, Some(3.0)),
+            Ok(None) => self.set_toast("average off".into(), now, Some(2.0)),
+            Err(why) => self.set_toast(format!("no average \u{2014} {why}"), now, Some(4.0)),
+        }
+    }
+
     /// `F` (#256): open the saved-captures list, or close it.
     fn open_file_list(&mut self, now: Instant) {
         if self.file_list.take().is_some() {
@@ -745,33 +791,40 @@ impl AcViewApp {
 
     /// `C` (#256): write the selected trace — live or a slot — to CSV next
     /// to the captures, and say where.
-    fn export_csv(&mut self, now: Instant) {
+    fn export_csv(&mut self, average: bool, now: Instant) {
         let ViewKind::Transfer(t) = &self.view else {
             return;
         };
-        let (name, input) = match t.focus {
-            crate::view::Focus::Live => match &self.last_frame {
-                Some(f) => (
-                    "live".to_string(),
-                    ac_scene::TransferInput::from_wire_frame(f),
-                ),
-                None => {
-                    self.set_toast("no live trace to export".into(), now, Some(3.0));
+        let (name, input) = if average {
+            // `Shift+C` (#671): the slot average.
+            match crate::snapshot_flow::average_input(t) {
+                Ok(Some((input, _))) => ("average".to_string(), input),
+                Ok(None) => {
+                    self.set_toast("no average shown (M)".into(), now, Some(3.0));
                     return;
                 }
-            },
-            crate::view::Focus::Stored(i) => match t.loaded.get(i) {
-                Some(run) => {
-                    let mut input = ac_scene::TransferInput::from_pair_derivation(
-                        &run.derivation,
-                        &run.channel_role,
-                        run.sr,
-                    );
-                    input.shift_delay(run.delay_offset_samples);
-                    (run.label.clone(), input)
+                Err(why) => {
+                    self.set_toast(format!("no average \u{2014} {why}"), now, Some(4.0));
+                    return;
                 }
-                None => return,
-            },
+            }
+        } else {
+            match t.focus {
+                crate::view::Focus::Live => match &self.last_frame {
+                    Some(f) => (
+                        "live".to_string(),
+                        ac_scene::TransferInput::from_wire_frame(f),
+                    ),
+                    None => {
+                        self.set_toast("no live trace to export".into(), now, Some(3.0));
+                        return;
+                    }
+                },
+                crate::view::Focus::Stored(i) => match t.loaded.get(i) {
+                    Some(run) => (run.label.clone(), crate::snapshot_flow::run_input(run)),
+                    None => return,
+                },
+            }
         };
         if input.freqs.is_empty() {
             self.set_toast(format!("{name} has no trace yet"), now, Some(3.0));
@@ -1379,6 +1432,15 @@ impl AcViewApp {
                     color_slot: run.color_slot,
                     slot: run.slot,
                 })
+                .chain(self.average_scene.iter().map(|(scene, label)| StoredTrace {
+                    label: label.as_str(),
+                    captured_at_utc: "",
+                    scene,
+                    focused: false,
+                    visible: true,
+                    color_slot: crate::view::palette::AVERAGE_SLOT,
+                    slot: None,
+                }))
                 .collect(),
             ViewKind::Spectrum(_) => Vec::new(),
         }

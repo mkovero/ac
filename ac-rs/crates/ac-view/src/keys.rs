@@ -39,6 +39,9 @@ pub enum Action {
     ExportCsv,
     /// `B` (#670): cycle the display's coherence mask.
     CycleCoherenceMask,
+    /// `M` (#671): the average of the visible slots, on or off; Shift:
+    /// coherence weighting on or off.
+    ToggleAverage,
     MoveCursorLeft,
     MoveCursorRight,
     ZoomFreqIn,
@@ -285,7 +288,13 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::C,
         action: Action::ExportCsv,
         scope: Scope::Transfer,
-        description: "Write the selected trace to CSV",
+        description: "Write the selected trace to CSV (Shift: the average)",
+    },
+    Binding {
+        key: Key::M,
+        action: Action::ToggleAverage,
+        scope: Scope::Transfer,
+        description: "Average of the visible slots (Shift: coherence weighting on/off)",
     },
     Binding {
         key: Key::T,
