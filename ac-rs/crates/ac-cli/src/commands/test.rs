@@ -86,40 +86,9 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
         std::process::exit(1);
     }
 
-    io::print_freq_header(false, false);
-
-    loop {
-        let frame = match client.recv_data(300_000) {
-            Some(f) => f,
-            None => {
-                eprintln!("  error: timeout");
-                return;
-            }
-        };
-        let (topic, data) = frame;
-
-        if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str())
-                == Some("measurement/frequency_response/point")
-            {
-                io::print_freq_row(&data, false, false);
-            }
-        } else if topic == "done" {
-            // No summary here, so the xrun warning prints under the table.
-            let xruns = data.get("xruns").and_then(|v| v.as_u64()).unwrap_or(0);
-            if let Some(line) = io::xrun_warning_line(xruns) {
-                println!("\n{line}");
-            }
-            println!();
-            return;
-        } else if topic == "error" {
-            let msg = data
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error");
-            eprintln!("\n  error: {msg}");
-            return;
-        }
+    let suite = run_suite(client, "test_hardware");
+    if !suite.ok() {
+        std::process::exit(1);
     }
 }
 
@@ -138,7 +107,6 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     let _ = level_defaulted;
 
     let mut cal = get_cal(client);
-    let have_cal = cal.is_some();
     let level_db = level_to_dbfs(level, cal.as_ref());
     let consumes = consumes_voltage(cal.as_ref(), Some(level));
 
@@ -157,48 +125,237 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         std::process::exit(1);
     }
 
-    io::print_freq_header(have_cal, false);
-
-    let mut results = Vec::new();
-    let mut xruns = 0;
-    loop {
-        let frame = match client.recv_data(300_000) {
-            Some(f) => f,
-            None => {
-                eprintln!("  error: timeout");
-                break;
-            }
-        };
-        let (topic, data) = frame;
-
-        if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str())
-                == Some("measurement/frequency_response/point")
-            {
-                io::print_freq_row(&data, have_cal, false);
-                results.push(data);
-            }
-        } else if topic == "done" {
-            xruns = data.get("xruns").and_then(|v| v.as_u64()).unwrap_or(0);
-            break;
-        } else if topic == "error" {
-            let msg = data
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("error");
-            eprintln!("\n  error: {msg}");
-            break;
+    let suite = run_suite(client, "test_dut");
+    if !suite.rows.is_empty() {
+        let path = io::output_dir(cfg).join(format!("test_dut_{}.csv", io::timestamp()));
+        match save_suite_csv(&suite.rows, &path) {
+            Ok(()) => println!("  saved  {}\n", path.display()),
+            Err(e) => eprintln!("  error: could not write {}: {e}", path.display()),
         }
     }
-
-    // Ungated: with no points (#619) the summary is the xrun line alone.
-    io::print_summary(&results, "DUT", have_cal, xruns);
-    if !results.is_empty() {
-        let dir = io::output_dir(cfg);
-        let ts = io::timestamp();
-        let path = dir.join(format!("test_dut_{ts}.csv"));
-        io::save_csv(&results, &path);
+    if !suite.ok() {
+        std::process::exit(1);
     }
+}
+
+/// How `test hardware` / `test dut` ended, as the CLI saw it.
+///
+/// Both workers publish one `test_result` frame per check and a `done`
+/// with their own count (ZMQ.md). #619: the CLI used to keep only
+/// frequency-response points, which neither worker sends, so both
+/// commands printed a table header and exited 0 with nothing in it.
+#[derive(Debug, Default)]
+struct Suite {
+    rows: Vec<Value>,
+    /// `tests_run + dmm_run` from `done`; `None` until `done` arrives.
+    reported: Option<u64>,
+    /// An `error` frame or a timeout ended the run early.
+    broken: bool,
+}
+
+impl Suite {
+    /// Exit 0 only when every row passed, at least one ran, and the rows
+    /// received match the daemon's own count. A silent or short run is a
+    /// failure, not an empty success.
+    fn ok(&self) -> bool {
+        !self.broken
+            && !self.rows.is_empty()
+            && self.reported == Some(self.rows.len() as u64)
+            && self.rows.iter().all(row_passed)
+    }
+}
+
+/// What one DATA-socket frame means to a running suite.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Print these lines and keep reading.
+    Print(Vec<String>),
+    /// `test dut compare` wants the DUT bypassed; show this and wait.
+    Prompt(String),
+    /// Terminal frame: print these lines and stop.
+    Done(Vec<String>),
+    /// Unrelated frame (another command's, or a progress type).
+    Skip,
+}
+
+fn run_suite(client: &mut AcClient, cmd_name: &str) -> Suite {
+    let mut suite = Suite::default();
+    loop {
+        let Some(frame) = client.recv_data(300_000) else {
+            eprintln!("\n  error: no result from the daemon in 300 s");
+            suite.broken = true;
+            return suite;
+        };
+        match consume(&mut suite, cmd_name, frame) {
+            Step::Print(lines) => lines.iter().for_each(|l| println!("{l}")),
+            Step::Done(lines) => {
+                lines.iter().for_each(|l| println!("{l}"));
+                return suite;
+            }
+            Step::Prompt(message) => {
+                if !answer_bypass_prompt(client, &message) {
+                    // Stopped before the bypass pass: the rows so far may
+                    // all pass, but the comparison asked for never ran.
+                    suite.broken = true;
+                }
+            }
+            Step::Skip => {}
+        }
+    }
+}
+
+/// Fold one frame into `suite`. Pure, so what each frame prints is a unit
+/// test rather than a rig run.
+fn consume(suite: &mut Suite, cmd_name: &str, (topic, data): (String, Value)) -> Step {
+    // Another command's frame. One without `cmd` is kept: an `error` that
+    // lost its name must still end the run, not leave it to time out.
+    if data
+        .get("cmd")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c != cmd_name)
+    {
+        return Step::Skip;
+    }
+    match topic.as_str() {
+        "data" => match data.get("type").and_then(Value::as_str) {
+            Some("test_result") => {
+                let prev_tag = suite
+                    .rows
+                    .last()
+                    .and_then(|r| r.get("tag"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let lines = suite_row_lines(&data, prev_tag.as_deref());
+                suite.rows.push(data);
+                Step::Print(lines)
+            }
+            Some("dut_compare_prompt") => Step::Prompt(
+                data.get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Bypass DUT and press Enter")
+                    .to_owned(),
+            ),
+            _ => Step::Skip,
+        },
+        "done" => {
+            let count = |k: &str| data.get(k).and_then(Value::as_u64).unwrap_or(0);
+            suite.reported = Some(count("tests_run") + count("dmm_run"));
+            let mut lines = vec![String::new()];
+            lines.extend(summary_lines(suite));
+            if let Some(line) = io::xrun_warning_line(count("xruns")) {
+                lines.push(line);
+            }
+            lines.push(String::new());
+            Step::Done(lines)
+        }
+        "error" => {
+            suite.broken = true;
+            let msg = data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            Step::Done(vec![String::new(), format!("  error: {msg}")])
+        }
+        _ => Step::Skip,
+    }
+}
+
+fn row_passed(row: &Value) -> bool {
+    row.get("pass").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// One `test_result` as rows in the `test software` layout
+/// ([`result_lines`]). A change of `tag` (`test dut compare`) starts a
+/// group with its own heading. `tolerance` means different things per
+/// suite: for `test_hardware` it is the pass criterion, for `test_dut` it
+/// names what was measured (a DUT row fails only when it could not be
+/// measured), so it is worded to match.
+fn suite_row_lines(row: &Value, prev_tag: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    let tag = row.get("tag").and_then(Value::as_str);
+    if tag.is_some() && tag != prev_tag {
+        if prev_tag.is_some() {
+            lines.push(String::new());
+        }
+        lines.push(match tag {
+            Some("bypass") => "  Bypass".to_owned(),
+            _ => "  With DUT".to_owned(),
+        });
+    }
+
+    let name = row.get("name").and_then(Value::as_str).unwrap_or("?");
+    let tolerance = row
+        .get("tolerance")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let dmm = row.get("dmm").and_then(Value::as_bool) == Some(true);
+    let name = match (tag.is_some(), dmm) {
+        (true, _) if !tolerance.is_empty() => format!("{name} ({tolerance})"),
+        (_, true) => format!("{name} (DMM)"),
+        _ => name.to_owned(),
+    };
+    let rendered = serde_json::json!({
+        "name": name,
+        "pass": row_passed(row),
+        "detail": row.get("detail").and_then(Value::as_str).unwrap_or_default(),
+    });
+    lines.extend(result_lines(&[rendered]));
+    if tag.is_none() && !tolerance.is_empty() {
+        lines.push(format!("        pass if {tolerance}"));
+    }
+    lines
+}
+
+/// Count line, plus a warning when the rows received disagree with the
+/// daemon's own count — a dropped frame would otherwise read as a short,
+/// clean suite.
+fn summary_lines(suite: &Suite) -> Vec<String> {
+    let received = suite.rows.len() as u64;
+    let passed = suite.rows.iter().filter(|r| row_passed(r)).count();
+    let mut lines = vec![if received == 0 {
+        "  no tests ran".to_owned()
+    } else {
+        format!("  {passed} of {received} pass")
+    }];
+    if let Some(reported) = suite.reported.filter(|&n| n != received) {
+        lines.push(format!(
+            "  warning: the daemon reports {reported} tests run, {received} results arrived"
+        ));
+    }
+    lines
+}
+
+/// `test dut compare`: the daemon waits up to 300 s for `dut_reply`, then
+/// runs the bypass pass whether or not anything was bypassed (ZMQ.md). So
+/// the reply is sent only on a real Enter; with no terminal to answer from
+/// the run is stopped instead of producing unbypassed "bypass" rows.
+/// Returns whether the bypass pass will run.
+fn answer_bypass_prompt(client: &mut AcClient, message: &str) -> bool {
+    println!("\n  {message}");
+    let mut line = String::new();
+    let answered = matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0);
+    let cmd = if answered {
+        serde_json::json!({"cmd": "dut_reply"})
+    } else {
+        eprintln!("  error: no answer on stdin, stopping before the bypass pass");
+        serde_json::json!({"cmd": "stop", "name": "test_dut"})
+    };
+    check_ack(client.send_cmd(&cmd, None), "test_dut");
+    answered
+}
+
+/// One row per check. Columns follow the wire names so the file reads
+/// against ZMQ.md without a mapping.
+fn save_suite_csv(rows: &[Value], path: &std::path::Path) -> Result<(), csv::Error> {
+    let mut w = csv::Writer::from_path(path)?;
+    w.write_record(["tag", "name", "pass", "detail", "tolerance"])?;
+    for r in rows {
+        let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default();
+        let pass = if row_passed(r) { "true" } else { "false" };
+        w.write_record([s("tag"), s("name"), pass, s("detail"), s("tolerance")])?;
+    }
+    w.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -268,5 +425,263 @@ mod tests {
         assert!(lines
             .windows(2)
             .all(|w| !(w[0].is_empty() && w[1].is_empty())));
+    }
+
+    fn frame(topic: &str, data: Value) -> (String, Value) {
+        (topic.to_owned(), data)
+    }
+
+    fn hw(name: &str, pass: bool, detail: &str, tolerance: &str) -> (String, Value) {
+        frame(
+            "data",
+            json!({"type": "test_result", "cmd": "test_hardware", "name": name,
+                   "pass": pass, "detail": detail, "tolerance": tolerance,
+                   "mic_correction": "none", "spl_offset_db": null}),
+        )
+    }
+
+    fn dut(tag: &str, name: &str, detail: &str, tolerance: &str) -> (String, Value) {
+        frame(
+            "data",
+            json!({"type": "test_result", "cmd": "test_dut", "tag": tag, "name": name,
+                   "pass": true, "detail": detail, "tolerance": tolerance}),
+        )
+    }
+
+    /// Feed frames in order; collect every printed line and any prompt.
+    fn feed(cmd: &str, frames: Vec<(String, Value)>) -> (Suite, Vec<String>, Vec<String>) {
+        let mut suite = Suite::default();
+        let (mut lines, mut prompts) = (Vec::new(), Vec::new());
+        for f in frames {
+            match consume(&mut suite, cmd, f) {
+                Step::Print(l) | Step::Done(l) => lines.extend(l),
+                Step::Prompt(m) => prompts.push(m),
+                Step::Skip => {}
+            }
+        }
+        (suite, lines, prompts)
+    }
+
+    /// #619 itself: the frames a `--fake-audio` `test_hardware` actually
+    /// sent (captured 2026-09-27) print as rows, and the three failing
+    /// checks make the run fail. The old CLI kept only
+    /// `measurement/frequency_response/point` frames and printed nothing.
+    #[test]
+    fn hardware_results_print_and_a_failed_check_fails_the_run() {
+        let frames = vec![
+            hw(
+                "Noise floor",
+                false,
+                "-23.0 dBFS / -23.0 dBFS",
+                "< -80 dBFS",
+            ),
+            hw(
+                "Level linearity",
+                true,
+                "[-42\u{2192}-36:6.00]",
+                "monotonic, step error < 1 dB",
+            ),
+            hw(
+                "THD floor (1 kHz)",
+                false,
+                "best 1.0000%",
+                "best THD < 0.05%",
+            ),
+            hw(
+                "Frequency response",
+                true,
+                "max deviation 0.00 dB",
+                "< 1.0 dB vs 1 kHz ref",
+            ),
+            hw(
+                "Channel match",
+                false,
+                "delta level: 0.000 dB",
+                "level < 0.5 dB",
+            ),
+            hw(
+                "Repeatability",
+                true,
+                "level sigma=0.0000 dB",
+                "level sigma < 0.05 dB",
+            ),
+            frame(
+                "done",
+                json!({"cmd": "test_hardware", "tests_run": 6, "tests_pass": 3,
+                                 "dmm_run": 0, "dmm_pass": 0, "xruns": 0}),
+            ),
+        ];
+        assert!(frames
+            .iter()
+            .all(|(_, d)| d["type"] != "measurement/frequency_response/point"));
+
+        let (suite, lines, _) = feed("test_hardware", frames);
+        assert_eq!(
+            lines[..3],
+            [
+                "  FAIL  Noise floor",
+                "        -23.0 dBFS / -23.0 dBFS",
+                "        pass if < -80 dBFS",
+            ]
+        );
+        assert!(lines.contains(&"  pass  Repeatability".to_owned()));
+        assert!(lines.contains(&"  3 of 6 pass".to_owned()));
+        assert!(!suite.ok());
+    }
+
+    #[test]
+    fn an_all_pass_run_with_matching_count_is_ok() {
+        let (suite, _, _) = feed(
+            "test_hardware",
+            vec![
+                hw("Noise floor", true, "-120 dBFS", "< -80 dBFS"),
+                frame(
+                    "done",
+                    json!({"cmd": "test_hardware", "tests_run": 1, "dmm_run": 0}),
+                ),
+            ],
+        );
+        assert!(suite.ok());
+    }
+
+    /// Ask what makes it fail: a short run — a row lost on the way — must
+    /// not read as a clean pass, and must say so.
+    #[test]
+    fn fewer_rows_than_the_daemon_ran_fails_and_warns() {
+        let (suite, lines, _) = feed(
+            "test_hardware",
+            vec![
+                hw("Noise floor", true, "-120 dBFS", "< -80 dBFS"),
+                frame(
+                    "done",
+                    json!({"cmd": "test_hardware", "tests_run": 2, "dmm_run": 0}),
+                ),
+            ],
+        );
+        assert!(lines
+            .contains(&"  warning: the daemon reports 2 tests run, 1 results arrived".to_owned()));
+        assert!(!suite.ok());
+    }
+
+    #[test]
+    fn nothing_ran_is_a_failure_not_an_empty_pass() {
+        let (suite, lines, _) = feed(
+            "test_hardware",
+            vec![frame(
+                "done",
+                json!({"cmd": "test_hardware", "tests_run": 0}),
+            )],
+        );
+        assert!(lines.contains(&"  no tests ran".to_owned()));
+        assert!(!suite.ok());
+    }
+
+    #[test]
+    fn dmm_rows_are_named_and_counted() {
+        let mut row = hw("Absolute level", true, "0.3% error", "< 1% error");
+        row.1["dmm"] = true.into();
+        let (suite, lines, _) = feed(
+            "test_hardware",
+            vec![
+                row,
+                frame(
+                    "done",
+                    json!({"cmd": "test_hardware", "tests_run": 0, "dmm_run": 1}),
+                ),
+            ],
+        );
+        assert_eq!(lines[0], "  pass  Absolute level (DMM)");
+        assert!(suite.ok());
+    }
+
+    /// `test dut compare`: each tag gets a heading, the prompt is surfaced
+    /// once, and a DUT row names what it measured instead of "pass if".
+    #[test]
+    fn dut_compare_groups_by_tag_and_surfaces_the_prompt() {
+        let (suite, lines, prompts) = feed(
+            "test_dut",
+            vec![
+                dut("dut", "Gain", "+0.0 dB", "at 1 kHz"),
+                frame(
+                    "data",
+                    json!({"type": "dut_compare_prompt", "cmd": "test_dut",
+                                     "message": "Bypass DUT and press Enter"}),
+                ),
+                dut("bypass", "Gain", "+0.1 dB", "at 1 kHz"),
+                frame(
+                    "done",
+                    json!({"cmd": "test_dut", "tests_run": 2, "compare": true,
+                                     "xruns": 0}),
+                ),
+            ],
+        );
+        assert_eq!(prompts, ["Bypass DUT and press Enter"]);
+        assert_eq!(
+            lines[..7],
+            [
+                "  With DUT",
+                "  pass  Gain (at 1 kHz)",
+                "        +0.0 dB",
+                "",
+                "  Bypass",
+                "  pass  Gain (at 1 kHz)",
+                "        +0.1 dB",
+            ]
+        );
+        assert!(!lines.iter().any(|l| l.contains("pass if")));
+        assert!(lines.contains(&"  2 of 2 pass".to_owned()));
+        assert!(suite.ok());
+    }
+
+    #[test]
+    fn an_error_ends_the_run_as_a_failure_even_without_a_cmd() {
+        let (suite, lines, _) = feed(
+            "test_dut",
+            vec![
+                dut("dut", "Gain", "+0.0 dB", "at 1 kHz"),
+                frame(
+                    "error",
+                    json!({"message": "backend does not support port routing"}),
+                ),
+            ],
+        );
+        assert_eq!(
+            lines.last().unwrap(),
+            "  error: backend does not support port routing"
+        );
+        assert!(!suite.ok());
+    }
+
+    #[test]
+    fn another_commands_frames_are_ignored() {
+        let (suite, lines, _) = feed(
+            "test_dut",
+            vec![
+                hw("Noise floor", false, "x", "y"),
+                frame("done", json!({"cmd": "test_hardware", "tests_run": 1})),
+            ],
+        );
+        assert!(lines.is_empty());
+        assert!(suite.rows.is_empty() && suite.reported.is_none());
+    }
+
+    #[test]
+    fn csv_has_one_row_per_check_with_wire_column_names() {
+        let dir = std::env::temp_dir().join(format!("ac-619-csv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.csv");
+        let rows = vec![
+            dut("dut", "Gain", "+0.0 dB  (ref: a, b)", "at 1 kHz").1,
+            dut("bypass", "Gain", "+0.1 dB", "at 1 kHz").1,
+        ];
+        save_suite_csv(&rows, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            text,
+            "tag,name,pass,detail,tolerance\n\
+             dut,Gain,true,\"+0.0 dB  (ref: a, b)\",at 1 kHz\n\
+             bypass,Gain,true,+0.1 dB,at 1 kHz\n"
+        );
     }
 }
