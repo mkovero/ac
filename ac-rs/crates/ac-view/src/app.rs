@@ -439,7 +439,10 @@ impl AcViewApp {
                     // the scene keeps rolling so the meters, the fault
                     // indicator and the readouts stay live.
                     live.set_protection(wire_frame.protection.as_ref());
-                    if pair.track_pending == Some(live.delay_tracking) {
+                    if pair
+                        .track_pending
+                        .is_some_and(|(_, at)| pair.frames_in >= at + TRACK_PENDING_FRAMES)
+                    {
                         pair.track_pending = None;
                     }
                     pair.scene = Some(live);
@@ -499,6 +502,7 @@ impl AcViewApp {
                 match self.route(wire_frame.meas_channel, wire_frame.ref_channel) {
                     Some(i) => {
                         self.live[i].frame = Some(wire_frame);
+                        self.live[i].frames_in += 1;
                         true
                     }
                     None => false,
@@ -588,6 +592,7 @@ impl AcViewApp {
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
         self.live[i].frame = Some(frame);
+        self.live[i].frames_in += 1;
         self.rebuild_scenes(true, now_s);
     }
 
@@ -709,8 +714,8 @@ impl AcViewApp {
                     .scene
                     .as_ref()
                     .is_some_and(|s| s.delay_tracking);
-                let on = !self.live[i].track_pending.unwrap_or(shown);
-                self.live[i].track_pending = Some(on);
+                let on = !self.live[i].track_pending.map_or(shown, |(v, _)| v);
+                self.live[i].track_pending = Some((on, self.live[i].frames_in));
                 self.send_delay(serde_json::json!({"track": on}));
             }
             Action::ToggleTraceVisible => self.with_transfer(|t| {
@@ -1852,11 +1857,22 @@ struct LivePair {
     fault: ac_scene::FaultState,
     /// Built from `frame` every pass in the transfer view.
     scene: Option<ac_scene::TransferScene>,
-    /// The tracking state `Y` last asked for (#687), until a frame shows
-    /// it: two presses before the next frame then toggle twice instead of
-    /// sending the same value (Codex review).
-    track_pending: Option<bool>,
+    /// Frames received for this pair, ever.
+    frames_in: u64,
+    /// The tracking state `Y` last asked for (#687), with `frames_in` at
+    /// the press. Two presses before the frames catch up then toggle twice
+    /// instead of sending the same value (Codex review).
+    track_pending: Option<(bool, u64)>,
 }
+
+/// New frames of a pair after which a `Y` press is no longer pending: the
+/// frames then say what the daemon holds. The daemon applies a queued
+/// `set_delay` at the start of its next 50 ms tick, so the second frame
+/// after a press already reflects it; five leaves room for frames already
+/// in flight. Assumed, not measured. Counting frames rather than matching
+/// values: a stored frame, or one in flight from before the press, can
+/// match the pending value by accident (Codex recheck).
+const TRACK_PENDING_FRAMES: u64 = 5;
 
 /// The version-mismatch state's cross-frame record (#112).
 struct VersionRefusal {
