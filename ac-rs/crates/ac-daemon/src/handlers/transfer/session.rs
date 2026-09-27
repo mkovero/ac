@@ -260,7 +260,13 @@ impl SessionState {
                 continue;
             }
             let held = st.delay.map(|l| l.samples);
+            // Any operator change starts tracking's evidence afresh.
+            st.track_candidate = None;
             let samples = match cmd.action {
+                DelayAction::Track(on) => {
+                    st.tracking = on;
+                    continue;
+                }
                 DelayAction::Find => {
                     st.flush(ladder);
                     continue;
@@ -411,6 +417,55 @@ impl SessionState {
             }
         }
         found
+    }
+
+    /// Delay tracking (#687): move each tracking pair's held delay by its
+    /// live IR residual once [`super::pair::track_step`] confirms it on an
+    /// independent window. The move is what `set_delay {step}` does —
+    /// operator-set, ladder rebuilt. A pair paused this tick (#670), or
+    /// whose estimate is not at its held delay yet, is left alone.
+    ///
+    /// Returns whether any pair moved, so the caller recomputes that
+    /// pair's estimate at the new delay in the same tick.
+    pub(super) fn track_delays(&mut self) -> bool {
+        let window = self.window;
+        let mut moved = false;
+        for (((st, ladder), held), &processing) in self
+            .pairs
+            .iter_mut()
+            .zip(self.ladders.iter_mut())
+            .zip(self.analysis.iter())
+            .zip(self.processing.iter())
+        {
+            if !st.tracking || !processing {
+                continue;
+            }
+            let Some(lock) = st.delay else {
+                st.track_candidate = None;
+                continue;
+            };
+            let Some(a) = held.as_ref().filter(|a| a.key.delay == lock.samples) else {
+                continue;
+            };
+            let ring_start = a.key.dropped as u64;
+            let ring_len = (window.nperseg + window.step * a.key.n_blocks.saturating_sub(1)) as u64;
+            let obs = super::pair::TrackObservation {
+                residual: a.ir_peak_lag,
+                delay: lock.samples,
+                ring_start,
+                ring_end: ring_start + ring_len,
+            };
+            if let Some(step) = super::pair::track_step(&mut st.track_candidate, obs) {
+                st.delay = Some(Lock {
+                    samples: lock.samples.saturating_add(step),
+                    driving: lock.driving,
+                    operator: true,
+                });
+                *ladder = None;
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// Build each pair's ladder once its alignment offset is known — the
@@ -683,7 +738,9 @@ impl SessionState {
         let n_blocks = self.n_blocks();
         if push && n_blocks > 0 {
             self.refresh_analysis(n_blocks, ev.mc_enabled);
-            if self.find_missing_delays(ev, now) {
+            let found = self.find_missing_delays(ev, now);
+            let tracked = self.track_delays();
+            if found || tracked {
                 self.refresh_analysis(n_blocks, ev.mc_enabled);
             }
         }

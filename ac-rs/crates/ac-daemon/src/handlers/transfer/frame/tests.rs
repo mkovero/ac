@@ -350,6 +350,7 @@ const TRANSFER_KEYS: &[&str] = &[
     "delay_operator",
     "delay_residual",
     "delay_samples",
+    "delay_tracking",
     "drive",
     "drive.drivable",
     "drive.level_dbfs",

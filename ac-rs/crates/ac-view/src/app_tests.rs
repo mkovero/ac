@@ -2081,3 +2081,30 @@ fn meas_lists_parse_or_are_refused() {
         Err("channel 4 is listed twice".to_string())
     );
 }
+
+/// `Y` (#687) switches delay tracking for the selected pair: on when the
+/// frame says it is off, off when the frame says it is on.
+#[test]
+fn y_toggles_delay_tracking_from_what_the_frame_says() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    let mut tracking = found_frame();
+    tracking.delay_tracking = true;
+    app.ingest_frame_for_test(tracking, 1.0);
+    assert_eq!(
+        app.current_transfer_scene()
+            .unwrap()
+            .delay_control_readout
+            .as_deref(),
+        Some("tracking \u{b7} find +12 smp (+0.25 ms)")
+    );
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "track": true, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0}),
+        ]
+    );
+}

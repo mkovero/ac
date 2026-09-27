@@ -698,6 +698,13 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
+            // `Y` (#687): the daemon owns the rule; this only flips it.
+            Action::ToggleDelayTracking => {
+                let on = !self
+                    .current_transfer_scene()
+                    .is_some_and(|s| s.delay_tracking);
+                self.send_delay(serde_json::json!({"track": on}));
+            }
             Action::ToggleTraceVisible => self.with_transfer(|t| {
                 if shift {
                     t.show_all();

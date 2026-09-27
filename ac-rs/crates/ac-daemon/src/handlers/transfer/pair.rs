@@ -107,6 +107,80 @@ pub(super) struct PairState {
     pub(super) spl_integ: Option<ac_core::visualize::time_integration::EmaIntegrator>,
     /// Timestamp of the last `spl` integration step, for its `dt`.
     pub(super) spl_last: Option<std::time::Instant>,
+    /// Delay tracking switched on for this pair (#687).
+    pub(super) tracking: bool,
+    /// The residual tracking is waiting to see confirmed (#687).
+    pub(super) track_candidate: Option<TrackCandidate>,
+}
+
+/// One analysis window's residual, held until an independent window
+/// confirms or replaces it (#687).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TrackCandidate {
+    /// The live IR's residual against `delay`, samples.
+    pub(super) residual: i64,
+    /// The held delay the residual was measured against.
+    pub(super) delay: i64,
+    /// One past the last ring sample the window covered, in the rings'
+    /// coordinate (the one `SessionState::dropped` counts in).
+    pub(super) ring_end: u64,
+}
+
+/// One analysis window as tracking sees it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TrackObservation {
+    pub(super) residual: Option<i64>,
+    pub(super) delay: i64,
+    pub(super) ring_start: u64,
+    pub(super) ring_end: u64,
+}
+
+/// How far two windows' residuals may differ and still agree, samples. A
+/// peak can land on either of two adjacent samples when the true arrival
+/// falls between them; two samples of scatter is a different arrival.
+pub(super) const TRACK_AGREEMENT_SAMPLES: i64 = 1;
+
+/// The tracking rule (#687): the step to apply to the held delay, or
+/// `None`. Moves only when the residual of a window that shares **no
+/// samples** with the candidate's window agrees with it within
+/// [`TRACK_AGREEMENT_SAMPLES`], both measured against the same held delay.
+///
+/// Consecutive ticks share almost the whole 2.5 s ring, so agreement
+/// between them is the same data read twice, not a confirmation: a single
+/// noise or reflection peak would pass it. A residual of 0, no residual (a
+/// silent leg), or a different held delay clears the candidate.
+pub(super) fn track_step(
+    candidate: &mut Option<TrackCandidate>,
+    obs: TrackObservation,
+) -> Option<i64> {
+    let residual = match obs.residual {
+        Some(r) if r != 0 => r,
+        _ => {
+            *candidate = None;
+            return None;
+        }
+    };
+    let fresh = TrackCandidate {
+        residual,
+        delay: obs.delay,
+        ring_end: obs.ring_end,
+    };
+    match *candidate {
+        Some(c) if c.delay != obs.delay => {
+            *candidate = Some(fresh);
+            None
+        }
+        // Still overlapping the candidate's window: no new evidence yet.
+        Some(c) if obs.ring_start < c.ring_end => None,
+        Some(c) if (residual - c.residual).abs() <= TRACK_AGREEMENT_SAMPLES => {
+            *candidate = None;
+            Some(residual)
+        }
+        _ => {
+            *candidate = Some(fresh);
+            None
+        }
+    }
 }
 
 impl PairState {
@@ -120,6 +194,8 @@ impl PairState {
             attempts: 0,
             spl_integ,
             spl_last: None,
+            tracking: false,
+            track_candidate: None,
         }
     }
 
@@ -136,6 +212,93 @@ impl PairState {
     pub(super) fn flush(&mut self, ladder: &mut Option<ac_core::visualize::mtw::MtwPair>) {
         self.delay = None;
         self.next_attempt = None;
+        self.track_candidate = None;
         *ladder = None;
+    }
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+
+    const RING: u64 = 120_000; // 2.5 s at 48 kHz
+    const HOP: u64 = 24_000; // 0.5 s
+
+    fn obs(residual: Option<i64>, delay: i64, start: u64) -> TrackObservation {
+        TrackObservation {
+            residual,
+            delay,
+            ring_start: start,
+            ring_end: start + RING,
+        }
+    }
+
+    /// The rejected rule, computed here: move when two consecutive
+    /// analyses agree, whatever their windows share.
+    fn consecutive_rule(prev: Option<i64>, now: Option<i64>) -> Option<i64> {
+        match (prev, now) {
+            (Some(a), Some(b)) if b != 0 && (a - b).abs() <= TRACK_AGREEMENT_SAMPLES => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Agreement on overlapping windows is the same audio read twice: the
+    /// consecutive rule moves on it, this rule waits for a window that
+    /// shares no samples.
+    #[test]
+    fn overlapping_windows_never_confirm() {
+        let mut c = None;
+        assert_eq!(track_step(&mut c, obs(Some(20), 460, 0)), None);
+        for k in 1..5 {
+            let start = k * HOP; // still inside the first window
+            assert_eq!(track_step(&mut c, obs(Some(20), 460, start)), None);
+            assert_eq!(
+                consecutive_rule(Some(20), Some(20)),
+                Some(20),
+                "the rejected rule would have moved at hop {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_independent_window_that_agrees_moves_the_delay() {
+        let mut c = None;
+        track_step(&mut c, obs(Some(20), 460, 0));
+        assert_eq!(track_step(&mut c, obs(Some(21), 460, RING)), Some(21));
+        assert_eq!(c, None, "a move starts the evidence afresh");
+    }
+
+    #[test]
+    fn a_disagreeing_window_becomes_the_new_candidate() {
+        let mut c = None;
+        track_step(&mut c, obs(Some(20), 460, 0));
+        assert_eq!(track_step(&mut c, obs(Some(35), 460, RING)), None);
+        assert_eq!(c.map(|c| c.residual), Some(35));
+        assert_eq!(track_step(&mut c, obs(Some(35), 460, 2 * RING)), Some(35));
+    }
+
+    #[test]
+    fn zero_or_no_residual_clears_the_candidate() {
+        for clear in [Some(0), None] {
+            let mut c = None;
+            track_step(&mut c, obs(Some(20), 460, 0));
+            assert_eq!(track_step(&mut c, obs(clear, 460, HOP)), None);
+            assert_eq!(c, None);
+            assert_eq!(
+                track_step(&mut c, obs(Some(20), 460, RING)),
+                None,
+                "{clear:?}"
+            );
+        }
+    }
+
+    /// A residual measured against another held delay says nothing about
+    /// this one.
+    #[test]
+    fn a_changed_held_delay_restarts_the_evidence() {
+        let mut c = None;
+        track_step(&mut c, obs(Some(20), 460, 0));
+        assert_eq!(track_step(&mut c, obs(Some(20), 450, RING)), None);
+        assert_eq!(c.map(|c| c.delay), Some(450));
     }
 }

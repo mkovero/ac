@@ -3029,6 +3029,12 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // drive edge.
   "delay_operator":  <bool>,
 
+  // Additive (#687) — delay tracking is on for this pair: the daemon moves
+  // `delay_samples` by the residual once two analysis windows that share no
+  // samples agree on it (±1 sample). Set with `set_delay {track}`. false on
+  // a daemon predating it.
+  "delay_tracking":  <bool>,
+
   // Additive (#238) — how many start-up Finds this pair has completed, with
   // or without a peak. 0 before the first, and absent entirely on a daemon
   // predating #238 (consumers must default it to 0, never to "it ran").
@@ -3238,7 +3244,8 @@ tells that apart from a stationary DUT.
 What does move every frame: `mtw` (the ladder is a push pipeline fed the
 fresh capture buffers), `meas_peak_dbfs` / `ref_peak_dbfs`, `drive`,
 `spl` (the F/S integrator steps every tick over the held broadband
-level), `delay_locked`, `delay_operator` and `delay_attempts`.
+level), `delay_locked`, `delay_operator`, `delay_tracking` and
+`delay_attempts`.
 `delay_residual` moves with the analysis, once per hop.
 
 The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
@@ -3455,6 +3462,7 @@ spawning one, so it does not go through the busy guard.
 ```json
 { "cmd": "set_delay", "samples": <int> | null, "pair": <int> }
 { "cmd": "set_delay", "step": <int>, "pair": <int> }
+{ "cmd": "set_delay", "track": <bool>, "pair": <int> }
 ```
 
 - `samples` (required): an integer holds that delay, marked
@@ -3464,6 +3472,16 @@ spawning one, so it does not go through the busy guard.
 - `step` (instead of `samples`): move the held delay by that many samples,
   operator-set. Applied by the daemon in arrival order, so two nudges sent
   before the next frame both land. A pair with no delay yet is left alone.
+- `track` (instead of `samples`/`step`, #687): switch delay tracking on or
+  off. While on, after each analysis the pair's live IR residual is held as
+  a candidate; when a later window that shares **no samples** with the
+  candidate's (the ring is 2.5 s, so about 2.5 s later) reads the same
+  residual within ±1 sample against the same held delay, the delay moves by
+  it, exactly as a `step` would: operator-set, ladder restarted. A residual
+  of 0, no residual (a silent leg), a pair paused by data protection, or any
+  other `set_delay` clears the candidate. A move is therefore followed
+  about two ring lengths (≈5 s) after it stops. Published as
+  `delay_tracking`.
 - `pair` (optional): a pair index in launch order. Absent: every pair.
 
 Setting the value a pair already holds only marks it operator-set; a
@@ -3478,8 +3496,9 @@ offset is applied before decimation).
 **Errors**
 ```json
 { "ok": false, "error": "no transfer_stream session running" }
-{ "ok": false, "error": "'samples' (integer or null) or 'step' (integer) required" }
-{ "ok": false, "error": "give 'samples' or 'step', not both" }
+{ "ok": false, "error": "'samples' (integer or null), 'step' (integer) or 'track' (bool) required" }
+{ "ok": false, "error": "give one of 'samples', 'step' or 'track'" }
+{ "ok": false, "error": "'track' must be true or false" }
 { "ok": false, "error": "'samples' must be an integer or null" }
 { "ok": false, "error": "'step' must be an integer" }
 { "ok": false, "error": "'pair' must be a non-negative integer" }

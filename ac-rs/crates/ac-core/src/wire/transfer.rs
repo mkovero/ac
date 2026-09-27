@@ -287,6 +287,11 @@ pub struct TransferFrame {
     /// operator-set delay is never replaced by the daemon.
     #[serde(default)]
     pub delay_operator: bool,
+    /// Delay tracking is on for this pair (#687): the daemon moves
+    /// [`Self::delay_samples`] by the residual once two analysis windows
+    /// that share no samples agree on it. `false` on a daemon predating it.
+    #[serde(default)]
+    pub delay_tracking: bool,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's
