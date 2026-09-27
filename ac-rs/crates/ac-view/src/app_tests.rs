@@ -1885,6 +1885,7 @@ fn pair_frame(meas: i64, delay: i64, meas_peak_dbfs: f64) -> ac_core::wire::Tran
     f.meas_channel = meas;
     f.ref_channel = 1;
     f.delay_samples = delay;
+    f.delay_ms = delay as f64 * 1000.0 / f64::from(f.sr);
     f.meas_peak_dbfs = Some(meas_peak_dbfs);
     f
 }
@@ -2017,7 +2018,8 @@ fn settings_apply_is_refused_with_several_pairs() {
         .is_some_and(|t| t.starts_with("several pairs are measured")));
 }
 
-/// `C` on a second pair names the file after its input.
+/// `C` on a second pair writes that pair's trace, named after its input
+/// (Codex review: the name alone would pass with pair 0's data in it).
 #[test]
 fn csv_export_names_the_selected_pair() {
     let dir = std::env::temp_dir().join(format!("ac-685-csv-{}", std::process::id()));
@@ -2027,13 +2029,21 @@ fn csv_export_names_the_selected_pair() {
     app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
     app.handle_action(Action::CycleFocus, false);
     app.handle_action(Action::ExportCsv, false);
-    let names: Vec<String> = std::fs::read_dir(&dir)
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|e| e.unwrap().path())
         .collect();
+    let text = files
+        .first()
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .unwrap_or_default();
     std::fs::remove_dir_all(&dir).ok();
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].starts_with("live4-"), "{names:?}");
+    assert_eq!(files.len(), 1, "{files:?}");
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("live4-"), "{name}");
+    assert!(text.contains("# ac transfer trace: live 4\n"), "{text}");
+    // Pair 1's delay (0), not pair 0's (326 samples).
+    assert!(text.contains("# delay_ms: 0.000000\n"), "{text}");
 }
 
 #[test]
