@@ -109,16 +109,20 @@ impl Session {
         &self.client
     }
 
-    /// Launch a single-pair `transfer_stream` session (M3's V1 scope —
-    /// multi-pair is a later milestone). Weighting/integration are set
-    /// here only; nothing in this crate re-sends them mid-session.
+    /// Launch a `transfer_stream` session on `pairs` — `(meas, ref)` in
+    /// launch order, which is also the daemon's pair index (#685).
+    /// Weighting/integration are set here only; nothing in this crate
+    /// re-sends them mid-session.
     pub fn launch(
         &mut self,
-        meas_channel: u32,
-        ref_channel: u32,
+        pairs: &[(u32, u32)],
         weighting: WeightingCurve,
         integration: &str,
     ) -> Result<()> {
+        if pairs.is_empty() {
+            bail!("no measurement pair to launch");
+        }
+        let pairs: Vec<[u32; 2]> = pairs.iter().map(|&(m, r)| [m, r]).collect();
         self.client.drain_pending();
         let reply = self.client.call(&json!({
             "cmd": "transfer_stream",
@@ -126,8 +130,7 @@ impl Session {
             // so a later `set_drive` actually reaches the interface, while
             // `drive` stays unset so the session comes up emitting nothing.
             "drivable": true,
-            "meas_channel": meas_channel,
-            "ref_channel": ref_channel,
+            "pairs": pairs,
             "weighting": weighting.tag(),
             "integration": integration,
         }))?;

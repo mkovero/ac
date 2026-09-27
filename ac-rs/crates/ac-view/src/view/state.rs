@@ -204,6 +204,12 @@ pub struct TransferViewState {
     /// Starts on `Live` — a session that has loaded nothing yet reads
     /// exactly as it did before this issue.
     pub focus: Focus,
+    /// How many live pairs the session measures (#685); at least 1.
+    live_count: usize,
+    /// Which live pair is selected (#685), in launch order. It is what
+    /// `Focus::Live` names, and it stays put while a slot is selected, so
+    /// the meters and the fault indicator keep following one pair.
+    pub live_pair: usize,
     /// Enter while not armed (#256): the live trace is not drawn, so the
     /// slots are compared on their own. Everything else keeps rolling —
     /// meters, fault indicator, readouts, stimulus — and storing to a slot
@@ -242,6 +248,8 @@ impl TransferViewState {
             ir_panel_open: false,
             loaded: Vec::new(),
             focus: Focus::Live,
+            live_count: 1,
+            live_pair: 0,
             paused: false,
             live_visible: true,
             // Slot runs take colours 0–8 by slot; runs opened from files
@@ -400,20 +408,38 @@ impl TransferViewState {
         self.focus = Focus::Stored(self.loaded.len() - 1);
     }
 
-    /// `Tab`: move focus to the next trace — live, then each stored run
-    /// in load order, wrapping back to live. A no-op (`Live` stays
-    /// `Live`) when nothing is loaded.
+    /// The number of live pairs (#685). Clamps the selection into range.
+    pub fn set_live_count(&mut self, n: usize) {
+        self.live_count = n.max(1);
+        self.live_pair = self.live_pair.min(self.live_count - 1);
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.live_count
+    }
+
+    /// `Tab`: move focus to the next trace — each live pair in launch
+    /// order (#685), then each stored run in load order, wrapping back to
+    /// the first live pair. A no-op with one pair and nothing loaded.
     ///
     /// Hidden slots are skipped (#256): the selection never rests on a
     /// curve that is not drawn.
     pub fn cycle_focus(&mut self) {
+        if self.focus == Focus::Live && self.live_pair + 1 < self.live_count {
+            self.live_pair += 1;
+            return;
+        }
         let from = match self.focus {
             Focus::Live => 0,
             Focus::Stored(idx) => idx + 1,
         };
-        self.focus = (from..self.loaded.len())
-            .find(|&i| self.loaded[i].visible)
-            .map_or(Focus::Live, Focus::Stored);
+        self.focus = match (from..self.loaded.len()).find(|&i| self.loaded[i].visible) {
+            Some(i) => Focus::Stored(i),
+            None => {
+                self.live_pair = 0;
+                Focus::Live
+            }
+        };
     }
 
     /// Put the selection back on live if it rests on a hidden or removed
@@ -491,6 +517,28 @@ impl TransferViewState {
 
 #[cfg(test)]
 mod tests {
+    /// #685: `Tab` visits every live pair, then the visible stored runs,
+    /// then wraps to the first live pair.
+    #[test]
+    fn tab_walks_live_pairs_then_stored_runs() {
+        let mut t = TransferViewState::default();
+        t.set_live_count(2);
+        t.cycle_focus();
+        assert_eq!((t.focus, t.live_pair), (Focus::Live, 1));
+        t.cycle_focus();
+        assert_eq!(
+            (t.focus, t.live_pair),
+            (Focus::Live, 0),
+            "no stored run: wrap"
+        );
+        t.set_live_count(1);
+        t.live_pair = 0;
+        t.set_live_count(3);
+        t.live_pair = 2;
+        t.set_live_count(2);
+        assert_eq!(t.live_pair, 1, "a shrinking session clamps the selection");
+    }
+
     use super::*;
 
     #[test]

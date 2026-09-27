@@ -93,6 +93,7 @@ ac s f 20hz 20khz 0dbu              # fast output-only chirp
 ac m                                # live spectrum (ac-view window)
 ac monitor --tui                    # same measurement, terminal readout
 ac transfer                         # transfer view — arm/fire stimulus, H1 + phase
+ac transfer 0,4                     # two measurements at once, each against the reference
 ac monitor cwt                      # live Morlet-CWT waterfall (terminal)
 ```
 

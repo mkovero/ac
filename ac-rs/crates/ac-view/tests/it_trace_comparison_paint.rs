@@ -11,7 +11,7 @@ use ac_scene::{
     DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
     TransferScene,
 };
-use ac_view::view::{draw_view, Focus, StoredTrace, TransferViewState, ViewKind};
+use ac_view::view::{draw_view, Focus, LiveTrace, StoredTrace, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -116,7 +116,7 @@ fn stored_runs_paint_without_a_live_scene() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, None, &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None);
     });
     harness.run();
 
@@ -172,7 +172,7 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, None, &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None);
     });
     harness.run();
 
@@ -221,7 +221,7 @@ fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
         }];
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(900.0, 300.0));
-            draw_view(&view, ui, None, None, &stored, None);
+            draw_view(&view, ui, None, None, &[], &stored, None);
         });
         harness.run();
         extract_texts(&harness.output().shapes)
@@ -265,7 +265,7 @@ fn slot_runs_paint_as_a_box_strip_not_timestamp_rows() {
     }];
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(640.0, 360.0));
-        draw_view(&view, ui, None, None, &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None);
     });
     harness.run();
     let shapes = &harness.output().shapes;
@@ -314,7 +314,7 @@ fn a_selected_slot_draws_like_an_unselected_one() {
     let stored = vec![run(1, true), run(2, false)];
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(640.0, 360.0));
-        draw_view(&view, ui, None, None, &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None);
     });
     harness.run();
     let width_of = |color: egui::Color32| -> Vec<f32> {
@@ -336,5 +336,58 @@ fn a_selected_slot_draws_like_an_unselected_one() {
     assert!(
         one.iter().chain(&two).all(|w| *w == one[0]),
         "selected {one:?} vs unselected {two:?}"
+    );
+}
+
+/// #685: with two live pairs the strip has one box per pair, each drawn
+/// in its own colour, and a fault on the pair that is not selected is
+/// painted by name, so a silent second leg cannot hide behind the first.
+#[test]
+fn two_live_pairs_paint_their_boxes_and_the_other_pairs_fault() {
+    let first = scene(Smoothing::Off);
+    let mut second = scene(Smoothing::Off);
+    second.fault = Some(ac_scene::Fault::NoSignal);
+    let mut state = TransferViewState::default();
+    state.set_live_count(2);
+    let view = ViewKind::Transfer(state);
+    let live = [
+        LiveTrace {
+            label: "live 0".to_string(),
+            pair: 0,
+            scene: &first,
+            selected: true,
+        },
+        LiveTrace {
+            label: "live 4".to_string(),
+            pair: 1,
+            scene: &second,
+            selected: false,
+        },
+    ];
+
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(600.0, 400.0));
+        draw_view(&view, ui, None, Some(&first), &live, &[], None);
+    });
+    harness.run();
+    let shapes = &harness.output().shapes;
+    let texts = extract_texts(shapes);
+    for label in ["live 0", "live 4", "live 4  NO SIGNAL"] {
+        assert!(
+            texts.iter().any(|t| t == label),
+            "{label:?} not painted: {texts:?}"
+        );
+    }
+    assert!(
+        !texts.iter().any(|t| t == "NO SIGNAL"),
+        "the selected pair has no fault, yet the big indicator painted one: {texts:?}"
+    );
+    let second_colour = ac_view::view::palette::live_color(1);
+    assert!(
+        shapes.iter().any(|cs| matches!(
+            &cs.shape,
+            egui::Shape::Path(p) if p.points.len() > 1 && p.stroke.color == egui::epaint::ColorMode::Solid(second_colour)
+        )),
+        "the second pair's curve is not drawn in its own colour"
     );
 }

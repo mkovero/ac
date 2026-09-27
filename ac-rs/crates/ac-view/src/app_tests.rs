@@ -596,8 +596,8 @@ fn e_inserts_the_found_delay_and_shift_e_finds_again() {
     assert_eq!(
         app.sent_delay,
         vec![
-            serde_json::json!({"cmd": "set_delay", "samples": 412}),
-            serde_json::json!({"cmd": "set_delay", "samples": null}),
+            serde_json::json!({"cmd": "set_delay", "samples": 412, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "samples": null, "pair": 0}),
         ]
     );
 }
@@ -614,9 +614,9 @@ fn arrows_step_the_live_delay_by_one_or_ten() {
     assert_eq!(
         app.sent_delay,
         vec![
-            serde_json::json!({"cmd": "set_delay", "step": -1}),
-            serde_json::json!({"cmd": "set_delay", "step": 1}),
-            serde_json::json!({"cmd": "set_delay", "step": 10}),
+            serde_json::json!({"cmd": "set_delay", "step": -1, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "step": 1, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "step": 10, "pair": 0}),
         ]
     );
 }
@@ -685,7 +685,7 @@ fn a_typed_delay_applies_on_t_and_cancels_when_empty_or_on_esc() {
     app.handle_delay_entry_keys("-25", false, false, false);
     app.handle_delay_entry_keys("", true, false, false);
     app.handle_delay_entry_keys("0", false, true, false);
-    let typed = vec![serde_json::json!({"cmd": "set_delay", "samples": -20})];
+    let typed = vec![serde_json::json!({"cmd": "set_delay", "samples": -20, "pair": 0})];
     assert_eq!(app.sent_delay, typed);
     assert!(app.delay_entry.is_none());
 
@@ -992,9 +992,9 @@ fn a_refusal_clears_the_held_frames_and_their_scenes() {
 
     assert!(!app.ingest_raw_frame(with_wire_version(transfer_frame_json(), 2), t0));
     app.rebuild_scenes(true, 0.1);
-    assert!(app.last_frame.is_none());
+    assert!(app.last_frame().is_none());
     assert!(app.current_transfer_scene().is_none());
-    assert!(app.last_ir_frame.is_none());
+    assert!(app.last_ir_frame().is_none());
     assert!(app.current_ir_scene().is_none());
 }
 
@@ -1003,7 +1003,7 @@ fn a_refusal_clears_the_held_frames_and_their_scenes() {
 fn a_refused_ir_frame_is_not_held() {
     let mut app = localhost_transfer_app();
     app.ingest_raw_ir_frame(with_wire_version(ir_frame_json(), 2));
-    assert!(app.last_ir_frame.is_none());
+    assert!(app.last_ir_frame().is_none());
 }
 
 // An accepted frame — the daemon restarted on a matching build — ends the
@@ -1251,9 +1251,9 @@ fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
 
     let got_new_frame = app.ingest_drained(drained, drained_ir, std::time::Instant::now());
     assert!(got_new_frame, "no injected transfer frame was accepted");
-    let held = app.last_frame.as_ref().expect("a transfer frame is held");
+    let held = app.last_frame().expect("a transfer frame is held");
     assert_eq!(held.delay_samples, DRAIN_BACKLOG - 1);
-    let held_ir = app.last_ir_frame.as_ref().expect("an IR frame is held");
+    let held_ir = app.last_ir_frame().expect("an IR frame is held");
     assert_eq!(held_ir.delay_samples, DRAIN_BACKLOG - 1);
 }
 
@@ -1868,4 +1868,182 @@ fn m_averages_the_visible_slots() {
         Some("no average \u{2014} an average needs two or more traces")
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- several measurements at once (#685) ----
+
+/// A transfer-view app measuring inputs 0 and 4 against reference 1.
+fn two_pair_app() -> AcViewApp {
+    let mut app = transfer_app();
+    app.set_pairs(vec![(0, 1), (4, 1)]);
+    app
+}
+
+/// A found-delay frame for input `meas` against reference 1.
+fn pair_frame(meas: i64, delay: i64, meas_peak_dbfs: f64) -> ac_core::wire::TransferFrame {
+    let mut f = found_frame();
+    f.meas_channel = meas;
+    f.ref_channel = 1;
+    f.delay_samples = delay;
+    f.meas_peak_dbfs = Some(meas_peak_dbfs);
+    f
+}
+
+/// Each pair's frame lands in its own trace, and `Tab` walks the live
+/// pairs before wrapping: the selected scene is the one the delay
+/// readout, meters and fault indicator follow.
+#[test]
+fn each_pair_keeps_its_own_trace_and_tab_walks_the_pairs() {
+    let mut app = two_pair_app();
+    app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
+    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    let delays: Vec<_> = app
+        .current_live_scenes()
+        .iter()
+        .map(|s| s.map(|s| s.delay_samples))
+        .collect();
+    assert_eq!(delays, vec![Some(Some(326)), Some(Some(0))]);
+
+    let selected = |app: &AcViewApp| app.current_transfer_scene().unwrap().delay_samples;
+    assert_eq!(selected(&app), Some(326));
+    app.handle_action(Action::CycleFocus, false);
+    assert_eq!(
+        selected(&app),
+        Some(0),
+        "Tab did not select the second pair"
+    );
+    app.handle_action(Action::CycleFocus, false);
+    assert_eq!(
+        selected(&app),
+        Some(326),
+        "Tab did not wrap to the first pair"
+    );
+}
+
+/// The delay keys name the selected pair. Without `pair` the daemon moves
+/// every pair, so a nudge on input 4 would shift input 0 as well.
+#[test]
+fn delay_keys_name_the_selected_pair() {
+    let mut app = two_pair_app();
+    app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
+    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    app.handle_action(Action::CycleFocus, false);
+    app.handle_action(Action::NudgeDelayLater, false);
+    app.handle_action(Action::InsertDelay, true);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "step": 1, "pair": 1}),
+            serde_json::json!({"cmd": "set_delay", "samples": null, "pair": 1}),
+        ]
+    );
+}
+
+/// A frame for a pair this session did not launch is not drawn, and is
+/// not counted as malformed either.
+#[test]
+fn a_frame_for_a_pair_not_launched_is_dropped() {
+    let mut app = two_pair_app();
+    let frame = serde_json::to_value(pair_frame(7, 0, -20.0)).unwrap();
+    assert!(!app.ingest_raw_frame(frame, Instant::now()));
+    assert_eq!(app.frame_parse_failures, 0);
+    app.rebuild_scenes(true, 0.0);
+    assert!(app.current_live_scenes().iter().all(Option::is_none));
+}
+
+/// The meters keep per-pair state. The rejected design — one meter state
+/// fed every pair's frames — is computed here too: its hold tick carries
+/// the loud pair's peak onto the quiet pair's meter.
+#[test]
+fn meters_hold_per_pair_not_across_pairs() {
+    let mut app = two_pair_app();
+    let (loud, quiet) = (-6.0, -54.0);
+    let mut shared = ac_scene::MeterState::default();
+    let mut shared_hold = 0.0;
+    for tick in 0..5 {
+        let t = f64::from(tick) * 0.1;
+        app.ingest_frame_for_test(pair_frame(0, 326, loud), t);
+        app.ingest_frame_for_test(pair_frame(4, 0, quiet), t + 0.05);
+        shared.update(Some(loud), t);
+        shared_hold = shared.update(Some(quiet), t + 0.05).hold;
+    }
+    let quiet_hold = app.current_live_scenes()[1].unwrap().meas_meter.hold;
+    assert!(
+        (quiet_hold - ac_scene::transfer::meter_height(Some(quiet))).abs() < 1e-9,
+        "quiet pair's meter held {quiet_hold}"
+    );
+    assert!(
+        (shared_hold - ac_scene::transfer::meter_height(Some(loud))).abs() < 1e-9,
+        "the shared-state design did not show the failure this test guards"
+    );
+}
+
+/// A fault on the pair that is not selected is still in its scene, so
+/// the view can name it (the paint test checks the drawing).
+#[test]
+fn a_fault_on_the_other_pair_is_kept() {
+    let mut app = two_pair_app();
+    let mut silent = pair_frame(4, 0, -50.0);
+    silent.meas_peak_dbfs = None;
+    for t in [0.0, 1.0, 2.0] {
+        app.ingest_frame_for_test(pair_frame(0, 326, -20.0), t);
+        app.ingest_frame_for_test(silent.clone(), t);
+    }
+    let scenes = app.current_live_scenes();
+    assert_eq!(scenes[0].unwrap().fault, None);
+    assert_eq!(scenes[1].unwrap().fault, Some(ac_scene::Fault::NoSignal));
+}
+
+/// With several pairs the settings overlay cannot apply: it edits one
+/// meas/ref and would quietly drop the rest.
+#[test]
+fn settings_apply_is_refused_with_several_pairs() {
+    let mut app = two_pair_app();
+    app.settings = Some(crate::settings::SettingsOverlay::from_config(
+        &ac_core::config::Config::default(),
+        -30.0,
+    ));
+    app.handle_settings_keys(SettingsKeys {
+        up: false,
+        down: false,
+        left: false,
+        right: false,
+        enter: true,
+        esc: false,
+    });
+    assert!(app.settings.is_none());
+    assert!(app
+        .toast_text()
+        .is_some_and(|t| t.starts_with("several pairs are measured")));
+}
+
+/// `C` on a second pair names the file after its input.
+#[test]
+fn csv_export_names_the_selected_pair() {
+    let dir = std::env::temp_dir().join(format!("ac-685-csv-{}", std::process::id()));
+    let mut app = two_pair_app();
+    app.captures_dir = dir.clone();
+    app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
+    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    app.handle_action(Action::CycleFocus, false);
+    app.handle_action(Action::ExportCsv, false);
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].starts_with("live4-"), "{names:?}");
+}
+
+#[test]
+fn meas_lists_parse_or_are_refused() {
+    assert_eq!(parse_meas_list("0,4"), Ok(vec![0, 4]));
+    assert_eq!(parse_meas_list("3"), Ok(vec![3]));
+    assert!(parse_meas_list("0,x").is_err());
+    assert!(parse_meas_list("").is_err());
+    assert_eq!(
+        parse_meas_list("4,4"),
+        Err("channel 4 is listed twice".to_string())
+    );
 }

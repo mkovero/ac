@@ -31,6 +31,19 @@ const ROW_H: f32 = 16.0;
 /// `(&str, &str, &TransferScene, bool)` gave no clue which `&str` was the
 /// filename and which the timestamp, and every read site destructured it
 /// with `_` placeholders.
+/// One live pair's trace (#685), in launch order. `scene` for the selected
+/// pair is the same scene `draw_transfer` gets as its `scene` argument —
+/// the one the readouts, meters and fault indicator follow.
+pub struct LiveTrace<'a> {
+    /// `live`, or `live <meas channel>` when the session measures several.
+    pub label: String,
+    /// Launch order: picks the colour ([`super::palette::live_color`]).
+    pub pair: usize,
+    pub scene: &'a ac_scene::TransferScene,
+    /// The selected live pair while the selection is on live.
+    pub selected: bool,
+}
+
 pub struct StoredTrace<'a> {
     /// Attribution (acceptance criterion 1) — the file's own name.
     pub label: &'a str,
@@ -62,11 +75,12 @@ struct TransferLayout {
 }
 
 impl TransferLayout {
-    fn new(content: Rect, file_runs: usize, any_stored: bool) -> Self {
-        // The legend reserves one strip row (live + the nine slot boxes,
-        // #256) plus one row per run opened from a file, and is carved out
-        // before the panes are sized. Nothing stored, no legend.
-        let legend_band = if any_stored {
+    fn new(content: Rect, file_runs: usize, strip: bool) -> Self {
+        // The legend reserves one strip row (the live boxes + the nine slot
+        // boxes, #256) plus one row per run opened from a file, and is
+        // carved out before the panes are sized. Nothing stored and one
+        // live pair, no legend.
+        let legend_band = if strip {
             (file_runs as f32 + 1.0) * ROW_H + 8.0
         } else {
             0.0
@@ -97,6 +111,7 @@ pub(super) fn draw_transfer(
     state: &TransferViewState,
     ui: &mut Ui,
     scene: Option<&ac_scene::TransferScene>,
+    live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
     ir: Option<&ac_scene::IrScene>,
 ) {
@@ -109,7 +124,24 @@ pub(super) fn draw_transfer(
     // purely offline before/after review). Gating the whole comparison
     // feature on an unrelated live-frame precondition made it unreachable
     // in exactly that state (QA #336 correctness issue 1).
-    if scene.is_none() && stored.is_empty() {
+    // A caller with one scene and no live list (a single-pair session, or
+    // a test drawing one scene) gets that scene as the one live trace.
+    let single;
+    let live = if live.is_empty() {
+        single = scene
+            .map(|scene| LiveTrace {
+                label: "live".to_string(),
+                pair: 0,
+                scene,
+                selected: matches!(state.focus, Focus::Live),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        &single[..]
+    } else {
+        live
+    };
+    if scene.is_none() && live.is_empty() && stored.is_empty() {
         text(
             painter,
             rect.center(),
@@ -151,27 +183,15 @@ pub(super) fn draw_transfer(
     let layout = TransferLayout::new(
         content,
         stored.iter().filter(|r| r.slot.is_none()).count(),
-        !stored.is_empty(),
+        !stored.is_empty() || state.live_count() > 1,
     );
-    let live_focused = matches!(state.focus, Focus::Live);
 
     draw_axes(painter, &layout, scene, stored);
-    draw_traces(
-        painter,
-        &layout,
-        scene.filter(|_| state.live_trace_shown()),
-        stored,
-    );
+    let shown: &[LiveTrace<'_>] = if state.live_trace_shown() { live } else { &[] };
+    draw_traces(painter, &layout, shown, stored);
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
-    draw_legend(
-        painter,
-        &layout,
-        state,
-        scene.is_some(),
-        stored,
-        live_focused,
-    );
+    draw_legend(painter, &layout, state, live, stored);
     // Row 4 (#670): the coherence mask when not the default, and what data
     // protection is holding back. Verbatim ac-scene strings.
     if let Some(scene) = scene {
@@ -208,7 +228,7 @@ pub(super) fn draw_transfer(
 
     // Last, so the fault indicator is over the traces rather than under
     // them.
-    draw_fault(painter, &layout, scene);
+    draw_fault(painter, &layout, scene, live);
 }
 
 /// The stimulus banner (safety UI) owns a reserved top band that nothing
@@ -285,17 +305,17 @@ fn draw_axes(
 fn draw_traces(
     painter: &Painter,
     layout: &TransferLayout,
-    scene: Option<&ac_scene::TransferScene>,
+    live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
 ) {
     // One width for every trace, one colour per trace, whatever is
     // selected (#256): changing a curve's look with the selection only
     // confused which curve was which. The selection is the strip box's
     // border.
-    if let Some(scene) = scene {
-        let stroke = live_stroke();
-        draw_trace(painter, &scene.magnitude, layout.mag, stroke, false);
-        draw_trace(painter, &scene.phase, layout.phase, stroke, false);
+    for trace in live {
+        let stroke = live_stroke(trace.pair);
+        draw_trace(painter, &trace.scene.magnitude, layout.mag, stroke, false);
+        draw_trace(painter, &trace.scene.phase, layout.phase, stroke, false);
     }
     for run in stored.iter().filter(|r| r.visible) {
         let stroke = Stroke::new(TRACE_WIDTH, super::palette::compare_color(run.color_slot));
@@ -307,9 +327,10 @@ fn draw_traces(
 /// Every trace's line width (#256).
 const TRACE_WIDTH: f32 = 1.5;
 
-/// The live trace: always the signal colour.
-fn live_stroke() -> Stroke {
-    Stroke::new(TRACE_WIDTH, COLOR_SIGNAL)
+/// A live pair's trace: the signal colour for the first pair, its own
+/// colour for each further one (#685).
+fn live_stroke(pair: usize) -> Stroke {
+    Stroke::new(TRACE_WIDTH, super::palette::live_color(pair))
 }
 
 /// The top of the magnitude pane carries three rows, in this order and
@@ -462,9 +483,8 @@ fn draw_legend(
     painter: &Painter,
     layout: &TransferLayout,
     state: &TransferViewState,
-    live_present: bool,
+    live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
-    live_focused: bool,
 ) {
     let Some(legend_top) = layout.legend_top else {
         return;
@@ -491,15 +511,28 @@ fn draw_legend(
         text(painter, rect.center(), Align2::CENTER_CENTER, label, ink);
     };
 
-    // The live box wears the live curve's colour, and is filled only when
-    // a live curve is actually on screen.
-    draw_box(
-        slot_box(3.0 * h),
-        "live",
-        live_stroke().color,
-        live_present && state.live_trace_shown(),
-        live_focused,
-    );
+    // One live box per pair (#685), in its curve's colour, filled only
+    // when that curve is actually on screen. Before the first frame the
+    // lone box still stands, outlined.
+    if live.is_empty() {
+        draw_box(
+            slot_box(3.0 * h),
+            "live",
+            live_stroke(0).color,
+            false,
+            matches!(state.focus, Focus::Live),
+        );
+    }
+    for trace in live {
+        let width = if trace.label.len() > 4 { 4.5 } else { 3.0 };
+        draw_box(
+            slot_box(width * h),
+            &trace.label,
+            live_stroke(trace.pair).color,
+            state.live_trace_shown(),
+            trace.selected,
+        );
+    }
     for n in 1..=crate::keys::SLOT_KEYS.len() as u8 {
         let rect = slot_box(1.4 * h);
         let label = n.to_string();
@@ -582,7 +615,38 @@ fn draw_legend(
 /// right edge, and the stimulus banner owns its own reserved band above
 /// all of this, so nothing collides. Both strings are verbatim ac-scene.
 /// Live-only: a fault is a live-session condition.
-fn draw_fault(painter: &Painter, layout: &TransferLayout, scene: Option<&ac_scene::TransferScene>) {
+///
+/// With several pairs (#685) the indicator is the selected pair's, and a
+/// fault on any other pair is listed under it by name, so a silent second
+/// leg cannot hide behind the selected one.
+fn draw_fault(
+    painter: &Painter,
+    layout: &TransferLayout,
+    scene: Option<&ac_scene::TransferScene>,
+    live: &[LiveTrace<'_>],
+) {
+    let centre = egui::pos2(
+        layout.mag.x + layout.mag.width / 2.0,
+        layout.mag.y + layout.mag.height / 2.0,
+    );
+    let mut below = centre.y + 44.0;
+    // The selected pair's own fault is the big one below; skip its scene.
+    let others = live
+        .iter()
+        .filter(|t| !scene.is_some_and(|s| std::ptr::eq(s, t.scene)));
+    for trace in others {
+        let Some(fault) = trace.scene.fault else {
+            continue;
+        };
+        painter.text(
+            egui::pos2(centre.x, below),
+            Align2::CENTER_CENTER,
+            format!("{}  {}", trace.label, fault.label()),
+            FontId::proportional(16.0),
+            COLOR_SIGNAL,
+        );
+        below += 20.0;
+    }
     let Some(fault) = scene.and_then(|s| s.fault) else {
         return;
     };
@@ -592,10 +656,6 @@ fn draw_fault(painter: &Painter, layout: &TransferLayout, scene: Option<&ac_scen
         ac_scene::Severity::Fault => COLOR_SIGNAL,
         ac_scene::Severity::Confirmation => COLOR_VALUE,
     };
-    let centre = egui::pos2(
-        layout.mag.x + layout.mag.width / 2.0,
-        layout.mag.y + layout.mag.height / 2.0,
-    );
     painter.text(
         centre,
         Align2::CENTER_CENTER,

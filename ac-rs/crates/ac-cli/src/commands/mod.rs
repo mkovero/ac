@@ -28,7 +28,7 @@ use crate::parse::{CommandKind, LevelSpec, ParsedCommand};
 /// option, so a CLI launch cannot bring a session up driving — drive only
 /// starts through the in-app arm→fire machine. `meas_override` maps an
 /// explicit CLI channel spec onto the measurement leg ("as today").
-pub fn spawn_ac_view(cfg: &ac_core::config::Config, transfer: bool, meas_override: Option<u32>) {
+pub fn spawn_ac_view(cfg: &ac_core::config::Config, transfer: bool, meas_override: Option<&[u32]>) {
     let Some(bin) = crate::spawn::find_binary("ac-view") else {
         eprintln!("  error: ac-view binary not found — build it with `cargo build -p ac-view`");
         return;
@@ -45,14 +45,14 @@ pub fn spawn_ac_view(cfg: &ac_core::config::Config, transfer: bool, meas_overrid
 /// drive option**: there is no path here to pass a drive/on argument, so
 /// the CLI-launch AC (#185, "`ac transfer` never sets launch-time drive")
 /// holds by construction of this arg list, not by the UI's separate proof.
-fn ac_view_args(host: &str, transfer: bool, meas_override: Option<u32>) -> Vec<String> {
+fn ac_view_args(host: &str, transfer: bool, meas_override: Option<&[u32]>) -> Vec<String> {
     let mut args = vec![host.to_string(), "5556".to_string(), "5557".to_string()];
     if transfer {
         args.push("--transfer".to_string());
     }
-    if let Some(m) = meas_override {
+    if let Some(m) = meas_override.filter(|m| !m.is_empty()) {
         args.push("--meas".to_string());
-        args.push(m.to_string());
+        args.push(m.iter().map(u32::to_string).collect::<Vec<_>>().join(","));
     }
     args
 }
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn ac_view_launch_args_carry_no_drive_option() {
         for transfer in [true, false] {
-            for meas in [None, Some(3u32)] {
+            for meas in [None, Some(&[3u32][..]), Some(&[0u32, 4][..])] {
                 let args = ac_view_args("localhost", transfer, meas);
                 let joined = args.join(" ").to_lowercase();
                 assert!(
@@ -1149,12 +1149,21 @@ mod tests {
 
     #[test]
     fn meas_override_maps_the_channel() {
-        let args = ac_view_args("h", true, Some(5));
+        let args = ac_view_args("h", true, Some(&[5]));
         let i = args
             .iter()
             .position(|a| a == "--meas")
             .expect("--meas present");
         assert_eq!(args[i + 1], "5");
+    }
+
+    /// #685: every listed channel reaches ac-view. Before, `ac transfer
+    /// 0,4` passed only `0` and said nothing about `4`.
+    #[test]
+    fn every_measurement_channel_reaches_ac_view() {
+        let args = ac_view_args("h", true, Some(&[0, 4]));
+        let i = args.iter().position(|a| a == "--meas").unwrap();
+        assert_eq!(args[i + 1], "0,4");
     }
 
     #[test]

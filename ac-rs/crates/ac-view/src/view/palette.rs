@@ -38,6 +38,22 @@ pub const COMPARE_COLORS: [Color32; 9] = [
     Color32::from_rgb(0xd7, 0xaf, 0x87), // 9 sand
 ];
 
+/// Live-pair colours (#685). The first pair is the signal colour, as a
+/// single live trace always was; further pairs of one session each need
+/// their own. Brighter than [`COMPARE_COLORS`], so a live trace still
+/// reads as live beside the slots, and none repeats a slot colour.
+pub const LIVE_COLORS: [Color32; 4] = [
+    COLOR_SIGNAL,
+    Color32::from_rgb(0xd7, 0xd7, 0x5f), // yellow
+    Color32::from_rgb(0x5f, 0xd7, 0xd7), // cyan
+    Color32::from_rgb(0xd7, 0x5f, 0xd7), // magenta
+];
+
+/// The colour of live pair `pair` (launch order), cycling past four.
+pub fn live_color(pair: usize) -> Color32 {
+    LIVE_COLORS[pair % LIVE_COLORS.len()]
+}
+
 /// The colour slot of the slot average (#671): drawn in the value colour,
 /// apart from every slot's.
 pub const AVERAGE_SLOT: usize = usize::MAX;
@@ -53,6 +69,23 @@ pub fn compare_color(slot: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #685: every live pair's colour differs from the others' and from
+    /// every slot's, so a live trace is never mistaken for a stored one.
+    #[test]
+    fn live_colours_are_distinct_from_each_other_and_the_slots() {
+        for (i, a) in LIVE_COLORS.iter().enumerate() {
+            assert!(
+                !COMPARE_COLORS.contains(a),
+                "live {i} repeats a slot colour"
+            );
+            assert_ne!(*a, COLOR_VALUE, "live {i} is the average's colour");
+            for b in &LIVE_COLORS[i + 1..] {
+                assert_ne!(a, b, "live {i} repeats a live colour");
+            }
+        }
+        assert_eq!(live_color(0), COLOR_SIGNAL);
+    }
 
     /// Every slot draws in its own colour, and none is the focus colour.
     #[test]

@@ -27,7 +27,7 @@ pub struct Captured {
     pub opened: bool,
     /// Where the `.acsnap` was written.
     pub path: PathBuf,
-    /// Pair 0 of the snapshot, ready to overlay.
+    /// The stored pair of the snapshot, ready to overlay.
     pub run: LoadedRun,
 }
 
@@ -45,8 +45,29 @@ pub fn captures_dir() -> PathBuf {
 
 /// The file name for slot `slot` captured at `captured_at_utc` (RFC3339):
 /// colons are not portable in file names, so they become `-`.
-pub fn file_name(slot: u8, captured_at_utc: &str) -> String {
-    format!("slot{slot}-{}.acsnap", captured_at_utc.replace(':', "-"))
+///
+/// A snapshot holds every pair of the session, so a slot stored from any
+/// pair but the first names it (`-pair<k>`, #685); [`stored_pair`] reads it
+/// back when `F` opens the file. Pair 0 keeps the old name.
+pub fn file_name(slot: u8, pair: usize, captured_at_utc: &str) -> String {
+    let pair = if pair == 0 {
+        String::new()
+    } else {
+        format!("-pair{pair}")
+    };
+    format!(
+        "slot{slot}{pair}-{}.acsnap",
+        captured_at_utc.replace(':', "-")
+    )
+}
+
+/// The pair a slot file was stored from: `-pair<k>` in its name, else 0
+/// (every file written before #685, and any file named by hand).
+pub fn stored_pair(path: &Path) -> usize {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.split('-')
+        .find_map(|part| part.strip_prefix("pair").and_then(|k| k.parse().ok()))
+        .unwrap_or(0)
 }
 
 /// Write `bytes` under `dir` as a file that did not exist before: the
@@ -83,14 +104,18 @@ pub(crate) fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<(PathBuf
     unreachable!("an unbounded counter always finds a free name")
 }
 
-/// Trigger, fetch, write under `dir`, and derive pair 0 for `slot` — one
+/// Trigger, fetch, write under `dir`, and derive `pair` for `slot` — one
 /// blocking call, for the capture thread. The run is labelled `slot N`;
 /// the file keeps the full name, which the status message reports.
-pub fn capture_into(client: &Client, dir: &Path, slot: u8) -> Result<Captured> {
+pub fn capture_into(client: &Client, dir: &Path, slot: u8, pair: usize) -> Result<Captured> {
     let (bytes, snap) = crate::snapshot_flow::trigger_and_fetch_bytes(client)?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let (path, _) = write_new(dir, &file_name(slot, &snap.meta.captured_at_utc), &bytes)?;
-    let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, 0, format!("slot {slot}"))?;
+    let (path, _) = write_new(
+        dir,
+        &file_name(slot, pair, &snap.meta.captured_at_utc),
+        &bytes,
+    )?;
+    let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, pair, format!("slot {slot}"))?;
     Ok(Captured {
         slot,
         path,
@@ -102,11 +127,11 @@ pub fn capture_into(client: &Client, dir: &Path, slot: u8) -> Result<Captured> {
 /// Run [`capture_into`] [`captures_dir`] on a thread with its own
 /// connection to `endpoint`. The receiver yields exactly one result; the
 /// error is already rendered for the status line.
-pub fn spawn(endpoint: Endpoint, slot: u8) -> Receiver<Result<Captured, String>> {
+pub fn spawn(endpoint: Endpoint, slot: u8, pair: usize) -> Receiver<Result<Captured, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = Client::connect(&endpoint)
-            .and_then(|client| capture_into(&client, &captures_dir(), slot))
+            .and_then(|client| capture_into(&client, &captures_dir(), slot, pair))
             .map_err(|e| format!("{e:#}"));
         let _ = tx.send(result);
     });
@@ -119,7 +144,7 @@ pub fn spawn(endpoint: Endpoint, slot: u8) -> Receiver<Result<Captured, String>>
 pub fn spawn_open(path: PathBuf, slot: u8) -> Receiver<Result<Captured, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let result = crate::snapshot_flow::open_stored_transfer_run(&path, 0)
+        let result = crate::snapshot_flow::open_stored_transfer_run(&path, stored_pair(&path))
             .map(|mut run| {
                 run.label = format!("slot {slot}");
                 Captured {
@@ -142,8 +167,29 @@ mod tests {
     #[test]
     fn file_names_carry_no_colons() {
         assert_eq!(
-            file_name(3, "2026-09-26T14:30:05Z"),
+            file_name(3, 0, "2026-09-26T14:30:05Z"),
             "slot3-2026-09-26T14-30-05Z.acsnap"
+        );
+    }
+
+    /// #685: a slot stored from pair 1 says so in its name, and `F` reads
+    /// the same pair back; a pair-0 file and an old file read as pair 0.
+    #[test]
+    fn the_stored_pair_round_trips_through_the_file_name() {
+        let name = file_name(4, 1, "2026-09-27T20:10:00Z");
+        assert_eq!(name, "slot4-pair1-2026-09-27T20-10-00Z.acsnap");
+        assert_eq!(stored_pair(Path::new(&name)), 1);
+        assert_eq!(
+            stored_pair(Path::new("slot4-pair12-2026-09-27T20-10-00Z-2.acsnap")),
+            12
+        );
+        assert_eq!(
+            stored_pair(Path::new(&file_name(4, 0, "2026-09-27T20:10:00Z"))),
+            0
+        );
+        assert_eq!(
+            stored_pair(Path::new("slot2-2026-09-26T14-30-05Z.acsnap")),
+            0
         );
     }
 
@@ -151,7 +197,7 @@ mod tests {
     fn a_second_capture_in_the_same_second_does_not_overwrite_the_first() {
         let dir = std::env::temp_dir().join(format!("ac-capture-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let base = file_name(1, "2026-09-26T14:30:05Z");
+        let base = file_name(1, 0, "2026-09-26T14:30:05Z");
         let (p1, _) = write_new(&dir, &base, b"one").unwrap();
         let (p2, n2) = write_new(&dir, &base, b"two").unwrap();
         assert_ne!(p1, p2);

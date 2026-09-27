@@ -312,7 +312,7 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::Tab,
         action: Action::CycleFocus,
         scope: Scope::Transfer,
-        description: "Cycle trace focus (live, then each loaded run)",
+        description: "Cycle trace focus (each live pair, then each loaded run)",
     },
     Binding {
         key: Key::X,
