@@ -3,7 +3,9 @@
 //! this file only parses args and hands off to `eframe::run_native`.
 
 use ac_core::visualize::weighting_curves::WeightingCurve;
-use ac_view::app::{connect_and_launch, connect_and_launch_transfer, resolve_transfer_channels};
+use ac_view::app::{
+    connect_and_launch, connect_and_launch_transfer, parse_meas_list, resolve_transfer_channels,
+};
 use ac_view::zmq_client::Endpoint;
 
 fn main() -> eframe::Result<()> {
@@ -13,14 +15,16 @@ fn main() -> eframe::Result<()> {
     // ever starts through the in-app arm→fire machine.
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let transfer = raw.iter().any(|a| a == "--transfer");
-    // `--meas <N>` overrides the measurement channel from the CLI (an
-    // explicit `ac monitor`/`ac transfer` channel spec). Reference always
-    // comes from config.
-    let meas_override: Option<u32> = raw
-        .iter()
-        .position(|a| a == "--meas")
-        .and_then(|i| raw.get(i + 1))
-        .and_then(|s| s.parse().ok());
+    // `--meas <N>[,<N>…]` overrides the measurement channel(s) from the
+    // CLI (an explicit `ac monitor`/`ac transfer` channel spec); each is
+    // measured against the configured reference (#685). A value that does
+    // not parse is refused, never ignored.
+    let meas_override: Option<Vec<u32>> = raw.iter().position(|a| a == "--meas").map(|i| {
+        parse_meas_list(raw.get(i + 1).map(String::as_str).unwrap_or("")).unwrap_or_else(|e| {
+            eprintln!("ac-view: --meas: {e}");
+            std::process::exit(1);
+        })
+    });
     // Positional args = everything that isn't a `--flag` or the value
     // consumed by `--meas`.
     let mut positional: Vec<&String> = Vec::new();
@@ -55,25 +59,26 @@ fn main() -> eframe::Result<()> {
         eprintln!("ac-view: {e}");
         std::process::exit(1);
     });
-    let meas_channel = meas_override.unwrap_or(cfg_meas);
+    let meas_channels = meas_override.unwrap_or_else(|| vec![cfg_meas]);
 
     // Spelled out rather than selected as a function pointer: the
     // transfer entry needs the stimulus ceiling from the config already
     // loaded above, and the spectrum entry — which has no stimulus —
     // must not be handed one. The differing signatures are the point.
     let launched = if transfer {
+        let pairs: Vec<(u32, u32)> = meas_channels.iter().map(|&m| (m, ref_channel)).collect();
         connect_and_launch_transfer(
             endpoint,
-            meas_channel,
-            ref_channel,
+            &pairs,
             WeightingCurve::Z,
             "fast",
             ac_core::shared::emission_level::MAX_EMISSION_DBFS,
         )
     } else {
+        // The spectrum view draws one channel: the first listed.
         connect_and_launch(
             endpoint,
-            meas_channel,
+            meas_channels[0],
             ref_channel,
             WeightingCurve::Z,
             "fast",

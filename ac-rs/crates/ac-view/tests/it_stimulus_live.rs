@@ -110,7 +110,7 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
     let daemon = DaemonProcess::spawn();
     let mut session = Session::new(Client::connect(&endpoint(&daemon)).expect("connect"));
     session
-        .launch(0, 1, WeightingCurve::A, "fast")
+        .launch(&[(0, 1)], WeightingCurve::A, "fast")
         .expect("launch transfer_stream");
 
     // Settle to the idle level.

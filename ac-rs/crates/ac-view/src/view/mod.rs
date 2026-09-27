@@ -31,7 +31,7 @@ use egui::Ui;
 
 pub use ir::draw_sweep_ir_panel;
 pub use state::{DerotChoice, Focus, LoadedRun, SpectrumViewState, StimState, TransferViewState};
-pub use transfer::StoredTrace;
+pub use transfer::{LiveTrace, StoredTrace};
 
 use palette::COLOR_LABEL;
 
@@ -58,6 +58,7 @@ pub fn draw_view(
     ui: &mut Ui,
     scene: Option<&Scene>,
     transfer_scene: Option<&ac_scene::TransferScene>,
+    live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
     ir_scene: Option<&ac_scene::IrScene>,
 ) {
@@ -85,7 +86,7 @@ pub fn draw_view(
     match kind {
         ViewKind::Spectrum(state) => spectrum::draw_spectrum(state, ui, scene),
         ViewKind::Transfer(state) => {
-            transfer::draw_transfer(state, ui, transfer_scene, stored, ir_scene)
+            transfer::draw_transfer(state, ui, transfer_scene, live, stored, ir_scene)
         }
     }
 }

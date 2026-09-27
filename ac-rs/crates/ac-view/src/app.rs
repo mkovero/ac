@@ -35,44 +35,32 @@ pub struct AcViewApp {
 
     // --- held frames and the scenes built from them. Rebuilt as a
     // group, once per pass, by `rebuild_scenes`; never mutated in
-    // place. Exactly one of `scene` / `transfer_scene` is populated,
+    // place. Exactly one of `scene` / the live pairs' scenes is populated,
     // decided by `view`. ---
     scene: Option<Scene>,
-    /// The last frame received, kept so the scene can be rebuilt on a
-    /// zoom/pan (range change) without waiting for the next frame —
-    /// otherwise zoom appears frozen on a paused or slow stream.
-    last_frame: Option<ac_core::wire::TransferFrame>,
+    /// The measured pairs, `(meas, ref)` in launch order — the daemon's
+    /// pair index (#685). Empty for an app built without a session.
+    pairs: Vec<(u32, u32)>,
+    /// One [`LivePair`] per measured pair, index-aligned with `pairs`;
+    /// always at least one, so a frame reaching an app built without a
+    /// session still has somewhere to go.
+    live: Vec<LivePair>,
     /// The ranges the current `scene` was last built with, so a
     /// range change alone (no new frame) is detected and triggers a
-    /// rebuild from `last_frame`.
+    /// rebuild from the first pair's held frame.
     last_scene_ranges: Option<((f64, f64), (f64, f64))>,
-    /// Built when the active view is Transfer; the spectrum `scene` stays
-    /// `None` then, and vice versa.
-    transfer_scene: Option<ac_scene::TransferScene>,
     /// One built `TransferScene` per `TransferViewState::loaded` entry
     /// (#321), index-aligned, rebuilt every pass the same "never mutate,
-    /// always rebuild from held state" discipline `transfer_scene` itself
+    /// always rebuild from held state" discipline each live scene itself
     /// follows — each run's `PairDerivation` is static, but the shared
     /// freq/db range and that run's own `Smoothing` are not, so a
     /// zoom/pan or an `N` press must reach every loaded run's curve, not
     /// just the live one.
     loaded_scenes: Vec<ac_scene::TransferScene>,
-    /// The last `visualize/ir` sidecar frame received (#286), kept for
-    /// the same zoom/pan-independent-of-new-frame reason `last_frame`
-    /// is: today the IR panel has no zoom/pan of its own, but rebuilding
-    /// from the held frame rather than only on arrival keeps the two
-    /// frame types symmetric instead of one being a special case.
-    last_ir_frame: Option<ac_core::wire::IrFrame>,
     /// Built only when the Transfer view is active AND its IR panel is
     /// open (`H`) — the accessory-panel cost should not be paid every
     /// frame just because a sidecar frame arrived.
     ir_scene: Option<ac_scene::IrScene>,
-    meters: (ac_scene::MeterState, ac_scene::MeterState),
-    /// The fault indicator's cross-frame state (#228) — the refusal clock
-    /// and the lock-acquired transient. Lives beside `meters` for the same
-    /// reason: it is time-dependent, so it cannot be rebuilt from the last
-    /// frame alone.
-    fault: ac_scene::FaultState,
 
     // --- stream health, backing the status line's `malformed` state ---
     /// Consecutive DATA frames since the last one that parsed into a
@@ -150,17 +138,11 @@ impl AcViewApp {
             endpoint,
             view: ViewKind::Spectrum(SpectrumViewState::default()),
             scene: None,
-            last_frame: None,
+            pairs: Vec::new(),
+            live: vec![LivePair::default()],
             last_scene_ranges: None,
-            transfer_scene: None,
             loaded_scenes: Vec::new(),
-            last_ir_frame: None,
             ir_scene: None,
-            meters: (
-                ac_scene::MeterState::default(),
-                ac_scene::MeterState::default(),
-            ),
-            fault: ac_scene::FaultState::default(),
             frame_parse_failures: 0,
             first_malformed_since: None,
             version_refusal: None,
@@ -213,7 +195,89 @@ impl AcViewApp {
     /// segments), closing the hole a state-only assertion (`derot_mode()`
     /// changed) cannot: that the changed mode failed to reach the scene.
     pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
-        self.transfer_scene.as_ref()
+        self.live_selected().scene.as_ref()
+    }
+
+    /// Every live pair's built scene (#685), in launch order — `None` for a
+    /// pair with no frame yet. The multi-pair analogue of
+    /// [`Self::current_transfer_scene`], which is the selected pair's.
+    pub fn current_live_scenes(&self) -> Vec<Option<&ac_scene::TransferScene>> {
+        self.live.iter().map(|p| p.scene.as_ref()).collect()
+    }
+
+    /// Measure `pairs` (#685): one live state per pair, and the view told
+    /// how many there are. An empty list keeps one unnamed pair.
+    fn set_pairs(&mut self, pairs: Vec<(u32, u32)>) {
+        let n = pairs.len().max(1);
+        self.live = (0..n).map(|_| LivePair::default()).collect();
+        self.pairs = pairs;
+        self.with_transfer(|t| t.set_live_count(n));
+    }
+
+    /// The selected live pair's index — the view's choice in the transfer
+    /// view, the first pair in the spectrum view.
+    fn selected_pair(&self) -> usize {
+        let chosen = match &self.view {
+            ViewKind::Transfer(t) => t.live_pair,
+            ViewKind::Spectrum(_) => 0,
+        };
+        chosen.min(self.live.len() - 1)
+    }
+
+    fn live_selected(&self) -> &LivePair {
+        &self.live[self.selected_pair()]
+    }
+
+    /// The selected pair's held transfer frame.
+    pub(crate) fn last_frame(&self) -> Option<&ac_core::wire::TransferFrame> {
+        self.live_selected().frame.as_ref()
+    }
+
+    /// The selected pair's held IR sidecar frame.
+    #[cfg(test)]
+    pub(crate) fn last_ir_frame(&self) -> Option<&ac_core::wire::IrFrame> {
+        self.live_selected().ir.as_ref()
+    }
+
+    /// Which live pair a frame belongs to, by its channels (#685). With
+    /// one pair, or none, every frame is that pair's — a daemon frame and
+    /// a test frame alike.
+    fn route(&self, meas: i64, reference: i64) -> Option<usize> {
+        if self.pairs.len() <= 1 {
+            return Some(0);
+        }
+        self.pairs
+            .iter()
+            .position(|&(m, r)| i64::from(m) == meas && i64::from(r) == reference)
+    }
+
+    /// The name a live pair goes by on screen: `live`, or `live <meas>`
+    /// when the session measures several (#685) — the channel number the
+    /// operator typed to `ac transfer`.
+    fn pair_label(&self, pair: usize) -> String {
+        match self.pairs.get(pair) {
+            Some((meas, _)) if self.pairs.len() > 1 => format!("live {meas}"),
+            _ => "live".to_string(),
+        }
+    }
+
+    /// Every live pair with a scene, for drawing (#685).
+    fn live_traces(&self) -> Vec<crate::view::LiveTrace<'_>> {
+        let selected = self.selected_pair();
+        let on_live =
+            matches!(&self.view, ViewKind::Transfer(t) if t.focus == crate::view::Focus::Live);
+        self.live
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                p.scene.as_ref().map(|scene| crate::view::LiveTrace {
+                    label: self.pair_label(i),
+                    pair: i,
+                    scene,
+                    selected: on_live && i == selected,
+                })
+            })
+            .collect()
     }
 
     /// Every loaded stored run's currently built scene (#321),
@@ -247,7 +311,9 @@ impl AcViewApp {
             return;
         }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
-            self.last_ir_frame = Some(ir_frame);
+            if let Some(i) = self.route(ir_frame.meas_channel, ir_frame.ref_channel) {
+                self.live[i].ir = Some(ir_frame);
+            }
         }
     }
 
@@ -285,23 +351,26 @@ impl AcViewApp {
                 self.version_refusal = Some(VersionRefusal { error, refused: 1 });
             }
         }
-        self.last_frame = None;
+        for pair in &mut self.live {
+            pair.frame = None;
+            pair.ir = None;
+            pair.scene = None;
+        }
         self.scene = None;
         self.last_scene_ranges = None;
-        self.transfer_scene = None;
-        self.last_ir_frame = None;
         self.ir_scene = None;
         false
     }
 
-    /// Rebuild `ir_scene` from `last_ir_frame` if the Transfer view's IR
+    /// Rebuild `ir_scene` from the selected pair's IR frame if the Transfer view's IR
     /// panel is open, else clear it — the one place this decision is
     /// made, called from both the live paint pass and the test helpers
     /// below so they can't drift apart.
     fn rebuild_ir_scene(&mut self) {
         let open = matches!(&self.view, ViewKind::Transfer(t) if t.ir_panel_open());
         self.ir_scene = if open {
-            self.last_ir_frame
+            self.live_selected()
+                .ir
                 .as_ref()
                 .map(|f| ac_scene::IrScene::from_input(&ac_scene::IrInput::from_wire_frame(f)))
         } else {
@@ -313,7 +382,7 @@ impl AcViewApp {
     /// place this happens, called from both the live paint pass in
     /// `ui()` and the headless test hook below so the two cannot drift.
     /// The inactive view's scene is always cleared, so exactly one of
-    /// `scene` / `transfer_scene` is ever populated.
+    /// `scene` / the live pairs' scenes is ever populated.
     ///
     /// `got_new_frame` forces a spectrum rebuild; without it the
     /// spectrum scene is rebuilt only when the ranges moved, which is
@@ -332,13 +401,15 @@ impl AcViewApp {
                     (state.freq_range.min(), state.freq_range.max()),
                     (state.db_range.min(), state.db_range.max()),
                 );
-                if let Some(wire_frame) = &self.last_frame {
+                if let Some(wire_frame) = &self.live[0].frame {
                     if got_new_frame || self.last_scene_ranges != Some(ranges) {
                         self.scene = Some(Scene::from_wire_frame(wire_frame, ranges.0, ranges.1));
                         self.last_scene_ranges = Some(ranges);
                     }
                 }
-                self.transfer_scene = None;
+                for pair in &mut self.live {
+                    pair.scene = None;
+                }
                 self.loaded_scenes.clear();
             }
             ViewKind::Transfer(state) => {
@@ -348,23 +419,27 @@ impl AcViewApp {
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
                 let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
                     .with_coherence_mask(state.coherence_mask);
-                if let Some(wire_frame) = &self.last_frame {
+                // Every pair every pass, each through its own meter and
+                // fault state (#685): both carry time between frames.
+                for pair in &mut self.live {
+                    let Some(wire_frame) = &pair.frame else {
+                        continue;
+                    };
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
-                    let live = ac_scene::TransferScene::from_input(
+                    let mut live = ac_scene::TransferScene::from_input(
                         &input,
                         modes,
                         freq_range,
                         db_range,
-                        &mut self.meters,
-                        &mut self.fault,
+                        &mut pair.meters,
+                        &mut pair.fault,
                         now_s,
                     );
                     // Paused (#256) only hides the live trace, in the view;
                     // the scene keeps rolling so the meters, the fault
                     // indicator and the readouts stay live.
-                    let mut live = live;
                     live.set_protection(wire_frame.protection.as_ref());
-                    self.transfer_scene = Some(live);
+                    pair.scene = Some(live);
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
@@ -403,7 +478,7 @@ impl AcViewApp {
     /// loop in `ui()` and the headless test below go through it, so a
     /// test exercises the same `serde_json::from_value` failure path a
     /// real malformed frame hits. Returns `true` if the frame was
-    /// accepted (`self.last_frame` updated).
+    /// accepted (its pair's held frame updated).
     ///
     /// The version check runs first, on the raw value: a frame whose schema
     /// moved too far to parse is still reported as a version mismatch, and a
@@ -414,10 +489,17 @@ impl AcViewApp {
         }
         match serde_json::from_value::<ac_core::wire::TransferFrame>(frame) {
             Ok(wire_frame) => {
-                self.last_frame = Some(wire_frame);
                 self.frame_parse_failures = 0;
                 self.first_malformed_since = None;
-                true
+                // A frame for a pair this session did not launch is not
+                // malformed, only not ours to draw.
+                match self.route(wire_frame.meas_channel, wire_frame.ref_channel) {
+                    Some(i) => {
+                        self.live[i].frame = Some(wire_frame);
+                        true
+                    }
+                    None => false,
+                }
             }
             Err(_) => {
                 if self.frame_parse_failures == 0 {
@@ -499,7 +581,10 @@ impl AcViewApp {
         frame: ac_core::wire::TransferFrame,
         now_s: f64,
     ) {
-        self.last_frame = Some(frame);
+        let i = self
+            .route(frame.meas_channel, frame.ref_channel)
+            .expect("a test frame for a launched pair");
+        self.live[i].frame = Some(frame);
         self.rebuild_scenes(true, now_s);
     }
 
@@ -507,7 +592,10 @@ impl AcViewApp {
     /// session — the IR-panel analogue of [`Self::ingest_frame_for_test`].
     #[cfg(test)]
     pub(crate) fn ingest_ir_frame_for_test(&mut self, frame: ac_core::wire::IrFrame) {
-        self.last_ir_frame = Some(frame);
+        let i = self
+            .route(frame.meas_channel, frame.ref_channel)
+            .expect("a test frame for a launched pair");
+        self.live[i].ir = Some(frame);
         self.rebuild_ir_scene();
     }
 
@@ -516,9 +604,7 @@ impl AcViewApp {
     #[cfg(test)]
     pub(crate) fn press_for_test(&mut self, action: Action, now_s: f64) {
         self.handle_action(action, false);
-        if let Some(frame) = self.last_frame.clone() {
-            self.ingest_frame_for_test(frame, now_s);
-        }
+        self.rebuild_scenes(true, now_s);
         self.rebuild_ir_scene();
     }
 
@@ -573,8 +659,7 @@ impl AcViewApp {
                 if shift {
                     self.send_delay(serde_json::json!({"samples": null}));
                 } else if let Some(v) = self
-                    .transfer_scene
-                    .as_ref()
+                    .current_transfer_scene()
                     .and_then(|s| s.delay_insert_samples)
                 {
                     self.send_delay(serde_json::json!({"samples": v}));
@@ -599,8 +684,7 @@ impl AcViewApp {
                 match focus {
                     crate::view::Focus::Live => {
                         if self
-                            .transfer_scene
-                            .as_ref()
+                            .current_transfer_scene()
                             .is_some_and(|s| s.delay_samples.is_some())
                         {
                             self.send_delay(serde_json::json!({"step": step}));
@@ -810,9 +894,9 @@ impl AcViewApp {
             }
         } else {
             match t.focus {
-                crate::view::Focus::Live => match &self.last_frame {
+                crate::view::Focus::Live => match self.last_frame() {
                     Some(f) => (
-                        "live".to_string(),
+                        self.pair_label(self.selected_pair()),
                         ac_scene::TransferInput::from_wire_frame(f),
                     ),
                     None => {
@@ -890,7 +974,13 @@ impl AcViewApp {
                 Some(3.0),
             );
         } else {
-            self.capture_rx = Some(crate::capture::spawn(self.endpoint.clone(), n));
+            // The selected live pair (#685): the snapshot holds every pair,
+            // the slot keeps the one the operator is looking at.
+            self.capture_rx = Some(crate::capture::spawn(
+                self.endpoint.clone(),
+                n,
+                self.selected_pair(),
+            ));
             self.capture_slot = Some(n);
             self.set_toast(format!("storing slot {n}\u{2026}"), now, None);
         }
@@ -961,8 +1051,12 @@ impl AcViewApp {
     /// Relay a `set_delay` to the daemon (#669). Best-effort, same
     /// discipline as `set_drive`: a failed send is a delay that did not
     /// change, visible on the next frame, never a crash.
+    ///
+    /// Always names the selected pair (#685): without `pair` the daemon
+    /// applies the change to every pair.
     fn send_delay(&mut self, mut request: serde_json::Value) {
         request["cmd"] = serde_json::json!("set_delay");
+        request["pair"] = serde_json::json!(self.selected_pair());
         #[cfg(test)]
         self.sent_delay.push(request.clone());
         if let Some(session) = &self.session {
@@ -1121,6 +1215,19 @@ impl AcViewApp {
                 );
                 return;
             }
+            // Several pairs (#685): the overlay edits one meas/ref, and
+            // applying it would quietly drop the others. Refused, with
+            // the way to change them.
+            if self.pairs.len() > 1 {
+                self.settings = None;
+                self.set_toast(
+                    "several pairs are measured \u{2014} relaunch with `ac transfer <channels>` to change them"
+                        .into(),
+                    Instant::now(),
+                    Some(5.0),
+                );
+                return;
+            }
             // Persist (last-writer-wins) then relaunch on the new
             // channels and reseed the stimulus start level.
             let Some(overlay) = &mut self.settings else {
@@ -1147,12 +1254,12 @@ impl AcViewApp {
         if let Some(session) = &mut self.session {
             session.stop();
             let _ = session.launch(
-                applied.meas_channel,
-                applied.ref_channel,
+                &[(applied.meas_channel, applied.ref_channel)],
                 self.weighting,
                 self.integration,
             );
         }
+        self.set_pairs(vec![(applied.meas_channel, applied.ref_channel)]);
         // Re-read rather than reuse a construction-time value: `apply`
         // has just persisted the overlay, so this is the one place the
         // ceiling is deliberately picked up fresh off disk.
@@ -1351,7 +1458,7 @@ impl AcViewApp {
         // Drain to the newest queued frame rather than parsing one
         // per repaint: the daemon publishes faster than the UI
         // repaints, so a single `if let` would fall progressively
-        // behind. `self.last_frame` is overwritten each iteration,
+        // behind. Each pair's held frame is overwritten each iteration,
         // so the backlog is discarded and only the freshest frame
         // survives — correct for a live display.
         //
@@ -1558,11 +1665,13 @@ impl eframe::App for AcViewApp {
         let status = self.status_line();
         ui.label(status);
         let stored_refs = self.stored_run_refs();
+        let live_traces = self.live_traces();
         draw_view(
             &self.view,
             ui,
             self.scene.as_ref(),
-            self.transfer_scene.as_ref(),
+            self.current_transfer_scene(),
+            &live_traces,
             &stored_refs,
             self.ir_scene.as_ref(),
         );
@@ -1605,6 +1714,24 @@ fn rebuild_loaded_scenes(
         .collect()
 }
 
+/// `--meas 0,4` (#685): one or more measurement channels, comma
+/// separated, each once. Anything else is refused with the reason — a
+/// channel list that quietly lost an entry would measure less than asked.
+pub fn parse_meas_list(s: &str) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let ch: u32 = part
+            .trim()
+            .parse()
+            .map_err(|_| format!("{s:?} is not a list of channel numbers"))?;
+        if out.contains(&ch) {
+            return Err(format!("channel {ch} is listed twice"));
+        }
+        out.push(ch);
+    }
+    Ok(out)
+}
+
 /// Resolve the transfer session's measurement and reference channels
 /// from config (M4c, #182). The hardcoded 0/1 is gone: `input_channel`
 /// is the measurement leg, and `reference_channel` is **required** —
@@ -1632,8 +1759,7 @@ pub fn connect_and_launch(
 ) -> anyhow::Result<AcViewApp> {
     connect_and_launch_view(
         endpoint,
-        meas_channel,
-        ref_channel,
+        &[(meas_channel, ref_channel)],
         weighting,
         integration,
         None,
@@ -1647,18 +1773,18 @@ pub fn connect_and_launch(
 /// cannot bring a session up already driving (the load-bearing AC). The
 /// only difference from the spectrum entry is which view renders the
 /// frames.
+///
+/// `pairs` is every `(meas, ref)` to measure (#685), in launch order.
 pub fn connect_and_launch_transfer(
     endpoint: Endpoint,
-    meas_channel: u32,
-    ref_channel: u32,
+    pairs: &[(u32, u32)],
     weighting: WeightingCurve,
     integration: &'static str,
     drive_max_dbfs: f64,
 ) -> anyhow::Result<AcViewApp> {
     connect_and_launch_view(
         endpoint,
-        meas_channel,
-        ref_channel,
+        pairs,
         weighting,
         integration,
         Some(drive_max_dbfs),
@@ -1673,8 +1799,7 @@ pub fn connect_and_launch_transfer(
 /// cannot be handed a ceiling it would silently drop.
 fn connect_and_launch_view(
     endpoint: Endpoint,
-    meas_channel: u32,
-    ref_channel: u32,
+    pairs: &[(u32, u32)],
     weighting: WeightingCurve,
     integration: &'static str,
     drive_max_dbfs: Option<f64>,
@@ -1682,15 +1807,36 @@ fn connect_and_launch_view(
     let client = Client::connect(&endpoint)?;
     let mut session = Session::new(client);
     // No `drive` param — neither entry (UI or CLI) ever launches driving.
-    session.launch(meas_channel, ref_channel, weighting, integration)?;
+    session.launch(pairs, weighting, integration)?;
     let mut app = match drive_max_dbfs {
         Some(max) => AcViewApp::new_transfer(endpoint, max),
         None => AcViewApp::new(endpoint),
     };
     app.session = Some(session);
+    app.set_pairs(pairs.to_vec());
     app.weighting = weighting;
     app.integration = integration;
     Ok(app)
+}
+
+/// One measured pair's live state (#685). The meters and the fault state
+/// carry time from one frame to the next — ballistics, the refusal clock —
+/// so each pair keeps its own: fed through one shared state, two pairs'
+/// frames would interleave into a reading that belongs to neither.
+#[derive(Default)]
+struct LivePair {
+    /// The last frame received, kept so the scene can be rebuilt on a
+    /// zoom/pan (range change) without waiting for the next frame —
+    /// otherwise zoom appears frozen on a paused or slow stream.
+    frame: Option<ac_core::wire::TransferFrame>,
+    /// The last `visualize/ir` sidecar frame (#286), held for the same
+    /// reason.
+    ir: Option<ac_core::wire::IrFrame>,
+    meters: (ac_scene::MeterState, ac_scene::MeterState),
+    /// The fault indicator's cross-frame state (#228).
+    fault: ac_scene::FaultState,
+    /// Built from `frame` every pass in the transfer view.
+    scene: Option<ac_scene::TransferScene>,
 }
 
 /// The version-mismatch state's cross-frame record (#112).

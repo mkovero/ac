@@ -83,7 +83,7 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
     let sniff_client = Client::connect(&endpoint).expect("connect (sniffer)");
     let mut sniff_session = Session::new(sniff_client);
     sniff_session
-        .launch(0, 1, WeightingCurve::A, "fast")
+        .launch(&[(0, 1)], WeightingCurve::A, "fast")
         .expect("launch transfer_stream (sniffer)");
     assert_eq!(sniff_session.connection_state(), ConnectionState::Live);
 
@@ -203,7 +203,7 @@ fn ir_panel_header_and_arrival_match_ac_scene_for_the_same_sidecar_frame() {
     let sniff_client = Client::connect(&endpoint).expect("connect (sniffer)");
     let mut sniff_session = Session::new(sniff_client);
     sniff_session
-        .launch(0, 1, WeightingCurve::A, "fast")
+        .launch(&[(0, 1)], WeightingCurve::A, "fast")
         .expect("launch transfer_stream (sniffer)");
     assert_eq!(sniff_session.connection_state(), ConnectionState::Live);
 
@@ -248,7 +248,7 @@ fn ir_panel_header_and_arrival_match_ac_scene_for_the_same_sidecar_frame() {
         // Explicit stimulus ceiling: this test drives no stimulus, but
         // the value is now a parameter rather than a config re-read, so
         // it must not depend on the developer's local config.
-        connect_and_launch_transfer(endpoint, 0, 1, WeightingCurve::A, "fast", -10.0)
+        connect_and_launch_transfer(endpoint, &[(0, 1)], WeightingCurve::A, "fast", -10.0)
             .expect("connect_and_launch_transfer")
     });
 

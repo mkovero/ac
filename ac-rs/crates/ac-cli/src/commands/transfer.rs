@@ -9,12 +9,15 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config) {
     let CommandKind::Transfer { channels } = cmd else {
         unreachable!()
     };
-    // An explicit channel spec overrides the measurement leg, same as
-    // `ac monitor`. Only the first channel is the meas leg; the reference
-    // comes from config (transfer is a fixed meas/ref pair).
-    let meas_override = channels.as_ref().and_then(|c| c.first().copied());
+    // An explicit channel spec names the measurement channels (#685):
+    // each one is measured against the reference from config, one live
+    // trace per channel. Before, only the first was used and the rest were
+    // dropped without a word.
+    let meas_override = channels.as_deref().filter(|c| !c.is_empty());
     if let Some(m) = meas_override {
-        eprintln!("  ac transfer: measurement channel {m}  (explicit)");
+        let list = m.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+        let noun = if m.len() == 1 { "channel" } else { "channels" };
+        eprintln!("  ac transfer: measurement {noun} {list}  (explicit)");
     }
     super::spawn_ac_view(cfg, true, meas_override);
 }

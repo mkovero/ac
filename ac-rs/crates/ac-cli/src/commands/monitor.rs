@@ -39,7 +39,7 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config) {
     } else {
         // Default: the ac-view spectrum window (M4d-CLI). Explicit channel
         // spec maps its first entry onto the measurement leg.
-        super::spawn_ac_view(cfg, false, channels.first().copied());
+        super::spawn_ac_view(cfg, false, channels.first().map(std::slice::from_ref));
     }
 }
 

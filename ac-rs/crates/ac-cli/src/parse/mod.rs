@@ -783,6 +783,7 @@ Commands:
   plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
                   [<N>harm] [<N>win] [<N>s tail]                      (gate params: harmonics, window, tail capture)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
+  transfer        [channels]                                          transfer view; each channel is measured against the reference
                                                                       live spectrum (default FFT; cwt = Morlet)
   stop                                                                stop active generator/measurement
   test software                                                       validate analysis pipeline (no hardware)
