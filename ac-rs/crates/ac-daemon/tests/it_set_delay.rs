@@ -540,3 +540,37 @@ fn back_to_back_steps_accumulate() {
     assert_eq!(delay_samples(&moved), LOCK_DELAY_SAMPLES + 2, "{moved}");
     assert_eq!(moved["delay_operator"], json!(true));
 }
+
+// ---------------------------------------------------------------------
+// Delay tracking (#687), through the real dispatcher.
+// ---------------------------------------------------------------------
+
+/// `track` reaches the session: the command table accepts the field (a
+/// rig run found it refused as unrecognised while every unit test passed,
+/// because they call the handler directly), the frame reports it, and a
+/// delay set 20 samples off comes back to the arrival.
+#[test]
+fn tracking_is_accepted_reported_and_restores_an_offset_delay() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(
+        start_correlated(&c, false, LOCK_DELAY_SAMPLES, 0.6)["ok"],
+        json!(true)
+    );
+    c.frame_matching(LOCK_TIMEOUT, locked);
+
+    let r = c.call(json!({"cmd": "set_delay", "track": true}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.call(json!({"cmd": "set_delay", "samples": LOCK_DELAY_SAMPLES - 20}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    c.frame_matching(LOCK_TIMEOUT, |f| {
+        f["delay_tracking"] == json!(true) && delay_samples(f) == LOCK_DELAY_SAMPLES - 20
+    });
+    let back = c.frame_matching(LOCK_TIMEOUT, |f| delay_samples(f) == LOCK_DELAY_SAMPLES);
+    assert_eq!(back["delay_tracking"], json!(true));
+
+    let r = c.call(json!({"cmd": "set_delay", "track": "yes"}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let r = c.call(json!({"cmd": "set_delay", "track": false, "step": 1}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+}
