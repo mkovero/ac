@@ -2026,7 +2026,18 @@ fn csv_export_names_the_selected_pair() {
     let mut app = two_pair_app();
     app.captures_dir = dir.clone();
     app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
-    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    // Pair 1's trace differs from pair 0's in its data rows too (Codex
+    // recheck): -21.5 dB where pair 0 reads -6.
+    let mut second = pair_frame(4, 0, -50.0);
+    for m in second.magnitude_db.iter_mut() {
+        *m = -21.5;
+    }
+    if let Some(mtw) = second.mtw.as_mut() {
+        for m in mtw.magnitude_db.iter_mut() {
+            *m = -21.5;
+        }
+    }
+    app.ingest_frame_for_test(second, 0.0);
     app.handle_action(Action::CycleFocus, false);
     app.handle_action(Action::ExportCsv, false);
     let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -2042,8 +2053,21 @@ fn csv_export_names_the_selected_pair() {
     let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.starts_with("live4-"), "{name}");
     assert!(text.contains("# ac transfer trace: live 4\n"), "{text}");
-    // Pair 1's delay (0), not pair 0's (326 samples).
+    // Pair 1's delay (0), not pair 0's (326 samples), and its data rows.
     assert!(text.contains("# delay_ms: 0.000000\n"), "{text}");
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .skip(1)
+        .collect();
+    assert!(!rows.is_empty(), "{text}");
+    for row in rows {
+        let magnitude: f64 = row.split(',').nth(1).unwrap().parse().unwrap();
+        assert!(
+            (magnitude + 21.5).abs() < 1e-6,
+            "pair 0's row in pair 1's file: {row}"
+        );
+    }
 }
 
 #[test]
