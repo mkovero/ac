@@ -22,6 +22,12 @@ use super::{
     resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
 
+/// How long the compare pass waits for `dut_reply` before running the
+/// bypass pass anyway. `ac-cli` (`commands/test.rs`, `BYPASS_ANSWER`) gives
+/// up and sends `stop` before this, so a late Enter can never confirm a
+/// bypass the daemon already ran without; its test reads this line.
+const DUT_REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 const THD_LEVELS_DBFS: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0];
 const CLIPPING_LEVELS_DBFS: &[f64] = &[
     -30.0, -27.0, -24.0, -21.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0,
@@ -205,6 +211,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             emit!(dut_clipping_point(&mut *eng, sr, cal.as_ref()), "dut");
         }
 
+        // Whether `dut_reply` arrived before the deadline. The bypass pass
+        // runs either way, so only this says the DUT was taken out (#619).
+        let mut bypass_confirmed = false;
         if compare_mode && !stop.load(Ordering::Relaxed) {
             let (tx, rx) = crossbeam_channel::bounded(1);
             *dut_reply_tx.lock().unwrap() = Some(tx);
@@ -218,7 +227,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                 }),
             );
 
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            let deadline = std::time::Instant::now() + DUT_REPLY_DEADLINE;
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -227,6 +236,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                     break;
                 }
                 if rx.try_recv().is_ok() {
+                    bypass_confirmed = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -255,6 +265,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
+        // Read before cleanup: a stop that lands while the engine shuts
+        // down cut nothing short (Codex recheck).
+        let stopped = stop.load(Ordering::Relaxed);
         eng.set_silence();
         eng.stop();
         let xruns = eng.xruns();
@@ -264,6 +277,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             &json!({
                 "cmd": "test_dut",
                 "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
+                // See test_hardware's `stopped` (#619).
+                "stopped": stopped,
+                "bypass_confirmed": bypass_confirmed,
                 "backend": backend,
             }),
         );

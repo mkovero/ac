@@ -419,7 +419,11 @@ Requires two loopback pairs (same as hardware test). Signal path: `output_channe
 
 ### Compare mode (`ac test dut compare`)
 
-Runs the full 5-measurement suite twice: once with DUT in the signal path, then prompts the user to bypass the DUT and runs again. Results are tagged `[With DUT]` and `[Bypass]` for comparison.
+Runs the full 5-measurement suite twice: once with DUT in the signal path, then prompts the user to bypass the DUT and runs again after Enter. Results print under `With DUT` and `Bypass` headings. With no answer at the prompt (stdin closed, or no Enter within 270 s, before the daemon's own 300 s deadline), the run stops before the bypass pass and exits 1.
+
+### Output and exit status (`test hardware`, `test dut`)
+
+One row per check: `pass` or `FAIL`, the name, then the detail. A `test hardware` row adds its criterion (`pass if …`). A `test dut` row names what it measured, and it fails only when that could not be measured. A count line (`N of M pass`) follows. The command exits 1 on any `FAIL`, on an error, when a `stop` cut the suite short, when a compare's bypass pass ran without an answer to the prompt, when no test ran, or when fewer results arrived than the daemon reports having run. `test dut` also writes `test_dut_<timestamp>.csv` (`tag,name,pass,detail,tolerance`) to the session directory, or to the working directory when no session is set. A failed CSV write also exits 1.
 
 ### With direct loopback (no DUT)
 

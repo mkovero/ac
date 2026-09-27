@@ -227,6 +227,9 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
+        // Read before cleanup: a stop that lands while the engine shuts
+        // down cut nothing short.
+        let stopped = stop.load(Ordering::Relaxed);
         eng.set_silence();
         eng.stop();
         send_pub(
@@ -236,6 +239,10 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
                 "cmd": "test_hardware",
                 "tests_run": tests_run, "tests_pass": tests_pass,
                 "dmm_run": dmm_run, "dmm_pass": dmm_pass,
+                // A stop cuts the suite between tests, and `tests_run`
+                // then counts only what ran: without this a stopped
+                // all-pass run reads as a complete one (#619).
+                "stopped": stopped,
                 "xruns": eng.xruns(),
                 "backend": backend,
             }),
