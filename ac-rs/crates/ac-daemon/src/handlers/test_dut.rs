@@ -211,6 +211,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             emit!(dut_clipping_point(&mut *eng, sr, cal.as_ref()), "dut");
         }
 
+        // Whether `dut_reply` arrived before the deadline. The bypass pass
+        // runs either way, so only this says the DUT was taken out (#619).
+        let mut bypass_confirmed = false;
         if compare_mode && !stop.load(Ordering::Relaxed) {
             let (tx, rx) = crossbeam_channel::bounded(1);
             *dut_reply_tx.lock().unwrap() = Some(tx);
@@ -233,6 +236,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                     break;
                 }
                 if rx.try_recv().is_ok() {
+                    bypass_confirmed = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -261,6 +265,9 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
+        // Read before cleanup: a stop that lands while the engine shuts
+        // down cut nothing short (Codex recheck).
+        let stopped = stop.load(Ordering::Relaxed);
         eng.set_silence();
         eng.stop();
         let xruns = eng.xruns();
@@ -271,7 +278,8 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                 "cmd": "test_dut",
                 "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
                 // See test_hardware's `stopped` (#619).
-                "stopped": stop.load(Ordering::Relaxed),
+                "stopped": stopped,
+                "bypass_confirmed": bypass_confirmed,
                 "backend": backend,
             }),
         );

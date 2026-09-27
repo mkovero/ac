@@ -3856,17 +3856,21 @@ waits for `dut_reply`:
 
 The wait has a **300 s deadline, and expiry is not an error**: the bypass
 pass runs anyway, and its frames are tagged `"bypass"` whether or not the
-operator actually bypassed anything. Nothing on the wire distinguishes an
-answered prompt from a timed-out one, so **a `bypass` tag is not evidence
-that the DUT was bypassed** — a client that needs that distinction must
-track whether it sent `dut_reply` itself.
+operator actually bypassed anything. A `bypass` tag alone is therefore
+**not evidence that the DUT was bypassed**: the terminal frame's
+`bypass_confirmed` says whether the prompt was answered in time. A client
+cannot learn this from its own `dut_reply`, which is acknowledged even
+after the deadline.
 
 **Terminal frame** (`done`):
 ```json
-{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "stopped": <bool>, "xruns": <int> }
+{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "stopped": <bool>,
+  "bypass_confirmed": <bool>, "xruns": <int> }
 ```
 
-`stopped` as in `test_hardware`.
+`stopped` as in `test_hardware`. `bypass_confirmed` is `true` only when a
+`dut_reply` reached the waiting worker before the deadline; it is `false`
+outside compare mode, on a stop, and when the deadline expired.
 
 ---
 

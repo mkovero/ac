@@ -157,6 +157,10 @@ struct Suite {
     stopped: bool,
     /// An `error` frame or a timeout ended the run early.
     broken: bool,
+    /// `test dut compare` whose bypass pass ran without an answer to the
+    /// prompt (`done.bypass_confirmed` false). The daemon decides, so a
+    /// client's clock or a late Enter cannot turn this into a pass.
+    bypass_unconfirmed: bool,
 }
 
 impl Suite {
@@ -166,6 +170,7 @@ impl Suite {
     fn ok(&self) -> bool {
         !self.broken
             && !self.stopped
+            && !self.bypass_unconfirmed
             && !self.rows.is_empty()
             && self.reported == Some(self.rows.len() as u64)
             && self.rows.iter().all(row_passed)
@@ -248,6 +253,8 @@ fn consume(suite: &mut Suite, cmd_name: &str, (topic, data): (String, Value)) ->
             let count = |k: &str| data.get(k).and_then(Value::as_u64).unwrap_or(0);
             suite.reported = Some(count("tests_run") + count("dmm_run"));
             suite.stopped = data.get("stopped").and_then(Value::as_bool) == Some(true);
+            suite.bypass_unconfirmed = data.get("compare").and_then(Value::as_bool) == Some(true)
+                && data.get("bypass_confirmed").and_then(Value::as_bool) != Some(true);
             let mut lines = vec![String::new()];
             lines.extend(summary_lines(suite));
             if let Some(line) = io::xrun_warning_line(count("xruns")) {
@@ -327,6 +334,11 @@ fn summary_lines(suite: &Suite) -> Vec<String> {
     }];
     if suite.stopped {
         lines.push("  stopped before the suite finished".to_owned());
+    } else if suite.bypass_unconfirmed {
+        lines.push(
+            "  bypass not confirmed: the prompt went unanswered, so the Bypass rows may include the DUT"
+                .to_owned(),
+        );
     }
     if let Some(reported) = suite.reported.filter(|&n| n != received) {
         lines.push(format!(
@@ -339,11 +351,11 @@ fn summary_lines(suite: &Suite) -> Vec<String> {
 /// How long `test dut compare` waits for Enter at the bypass prompt.
 ///
 /// Coupled to the daemon's `DUT_REPLY_DEADLINE` (300 s, `test_dut.rs`):
-/// past that the daemon runs the bypass pass whether or not anything was
-/// bypassed, and a `dut_reply` sent later is still acknowledged. So this
-/// must end first, with room for the `stop` to arrive; a test reads the
-/// daemon's value. 30 s of margin is assumed, not measured — a `stop`
-/// round trip on one host takes milliseconds.
+/// past that the daemon runs the bypass pass by itself. Ending first lets
+/// the CLI stop the run cleanly instead of producing unconfirmed Bypass
+/// rows; a test reads the daemon's value. Correctness does not rest on it:
+/// the two clocks start at different moments (send vs receive), so the
+/// verdict comes from `done.bypass_confirmed`. 30 s of margin is assumed.
 const BYPASS_ANSWER: std::time::Duration = std::time::Duration::from_secs(270);
 
 /// `test dut compare`: the daemon waits for `dut_reply`, then runs the
@@ -632,6 +644,31 @@ mod tests {
         );
     }
 
+    /// Codex recheck: the CLI's prompt clock starts late, so the daemon can
+    /// run the bypass pass unanswered while every row passes and the counts
+    /// match. `bypass_confirmed: false` alone must fail it.
+    #[test]
+    fn an_unconfirmed_bypass_fails_a_complete_all_pass_compare() {
+        let frames = |confirmed: bool| {
+            vec![
+                dut("dut", "Gain", "+0.0 dB", "at 1 kHz"),
+                dut("bypass", "Gain", "+0.0 dB", "at 1 kHz"),
+                frame(
+                    "done",
+                    json!({"cmd": "test_dut", "tests_run": 2, "compare": true,
+                                     "stopped": false, "bypass_confirmed": confirmed}),
+                ),
+            ]
+        };
+        let (suite, lines, _) = feed("test_dut", frames(false));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("  bypass not confirmed")));
+        assert!(!suite.ok());
+        let (suite, _, _) = feed("test_dut", frames(true));
+        assert!(suite.ok());
+    }
+
     #[test]
     fn nothing_ran_is_a_failure_not_an_empty_pass() {
         let (suite, lines, _) = feed(
@@ -680,7 +717,7 @@ mod tests {
                 frame(
                     "done",
                     json!({"cmd": "test_dut", "tests_run": 2, "compare": true,
-                                     "xruns": 0}),
+                                     "bypass_confirmed": true, "xruns": 0}),
                 ),
             ],
         );

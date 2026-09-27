@@ -32,6 +32,7 @@ fn a_stop_mid_suite_is_reported_in_done() {
         .expect("done after stop");
     assert_eq!(done["cmd"], "test_dut", "{done}");
     assert_eq!(done["stopped"], true, "{done}");
+    assert_eq!(done["bypass_confirmed"], false, "{done}");
     let run = done["tests_run"].as_u64().expect("tests_run");
     assert!(
         (1..5).contains(&run),
