@@ -2423,19 +2423,32 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
     // not replace it, and resuming shows live again.
     let held = app.current_ir_scene().unwrap().trace.clone();
     app.handle_action(Action::StimulusFireOrPause, false); // pause
+                                                           // A frame drained after the keypress but before the next rebuild must
+                                                           // not be what freezes (Codex review).
+    let mut later = ir_frame();
+    later.samples = vec![0.0, -1.0, 0.5, 0.0];
+    app.live[0].hold_ir(later.clone());
     app.rebuild_ir_scene();
     assert_eq!(
         label(&app).as_deref(),
         Some("live \u{b7} PAUSED \u{b7} IR 1 s (no current arrival IR)")
     );
-    let mut later = ir_frame();
-    later.samples = vec![0.0, -1.0, 0.5, 0.0];
+    assert_eq!(
+        app.current_ir_scene().unwrap().trace,
+        held,
+        "froze a later IR"
+    );
     app.ingest_ir_frame_for_test(later.clone());
     assert_eq!(
         app.current_ir_scene().unwrap().trace,
         held,
         "a paused IR moved"
     );
+    // A relaunch while paused drops the held IR.
+    app.set_pairs(vec![(0, 1)]);
+    app.rebuild_ir_scene();
+    assert!(app.current_ir_scene().is_none(), "old session's IR shown");
+    app.ingest_ir_frame_for_test(later.clone());
     app.handle_action(Action::StimulusFireOrPause, false); // resume
     app.rebuild_ir_scene();
     assert_eq!(

@@ -249,6 +249,8 @@ impl AcViewApp {
     fn set_pairs(&mut self, pairs: Vec<(u32, u32)>) {
         let n = pairs.len().max(1);
         self.live = (0..n).map(|_| LivePair::default()).collect();
+        // A new session: nothing held from the old one is its IR.
+        self.paused_ir = None;
         self.pairs = pairs;
         self.with_transfer(|t| t.set_live_count(n));
     }
@@ -396,6 +398,8 @@ impl AcViewApp {
             pair.ir_arrival = None;
             pair.scene = None;
         }
+        // Refused frames clear what is drawn, the held pause IR included.
+        self.paused_ir = None;
         self.scene = None;
         self.last_scene_ranges = None;
         self.ir_scene = None;
@@ -410,19 +414,9 @@ impl AcViewApp {
     /// live shows the selected pair's sidecar — and nothing while live is
     /// paused, since pause holds the live trace off the screen.
     fn rebuild_ir_scene(&mut self) {
-        // Freeze on the pause edge, thaw on resume — held whether or not
-        // the panel is open, so opening it while paused shows the moment
-        // of the pause.
-        let paused = matches!(&self.view, ViewKind::Transfer(t) if t.paused);
-        if !paused {
+        // Held from the pause keypress (see its handler) until resume.
+        if !matches!(&self.view, ViewKind::Transfer(t) if t.paused) {
             self.paused_ir = None;
-        } else if self.paused_ir.is_none() {
-            self.paused_ir = Some(
-                self.live
-                    .iter()
-                    .map(|p| (p.ir.clone(), p.ir_arrival.clone()))
-                    .collect(),
-            );
         }
         let ViewKind::Transfer(t) = &self.view else {
             self.ir_scene = None;
@@ -984,6 +978,19 @@ impl AcViewApp {
     /// Enter while not armed (#256): hold the live trace, or let it roll.
     fn toggle_live_pause(&mut self) {
         self.with_transfer(|t| t.toggle_pause());
+        // The IR panel freezes on the IRs of the keypress itself — not of
+        // the next rebuild, by which a newer frame may have been drained
+        // (Codex review).
+        if self.transfer_paused() {
+            self.paused_ir = Some(
+                self.live
+                    .iter()
+                    .map(|p| (p.ir.clone(), p.ir_arrival.clone()))
+                    .collect(),
+            );
+        } else {
+            self.paused_ir = None;
+        }
     }
 
     /// `M` / `Shift+M` (#671): the slot average on or off, or its weighting;
