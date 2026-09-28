@@ -44,6 +44,10 @@ impl OffsetEntry {
     /// What applying does: `Some(0.0)` for an empty entry (the offset goes
     /// back to none), the typed value when it parses within
     /// ±[`MAX_OFFSET_DB`], `None` otherwise (nothing to apply).
+    ///
+    /// Rounded to 0.1 dB, the precision the on-screen caption states: an
+    /// offset finer than that would move the curve while the caption read
+    /// `+0.0 dB` (Codex review).
     pub fn value(&self) -> Option<f64> {
         if self.text.is_empty() {
             return Some(0.0);
@@ -52,6 +56,7 @@ impl OffsetEntry {
             .parse::<f64>()
             .ok()
             .filter(|v| v.is_finite() && v.abs() <= MAX_OFFSET_DB)
+            .map(|v| (v * 10.0).round() / 10.0)
     }
 }
 
@@ -81,5 +86,14 @@ mod tests {
         assert_eq!(typed(".").value(), None);
         assert_eq!(typed("61").value(), None);
         assert_eq!(typed("-60").value(), Some(-60.0));
+    }
+
+    /// The caption states 0.1 dB, so that is what applies: a finer offset
+    /// would move the curve while the caption read `+0.0 dB`.
+    #[test]
+    fn the_applied_offset_is_what_the_caption_can_state() {
+        assert_eq!(typed("0.04").value(), Some(0.0));
+        assert_eq!(typed("1.26").value(), Some(1.3));
+        assert_eq!(typed("-2.25").value(), Some(-2.3));
     }
 }
