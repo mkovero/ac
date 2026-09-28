@@ -99,6 +99,9 @@ pub enum Action {
     /// live-arrival only (the sweep-derived kind is a disjoint data path,
     /// #308). Mnemonic: `H`, this display's own y-axis label.
     ToggleIrPanel,
+    /// `S` (#706): the live IR panel's arrival IR (250 ms, fast) or the
+    /// 1 s one.
+    ToggleIrSpan,
     /// Move focus to the next trace — live, then each loaded stored run,
     /// wrapping back to live (#321). Selects what `N` (smoothing) edits
     /// and what the delay readout names. Not yet reachable from any
@@ -378,6 +381,13 @@ pub const BINDINGS: &[Binding] = &[
         shift: Some("IR view: linear / log / ETC"),
     },
     Binding {
+        key: Key::S,
+        action: Action::ToggleIrSpan,
+        scope: Scope::Transfer,
+        description: "Live IR: arrival 250 ms (fast) / 1 s",
+        shift: None,
+    },
+    Binding {
         key: Key::Tab,
         action: Action::CycleFocus,
         scope: Scope::Transfer,
@@ -538,8 +548,8 @@ impl HelpGroup {
             CycleFocus | ToggleTraceVisible | CloseFocusedRun | OpenSnapshot | ToggleAverage
             | ExportCsv => HelpGroup::Traces,
             CycleSmoothing | CycleCoherenceMask | ToggleRawPhase | CycleDerotReference
-            | ToggleInvert | TypeOffset | OpenTargets | ToggleIrPanel | CycleWeighting
-            | CycleIntegration | ToggleRefTrace => HelpGroup::Display,
+            | ToggleInvert | TypeOffset | OpenTargets | ToggleIrPanel | ToggleIrSpan
+            | CycleWeighting | CycleIntegration | ToggleRefTrace => HelpGroup::Display,
             InsertDelay | ToggleDelayTracking | NudgeDelayEarlier | NudgeDelayLater | TypeDelay => {
                 HelpGroup::Delay
             }

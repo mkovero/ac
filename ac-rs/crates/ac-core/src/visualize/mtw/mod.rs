@@ -71,7 +71,7 @@ use ladder::{Ladder, Stage, NFFT};
 use splice::{Column, StageSpectra};
 
 /// Periodic Hann window of length `n`.
-fn hann(n: usize) -> Vec<f64> {
+pub(crate) fn hann(n: usize) -> Vec<f64> {
     (0..n)
         .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos())
         .collect()
@@ -96,6 +96,10 @@ struct Band {
 pub struct MtwPair {
     ladder: Ladder,
     aligner: PairAligner,
+    /// The arrival IR (#706), fed the same aligned full-rate stream the
+    /// stages decimate from. Opt-in ([`Self::with_live_ir`]): a snapshot
+    /// replay has no use for it.
+    live_ir: Option<crate::visualize::live_ir::LiveIr>,
     bands: Vec<Band>,
     window: Vec<f64>,
     planner: RealFftPlanner<f64>,
@@ -132,6 +136,7 @@ impl MtwPair {
         Ok(Self {
             ladder,
             aligner: PairAligner::new(offset),
+            live_ir: None,
             bands,
             window: hann(NFFT),
             planner: RealFftPlanner::<f64>::new(),
@@ -144,6 +149,29 @@ impl MtwPair {
 
     pub fn ladder(&self) -> &Ladder {
         &self.ladder
+    }
+
+    /// Also run the arrival IR (#706) on this pair's aligned stream.
+    pub fn with_live_ir(mut self, sr: u32) -> Self {
+        self.live_ir = Some(crate::visualize::live_ir::LiveIr::new(sr));
+        self
+    }
+
+    /// Start the arrival IR over (#706): after a gap in this pair's input
+    /// its partial segment and average would join audio across the gap.
+    ///
+    /// The aligner still holds up to `|offset|` samples of one leg from
+    /// before the gap; those are discarded too.
+    pub fn reset_live_ir(&mut self, sr: u32) {
+        if self.live_ir.is_some() {
+            let skip = self.aligner.offset().unsigned_abs() as usize;
+            self.live_ir = Some(crate::visualize::live_ir::LiveIr::after_gap(sr, skip));
+        }
+    }
+
+    /// The arrival IR, when enabled.
+    pub fn live_ir(&self) -> Option<&crate::visualize::live_ir::LiveIr> {
+        self.live_ir.as_ref()
     }
 
     /// Blocks analysed per stage so far — warmup progress, shallowest first.
@@ -175,6 +203,9 @@ impl MtwPair {
         );
         if self.aligned_meas.is_empty() {
             return;
+        }
+        if let Some(ir) = self.live_ir.as_mut() {
+            ir.push(&self.aligned_meas, &self.aligned_ref);
         }
         for band in self.bands.iter_mut() {
             self.dec_meas.clear();
@@ -298,14 +329,18 @@ struct StageMean {
 /// Note what is *not* here: no dB, no magnitude, no division. The block
 /// contributes raw `Sxx`, `Syy`, `Sxy`; everything derived comes later and
 /// once.
-fn analyse_block(
+/// One block's raw cross-spectra, folded into `avg`: Hann-windowed FFTs of
+/// both legs, reference as x. The block length is the window's, so the
+/// arrival IR ([`crate::visualize::live_ir`]) runs the same maths at its own
+/// segment length.
+pub(crate) fn analyse_block(
     planner: &mut RealFftPlanner<f64>,
     window: &[f64],
     meas: &[f64],
     reference: &[f64],
     avg: &mut BlockAverage,
 ) {
-    let fft = planner.plan_fft_forward(NFFT);
+    let fft = planner.plan_fft_forward(window.len());
     let mut bm: Vec<f64> = meas.iter().zip(window).map(|(&s, &w)| s * w).collect();
     let mut br: Vec<f64> = reference.iter().zip(window).map(|(&s, &w)| s * w).collect();
     let mut fm = fft.make_output_vec();

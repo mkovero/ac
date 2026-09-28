@@ -345,7 +345,7 @@ impl AcViewApp {
         }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
             if let Some(i) = self.route(ir_frame.meas_channel, ir_frame.ref_channel) {
-                self.live[i].ir = Some(ir_frame);
+                self.live[i].hold_ir(ir_frame);
             }
         }
     }
@@ -387,6 +387,7 @@ impl AcViewApp {
         for pair in &mut self.live {
             pair.frame = None;
             pair.ir = None;
+            pair.ir_arrival = None;
             pair.scene = None;
         }
         self.scene = None;
@@ -413,6 +414,7 @@ impl AcViewApp {
         }
         let view = t.ir_view;
         self.ir_scene = match t.focus {
+            // A stored run holds its 1 s IR only (#706).
             crate::view::Focus::Stored(i) => t.loaded.get(i).and_then(|run| {
                 run.ir.as_ref().map(|ir| {
                     // The run's `←`/`→` nudge moves its arrival marker as it
@@ -420,14 +422,30 @@ impl AcViewApp {
                     // delay the trace is drawn against.
                     let mut ir = ir.clone();
                     ir.delay_ms += run.delay_offset_samples as f64 * 1000.0 / f64::from(run.sr);
-                    ac_scene::IrScene::from_input_view(&ir, view).labelled(run.label.clone())
+                    ac_scene::IrScene::from_input_view(&ir, view)
+                        .labelled(format!("{} \u{b7} {}", run.label, IR_LONG_LABEL))
                 })
             }),
             crate::view::Focus::Live if t.paused => None,
-            crate::view::Focus::Live => self.live_selected().ir.as_ref().map(|f| {
-                ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
-                    .labelled(self.pair_label(self.selected_pair()))
-            }),
+            crate::view::Focus::Live => {
+                // The arrival IR by default (#706); `S` picks the 1 s one.
+                // Until a pair has a delay there is no arrival IR, and the
+                // panel says it is showing the 1 s one instead.
+                let pair = self.live_selected();
+                let owner = self.pair_label(self.selected_pair());
+                let (frame, what) = match (t.ir_arrival, &pair.ir_arrival, &pair.ir) {
+                    (true, Some(a), _) => (Some(a), IR_ARRIVAL_LABEL.to_string()),
+                    (true, None, long) => (
+                        long.as_ref(),
+                        format!("{IR_LONG_LABEL} (no current arrival IR)"),
+                    ),
+                    (false, _, long) => (long.as_ref(), IR_LONG_LABEL.to_string()),
+                };
+                frame.map(|f| {
+                    ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
+                        .labelled(format!("{owner} \u{b7} {what}"))
+                })
+            }
         };
     }
 
@@ -586,8 +604,7 @@ impl AcViewApp {
                 // malformed, only not ours to draw.
                 match self.route(wire_frame.meas_channel, wire_frame.ref_channel) {
                     Some(i) => {
-                        self.live[i].frame = Some(wire_frame);
-                        self.live[i].frames_in += 1;
+                        self.live[i].hold_frame(wire_frame);
                         true
                     }
                     None => false,
@@ -676,8 +693,7 @@ impl AcViewApp {
         let i = self
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
-        self.live[i].frame = Some(frame);
-        self.live[i].frames_in += 1;
+        self.live[i].hold_frame(frame);
         self.rebuild_scenes(true, now_s);
     }
 
@@ -688,7 +704,7 @@ impl AcViewApp {
         let i = self
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
-        self.live[i].ir = Some(frame);
+        self.live[i].hold_ir(frame);
         self.rebuild_ir_scene();
     }
 
@@ -764,6 +780,7 @@ impl AcViewApp {
                     t.toggle_ir_panel();
                 }
             }),
+            Action::ToggleIrSpan => self.with_transfer(|t| t.ir_arrival = !t.ir_arrival),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
             // -- transfer view: the operator's delay (#669). The values
@@ -1825,30 +1842,29 @@ impl AcViewApp {
         let Some(session) = &mut self.session else {
             return false;
         };
-        let (drained, drained_ir) =
-            collect_drained(|| session.poll_frame(Duration::from_millis(0)));
-        self.ingest_drained(drained, drained_ir, Instant::now())
+        let drained = collect_drained(|| session.poll_frame(Duration::from_millis(0)));
+        self.ingest_drained(drained, Instant::now())
     }
 
     /// Feed one pass's collected frames through the ingest boundary, in
     /// arrival order, so the last of each kind is what stays held. Returns
     /// whether any `transfer_stream` frame was accepted.
-    fn ingest_drained(
-        &mut self,
-        drained: Vec<serde_json::Value>,
-        drained_ir: Vec<serde_json::Value>,
-        now: Instant,
-    ) -> bool {
+    ///
+    /// One ordered pass, not transfer frames then IR frames: an arrival IR
+    /// ages out by the transfer frames that follow it (#706), so an old one
+    /// replayed after the frames that expired it would come back (Codex
+    /// recheck).
+    fn ingest_drained(&mut self, drained: Vec<PolledFrame>, now: Instant) -> bool {
         let mut got_new_frame = false;
         for frame in drained {
-            if self.ingest_raw_frame(frame, now) {
-                got_new_frame = true;
+            match frame {
+                PolledFrame::Transfer(v) => {
+                    if self.ingest_raw_frame(v, now) {
+                        got_new_frame = true;
+                    }
+                }
+                PolledFrame::Ir(v) => self.ingest_raw_ir_frame(v),
             }
-        }
-        // Same "drain to the newest" discipline as the transfer frame
-        // above — the last one in the backlog wins.
-        for frame in drained_ir {
-            self.ingest_raw_ir_frame(frame);
         }
         got_new_frame
     }
@@ -2210,6 +2226,14 @@ fn connect_and_launch_view(
     Ok(app)
 }
 
+/// The IR panel's name for the arrival IR (#706).
+const IR_ARRIVAL_LABEL: &str = "arrival IR 250 ms";
+/// The IR panel's name for the 1 s Welch IR.
+const IR_LONG_LABEL: &str = "IR 1 s";
+/// Transfer frames (50 ms each) without a new arrival IR after which the
+/// held one is dropped as stale: 200 ms, three missed 62.5 ms answers.
+const ARRIVAL_STALE_FRAMES: u32 = 4;
+
 /// One measured pair's live state (#685). The meters and the fault state
 /// carry time from one frame to the next — ballistics, the refusal clock —
 /// so each pair keeps its own: fed through one shared state, two pairs'
@@ -2221,8 +2245,13 @@ struct LivePair {
     /// otherwise zoom appears frozen on a paused or slow stream.
     frame: Option<ac_core::wire::TransferFrame>,
     /// The last `visualize/ir` sidecar frame (#286), held for the same
-    /// reason.
+    /// reason — the 1 s Welch IR.
     ir: Option<ac_core::wire::IrFrame>,
+    /// The last arrival IR (#706, `span: "arrival"`): 250 ms, a new one
+    /// every 62.5 ms once the pair has a delay.
+    ir_arrival: Option<ac_core::wire::IrFrame>,
+    /// Transfer frames since the last arrival IR (#706).
+    frames_since_arrival: u32,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     /// The fault indicator's cross-frame state (#228).
     fault: ac_scene::FaultState,
@@ -2234,6 +2263,43 @@ struct LivePair {
     /// the press. Two presses before the frames catch up then toggle twice
     /// instead of sending the same value (Codex review).
     track_pending: Option<(bool, u64)>,
+}
+
+impl LivePair {
+    /// Hold a transfer frame. An arrival IR aligned at a delay the pair no
+    /// longer holds is dropped with it (#706, Codex review): after a
+    /// `set_delay`, a re-find or a lost lock the daemon sends nothing until
+    /// the new ladder settles, and the old IR would sit on screen centred
+    /// on the old delay. The panel falls back to the 1 s IR and says so.
+    ///
+    /// A delay check alone cannot see a re-find or a restart at the same
+    /// delay (Codex recheck), so an arrival IR is also dropped once
+    /// [`ARRIVAL_STALE_FRAMES`] transfer frames pass without a new one: it
+    /// normally comes every 62.5 ms, and its absence means the daemon is
+    /// rebuilding it.
+    fn hold_frame(&mut self, frame: ac_core::wire::TransferFrame) {
+        self.frames_since_arrival = self.frames_since_arrival.saturating_add(1);
+        let stale = self.ir_arrival.as_ref().is_some_and(|a| {
+            frame.delay_locked != Some(true)
+                || a.delay_samples != frame.delay_samples
+                || self.frames_since_arrival > ARRIVAL_STALE_FRAMES
+        });
+        if stale {
+            self.ir_arrival = None;
+        }
+        self.frame = Some(frame);
+        self.frames_in += 1;
+    }
+
+    /// Hold an IR sidecar frame in the place its `span` names (#706).
+    fn hold_ir(&mut self, frame: ac_core::wire::IrFrame) {
+        if frame.span.as_deref() == Some(ac_core::wire::IR_SPAN_ARRIVAL) {
+            self.frames_since_arrival = 0;
+            self.ir_arrival = Some(frame);
+        } else {
+            self.ir = Some(frame);
+        }
+    }
 }
 
 /// New frames of a pair after which a `Y` press is no longer pending: the
@@ -2327,23 +2393,13 @@ fn draw_help(ctx: &egui::Context, view: crate::keys::ViewId) {
         });
 }
 
-/// Pull frames from `poll` until it reports empty, split by the tagged
-/// `PolledFrame` (#286) — a `transfer_stream` frame and its `visualize/ir`
-/// sidecar are independent JSON objects and go to independent ingest
-/// paths. The socket read is passed in so the drain test can inject a
+/// Pull frames from `poll` until it reports empty, in arrival order, each
+/// tagged `PolledFrame` (#286) — a `transfer_stream` frame and its
+/// `visualize/ir` sidecar are independent JSON objects and go to
+/// independent ingest paths, but in the order they came (#706). The socket read is passed in so the drain test can inject a
 /// queue instead (#219 Part B); `drain_frames` passes `Session::poll_frame`.
-fn collect_drained(
-    mut poll: impl FnMut() -> Option<PolledFrame>,
-) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-    let mut drained = Vec::new();
-    let mut drained_ir = Vec::new();
-    while let Some(frame) = poll() {
-        match frame {
-            PolledFrame::Transfer(v) => drained.push(v),
-            PolledFrame::Ir(v) => drained_ir.push(v),
-        }
-    }
-    (drained, drained_ir)
+fn collect_drained(poll: impl FnMut() -> Option<PolledFrame>) -> Vec<PolledFrame> {
+    std::iter::from_fn(poll).collect()
 }
 
 #[cfg(test)]

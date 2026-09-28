@@ -85,28 +85,62 @@ pub fn etc_db(ir: &[f32]) -> Vec<f32> {
 /// instead drew a peak just before it a whole bucket early (the rig: an
 /// arrival at −0.01 ms drawn at −0.5 ms).
 pub fn bucket_max(db: &[f32], stride: usize) -> Vec<f32> {
-    let stride = stride.max(1);
-    let half = stride / 2;
-    let n_out = db.len().div_ceil(stride);
-    (0..n_out)
-        .map(|i| {
-            let lo = (i * stride).saturating_sub(half);
-            // The last bucket runs to the end: the samples after the last
-            // pick belong to it, or an arrival there would vanish (Codex
-            // review).
-            let hi = if i + 1 == n_out {
-                db.len()
-            } else {
-                (i * stride + stride - half).min(db.len())
-            };
-            db[lo..hi].iter().copied().fold(f32::NEG_INFINITY, f32::max)
+    buckets(db.len(), stride)
+        .map(|r| db[r].iter().copied().fold(f32::NEG_INFINITY, f32::max))
+        .collect()
+}
+
+/// Downsample a linear `h(t)` by each bucket's **signed extreme** — the
+/// sample of largest magnitude, sign kept — over the same centred buckets
+/// as [`bucket_max`]. A stride pick drops a one-sample arrival between
+/// picks from the linear trace while the log and ETC views, bucketed, still
+/// show it (Codex review of #706); this keeps the three views in agreement.
+pub fn bucket_peak(h: &[f32], stride: usize) -> Vec<f32> {
+    buckets(h.len(), stride)
+        .map(|r| {
+            h[r].iter()
+                .copied()
+                .fold(0.0f32, |a, v| if v.abs() > a.abs() { v } else { a })
         })
         .collect()
+}
+
+/// The centred buckets [`bucket_max`] documents, as index ranges.
+fn buckets(len: usize, stride: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let stride = stride.max(1);
+    let half = stride / 2;
+    let n_out = len.div_ceil(stride);
+    (0..n_out).map(move |i| {
+        let lo = (i * stride).saturating_sub(half);
+        // The last bucket runs to the end: the samples after the last pick
+        // belong to it, or an arrival there would vanish (Codex review).
+        let hi = if i + 1 == n_out {
+            len
+        } else {
+            (i * stride + stride - half).min(len)
+        };
+        lo..hi
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #706 Codex: a one-sample arrival between stride picks — the rejected
+    /// stride pick (computed here) misses it in the linear trace, the
+    /// signed bucket peak keeps it, sign and all, at its bucket.
+    #[test]
+    fn bucket_peak_keeps_a_narrow_arrival_a_stride_pick_drops() {
+        let mut h = vec![0.01f32; 12_000];
+        h[6_001] = -0.8;
+        let stride = 6;
+        let picked: Vec<f32> = h.iter().step_by(stride).copied().collect();
+        assert!(picked.iter().all(|v| v.abs() < 0.1), "stride pick found it");
+        let peaks = bucket_peak(&h, stride);
+        assert_eq!(peaks.len(), picked.len());
+        assert_eq!(peaks[1_000], -0.8);
+    }
 
     /// A one-sample arrival between stride picks: the rejected stride
     /// pick draws it at the floor, the bucket maximum at 0 dB.

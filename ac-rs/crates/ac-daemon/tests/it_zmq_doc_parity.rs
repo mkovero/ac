@@ -628,7 +628,10 @@ fn typed_data_frame_blocks_match_the_shared_types() {
     assert_eq!(r["ok"], json!(true), "{r}");
     let with_ladder =
         |v: &serde_json::Value| v["type"] == json!("transfer_stream") && v["mtw"].is_object();
-    let ir = |v: &serde_json::Value| v["type"] == json!("visualize/ir");
+    // An arrival IR (#706): it writes every key the 1 s IR does, plus
+    // `span`, so it is the one that checks the whole documented block.
+    let ir =
+        |v: &serde_json::Value| v["type"] == json!("visualize/ir") && v["span"] == json!("arrival");
     let transfer = capture(&c, 15, &[&with_ladder, &ir]);
     let _ = c.call(json!({"cmd": "stop"}));
 

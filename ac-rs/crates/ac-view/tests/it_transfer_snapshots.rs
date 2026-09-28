@@ -173,6 +173,8 @@ fn ir_scene() -> IrScene {
         dt_ms,
         t_origin_ms,
         delay_ms: 10.0,
+        centre_ms: 0.0,
+        arrival: false,
         delay_locked: Some(true),
         channel_role: "meas_0".to_string(),
         source: Source::Live,

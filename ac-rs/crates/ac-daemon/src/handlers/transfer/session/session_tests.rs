@@ -1110,3 +1110,103 @@ fn a_pause_or_a_drive_edge_clears_the_tracking_candidate() {
         "moved on pre-edge evidence"
     );
 }
+
+/// #706: once a pair holds a delay, the session publishes arrival IRs —
+/// `visualize/ir` frames with `span: "arrival"`, centred on the held delay,
+/// one per new block (62.5 ms), with a rising `analysis_seq` — beside the
+/// 1 s IR, which keeps no `span`.
+#[test]
+fn an_arrival_ir_is_published_every_block_once_a_delay_is_held() {
+    let mut s = session();
+    let delay = 480usize;
+    let n = 60; // 3 s
+    let x = noise(CHUNK * (n + 2) + delay, 0x5eed);
+    let t0 = std::time::Instant::now();
+    let mut arrivals = Vec::new();
+    let mut long = 0usize;
+    for k in 0..n {
+        let r0 = delay + k * CHUNK;
+        let refb = x[r0..r0 + CHUNK].to_vec();
+        let meas = x[r0 - delay..r0 - delay + CHUNK].to_vec();
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        for m in s.tick(&[meas, refb], events(true), &drive_msg(true), now) {
+            if m["type"] != json!("visualize/ir") {
+                continue;
+            }
+            match m["span"].as_str() {
+                Some("arrival") => arrivals.push((k, m)),
+                None => long += 1,
+                Some(other) => panic!("unknown span {other}"),
+            }
+        }
+    }
+    assert!(long > 0, "the 1 s IR stopped");
+    assert!(arrivals.len() > 20, "{} arrival IRs in 3 s", arrivals.len());
+    let seqs: Vec<u64> = arrivals
+        .iter()
+        .map(|(_, m)| m["analysis_seq"].as_u64().unwrap())
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[1] > w[0]), "{seqs:?}");
+    // One block per 62.5 ms: over the last second (20 ticks, long after the
+    // lock at ~1 s and the 0.56 s settle), 16 answers — not one per tick,
+    // and not one per 0.5 s Welch hop.
+    let late = arrivals.iter().filter(|(k, _)| *k >= n - 20).count();
+    assert!(
+        (15..=17).contains(&late),
+        "{late} arrival IRs in the last 1 s"
+    );
+    let (_, last) = arrivals.last().unwrap();
+    assert_eq!(last["delay_samples"], json!(delay));
+    // Centred on the held delay: the peak is the middle sample.
+    let samples: Vec<f64> = last["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap().abs())
+        .collect();
+    let peak = (0..samples.len())
+        .max_by(|&a, &b| samples[a].total_cmp(&samples[b]))
+        .unwrap();
+    assert_eq!(peak, samples.len() / 2, "arrival not at the residual");
+}
+
+/// #706 Codex: a tick that is not processed (here a silent reference)
+/// starts the arrival IR over, so the next one published is built only
+/// from audio after the gap — no sooner than six fresh blocks.
+#[test]
+fn an_arrival_ir_after_a_gap_is_built_from_after_it() {
+    let mut s = session();
+    let delay = 480usize;
+    let x = noise(CHUNK * 100 + delay, 0x5eed);
+    let t0 = std::time::Instant::now();
+    let mut last_arrival_tick = None;
+    let mut first_after_gap = None;
+    for k in 0..90usize {
+        let gap = (50..53).contains(&k);
+        let r0 = delay + k * CHUNK;
+        let refb = if gap {
+            vec![0.0; CHUNK]
+        } else {
+            x[r0..r0 + CHUNK].to_vec()
+        };
+        let meas = x[r0 - delay..r0 - delay + CHUNK].to_vec();
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        for m in s.tick(&[meas, refb], events(true), &drive_msg(true), now) {
+            if m["type"] == json!("visualize/ir") && m["span"] == json!("arrival") {
+                if k < 50 {
+                    last_arrival_tick = Some(k);
+                } else if first_after_gap.is_none() {
+                    first_after_gap = Some(k);
+                }
+            }
+        }
+    }
+    assert!(last_arrival_tick.is_some(), "no arrival IR before the gap");
+    let after = first_after_gap.expect("no arrival IR after the gap");
+    // 0.5625 s of fresh audio is 11.25 ticks after the gap ends at 53.
+    assert!(
+        after >= 53 + 11,
+        "published {} ticks after the gap",
+        after - 53
+    );
+}
