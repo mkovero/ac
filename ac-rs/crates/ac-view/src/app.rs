@@ -1408,6 +1408,18 @@ impl AcViewApp {
     /// A click on the panes pins the cursor at that frequency; a
     /// right-click clears it (#718).
     pub(crate) fn apply_pointer(&mut self, p: crate::view::TransferPointer) {
+        if p.ir {
+            // The IR panel's time cursor (#720), in ms on its own axis.
+            let range = self.ir_scene.as_ref().map(|s| s.t_range);
+            self.with_transfer(|t| {
+                if p.clear {
+                    t.ir_cursor_pin = None;
+                } else if let (Some(x), Some((lo, hi))) = (p.click_x, range) {
+                    t.ir_cursor_pin = Some(ac_scene::ticks::x_to_time(x, lo, hi));
+                }
+            });
+            return;
+        }
         self.with_transfer(|t| {
             if p.clear {
                 t.cursor_pin = None;

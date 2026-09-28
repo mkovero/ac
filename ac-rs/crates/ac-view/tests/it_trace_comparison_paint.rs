@@ -656,3 +656,53 @@ fn the_cursor_reads_only_what_is_drawn_and_stays_on_the_pane() {
         );
     }
 }
+
+/// #720: with live paused (so not drawn), the cursor reads the first
+/// visible stored trace and names it, rather than reading nothing.
+#[test]
+fn with_live_paused_the_cursor_reads_the_visible_slot_and_names_it() {
+    let live_scene = scene(Smoothing::Off);
+    let slot_scene = scene(Smoothing::Oct3);
+    let mut state = TransferViewState::new(-10.0, -30.0);
+    state.focus = Focus::Live;
+    state.paused = true;
+    state.cursor_pin = Some(100.0);
+    let view = ViewKind::Transfer(state);
+    let lives = [LiveTrace {
+        label: "live".to_string(),
+        pair: 0,
+        scene: &live_scene,
+        selected: true,
+    }];
+    let stored = vec![StoredTrace {
+        label: "slot 2",
+        captured_at_utc: "2026-09-28T00:00:00Z",
+        scene: &slot_scene,
+        focused: false,
+        visible: true,
+        color_slot: 1,
+        slot: Some(2),
+    }];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 480.0))
+        .build_ui(|ui| {
+            draw_view(
+                &view,
+                ui,
+                None,
+                Some(&live_scene),
+                &lives,
+                &stored,
+                None,
+                None,
+            );
+        });
+    harness.run();
+    let texts = extract_texts(&harness.output().shapes);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("slot 2 \u{b7} 100.0 Hz ")),
+        "no slot readout while paused: {texts:?}"
+    );
+}

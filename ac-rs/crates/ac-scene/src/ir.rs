@@ -208,6 +208,11 @@ pub struct IrScene {
     pub header: &'static str,
     /// Which view the trace is (`Shift+H`).
     pub view: IrView,
+    /// Every drawn sample as `(t_ms, value)` — h(t) re its peak in the
+    /// linear view, dB re peak in log/ETC — for the pointer (#720).
+    pub cursor_samples: Vec<(f64, f64)>,
+    /// The time axis's span, ms: what normalized x maps to.
+    pub t_range: (f64, f64),
     /// [`IrView::label`], or why the view has no trace (a daemon that
     /// sends no log/ETC data).
     pub view_readout: &'static str,
@@ -218,6 +223,38 @@ pub struct IrScene {
     /// [`IrScene::labelled`]; the panel shows one trace's IR at a time
     /// (#702), so it must say which.
     pub label: Option<String>,
+}
+
+/// The IR cursor's readout at one time (#720): where its line goes and
+/// what it says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrCursorReadout {
+    /// Normalized x of the sample it snapped to.
+    pub x: f64,
+    pub text: String,
+}
+
+impl IrScene {
+    /// The readout at `t_ms`, snapped to the nearest drawn sample — never
+    /// an interpolation. `None` with nothing drawn, or outside the span.
+    pub fn cursor_readout(&self, t_ms: f64) -> Option<IrCursorReadout> {
+        let (lo, hi) = self.t_range;
+        if !(lo..=hi).contains(&t_ms) || self.trace.segments.is_empty() {
+            return None;
+        }
+        let &(t, v) = self
+            .cursor_samples
+            .iter()
+            .min_by(|a, b| (a.0 - t_ms).abs().total_cmp(&(b.0 - t_ms).abs()))?;
+        let value = match self.view {
+            IrView::Linear => format!("h {v:+.3} re peak"),
+            IrView::Log | IrView::Etc => format!("{v:+.1} dB re peak"),
+        };
+        Some(IrCursorReadout {
+            x: time_to_x(t, lo, hi),
+            text: format!("{t:+.2} ms  {value}"),
+        })
+    }
 }
 
 impl IrScene {
@@ -257,6 +294,9 @@ impl IrScene {
         // and no axis rather than fabricating a range — the same
         // defensive posture `ticks::freq_axis`/`db_axis` take.
         let has_span = n > 1 && t_max_ms > t_min_ms;
+        // What the cursor reads (#720): each drawn sample's time and value
+        // in the view's unit — h(t) re its peak, or dB re peak.
+        let mut cursor_samples: Vec<(f64, f64)> = Vec::new();
 
         let db_curve = match view {
             IrView::Linear => None,
@@ -267,6 +307,11 @@ impl IrScene {
         // the caption says why, rather than a curve from something else.
         let missing = db_curve.is_some_and(|c| c.len() != n);
         let trace = if let (true, Some(curve), false) = (has_span, db_curve, missing) {
+            cursor_samples = curve
+                .iter()
+                .enumerate()
+                .map(|(i, &db)| (t_min_ms + i as f64 * input.dt_ms, f64::from(db)))
+                .collect();
             let points: Vec<(f64, f64)> = curve
                 .iter()
                 .enumerate()
@@ -296,6 +341,12 @@ impl IrScene {
                 .iter()
                 .fold(0.0_f64, |m, &s| m.max((s as f64).abs()));
             let peak = if peak > 0.0 { peak } else { 1.0 };
+            cursor_samples = input
+                .samples
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (t_min_ms + i as f64 * input.dt_ms, s as f64 / peak))
+                .collect();
             let points: Vec<(f64, f64)> = input
                 .samples
                 .iter()
@@ -334,6 +385,8 @@ impl IrScene {
             trace,
             time_axis,
             arrival,
+            cursor_samples,
+            t_range: (t_min_ms, t_max_ms),
             header: if input.arrival {
                 IR_HEADER_ARRIVAL
             } else {
@@ -422,6 +475,30 @@ mod tests {
             IrScene::from_input(&IrInput::from_wire_frame(&long)).header,
             IR_HEADER
         );
+    }
+
+    /// #720: the IR cursor snaps to the nearest drawn sample and reads it
+    /// in the view's unit — h re peak in the linear view, dB re peak in
+    /// log/ETC; nothing outside the span.
+    #[test]
+    fn the_ir_cursor_reads_the_nearest_sample_in_the_views_unit() {
+        let mut input = locked_input(vec![0.0, 0.5, 1.0, -0.5, 0.0]);
+        input.log_db = vec![-150.0, -6.0, 0.0, -6.0, -150.0];
+        let lin = IrScene::from_input(&input);
+        let r = lin.cursor_readout(10.0).expect("in span");
+        assert_eq!(r.text, "+0.00 ms  h +1.000 re peak");
+        assert!((r.x - 0.5).abs() < 1e-12);
+        assert_eq!(
+            lin.cursor_readout(-230.0).unwrap().text,
+            "-250.00 ms  h +0.500 re peak"
+        );
+        assert!(lin.cursor_readout(600.0).is_none());
+        let log = IrScene::from_input_view(&input, IrView::Log);
+        assert_eq!(
+            log.cursor_readout(260.0).unwrap().text,
+            "+250.00 ms  -6.0 dB re peak"
+        );
+        assert!((crate::ticks::x_to_time(0.25, -500.0, 500.0) + 250.0).abs() < 1e-12);
     }
 
     /// The log and ETC views draw their dB curves on the fixed 80 dB span,
