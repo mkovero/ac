@@ -92,6 +92,24 @@ fn stim_state(app: &AcViewApp) -> StimState {
     }
 }
 
+/// Codex review of #710: Enter applies an open `J`/`T` entry, so with one
+/// open it must not fire an armed stimulus; Space and Esc still stop it.
+#[test]
+fn enter_with_an_entry_open_does_not_fire_an_armed_stimulus() {
+    for open_entry in [
+        |a: &mut AcViewApp| a.offset_entry = Some(Default::default()),
+        |a: &mut AcViewApp| a.delay_entry = Some(Default::default()),
+    ] {
+        let mut app = transfer_app();
+        app.handle_action(Action::StimulusArmOrStop, false); // armed
+        open_entry(&mut app);
+        assert!(!app.panic_first(false, true, false), "Enter fired");
+        assert_eq!(stim_state(&app), StimState::Armed);
+        assert!(app.panic_first(false, false, true), "Esc no longer stops");
+        assert_eq!(stim_state(&app), StimState::Idle);
+    }
+}
+
 fn drive(app: &mut AcViewApp) {
     app.handle_action(Action::StimulusArmOrStop, false); // Idle -> Armed
     app.handle_action(Action::StimulusFireOrPause, false); // Armed -> Driving

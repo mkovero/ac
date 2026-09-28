@@ -1435,7 +1435,11 @@ impl AcViewApp {
         let live = state != crate::stimulus::StimState::Idle;
         // Enter belongs to the stimulus only while armed — it fires. While
         // driving it pauses the live trace (#256); Space and Esc stop.
-        let enter = enter && state == crate::stimulus::StimState::Armed;
+        // With a typed entry open (`J`, `T`) Enter applies the entry: firing
+        // is a start, not a stop, and an operator finishing a number did
+        // not ask to emit (Codex review of #710). Space and Esc still stop.
+        let entry_open = self.offset_entry.is_some() || self.delay_entry.is_some();
+        let enter = enter && state == crate::stimulus::StimState::Armed && !entry_open;
         if !live || !(space || enter || esc) {
             return false;
         }

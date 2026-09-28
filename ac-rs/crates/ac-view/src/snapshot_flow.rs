@@ -178,7 +178,10 @@ pub fn average_input(
         .map(|r| {
             // The slots as drawn: nudged delay (in `run_input`), invert and
             // dB offset — an average of curves other than those on screen
-            // would not be the average the operator asked for.
+            // would not be the average the operator asked for. Not a slot's
+            // raw phase: each member is averaged against its own delay (a
+            // spatial average, `TransferInput::average`), and raw phases
+            // at different delays average to nothing meaningful.
             let mut input = run_input(r);
             ac_scene::transfer::apply_invert_offset(
                 &mut input.magnitude_db,
