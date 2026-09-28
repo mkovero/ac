@@ -380,6 +380,7 @@ pub(super) fn build_pair_messages(
         delay_locked: Some(st.delay.is_some()),
         analysis_seq: a.seq,
         backend: statics.backend.clone(),
+        span: None,
     });
     Some((pos, transfer, ir, a.spl_raw))
 }

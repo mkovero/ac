@@ -2404,16 +2404,51 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
     app.press_for_test(Action::ToggleIrPanel, 0.0);
     let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
     // `F` selected the opened slot.
-    assert_eq!(label(&app).as_deref(), Some("slot 1"));
+    assert_eq!(label(&app).as_deref(), Some("slot 1 \u{b7} IR 1 s"));
     assert_eq!(app.current_ir_scene().unwrap().trace, slot_ir.trace);
     app.with_transfer(|t| t.focus = crate::view::Focus::Live);
     app.rebuild_ir_scene();
-    assert_eq!(label(&app).as_deref(), Some("live"));
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} IR 1 s (no arrival IR until a delay is held)")
+    );
     app.handle_action(Action::StimulusFireOrPause, false); // pause
     app.rebuild_ir_scene();
     assert!(
         app.current_ir_scene().is_none(),
         "paused live still drew its IR"
+    );
+}
+
+/// #706: an arrival IR frame (`span: "arrival"`) is held beside the 1 s
+/// one, never over it; the live panel shows it by default, and `S` swaps
+/// to the 1 s IR and back — each named.
+#[test]
+fn s_switches_the_live_ir_between_arrival_and_one_second() {
+    let mut app = ir_app();
+    let long = ir_frame();
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.samples = vec![0.0, 0.25, 1.0, 0.25];
+    app.ingest_ir_frame_for_test(long.clone());
+    app.ingest_ir_frame_for_test(arrival.clone());
+    // The arrival frame did not replace the 1 s one.
+    assert_eq!(app.last_ir_frame().unwrap().samples, long.samples);
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
+    let arrival_trace =
+        ac_scene::IrScene::from_input(&ac_scene::IrInput::from_wire_frame(&arrival)).trace;
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} arrival IR 250 ms")
+    );
+    assert_eq!(app.current_ir_scene().unwrap().trace, arrival_trace);
+    app.press_for_test(Action::ToggleIrSpan, 0.0);
+    assert_eq!(label(&app).as_deref(), Some("live \u{b7} IR 1 s"));
+    app.press_for_test(Action::ToggleIrSpan, 0.0);
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} arrival IR 250 ms")
     );
 }
 
@@ -2467,7 +2502,7 @@ fn the_live_ir_names_its_pair_when_there_are_several() {
         app.current_ir_scene()
             .and_then(|s| s.label.clone())
             .as_deref(),
-        Some("live 4")
+        Some("live 4 \u{b7} IR 1 s (no arrival IR until a delay is held)")
     );
 }
 

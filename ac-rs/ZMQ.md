@@ -3253,7 +3253,8 @@ level), `delay_locked`, `delay_operator`, `delay_tracking` and
 `delay_residual` moves with the analysis, once per hop.
 
 The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
-it was derived from.
+it was derived from — except an arrival IR (`span: "arrival"`, below),
+whose `analysis_seq` counts its own blocks.
 
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB
@@ -3335,9 +3336,21 @@ toggled on/off in the UI without re-issuing the transfer command.
                                      // false the IR is UNALIGNED, so the peak
                                      // sits at the true path delay rather than
                                      // at t=0.
-  "backend":       "jack" | "cpal" | "fake"
+  "backend":       "jack" | "cpal" | "fake",
+  "span":          "arrival"         // additive, #706 — absent on the 1 s IR
 }
 ```
+
+**Two IRs (#706).** A frame without `span` is the 1 s IR above: the
+IFFT of the Welch H₁ (1 s segments, 0.5 s hop, 4 averages), so it
+changes every 0.5 s and spans ±0.5 s. A frame with `span: "arrival"` is
+the arrival IR: 250 ms segments at 75 % overlap, mean of 6 blocks
+(`ac_core::visualize::live_ir`), fed the pair's delay-aligned stream —
+so it exists only once the pair holds a delay, spans ±125 ms around
+that delay, and is published once per new block (every 62.5 ms), not
+per tick. Its `analysis_seq` is its block count; `delay_*` are the
+offset it is aligned at. Same H₁, IFFT and log/ETC as the 1 s IR. A
+client that ignores `span` sees the two interleaved: route on it.
 
 **Time origin.** `samples` is `fftshift`-centred so the dominant IR
 peak sits at the middle of the array. The first sample's time is

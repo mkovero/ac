@@ -265,6 +265,9 @@ pub struct TransferViewState {
     ir_panel_open: bool,
     /// Which view the IR panel draws: linear, log or ETC (`Shift+H`).
     pub ir_view: ac_scene::IrView,
+    /// The live IR panel shows the arrival IR (#706, the default) rather
+    /// than the 1 s one; `S` switches.
+    pub ir_arrival: bool,
     /// What the phase pane shows (#695), for every trace: wrapped phase,
     /// unwrapped phase or group delay (`Shift+P`).
     pub phase_view: ac_scene::transfer::PhaseView,
@@ -321,6 +324,7 @@ impl TransferViewState {
             offset_db: 0.0,
             ir_panel_open: false,
             ir_view: ac_scene::IrView::Linear,
+            ir_arrival: true,
             phase_view: ac_scene::transfer::PhaseView::Wrapped,
             loaded: Vec::new(),
             focus: Focus::Live,

@@ -566,6 +566,7 @@ mod tests {
             // "no metres before lock" formatting rule already covered by
             // `arrival_marker_drops_metres_when_unlocked` above.
             delay_locked: None,
+            span: None,
         };
 
         let d = PairDerivation {

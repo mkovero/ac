@@ -99,6 +99,10 @@ pub(super) struct SessionState {
     /// alongside a `Some` in [`Self::ladders`], so a flush, which drops the
     /// ladder, retires the entry with it.
     pub(super) ladder_origins: Vec<Option<(i64, u64)>>,
+    /// Per pair, the arrival-IR block count last published (#706): a
+    /// frame goes out when the pair's arrival IR gains a block, not every
+    /// tick.
+    pub(super) arrival_published: Vec<u64>,
     /// Samples of stream consumed since session start: the total length of
     /// every tick's `bufs` handed to [`Self::tick`]. The snapshot ring counts
     /// the same total, which is what lets a ladder origin be converted into
@@ -177,6 +181,7 @@ impl SessionState {
             rings,
             ladders,
             ladder_origins: vec![None; n_pairs],
+            arrival_published: vec![0; n_pairs],
             consumed: 0,
             ladder_failed: false,
             analysis: (0..n_pairs).map(|_| None).collect(),
@@ -519,7 +524,9 @@ impl SessionState {
             };
             match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
                 Ok(p) => {
-                    *slot = Some(p);
+                    // The arrival IR (#706) reads the ladder's aligned
+                    // stream, so it is built — and rebuilt — with it.
+                    *slot = Some(p.with_live_ir(sr));
                     // A new ladder: nothing it holds came from the old one,
                     // so the reference-level hold starts over (#670).
                     self.held_columns[i] = None;
@@ -824,6 +831,59 @@ impl SessionState {
             // nothing for it beats publishing a half-built frame.
             out.extend(serde_json::to_value(&frame).ok());
             out.extend(ir.and_then(|ir| serde_json::to_value(&ir).ok()));
+        }
+        for ir in self.arrival_ir_frames() {
+            out.extend(serde_json::to_value(&ir).ok());
+        }
+        out
+    }
+
+    /// The arrival IR (#706) of every pair whose arrival IR gained a block
+    /// since the last one published — every 62.5 ms once settled. Its delay
+    /// fields are the offset the ladder aligns at, which the IR is centred
+    /// on, as the 1 s IR is centred on the delay it was compensated for.
+    pub(super) fn arrival_ir_frames(&mut self) -> Vec<ac_core::wire::IrFrame> {
+        let sr = self.statics.sr;
+        let mut out = Vec::new();
+        for (i, slot) in self.ladders.iter().enumerate() {
+            let Some(live) = slot.as_ref().and_then(|p| p.live_ir()) else {
+                self.arrival_published[i] = 0;
+                continue;
+            };
+            if live.blocks() == self.arrival_published[i] {
+                continue;
+            }
+            let Some(full) = live.impulse_response() else {
+                continue;
+            };
+            self.arrival_published[i] = live.blocks();
+            let Some(p) = super::analysis::ir_payload(&full, sr) else {
+                continue;
+            };
+            let (Some(ctx), Some(st)) = (self.ctx.get(i), self.pairs.get(i)) else {
+                continue;
+            };
+            let offset = self.ladder_origins[i].map_or(0, |(d, _)| d);
+            out.push(ac_core::wire::IrFrame {
+                frame_type: "visualize/ir".to_string(),
+                cmd: "transfer_stream".to_string(),
+                wire_version: None,
+                samples: p.samples,
+                log_db: p.log_db,
+                etc_db: p.etc_db,
+                sr,
+                stride: p.stride,
+                dt_ms: p.dt_ms,
+                t_origin_ms: p.t_origin_ms,
+                ref_channel: ctx.ref_ch.into(),
+                meas_channel: ctx.meas_ch.into(),
+                delay_samples: offset,
+                delay_ms: offset as f64 * 1000.0 / f64::from(sr),
+                delay_locked: Some(st.delay.is_some()),
+                analysis_seq: live.blocks(),
+                backend: self.statics.backend.clone(),
+                span: Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string()),
+            });
         }
         out
     }

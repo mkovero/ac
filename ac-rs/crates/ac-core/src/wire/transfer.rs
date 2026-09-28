@@ -414,13 +414,23 @@ pub struct IrFrame {
     /// for the three-way meaning this field shares.
     #[serde(default)]
     pub delay_locked: Option<bool>,
-    /// Same value as the `transfer_stream` frame this was derived from.
+    /// Same value as the `transfer_stream` frame this was derived from —
+    /// or, for an arrival IR, the count of blocks behind it, which rises
+    /// exactly when it changes.
     #[serde(default)]
     pub analysis_seq: u64,
     /// The engine that produced the frame.
     #[serde(default)]
     pub backend: String,
+    /// Which IR this is (#706): `"arrival"` for the fast 250 ms one
+    /// (`visualize::live_ir`), absent for the 1 s Welch IR — which is
+    /// what every daemon before #706 sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<String>,
 }
+
+/// [`IrFrame::span`] of the arrival IR.
+pub const IR_SPAN_ARRIVAL: &str = "arrival";
 
 #[cfg(test)]
 mod tests {

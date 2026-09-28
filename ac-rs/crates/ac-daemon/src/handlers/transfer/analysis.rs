@@ -114,6 +114,35 @@ pub(super) struct IrPayload {
     pub(super) t_origin_ms: f64,
 }
 
+/// The sidecar payload for a full-resolution, `fftshift`-centred IR: the
+/// ≤2000-sample display series and its log/ETC curves. One builder for the
+/// 1 s Welch IR and the arrival IR (#706), so the two differ only in what
+/// they were computed from.
+pub(super) fn ir_payload(ir_full: &[f32], sr: u32) -> Option<IrPayload> {
+    if ir_full.is_empty() {
+        return None;
+    }
+    const IR_MAX_SAMPLES: usize = 2000;
+    let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
+    let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+    use ac_core::visualize::ir_views;
+    let log_db = ir_views::bucket_max(&ir_views::log_db(ir_full), stride);
+    let etc_db = ir_views::bucket_max(&ir_views::etc_db(ir_full), stride);
+    // t_origin_ms = -mid_ms because `impulse_response_from_h` centres
+    // the IR peak at the middle of the array (t=0 in the user's
+    // mental model).
+    let dt_ms = 1000.0 / sr as f64 * stride as f64;
+    let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
+    Some(IrPayload {
+        samples: ir_ds,
+        log_db,
+        etc_db,
+        stride,
+        dt_ms,
+        t_origin_ms,
+    })
+}
+
 /// Compute one pair's H1 estimate and everything derived from it.
 ///
 /// `None` when the pair's channels are not present in the rings, which
@@ -254,29 +283,7 @@ pub(super) fn analyse_pair(
     // `transfer_stream`.
     let ir_full = ac_core::visualize::transfer::impulse_response_from_h(&result.re, &result.im);
     let ir_peak_lag = ac_core::visualize::transfer::live_ir_peak_lag(&ir_full, sr);
-    let ir = if ir_full.is_empty() {
-        None
-    } else {
-        const IR_MAX_SAMPLES: usize = 2000;
-        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-        let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
-        use ac_core::visualize::ir_views;
-        let log_db = ir_views::bucket_max(&ir_views::log_db(&ir_full), stride);
-        let etc_db = ir_views::bucket_max(&ir_views::etc_db(&ir_full), stride);
-        // t_origin_ms = -mid_ms because `impulse_response_from_h` centres
-        // the IR peak at the middle of the array (t=0 in the user's
-        // mental model).
-        let dt_ms = 1000.0 / sr as f64 * stride as f64;
-        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
-        Some(IrPayload {
-            samples: ir_ds,
-            log_db,
-            etc_db,
-            stride,
-            dt_ms,
-            t_origin_ms,
-        })
-    };
+    let ir = ir_payload(&ir_full, sr);
 
     let _ = st;
     Some(PairAnalysis {

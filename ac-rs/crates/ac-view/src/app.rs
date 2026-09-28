@@ -345,7 +345,7 @@ impl AcViewApp {
         }
         if let Ok(ir_frame) = serde_json::from_value::<ac_core::wire::IrFrame>(frame) {
             if let Some(i) = self.route(ir_frame.meas_channel, ir_frame.ref_channel) {
-                self.live[i].ir = Some(ir_frame);
+                self.live[i].hold_ir(ir_frame);
             }
         }
     }
@@ -387,6 +387,7 @@ impl AcViewApp {
         for pair in &mut self.live {
             pair.frame = None;
             pair.ir = None;
+            pair.ir_arrival = None;
             pair.scene = None;
         }
         self.scene = None;
@@ -413,6 +414,7 @@ impl AcViewApp {
         }
         let view = t.ir_view;
         self.ir_scene = match t.focus {
+            // A stored run holds its 1 s IR only (#706).
             crate::view::Focus::Stored(i) => t.loaded.get(i).and_then(|run| {
                 run.ir.as_ref().map(|ir| {
                     // The run's `←`/`→` nudge moves its arrival marker as it
@@ -420,14 +422,30 @@ impl AcViewApp {
                     // delay the trace is drawn against.
                     let mut ir = ir.clone();
                     ir.delay_ms += run.delay_offset_samples as f64 * 1000.0 / f64::from(run.sr);
-                    ac_scene::IrScene::from_input_view(&ir, view).labelled(run.label.clone())
+                    ac_scene::IrScene::from_input_view(&ir, view)
+                        .labelled(format!("{} \u{b7} {}", run.label, IR_LONG_LABEL))
                 })
             }),
             crate::view::Focus::Live if t.paused => None,
-            crate::view::Focus::Live => self.live_selected().ir.as_ref().map(|f| {
-                ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
-                    .labelled(self.pair_label(self.selected_pair()))
-            }),
+            crate::view::Focus::Live => {
+                // The arrival IR by default (#706); `S` picks the 1 s one.
+                // Until a pair has a delay there is no arrival IR, and the
+                // panel says it is showing the 1 s one instead.
+                let pair = self.live_selected();
+                let owner = self.pair_label(self.selected_pair());
+                let (frame, what) = match (t.ir_arrival, &pair.ir_arrival, &pair.ir) {
+                    (true, Some(a), _) => (Some(a), IR_ARRIVAL_LABEL.to_string()),
+                    (true, None, long) => (
+                        long.as_ref(),
+                        format!("{IR_LONG_LABEL} (no arrival IR until a delay is held)"),
+                    ),
+                    (false, _, long) => (long.as_ref(), IR_LONG_LABEL.to_string()),
+                };
+                frame.map(|f| {
+                    ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
+                        .labelled(format!("{owner} \u{b7} {what}"))
+                })
+            }
         };
     }
 
@@ -688,7 +706,7 @@ impl AcViewApp {
         let i = self
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
-        self.live[i].ir = Some(frame);
+        self.live[i].hold_ir(frame);
         self.rebuild_ir_scene();
     }
 
@@ -764,6 +782,7 @@ impl AcViewApp {
                     t.toggle_ir_panel();
                 }
             }),
+            Action::ToggleIrSpan => self.with_transfer(|t| t.ir_arrival = !t.ir_arrival),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
             // -- transfer view: the operator's delay (#669). The values
@@ -2210,6 +2229,11 @@ fn connect_and_launch_view(
     Ok(app)
 }
 
+/// The IR panel's name for the arrival IR (#706).
+const IR_ARRIVAL_LABEL: &str = "arrival IR 250 ms";
+/// The IR panel's name for the 1 s Welch IR.
+const IR_LONG_LABEL: &str = "IR 1 s";
+
 /// One measured pair's live state (#685). The meters and the fault state
 /// carry time from one frame to the next — ballistics, the refusal clock —
 /// so each pair keeps its own: fed through one shared state, two pairs'
@@ -2221,8 +2245,11 @@ struct LivePair {
     /// otherwise zoom appears frozen on a paused or slow stream.
     frame: Option<ac_core::wire::TransferFrame>,
     /// The last `visualize/ir` sidecar frame (#286), held for the same
-    /// reason.
+    /// reason — the 1 s Welch IR.
     ir: Option<ac_core::wire::IrFrame>,
+    /// The last arrival IR (#706, `span: "arrival"`): 250 ms, a new one
+    /// every 62.5 ms once the pair has a delay.
+    ir_arrival: Option<ac_core::wire::IrFrame>,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     /// The fault indicator's cross-frame state (#228).
     fault: ac_scene::FaultState,
@@ -2234,6 +2261,17 @@ struct LivePair {
     /// the press. Two presses before the frames catch up then toggle twice
     /// instead of sending the same value (Codex review).
     track_pending: Option<(bool, u64)>,
+}
+
+impl LivePair {
+    /// Hold an IR sidecar frame in the place its `span` names (#706).
+    fn hold_ir(&mut self, frame: ac_core::wire::IrFrame) {
+        if frame.span.as_deref() == Some(ac_core::wire::IR_SPAN_ARRIVAL) {
+            self.ir_arrival = Some(frame);
+        } else {
+            self.ir = Some(frame);
+        }
+    }
 }
 
 /// New frames of a pair after which a `Y` press is no longer pending: the
