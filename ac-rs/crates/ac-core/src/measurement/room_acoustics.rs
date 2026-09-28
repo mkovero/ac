@@ -38,8 +38,11 @@
 //! floor: for a linear sweep deconvolution, end the span at most one sweep
 //! duration past the peak (ISO 18233 §B.5 — past that the floor decays and
 //! loses its highs, and would read as the room). The line meeting it is
-//! fitted from the band's peak down to 10 dB above it on the 10 ms-smoothed
-//! level: one pass of the §5.3.3 construction, not an iterative scheme.
+//! fitted to the late decay on the 10 ms-smoothed level — from 10 dB above
+//! the background down to it — and its slope is also the tail correction's
+//! rate ([`truncation`]): one pass of the §5.3.3 construction, not an
+//! iterative scheme. A band whose level starts less than [`MIN_DECAY_DB`]
+//! above its background has no decay, and every value is refused.
 //!
 //! STI (IEC 60268-16) is not computed: that standard is not held here.
 
@@ -56,6 +59,11 @@ pub const BAND_RANGE_HZ: (f64, f64) = (125.0, 4000.0);
 /// of a sweep capture past the room's decay (ISO 18233 §6.3.2 asks for
 /// 30 dB of decay inside it).
 pub const NOISE_TAIL_FRACTION: f64 = 0.1;
+
+/// The least a band's level must start above its background to count as a
+/// decay at all, dB: EDT's 10 dB span plus the 10 dB stretch the truncation
+/// line is fitted over. Below it every value is refused.
+const MIN_DECAY_DB: f64 = 20.0;
 
 /// Smoothing window for the level the truncation line is fitted to, s.
 const SMOOTH_S: f64 = 0.010;
@@ -191,22 +199,34 @@ fn fit_slope(level: &[f64], from: usize, top: f64, bottom: f64, fs: f64) -> Opti
     (den > 0.0).then(|| (n * sxy - sx * sy) / den)
 }
 
-/// §5.3.3's rate for the tail correction, dB/s (negative): the decay of
-/// the smoothed `level` between t0 — where it first falls to 10 dB above
-/// `noise_db` after `from` — and `t1`. `line` (the slope that placed t1)
-/// stands in when that stretch has fewer than two points or does not fall.
-fn tail_rate(level: &[f64], from: usize, t1: usize, noise_db: f64, line: f64, fs: f64) -> f64 {
-    let t1 = t1.min(level.len() - 1);
-    if from > t1 {
-        return line;
+/// §5.3.3's truncation of a band's decay, on its smoothed `level` (dB, at
+/// `fs` points per second) from the peak point `from`: the line through the
+/// representative late decay — from t0, where the level first falls to
+/// 10 dB above `noise_db`, to where it first reaches `noise_db` — and the
+/// time, s, at which that line meets `noise_db` (t1). Returns `(t1, slope)`
+/// with the slope in dB/s, also the tail correction's rate. `None` when the
+/// level does not start [`MIN_DECAY_DB`] above the background (no decay to
+/// truncate — steady noise wanders a few dB about its own mean), never
+/// falls to 10 dB above it, or does not fall.
+///
+/// A line from the peak, extrapolated, can meet the background long after
+/// the measured decay has reached it on a fast-then-slow decay; everything
+/// between would be integrated as room (Codex review).
+fn truncation(level: &[f64], from: usize, noise_db: f64, fs: f64) -> Option<(f64, f64)> {
+    if level.get(from)? - noise_db < MIN_DECAY_DB {
+        return None;
     }
-    let t0 = level[from..=t1]
+    let t0 = level[from..].iter().position(|&l| l <= noise_db + 10.0)? + from;
+    let floor = level[t0..]
         .iter()
-        .position(|&l| l <= noise_db + 10.0)
-        .map_or(from, |k| k + from);
-    fit_over(&level[t0..=t1], t0, fs)
-        .filter(|s| *s < 0.0)
-        .unwrap_or(line)
+        .position(|&l| l <= noise_db)
+        .map_or(level.len() - 1, |k| k + t0);
+    // Too short a stretch to fit (a step straight into the background):
+    // the line from the peak to t0 stands in.
+    let (a, b) = if floor > t0 { (t0, floor) } else { (from, t0) };
+    let slope = fit_over(&level[a..=b], a, fs).filter(|s| *s < 0.0)?;
+    let t1 = a as f64 / fs + (noise_db - level[a]) / slope;
+    Some((t1.max(t0 as f64 / fs), slope))
 }
 
 /// Least-squares slope, dB per second, of `level` taken as samples
@@ -284,28 +304,12 @@ fn band_params(
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
     let peak_to_noise_db = start_blk - noise_db;
-    let line_end = smooth[peak_blk..]
-        .iter()
-        .position(|&l| l <= noise_db + 10.0)
-        .map(|k| k + peak_blk);
-    let (t1, correction) = match line_end.and_then(|end| {
-        let s = fit_slope(&smooth, peak_blk, f64::INFINITY, smooth[end], fs / w as f64)?;
-        (s < 0.0).then_some((end, s))
-    }) {
-        Some((end, slope)) => {
-            // The line through (peak_blk, smooth[peak_blk]) at `slope` dB/s
-            // meets noise_db at t1.
-            let t_peak = peak_blk as f64 * w as f64 / fs;
-            let t1_s = t_peak + (noise_db - smooth[peak_blk]) / slope;
-            let t1 = ((t1_s * fs) as usize).clamp(end * w, n - 1);
-            // §5.3.3: the correction's rate is the decay between t0 and t1,
-            // t0 where the level is 10 dB above that at t1 (the background)
-            // — the late slope, not the whole line's (Codex review: a fast
-            // start and slow tail understated the tail). The line's slope
-            // stands in when that stretch holds too few points.
-            let t1_blk = (t1 / w).min(smooth.len() - 1);
-            let d = -tail_rate(&smooth, peak_blk, t1_blk, noise_db, slope, fs / w as f64); // dB/s
-            let c = noise * fs * 10.0 / (d * std::f64::consts::LN_10);
+    // §5.3.3: t1 where a line through the late decay meets the background,
+    // and the tail correction at that line's rate ([`truncation`]).
+    let (t1, correction) = match truncation(&smooth, peak_blk, noise_db, fs / w as f64) {
+        Some((t1_s, slope)) => {
+            let t1 = ((t1_s * fs) as usize).min(n - 1);
+            let c = noise * fs * 10.0 / (-slope * std::f64::consts::LN_10);
             (t1, c)
         }
         None => {
@@ -733,33 +737,38 @@ mod tests {
         }
     }
 
-    /// Codex review: the tail correction's rate is the late slope between
-    /// t0 (10 dB above the background) and t1 (§5.3.3). On a double slope
-    /// — 300 dB/s for 0.1 s, then 50 dB/s down to the background — it is
-    /// the slow rate; the whole line's slope (the rejected rule, computed
-    /// here) is far steeper and would understate the tail.
+    /// Codex review and recheck of #697: the truncation line is the late
+    /// decay, from 10 dB above the background to the background — its
+    /// slope is the tail rate, and t1 is where the measured decay reaches
+    /// the background. A double slope (30 dB in 0.1 s, then 10 dB/s to a
+    /// −60 dB floor, reached at 3.1 s): the late slope is −10 dB/s and t1
+    /// 3.1 s. The rejected line from the peak, computed here, is far off
+    /// both.
     #[test]
-    fn the_tail_rate_is_the_late_slope() {
-        let fs = 100.0; // blocks per second
+    fn the_truncation_line_is_the_late_decay() {
+        let fs = 100.0; // points per second
         let noise_db = -60.0;
-        let level: Vec<f64> = (0..120)
+        let level: Vec<f64> = (0..600)
             .map(|k| {
                 let t = k as f64 / fs;
                 let l = if t < 0.1 {
                     -300.0 * t
                 } else {
-                    -30.0 - 50.0 * (t - 0.1)
+                    -30.0 - 10.0 * (t - 0.1)
                 };
                 l.max(noise_db)
             })
             .collect();
-        let t1 = level.iter().position(|&l| l <= noise_db).unwrap();
-        let line = fit_over(&level[..=t1], 0, fs).unwrap();
-        let rate = tail_rate(&level, 0, t1, noise_db, line, fs);
-        assert!((rate + 50.0).abs() < 1.0, "tail rate {rate}");
+        let (t1, slope) = truncation(&level, 0, noise_db, fs).unwrap();
+        assert!((slope + 10.0).abs() < 0.2, "slope {slope}");
+        assert!((t1 - 3.1).abs() < 0.05, "t1 {t1}");
+
+        let t0 = level.iter().position(|&l| l <= noise_db + 10.0).unwrap();
+        let peak_line = fit_over(&level[..=t0], 0, fs).unwrap();
+        let peak_t1 = (noise_db - level[0]) / peak_line;
         assert!(
-            line < 1.2 * rate,
-            "the whole line was meant to be steeper: {line}"
+            (peak_t1 - 3.1).abs() > 0.3,
+            "the peak line's t1 was meant to miss: {peak_t1}"
         );
     }
 
