@@ -199,6 +199,12 @@ pub struct DisplayModes {
     /// Columns below this coherence are not drawn (#670). Display policy
     /// only — the fault indicator keeps [`COHERENCE_THRESHOLD`].
     pub coherence_mask: f64,
+    /// Draw the trace inverted (Smaart's Invert, for setting an EQ against
+    /// a response): magnitude and phase negated. Display only.
+    pub invert: bool,
+    /// dB added to the drawn magnitude (Smaart's trace offset), after the
+    /// inversion. Display only.
+    pub offset_db: f64,
 }
 
 impl DisplayModes {
@@ -209,6 +215,8 @@ impl DisplayModes {
             derot,
             smoothing,
             coherence_mask: COHERENCE_THRESHOLD,
+            invert: false,
+            offset_db: 0.0,
         }
     }
 }
@@ -226,6 +234,28 @@ impl DisplayModes {
         DisplayModes {
             coherence_mask,
             ..self
+        }
+    }
+
+    /// The same modes, drawn inverted and/or offset.
+    pub fn with_invert_offset(self, invert: bool, offset_db: f64) -> DisplayModes {
+        DisplayModes {
+            invert,
+            offset_db,
+            ..self
+        }
+    }
+
+    /// `"inverted · +3.0 dB"`, `"inverted"`, `"-6.0 dB"`, or `None` for an
+    /// unaltered trace — said on screen, so a moved or flipped curve is
+    /// never read as measured.
+    pub fn invert_offset_readout(&self) -> Option<String> {
+        let offset = (self.offset_db != 0.0).then(|| format!("{:+.1} dB", self.offset_db));
+        match (self.invert, offset) {
+            (false, None) => None,
+            (true, None) => Some("inverted".to_string()),
+            (false, Some(o)) => Some(format!("offset {o}")),
+            (true, Some(o)) => Some(format!("inverted \u{b7} offset {o}")),
         }
     }
 }
@@ -537,6 +567,9 @@ pub struct TransferScene {
     /// resolution: those say what the analyser resolved, this says what is on
     /// screen, and this one is authoritative for the drawn trace.
     pub smoothing_readout: Option<&'static str>,
+    /// [`DisplayModes::invert_offset_readout`]: the drawn trace is inverted
+    /// or offset, not as measured.
+    pub invert_offset_readout: Option<String>,
     /// `"coherence mask 0.70"` when the display mask is not the default
     /// (#670); `None` at the default.
     pub coherence_mask_readout: Option<String>,
@@ -1157,6 +1190,19 @@ impl TransferScene {
                 }
             };
 
+            // Invert and offset last (Smaart's trace controls): a display
+            // transform of the finished curve, so smoothing and masking are
+            // exactly what they are for the measured one.
+            let sign = if modes.invert { -1.0 } else { 1.0 };
+            let magnitude_db: Vec<f64> = magnitude_db
+                .iter()
+                .map(|m| sign * m + modes.offset_db)
+                .collect();
+            let phase_deg: Vec<f64> = if modes.invert {
+                phase_deg.iter().map(|p| wrap_deg(-p)).collect()
+            } else {
+                phase_deg
+            };
             let mag_points = |i: usize| {
                 // db_to_y is the crate's one dB→y mapping — do not
                 // re-implement it, and do not clamp: an over-range
@@ -1204,6 +1250,7 @@ impl TransferScene {
             delay_samples: input.delay_control.map(|c| c.samples),
             delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
             smoothing_readout: modes.smoothing.label(),
+            invert_offset_readout: modes.invert_offset_readout(),
             coherence_mask_readout: (modes.coherence_mask != COHERENCE_THRESHOLD)
                 .then(|| format!("coherence mask {:.2}", modes.coherence_mask)),
             protection_readout: None,
