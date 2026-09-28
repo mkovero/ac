@@ -34,6 +34,11 @@ use ac_core::wire::IrFrame;
 pub const IR_HEADER: &str =
     "IR — live arrival     H\u{2081} Welch, 1 Hz res  \u{b7}  mic curve not applied  \u{b7}  not a gated measurement";
 
+/// [`IR_HEADER`] for the arrival IR (#706): the same measurement kind, from
+/// 250 ms blocks — 4 Hz resolution, ±125 ms.
+pub const IR_HEADER_ARRIVAL: &str =
+    "IR — live arrival     H\u{2081} 250 ms blocks, 4 Hz res  \u{b7}  mic curve not applied  \u{b7}  not a gated measurement";
+
 /// Mirrors the daemon's own downsample target
 /// (`ac-daemon/src/handlers/transfer.rs`'s `IR_MAX_SAMPLES`) so a
 /// snapshot-derived panel and a live one carry the same column density.
@@ -55,6 +60,14 @@ pub struct IrInput {
     /// The first sample's time, ms (negative).
     pub t_origin_ms: f64,
     pub delay_ms: f64,
+    /// The delay the IR is centred on — `t = 0` on its axis. The arrival
+    /// marker sits at `delay_ms − centre_ms`: on the peak for a live IR
+    /// (both are the held delay), off it by a stored run's nudge (#706,
+    /// Codex review: the marker used to sit at `delay_ms` on this relative
+    /// axis, off the trace for any delay over the IR's half-span).
+    pub centre_ms: f64,
+    /// The arrival IR (#706) rather than the 1 s one: names the header.
+    pub arrival: bool,
     /// [`ac_core::wire::TransferFrame::delay_locked`]'s three-way meaning.
     pub delay_locked: Option<bool>,
     pub channel_role: String,
@@ -113,6 +126,11 @@ impl IrInput {
             dt_ms: frame.dt_ms,
             t_origin_ms: frame.t_origin_ms,
             delay_ms: frame.delay_ms,
+            // Both live IRs are centred on the delay the frame carries: the
+            // 1 s one compensated for it, the arrival one aligned at it; an
+            // unlocked pair's is 0 and unaligned.
+            centre_ms: frame.delay_ms,
+            arrival: frame.span.as_deref() == Some(ac_core::wire::IR_SPAN_ARRIVAL),
             delay_locked: frame.delay_locked,
             channel_role: format!("meas_{}", frame.meas_channel),
             source: Source::Live,
@@ -129,8 +147,8 @@ impl IrInput {
     pub fn from_pair_derivation(d: &PairDerivation, channel_role: &str, sr: u32) -> IrInput {
         let ir_full = impulse_response_from_h(&d.h1.re, &d.h1.im);
         let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-        let samples: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
         use ac_core::visualize::ir_views;
+        let samples = ir_views::bucket_peak(&ir_full, stride);
         let log_db = ir_views::bucket_max(&ir_views::log_db(&ir_full), stride);
         let etc_db = ir_views::bucket_max(&ir_views::etc_db(&ir_full), stride);
         let dt_ms = 1000.0 / sr as f64 * stride as f64;
@@ -140,6 +158,8 @@ impl IrInput {
             dt_ms,
             t_origin_ms,
             delay_ms: d.h1.delay_ms,
+            centre_ms: d.h1.delay_ms,
+            arrival: false,
             // A `PairDerivation` records no lock verdict (same reasoning
             // as `TransferInput::from_pair_derivation`).
             delay_locked: None,
@@ -303,7 +323,7 @@ impl IrScene {
 
         let arrival = ArrivalMarker {
             position: if has_span {
-                time_to_x(input.delay_ms, t_min_ms, t_max_ms)
+                time_to_x(input.delay_ms - input.centre_ms, t_min_ms, t_max_ms)
             } else {
                 0.5
             },
@@ -314,7 +334,11 @@ impl IrScene {
             trace,
             time_axis,
             arrival,
-            header: IR_HEADER,
+            header: if input.arrival {
+                IR_HEADER_ARRIVAL
+            } else {
+                IR_HEADER
+            },
             label: None,
             view,
             view_readout: if missing {
@@ -345,6 +369,8 @@ mod tests {
             dt_ms: 250.0,
             t_origin_ms: -500.0,
             delay_ms: 0.0,
+            centre_ms: 0.0,
+            arrival: false,
             delay_locked: Some(true),
             channel_role: "meas_0".to_string(),
             source: Source::Live,
@@ -352,6 +378,50 @@ mod tests {
             log_db: Vec::new(),
             etc_db: Vec::new(),
         }
+    }
+
+    /// #706 Codex: a live IR is centred on the delay its frame carries, so
+    /// the arrival marker sits at t = 0 — on the peak — whatever that delay
+    /// is. The rejected placement (the delay itself on this relative axis)
+    /// is computed here: at 200 ms it is off a ±125 ms arrival IR entirely.
+    /// The arrival IR also names itself in the header.
+    #[test]
+    fn a_live_marker_sits_on_the_centre_the_ir_is_aligned_at() {
+        let wire = ac_core::wire::IrFrame {
+            frame_type: "visualize/ir".into(),
+            cmd: "transfer_stream".into(),
+            wire_version: None,
+            samples: vec![0.0, 0.1, 1.0, 0.1, 0.0],
+            log_db: Vec::new(),
+            etc_db: Vec::new(),
+            sr: 48_000,
+            stride: 1,
+            dt_ms: 62.5,
+            t_origin_ms: -125.0,
+            ref_channel: 1,
+            meas_channel: 0,
+            delay_samples: 9_600,
+            delay_ms: 200.0,
+            delay_locked: Some(true),
+            analysis_seq: 6,
+            backend: String::new(),
+            span: Some(ac_core::wire::IR_SPAN_ARRIVAL.into()),
+        };
+        let scene = IrScene::from_input(&IrInput::from_wire_frame(&wire));
+        assert!((scene.arrival.position - 0.5).abs() < 1e-12);
+        assert_eq!(scene.arrival.text, "200.00 ms");
+        let rejected = time_to_x(200.0, -125.0, 125.0);
+        assert!(
+            rejected > 1.0,
+            "the old placement was on the panel: {rejected}"
+        );
+        assert_eq!(scene.header, IR_HEADER_ARRIVAL);
+        let mut long = wire;
+        long.span = None;
+        assert_eq!(
+            IrScene::from_input(&IrInput::from_wire_frame(&long)).header,
+            IR_HEADER
+        );
     }
 
     /// The log and ETC views draw their dB curves on the fixed 80 dB span,
@@ -539,7 +609,7 @@ mod tests {
         // computes internally.
         const DAEMON_IR_MAX_SAMPLES: usize = 2000;
         let stride = (ir_full.len() / DAEMON_IR_MAX_SAMPLES).max(1);
-        let samples: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        let samples = ac_core::visualize::ir_views::bucket_peak(&ir_full, stride);
         let dt_ms = 1000.0 / sr as f64 * stride as f64;
         let t_origin_ms = -((samples.len() / 2) as f64) * dt_ms;
 

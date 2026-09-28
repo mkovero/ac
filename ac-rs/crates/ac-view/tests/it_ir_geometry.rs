@@ -68,6 +68,8 @@ fn ir_scene() -> IrScene {
         dt_ms: 250.0,
         t_origin_ms: -500.0,
         delay_ms: 125.0, // a quarter of the way into the span
+        centre_ms: 0.0,
+        arrival: false,
         delay_locked: Some(true),
         channel_role: "meas_0".to_string(),
         source: Source::Live,

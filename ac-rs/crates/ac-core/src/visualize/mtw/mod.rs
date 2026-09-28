@@ -157,6 +157,14 @@ impl MtwPair {
         self
     }
 
+    /// Start the arrival IR over (#706): after a gap in this pair's input
+    /// its partial segment and average would join audio across the gap.
+    pub fn reset_live_ir(&mut self, sr: u32) {
+        if self.live_ir.is_some() {
+            self.live_ir = Some(crate::visualize::live_ir::LiveIr::new(sr));
+        }
+    }
+
     /// The arrival IR, when enabled.
     pub fn live_ir(&self) -> Option<&crate::visualize::live_ir::LiveIr> {
         self.live_ir.as_ref()

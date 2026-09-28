@@ -512,8 +512,13 @@ impl SessionState {
         {
             if !self.processing[i] {
                 // A gap in this ladder's input: its replay provenance no
-                // longer describes it (#670).
+                // longer describes it (#670), and the arrival IR starts over
+                // rather than average across it (#706).
                 *origin = None;
+                if let Some(p) = slot.as_mut() {
+                    p.reset_live_ir(sr);
+                }
+                self.arrival_published[i] = 0;
                 continue;
             }
             if slot.is_some() || self.ladder_failed {

@@ -2452,6 +2452,37 @@ fn s_switches_the_live_ir_between_arrival_and_one_second() {
     );
 }
 
+/// #706 Codex: an arrival IR aligned at a delay the pair no longer holds
+/// is dropped when the transfer frame says so; the panel falls back to the
+/// 1 s IR and says why.
+#[test]
+fn an_arrival_ir_at_an_old_delay_is_dropped() {
+    let mut app = ir_app();
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = 326;
+    app.ingest_ir_frame_for_test(ir_frame());
+    app.ingest_ir_frame_for_test(arrival);
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
+    let mut held = pair_frame(0, 326, -20.0);
+    held.delay_locked = Some(true);
+    app.ingest_frame_for_test(held, 0.0);
+    app.rebuild_ir_scene();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} arrival IR 250 ms")
+    );
+    let mut moved = pair_frame(0, 400, -20.0);
+    moved.delay_locked = Some(true);
+    app.ingest_frame_for_test(moved, 0.1);
+    app.rebuild_ir_scene();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} IR 1 s (no arrival IR until a delay is held)")
+    );
+}
+
 /// Codex review of #702: a slot's `→` nudge moves its IR arrival marker by
 /// the nudged delay, as it moves its phase.
 #[test]

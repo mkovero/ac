@@ -604,8 +604,7 @@ impl AcViewApp {
                 // malformed, only not ours to draw.
                 match self.route(wire_frame.meas_channel, wire_frame.ref_channel) {
                     Some(i) => {
-                        self.live[i].frame = Some(wire_frame);
-                        self.live[i].frames_in += 1;
+                        self.live[i].hold_frame(wire_frame);
                         true
                     }
                     None => false,
@@ -694,8 +693,7 @@ impl AcViewApp {
         let i = self
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
-        self.live[i].frame = Some(frame);
-        self.live[i].frames_in += 1;
+        self.live[i].hold_frame(frame);
         self.rebuild_scenes(true, now_s);
     }
 
@@ -2264,6 +2262,22 @@ struct LivePair {
 }
 
 impl LivePair {
+    /// Hold a transfer frame. An arrival IR aligned at a delay the pair no
+    /// longer holds is dropped with it (#706, Codex review): after a
+    /// `set_delay`, a re-find or a lost lock the daemon sends nothing until
+    /// the new ladder settles, and the old IR would sit on screen centred
+    /// on the old delay. The panel falls back to the 1 s IR and says so.
+    fn hold_frame(&mut self, frame: ac_core::wire::TransferFrame) {
+        let stale = self.ir_arrival.as_ref().is_some_and(|a| {
+            frame.delay_locked != Some(true) || a.delay_samples != frame.delay_samples
+        });
+        if stale {
+            self.ir_arrival = None;
+        }
+        self.frame = Some(frame);
+        self.frames_in += 1;
+    }
+
     /// Hold an IR sidecar frame in the place its `span` names (#706).
     fn hold_ir(&mut self, frame: ac_core::wire::IrFrame) {
         if frame.span.as_deref() == Some(ac_core::wire::IR_SPAN_ARRIVAL) {

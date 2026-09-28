@@ -1169,3 +1169,44 @@ fn an_arrival_ir_is_published_every_block_once_a_delay_is_held() {
         .unwrap();
     assert_eq!(peak, samples.len() / 2, "arrival not at the residual");
 }
+
+/// #706 Codex: a tick that is not processed (here a silent reference)
+/// starts the arrival IR over, so the next one published is built only
+/// from audio after the gap — no sooner than six fresh blocks.
+#[test]
+fn an_arrival_ir_after_a_gap_is_built_from_after_it() {
+    let mut s = session();
+    let delay = 480usize;
+    let x = noise(CHUNK * 100 + delay, 0x5eed);
+    let t0 = std::time::Instant::now();
+    let mut last_arrival_tick = None;
+    let mut first_after_gap = None;
+    for k in 0..90usize {
+        let gap = (50..53).contains(&k);
+        let r0 = delay + k * CHUNK;
+        let refb = if gap {
+            vec![0.0; CHUNK]
+        } else {
+            x[r0..r0 + CHUNK].to_vec()
+        };
+        let meas = x[r0 - delay..r0 - delay + CHUNK].to_vec();
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        for m in s.tick(&[meas, refb], events(true), &drive_msg(true), now) {
+            if m["type"] == json!("visualize/ir") && m["span"] == json!("arrival") {
+                if k < 50 {
+                    last_arrival_tick = Some(k);
+                } else if first_after_gap.is_none() {
+                    first_after_gap = Some(k);
+                }
+            }
+        }
+    }
+    assert!(last_arrival_tick.is_some(), "no arrival IR before the gap");
+    let after = first_after_gap.expect("no arrival IR after the gap");
+    // 0.5625 s of fresh audio is 11.25 ticks after the gap ends at 53.
+    assert!(
+        after >= 53 + 11,
+        "published {} ticks after the gap",
+        after - 53
+    );
+}

@@ -124,8 +124,8 @@ pub(super) fn ir_payload(ir_full: &[f32], sr: u32) -> Option<IrPayload> {
     }
     const IR_MAX_SAMPLES: usize = 2000;
     let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-    let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
     use ac_core::visualize::ir_views;
+    let ir_ds = ir_views::bucket_peak(ir_full, stride);
     let log_db = ir_views::bucket_max(&ir_views::log_db(ir_full), stride);
     let etc_db = ir_views::bucket_max(&ir_views::etc_db(ir_full), stride);
     // t_origin_ms = -mid_ms because `impulse_response_from_h` centres
