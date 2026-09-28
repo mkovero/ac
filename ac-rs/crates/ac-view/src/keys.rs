@@ -102,6 +102,8 @@ pub enum Action {
     /// `S` (#706): the live IR panel's arrival IR (250 ms, fast) or the
     /// 1 s one.
     ToggleIrSpan,
+    /// `W` (#714): the ladder's speed preset, Detail → Live → Follow.
+    CycleSpeed,
     /// Move focus to the next trace — live, then each loaded stored run,
     /// wrapping back to live (#321). Selects what `N` (smoothing) edits
     /// and what the delay readout names. Not yet reachable from any
@@ -388,6 +390,13 @@ pub const BINDINGS: &[Binding] = &[
         shift: None,
     },
     Binding {
+        key: Key::W,
+        action: Action::CycleSpeed,
+        scope: Scope::Transfer,
+        description: "Speed: Detail / Live / Follow (LF resolution vs update rate)",
+        shift: None,
+    },
+    Binding {
         key: Key::Tab,
         action: Action::CycleFocus,
         scope: Scope::Transfer,
@@ -549,7 +558,7 @@ impl HelpGroup {
             | ExportCsv => HelpGroup::Traces,
             CycleSmoothing | CycleCoherenceMask | ToggleRawPhase | CycleDerotReference
             | ToggleInvert | TypeOffset | OpenTargets | ToggleIrPanel | ToggleIrSpan
-            | CycleWeighting | CycleIntegration | ToggleRefTrace => HelpGroup::Display,
+            | CycleSpeed | CycleWeighting | CycleIntegration | ToggleRefTrace => HelpGroup::Display,
             InsertDelay | ToggleDelayTracking | NudgeDelayEarlier | NudgeDelayLater | TypeDelay => {
                 HelpGroup::Delay
             }

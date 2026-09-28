@@ -59,7 +59,7 @@ pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
 pub use test_software::test_software;
-pub use transfer::{probe, set_delay, set_drive, transfer_stream};
+pub use transfer::{probe, set_delay, set_drive, set_speed, transfer_stream};
 /// #628: the unrecognised-field check `server::dispatch` runs before any
 /// handler.
 pub(crate) use wire::{unrecognised_fields, unrecognised_refusal};

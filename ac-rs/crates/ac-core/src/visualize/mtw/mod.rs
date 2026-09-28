@@ -67,7 +67,7 @@ use realfft::RealFftPlanner;
 use align::PairAligner;
 use average::BlockAverage;
 use decimate::PairDecimator;
-use ladder::{Ladder, Stage, NFFT};
+use ladder::{Ladder, Stage};
 use splice::{Column, StageSpectra};
 
 /// Periodic Hann window of length `n`.
@@ -79,6 +79,9 @@ pub(crate) fn hann(n: usize) -> Vec<f64> {
 
 /// One rung's running state: decimator, segment buffer, accumulator.
 struct Band {
+    /// This stage's FFT length and Hann window ([`Stage::nfft`], #714).
+    nfft: usize,
+    window: Vec<f64>,
     /// This stage's segment hop, decimated samples ([`Stage::hop`]).
     hop: usize,
     decim: PairDecimator,
@@ -101,7 +104,6 @@ pub struct MtwPair {
     /// replay has no use for it.
     live_ir: Option<crate::visualize::live_ir::LiveIr>,
     bands: Vec<Band>,
-    window: Vec<f64>,
     planner: RealFftPlanner<f64>,
     /// Scratch, reused across ticks so the hot loop does not allocate.
     aligned_meas: Vec<f32>,
@@ -114,9 +116,18 @@ impl MtwPair {
     /// `offset` is the pair's alignment offset in full-rate samples, signed —
     /// see [`align`].
     pub fn new(sr: u32, offset: i64, n_blocks: usize) -> Result<Self, ladder::LadderError> {
-        let ladder = ladder::layout(sr)?;
+        Self::new_for(sr, offset, n_blocks, ladder::Speed::Detail)
+    }
+
+    /// [`Self::new`] under a speed preset (#714).
+    pub fn new_for(
+        sr: u32,
+        offset: i64,
+        n_blocks: usize,
+        speed: ladder::Speed,
+    ) -> Result<Self, ladder::LadderError> {
+        let ladder = ladder::layout_for(sr, speed)?;
         let srf = f64::from(sr);
-        let bins = NFFT / 2 + 1;
         let bands = ladder
             .stages
             .iter()
@@ -124,11 +135,13 @@ impl MtwPair {
                 let decim = PairDecimator::for_stage(srf, s);
                 let warmup = decim.transient_samples() / s.decim;
                 Band {
+                    nfft: s.nfft,
+                    window: hann(s.nfft),
                     hop: s.hop,
                     decim,
-                    buf_meas: Vec::with_capacity(NFFT * 2),
-                    buf_ref: Vec::with_capacity(NFFT * 2),
-                    avg: BlockAverage::new(bins, s.blocks(n_blocks)),
+                    buf_meas: Vec::with_capacity(s.nfft * 2),
+                    buf_ref: Vec::with_capacity(s.nfft * 2),
+                    avg: BlockAverage::new(s.nfft / 2 + 1, s.blocks(n_blocks)),
                     warmup,
                 }
             })
@@ -138,7 +151,6 @@ impl MtwPair {
             aligner: PairAligner::new(offset),
             live_ir: None,
             bands,
-            window: hann(NFFT),
             planner: RealFftPlanner::<f64>::new(),
             aligned_meas: Vec::new(),
             aligned_ref: Vec::new(),
@@ -229,12 +241,12 @@ impl MtwPair {
             // the drain happened to chunk it — which is precisely what today's
             // head-relative segmentation gets wrong.
             let mut pos = 0usize;
-            while pos + NFFT <= band.buf_meas.len() {
+            while pos + band.nfft <= band.buf_meas.len() {
                 analyse_block(
                     &mut self.planner,
-                    &self.window,
-                    &band.buf_meas[pos..pos + NFFT],
-                    &band.buf_ref[pos..pos + NFFT],
+                    &band.window,
+                    &band.buf_meas[pos..pos + band.nfft],
+                    &band.buf_ref[pos..pos + band.nfft],
                     &mut band.avg,
                 );
                 pos += band.hop;
@@ -412,6 +424,7 @@ pub fn wire_columns(
     n_blocks: usize,
     settled_stages: Vec<bool>,
     stages: Vec<crate::wire::MtwStage>,
+    speed: ladder::Speed,
 ) -> crate::wire::MtwColumns {
     crate::wire::MtwColumns {
         freqs: cols.iter().map(|c| c.freq).collect(),
@@ -433,6 +446,7 @@ pub fn wire_columns(
         n_blocks,
         settled_stages,
         stages,
+        speed: Some(speed.tag().to_string()),
     }
 }
 
@@ -849,6 +863,50 @@ mod tests {
     /// blocks, still more than overlap alone would have left it (4). Its
     /// floor must sit clearly above the shipped one (measured 0.44 against
     /// 0.27), or the extra blocks buy nothing and should go.
+    #[test]
+    fn every_speed_preset_keeps_the_coherence_floor() {
+        // #714: the presets shorten the deep FFTs with the same overlap and
+        // block counts, so each stage's floor on uncorrelated inputs must
+        // stay where Detail's is (≈1/4) — measured, per preset and stage.
+        for speed in [ladder::Speed::Live, ladder::Speed::Follow] {
+            let sr = 96_000u32;
+            let mut acc: Vec<Vec<f64>> = vec![Vec::new(); 3];
+            for run in 0..8u64 {
+                let mut p = MtwPair::new_for(sr, 0, 4, speed).unwrap();
+                let blk = 4_800usize;
+                for t in 0..60i64 {
+                    let i = t * blk as i64;
+                    let m: Vec<f32> = (0..blk)
+                        .map(|k| source_seeded(0xCCC0 + run, i + k as i64))
+                        .collect();
+                    let r: Vec<f32> = (0..blk)
+                        .map(|k| source_seeded(0x7770 + run, i + k as i64))
+                        .collect();
+                    p.push(&m, &r);
+                }
+                let cols = p.columns(20.0, 48_000.0, 48.0).expect("settled");
+                for c in cols.iter().filter(|c| c.bins == 1 && c.blend == 0.0) {
+                    acc[c.stage].push(c.coherence);
+                }
+            }
+            let floors: Vec<f64> = acc
+                .iter()
+                .map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64)
+                .collect();
+            eprintln!(
+                "{speed:?} floors {floors:?} ({:?} columns)",
+                acc.iter().map(Vec::len).collect::<Vec<_>>()
+            );
+            for (i, f) in floors.iter().enumerate() {
+                assert!(
+                    acc[i].len() > 20 && (0.2..0.3).contains(f),
+                    "{speed:?} stage {i} floor {f:.4} over {} columns",
+                    acc[i].len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn each_stage_keeps_the_uniform_ladders_coherence_floor() {
         fn floors(n: usize) -> Vec<f64> {

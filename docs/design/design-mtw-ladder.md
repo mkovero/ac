@@ -352,6 +352,35 @@ also means it is not made less stable. Faster *settling* still costs a
 higher floor or a shorter bottom window; that trade was left to the
 operator.
 
+### #714 — speed presets
+
+The operator asked for a refresh that is "tunable but with being clear
+about the accuracy". Overlap (#699) fixed stepping but not memory: the
+only lever on how fast the deep stages *follow* a change is their window.
+Three presets shorten the deep stages' FFT; stage 0 is the same in all.
+
+| preset | deep FFT | LF Δf | bottom update | bottom settling | 1/48 oct down to | measured floors (96 kHz) |
+|---|---|---|---|---|---|---|
+| Detail | 4096 | 0.98 Hz | 128 ms | 2.43 s | 68 Hz | 0.244 / 0.266 / 0.268 |
+| Live | 2048 | 1.95 Hz | 64 ms | 1.22 s | 135 Hz | 0.283 / 0.276 / 0.281 |
+| Follow | 1024 | 3.9 Hz | 32 ms | 0.61 s | 271 Hz | 0.235 / 0.284 / 0.286 |
+
+Crossovers follow the validity edges as always, so they move up with a
+shorter FFT, and each deep stage's anti-alias filter is designed from the
+band it then serves. Two rules the presets needed:
+
+- **The boundary guard checks every stage** against 0.45 × its rate, not
+  only the first (by construction was true only for one FFT length).
+- **A stage no finer than the one above is left out.** Follow's 12 kHz
+  rung at ≤ 48 kHz has stage 0's Δf (1024 at 12 kHz = 4096 at 48 kHz) and
+  would serve a zero-width band; the 4 kHz rung hands over directly. The
+  remaining rungs keep their depth's overlap and block counts.
+
+The on-screen caption states the trade from the stage table the frame
+carries (e.g. `Live · LF 1.95 Hz · updates 64 ms · settles 1.22 s · 1/48
+oct above 135 Hz`), so a stored run replayed under its own preset says its
+own.
+
 ---
 
 ## coherence depth — measured, not modelled

@@ -118,6 +118,26 @@ pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
     queue_delay_cmd(state, cmd, action)
 }
 
+/// `set_speed` (#714) — switch the running session's ladder speed preset:
+/// `"detail"`, `"live"` or `"follow"`. Every pair's ladder is rebuilt, so
+/// the columns re-settle. Dispatched like `set_delay`.
+pub fn set_speed(state: &ServerState, cmd: &Value) -> Value {
+    use ac_core::visualize::mtw::ladder::Speed;
+    let Some(speed) = cmd
+        .get("speed")
+        .and_then(Value::as_str)
+        .and_then(Speed::from_tag)
+    else {
+        return json!({"ok": false, "error": "'speed' must be \"detail\", \"live\" or \"follow\""});
+    };
+    let reply = queue_delay_cmd(state, &json!({}), crate::workers::DelayAction::Speed(speed));
+    if reply["ok"] == json!(true) {
+        json!({"ok": true, "speed": speed.tag()})
+    } else {
+        reply
+    }
+}
+
 /// Validate `pair` and queue `action` for the running session.
 fn queue_delay_cmd(state: &ServerState, cmd: &Value, action: crate::workers::DelayAction) -> Value {
     let pair = match cmd.get("pair") {

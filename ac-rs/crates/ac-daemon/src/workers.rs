@@ -129,6 +129,9 @@ pub enum DelayAction {
     /// Switch delay tracking on or off (#687): the held delay follows the
     /// live IR's residual once two independent windows agree on it.
     Track(bool),
+    /// Switch the ladder's speed preset (#714), every pair. Rides this queue
+    /// because it too acts on the running session between ticks.
+    Speed(ac_core::visualize::mtw::ladder::Speed),
 }
 
 /// `set_delay` requests waiting for a running `transfer_stream` worker

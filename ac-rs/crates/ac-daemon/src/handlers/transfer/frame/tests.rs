@@ -29,6 +29,7 @@ fn test_statics() -> FrameStatics {
         integration_tag: "fast".to_string(),
         mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
         mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
+        mtw_speed: ac_core::visualize::mtw::ladder::Speed::Detail,
         mtw_stages: Vec::new(),
     }
 }
@@ -391,6 +392,7 @@ const MTW_KEYS: &[&str] = &[
     "mtw.phase_deg",
     "mtw.ppo",
     "mtw.settled_stages",
+    "mtw.speed",
     "mtw.stage",
     "mtw.stages",
     "mtw.stages[].blend_top",

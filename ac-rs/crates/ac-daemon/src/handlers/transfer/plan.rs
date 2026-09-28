@@ -53,6 +53,7 @@ pub(super) struct SessionPlan {
     pub(super) fake_ring_period: usize,
     pub(super) mtw_ppo: f64,
     pub(super) mtw_n_blocks: usize,
+    pub(super) mtw_speed: ac_core::visualize::mtw::ladder::Speed,
     pub(super) weighting: WeightingCurve,
     pub(super) integration_tag: String,
     pub(super) integration_tau_s: f64,
@@ -94,6 +95,7 @@ impl SessionPlan {
             fake_ring_period,
             mtw_ppo,
             mtw_n_blocks,
+            mtw_speed,
             pairs,
             weighting,
             integration_tag,
@@ -288,6 +290,7 @@ impl SessionPlan {
             fake_ring_period,
             mtw_ppo,
             mtw_n_blocks,
+            mtw_speed,
             weighting,
             integration_tag,
             integration_tau_s,
@@ -360,7 +363,7 @@ impl SessionPlan {
         // its ladder from the same `layout(sr)`. The conversion is
         // `ac-core`'s, shared with snapshot replay (#221).
         let mtw_stages: Vec<ac_core::wire::MtwStage> =
-            match ac_core::visualize::mtw::ladder::layout(sr) {
+            match ac_core::visualize::mtw::ladder::layout_for(sr, self.mtw_speed) {
                 Ok(l) => ac_core::visualize::mtw::wire_stages(&l, self.mtw_n_blocks),
                 Err(_) => Vec::new(),
             };
@@ -377,6 +380,7 @@ impl SessionPlan {
             integration_tag: self.integration_tag.clone(),
             mtw_ppo: self.mtw_ppo,
             mtw_n_blocks: self.mtw_n_blocks,
+            mtw_speed: self.mtw_speed,
             mtw_stages,
         }
     }

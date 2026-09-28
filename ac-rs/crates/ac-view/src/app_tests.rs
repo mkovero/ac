@@ -2927,3 +2927,95 @@ fn a_hidden_run_does_not_set_the_shared_phase_range() {
     app.rebuild_scenes(true, 0.2);
     assert_eq!(app.shared_phase_range.map(|(_, r)| r), live_only);
 }
+
+/// #714: `W` asks for the preset after the one the frame says it runs —
+/// Detail when the frame names none — never a step held in the view.
+#[test]
+fn w_asks_for_the_next_speed_after_the_frames() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::CycleSpeed, false);
+    let mut f = found_frame();
+    let mut m = f.mtw.clone().unwrap_or_default();
+    m.speed = Some("live".into());
+    f.mtw = Some(m);
+    app.ingest_frame_for_test(f, 0.1);
+    app.handle_action(Action::CycleSpeed, false);
+    let asked: Vec<&str> = app
+        .sent_speed
+        .iter()
+        .map(|r| r["speed"].as_str().unwrap())
+        .collect();
+    assert_eq!(asked, vec!["live", "follow"]);
+}
+
+/// Codex review of #714: two `W` presses before a frame reports the first
+/// advance twice; once the frame catches up it is the reference again.
+#[test]
+fn w_twice_before_a_frame_advances_twice() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0); // no preset: Detail
+    app.handle_action(Action::CycleSpeed, false);
+    app.handle_action(Action::CycleSpeed, false);
+    let mut f = found_frame();
+    let mut m = f.mtw.clone().unwrap_or_default();
+    m.speed = Some("follow".into());
+    f.mtw = Some(m);
+    app.ingest_frame_for_test(f, 0.1);
+    app.handle_action(Action::CycleSpeed, false);
+    let asked: Vec<&str> = app
+        .sent_speed
+        .iter()
+        .map(|r| r["speed"].as_str().unwrap())
+        .collect();
+    assert_eq!(asked, vec!["live", "follow", "detail"]);
+}
+
+/// Codex review of #714: a new preset on the frame drops the held arrival
+/// IR, which ran in the retired ladder.
+#[test]
+fn a_speed_change_drops_the_arrival_ir() {
+    let mut app = ir_app();
+    let with_speed = |s: &str| {
+        let mut f = found_frame();
+        let mut m = f.mtw.clone().unwrap_or_default();
+        m.speed = Some(s.into());
+        f.mtw = Some(m);
+        f
+    };
+    app.ingest_frame_for_test(with_speed("detail"), 0.0);
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = found_frame().delay_samples;
+    app.ingest_ir_frame_for_test(arrival);
+    assert!(app.live[0].ir_arrival.is_some());
+    app.ingest_frame_for_test(with_speed("live"), 0.05);
+    assert!(
+        app.live[0].ir_arrival.is_none(),
+        "kept the retired ladder's IR"
+    );
+    // A settling frame of a rebuilt ladder carries no columns at all.
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = found_frame().delay_samples;
+    app.ingest_ir_frame_for_test(arrival);
+    assert!(app.live[0].ir_arrival.is_some());
+    let mut settling = found_frame();
+    settling.mtw = None;
+    app.ingest_frame_for_test(settling, 0.1);
+    assert!(
+        app.live[0].ir_arrival.is_none(),
+        "kept an IR with no ladder"
+    );
+}
+
+/// Codex recheck of #714: a relaunch drops a pending preset request.
+#[test]
+fn a_relaunch_forgets_a_pending_speed() {
+    let mut app = transfer_app();
+    app.handle_action(Action::CycleSpeed, false); // asks live
+    app.set_pairs(vec![(0, 1)]);
+    app.ingest_frame_for_test(found_frame(), 0.0); // new session: Detail
+    app.handle_action(Action::CycleSpeed, false);
+    assert_eq!(app.sent_speed.last().unwrap()["speed"], "live");
+}

@@ -23,9 +23,72 @@
 
 use std::fmt;
 
-/// FFT length at every stage. Fixed across the ladder so a stage's resolution
-/// and window are determined entirely by its decimated rate.
+/// FFT length at stage 0, and at every stage under [`Speed::Detail`]. The
+/// deeper stages' length is the speed preset's ([`Speed::deep_nfft`], #714):
+/// a shorter one trades their resolution for update rate and settling.
 pub const NFFT: usize = 4096;
+
+/// The ladder's speed preset (#714): the deeper stages' FFT length. Stage 0
+/// is the same in all three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Speed {
+    /// 4096 everywhere: 0.98 Hz at the bottom, settling 2.43 s (96 kHz).
+    #[default]
+    Detail,
+    /// 2048 below stage 0: 1.95 Hz, settling 1.22 s.
+    Live,
+    /// 1024 below stage 0: 3.9 Hz, settling 0.61 s.
+    Follow,
+}
+
+impl Speed {
+    pub const ALL: [Speed; 3] = [Speed::Detail, Speed::Live, Speed::Follow];
+
+    /// FFT length of every stage below stage 0.
+    pub fn deep_nfft(self) -> usize {
+        match self {
+            Speed::Detail => NFFT,
+            Speed::Live => NFFT / 2,
+            Speed::Follow => NFFT / 4,
+        }
+    }
+
+    /// The wire and request tag.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Speed::Detail => "detail",
+            Speed::Live => "live",
+            Speed::Follow => "follow",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Speed> {
+        Speed::ALL.into_iter().find(|s| s.tag() == tag)
+    }
+
+    /// The operator-facing name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Speed::Detail => "Detail",
+            Speed::Live => "Live",
+            Speed::Follow => "Follow",
+        }
+    }
+
+    /// The preset whose deep stages run `nfft`-point FFTs.
+    pub fn for_deep_nfft(nfft: usize) -> Option<Speed> {
+        Speed::ALL.into_iter().find(|s| s.deep_nfft() == nfft)
+    }
+
+    /// Detail → Live → Follow → Detail.
+    pub fn next(self) -> Speed {
+        match self {
+            Speed::Detail => Speed::Live,
+            Speed::Live => Speed::Follow,
+            Speed::Follow => Speed::Detail,
+        }
+    }
+}
 
 /// Stage 0's segment hop in samples — 50% overlap, matching the Hann window
 /// the estimator uses. The deeper stages hop more often ([`HOP_DIVISORS`]).
@@ -118,11 +181,14 @@ pub struct Stage {
     pub decim: usize,
     /// Decimated sample rate, `sr / decim`.
     pub rate: f64,
-    /// Bin width, `rate / NFFT`.
+    /// This stage's FFT length: [`NFFT`] at stage 0, the speed preset's
+    /// [`Speed::deep_nfft`] below it.
+    pub nfft: usize,
+    /// Bin width, `rate / nfft`.
     pub df: f64,
-    /// Analysis window length in seconds, `NFFT / rate`.
+    /// Analysis window length in seconds, `nfft / rate`.
     pub window_s: f64,
-    /// Segment hop in samples at this stage's rate, `NFFT / HOP_DIVISORS[i]`.
+    /// Segment hop in samples at this stage's rate, `nfft / HOP_DIVISORS[i]`.
     pub hop: usize,
     /// [`STAGE_BLOCKS`] for this stage: its block count is
     /// `ceil(N · num / den)` for the session's base `N`.
@@ -155,6 +221,8 @@ impl Stage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ladder {
     pub sr: u32,
+    /// The speed preset the stages were laid out for (#714).
+    pub speed: Speed,
     pub stages: Vec<Stage>,
 }
 
@@ -172,6 +240,13 @@ pub struct Source {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LadderError {
     ZeroRate,
+    /// A stage's served band (to `blend_top`) passes [`MAX_TOP_FRACTION`] of
+    /// its decimated rate: its anti-alias filter would have no transition
+    /// band. Checked at every boundary (#714), not only the first.
+    BandTooWide {
+        stage: usize,
+        percent: u32,
+    },
     /// `sr` is high enough that stage 1's served band would not fit inside its
     /// decimator's passband, and inserting stages did not resolve it.
     RateTooHigh(u32),
@@ -181,6 +256,11 @@ impl fmt::Display for LadderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LadderError::ZeroRate => write!(f, "sample rate must be non-zero"),
+            LadderError::BandTooWide { stage, percent } => write!(
+                f,
+                "ladder stage {stage} would serve {percent} % of its decimated rate (max {:.0} %)",
+                MAX_TOP_FRACTION * 100.0
+            ),
             LadderError::RateTooHigh(sr) => write!(
                 f,
                 "sample rate {sr} Hz needs more than {MAX_INSERTED_STAGES} inserted ladder stages"
@@ -204,6 +284,19 @@ impl std::error::Error for LadderError {}
 /// `Result` rather than a `[Stage; 3]`: a fixed-length ladder passes every
 /// rate in use today and breaks silently on the first faster device.
 pub fn layout(sr: u32) -> Result<Ladder, LadderError> {
+    layout_for(sr, Speed::Detail)
+}
+
+/// [`layout`] under a speed preset (#714): the stage rates and stage 0 are
+/// the same; the deeper stages take [`Speed::deep_nfft`], and every
+/// crossover follows the validity edges that sets.
+pub fn layout_for(sr: u32, speed: Speed) -> Result<Ladder, LadderError> {
+    layout_with(sr, speed, speed.deep_nfft())
+}
+
+/// [`layout_for`] with the deep FFT length given, so the boundary guard can
+/// be tested on a length no preset uses.
+fn layout_with(sr: u32, speed: Speed, deep_nfft: usize) -> Result<Ladder, LadderError> {
     if sr == 0 {
         return Err(LadderError::ZeroRate);
     }
@@ -240,22 +333,37 @@ pub fn layout(sr: u32) -> Result<Ladder, LadderError> {
     let mut stages: Vec<Stage> = Vec::with_capacity(decims.len());
     for (i, &m) in decims.iter().enumerate() {
         let rate = srf / m as f64;
-        let df = rate / NFFT as f64;
+        let nfft = if i == 0 { NFFT } else { deep_nfft };
+        let df = rate / nfft as f64;
         let f_valid = k * df;
+        // A stage no finer than the one above serves nothing: its band
+        // would run from its validity edge up to the same edge. Follow's
+        // 12 kHz rung at ≤ 48 kHz (1024 points: the 4096-point Δf at 48 kHz)
+        // is one (#714). It is left out; the rung below hands over directly.
+        if let Some(above) = stages.last() {
+            if df >= above.df {
+                continue;
+            }
+        }
         // Stage 0 runs to Nyquist and blends with nothing above it.
-        let (f_top, blend_top) = if i == 0 {
-            (nyquist, nyquist)
-        } else {
-            let top = stages[i - 1].f_valid;
-            (top, top * blend_ratio)
+        let (f_top, blend_top) = match stages.last() {
+            None => (nyquist, nyquist),
+            Some(above) => (above.f_valid, above.f_valid * blend_ratio),
         };
         let depth = i.min(HOP_DIVISORS.len() - 1);
-        let hop = NFFT / HOP_DIVISORS[depth];
+        let hop = nfft / HOP_DIVISORS[depth];
+        if i > 0 && blend_top > MAX_TOP_FRACTION * rate {
+            return Err(LadderError::BandTooWide {
+                stage: i,
+                percent: (100.0 * blend_top / rate).ceil() as u32,
+            });
+        }
         stages.push(Stage {
             decim: m,
             rate,
+            nfft,
             df,
-            window_s: NFFT as f64 / rate,
+            window_s: nfft as f64 / rate,
             hop,
             blocks_factor: STAGE_BLOCKS[depth],
             hop_s: hop as f64 / rate,
@@ -265,7 +373,7 @@ pub fn layout(sr: u32) -> Result<Ladder, LadderError> {
         });
     }
 
-    Ok(Ladder { sr, stages })
+    Ok(Ladder { sr, speed, stages })
 }
 
 /// `[1, round(sr/t)...]`, dropping targets that would not deepen the ladder.
@@ -655,5 +763,50 @@ mod tests {
             (44..=54).contains(&n_below),
             "expected ~49 honest columns below the validity edge, got {n_below}"
         );
+    }
+
+    /// #714: every preset lays out at every supported rate, with stage 0
+    /// unchanged and the deep stages at the preset's FFT length; resolution
+    /// coarsens monotonically with frequency; the table in ZMQ.md holds at
+    /// 96 kHz.
+    #[test]
+    fn every_preset_lays_out_and_matches_the_documented_table() {
+        for sr in [44_100u32, 48_000, 96_000, 192_000] {
+            for speed in Speed::ALL {
+                let l = layout_for(sr, speed).unwrap_or_else(|e| panic!("{sr} {speed:?}: {e}"));
+                assert_eq!(l.speed, speed);
+                assert_eq!(l.stages[0].nfft, NFFT);
+                assert!(l.stages[1..].iter().all(|s| s.nfft == speed.deep_nfft()));
+                for w in l.stages.windows(2) {
+                    assert!(w[1].df < w[0].df, "{sr} {speed:?}: Δf not coarser upward");
+                }
+            }
+        }
+        let l = |s| layout_for(96_000, s).unwrap();
+        let settle = |s: &Stage| s.window_s + s.hop_s * (s.blocks(4) - 1) as f64;
+        for (speed, df, hop_mid, hop_bot, set_mid, set_bot) in [
+            (Speed::Detail, 0.977, 0.0853, 0.128, 0.768, 2.432),
+            (Speed::Live, 1.953, 0.0427, 0.064, 0.384, 1.216),
+            (Speed::Follow, 3.906, 0.0213, 0.032, 0.192, 0.608),
+        ] {
+            let st = &l(speed).stages;
+            assert!((st[2].df - df).abs() < 1e-3, "{speed:?} Δf {}", st[2].df);
+            assert!((st[1].hop_s - hop_mid).abs() < 1e-3, "{speed:?}");
+            assert!((st[2].hop_s - hop_bot).abs() < 1e-3, "{speed:?}");
+            assert!((settle(&st[1]) - set_mid).abs() < 1e-3, "{speed:?}");
+            assert!((settle(&st[2]) - set_bot).abs() < 1e-3, "{speed:?}");
+        }
+    }
+
+    /// #714: the boundary guard fires on the case it names — a deep FFT so
+    /// short that the bottom stage would serve most of its decimated rate
+    /// (256 points: stage 2's band tops out near 4 kHz at a 4 kHz rate).
+    #[test]
+    fn the_boundary_guard_refuses_a_band_its_filter_cannot_pass() {
+        match layout_with(96_000, Speed::Follow, 256) {
+            Err(LadderError::BandTooWide { stage, .. }) => assert_eq!(stage, 2),
+            other => panic!("guard did not fire: {other:?}"),
+        }
+        assert!(layout_with(96_000, Speed::Follow, 1024).is_ok());
     }
 }

@@ -659,8 +659,19 @@ mod tests {
             ring.push_tick(&[vec![0.1; 30], vec![0.2; 30], vec![0.3; 30]]);
         }
         assert_eq!(ring.pushed_total(), 150);
-        let prov =
-            |origin| MtwProvenance::for_layout(48_000, 7, origin, 4, 48.0, 20.0, 24_000.0).unwrap();
+        let prov = |origin| {
+            MtwProvenance::for_layout(
+                48_000,
+                7,
+                origin,
+                4,
+                48.0,
+                20.0,
+                24_000.0,
+                ac_core::visualize::mtw::ladder::Speed::Detail,
+            )
+            .unwrap()
+        };
         ring.mtw = vec![Some(prov(60)), None];
         let (meta, channels) = ring.snapshot_meta_and_channels("test").unwrap();
         // 150 pushed, 100 held: the ring starts at stream sample 50.
