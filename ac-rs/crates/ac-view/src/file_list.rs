@@ -19,12 +19,25 @@ impl FileList {
     /// The `.acsnap` files in `dir`, newest first (by modification time),
     /// at most [`MAX_SHOWN`]. A missing directory is an empty list.
     pub fn read(dir: &Path) -> FileList {
+        Self::read_with(dir, &["acsnap"])
+    }
+
+    /// [`Self::read`] for files with any of `extensions` (lower case,
+    /// compared case-insensitively).
+    pub fn read_with(dir: &Path, extensions: &[&str]) -> FileList {
         let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "acsnap"))
+            // Regular files only: a named pipe with a listed extension
+            // would block the read that loads it (Codex review).
+            .filter(|p| p.is_file())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
+            })
             .map(|p| {
                 let t = std::fs::metadata(&p)
                     .and_then(|m| m.modified())
@@ -103,6 +116,17 @@ mod tests {
         let list = FileList::read(&dir);
         let names: Vec<String> = list.entries().iter().map(|p| FileList::name(p)).collect();
         assert_eq!(names, ["new.acsnap", "old.acsnap"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Target curves: the listed extensions, any case, nothing else.
+    #[test]
+    fn read_with_takes_the_given_extensions_in_any_case() {
+        let dir = dir_with(&["a.TXT", "b.frd", "c.acsnap", "d.csv", "e.json"]);
+        let list = FileList::read_with(&dir, &["txt", "frd", "csv"]);
+        let mut names: Vec<String> = list.entries().iter().map(|p| FileList::name(p)).collect();
+        names.sort();
+        assert_eq!(names, ["a.TXT", "b.frd", "d.csv"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

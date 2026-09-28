@@ -224,7 +224,7 @@ fn snapshot_transfer_live_masked_gap() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_live_masked_gap");
@@ -238,7 +238,7 @@ fn snapshot_transfer_armed_banner() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_armed_banner");
@@ -252,7 +252,7 @@ fn snapshot_transfer_driving_banner() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), &[], &[], None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_driving_banner");
@@ -269,7 +269,7 @@ fn snapshot_transfer_ir_panel() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&transfer), &[], &[], Some(&ir)));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&transfer), &[], &[], Some(&ir), None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_ir_panel");
@@ -320,7 +320,7 @@ fn snapshot_transfer_stored_comparison_no_live() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, None, &[], &stored, None));
+        .build_ui(|ui| draw_view(&view, ui, None, None, &[], &stored, None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_stored_comparison_no_live");
@@ -337,7 +337,7 @@ fn snapshot_spectrum_ref_trace_on() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, &[], &[], None));
+        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, &[], &[], None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_on");
@@ -354,7 +354,7 @@ fn snapshot_spectrum_ref_trace_off() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, &[], &[], None));
+        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, &[], &[], None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_off");

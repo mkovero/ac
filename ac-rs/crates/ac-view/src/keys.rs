@@ -89,6 +89,9 @@ pub enum Action {
     ToggleInvert,
     /// `J`: type a dB offset for the selected trace; `J` applies.
     TypeOffset,
+    /// `Z`: list target curves to draw over the magnitude pane (`Z`
+    /// loads the selected one); `Shift+Z` clears it.
+    OpenTargets,
     TypeDelay,
     /// Show or hide the focused trace (#256). Shift: show every trace.
     ToggleTraceVisible,
@@ -327,6 +330,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::TypeOffset,
         scope: Scope::Transfer,
         description: "Type a dB offset for the selected trace (J applies, empty resets)",
+    },
+    Binding {
+        key: Key::Z,
+        action: Action::OpenTargets,
+        scope: Scope::Transfer,
+        description: "Target curves: list, Z loads (Shift: clear)",
     },
     Binding {
         key: Key::H,

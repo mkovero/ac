@@ -44,6 +44,13 @@ pub struct LiveTrace<'a> {
     pub selected: bool,
 }
 
+/// The loaded target curve, as `ac-scene` built it: its trace on the
+/// magnitude pane and its caption.
+pub struct TargetTrace {
+    pub trace: ac_scene::Trace,
+    pub caption: String,
+}
+
 pub struct StoredTrace<'a> {
     /// Attribution (acceptance criterion 1) — the file's own name.
     pub label: &'a str,
@@ -114,6 +121,7 @@ pub(super) fn draw_transfer(
     live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
     ir: Option<&ac_scene::IrScene>,
+    target: Option<&TargetTrace>,
 ) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
@@ -188,6 +196,24 @@ pub(super) fn draw_transfer(
 
     draw_axes(painter, &layout, scene, stored);
     let shown: &[LiveTrace<'_>] = if state.live_trace_shown() { live } else { &[] };
+    // The target first, under the traces it is compared with: dashed, in
+    // the value colour, magnitude pane only — it has no phase.
+    if let Some(target) = target {
+        draw_trace(
+            painter,
+            &target.trace,
+            layout.mag,
+            Stroke::new(TRACE_WIDTH, COLOR_VALUE),
+            true,
+        );
+        text(
+            painter,
+            egui::pos2(layout.mag.x + 4.0, layout.mag.y + layout.mag.height - 4.0),
+            Align2::LEFT_BOTTOM,
+            &target.caption,
+            COLOR_VALUE,
+        );
+    }
     draw_traces(painter, &layout, shown, stored);
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);

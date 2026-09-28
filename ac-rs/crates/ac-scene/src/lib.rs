@@ -37,6 +37,7 @@ pub mod ir;
 pub mod readout;
 pub mod scene;
 pub mod sweep_ir;
+pub mod target;
 pub mod ticks;
 pub mod transfer;
 

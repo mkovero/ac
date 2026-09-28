@@ -31,7 +31,7 @@ use egui::Ui;
 
 pub use ir::draw_sweep_ir_panel;
 pub use state::{DerotChoice, Focus, LoadedRun, SpectrumViewState, StimState, TransferViewState};
-pub use transfer::{LiveTrace, StoredTrace};
+pub use transfer::{LiveTrace, StoredTrace, TargetTrace};
 
 use palette::COLOR_LABEL;
 
@@ -53,6 +53,9 @@ impl ViewKind {
 /// match arm — never by the shell inlining a new drawing call. The two
 /// scene options are mutually exclusive in practice: the app builds only
 /// the one matching the active view (the other stays `None`).
+// One argument per layer the transfer view draws (live, stored, IR,
+// target); a bundle struct would only rename the list.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_view(
     kind: &ViewKind,
     ui: &mut Ui,
@@ -61,6 +64,7 @@ pub fn draw_view(
     live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
     ir_scene: Option<&ac_scene::IrScene>,
+    target: Option<&TargetTrace>,
 ) {
     // Reserve the half line the top y-axis tick label hangs into (#245).
     // Every pane's tick labels are drawn vertically centred on their
@@ -86,7 +90,7 @@ pub fn draw_view(
     match kind {
         ViewKind::Spectrum(state) => spectrum::draw_spectrum(state, ui, scene),
         ViewKind::Transfer(state) => {
-            transfer::draw_transfer(state, ui, transfer_scene, live, stored, ir_scene)
+            transfer::draw_transfer(state, ui, transfer_scene, live, stored, ir_scene, target)
         }
     }
 }

@@ -117,7 +117,7 @@ fn stored_runs_paint_without_a_live_scene() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, None, &[], &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None, None);
     });
     harness.run();
 
@@ -173,7 +173,7 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, None, &[], &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None, None);
     });
     harness.run();
 
@@ -222,7 +222,7 @@ fn legend_draws_the_estimator_readout_for_a_welch_run_only() {
         }];
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(900.0, 300.0));
-            draw_view(&view, ui, None, None, &[], &stored, None);
+            draw_view(&view, ui, None, None, &[], &stored, None, None);
         });
         harness.run();
         extract_texts(&harness.output().shapes)
@@ -266,7 +266,7 @@ fn slot_runs_paint_as_a_box_strip_not_timestamp_rows() {
     }];
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(640.0, 360.0));
-        draw_view(&view, ui, None, None, &[], &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None, None);
     });
     harness.run();
     let shapes = &harness.output().shapes;
@@ -315,7 +315,7 @@ fn a_selected_slot_draws_like_an_unselected_one() {
     let stored = vec![run(1, true), run(2, false)];
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(640.0, 360.0));
-        draw_view(&view, ui, None, None, &[], &stored, None);
+        draw_view(&view, ui, None, None, &[], &stored, None, None);
     });
     harness.run();
     let width_of = |color: egui::Color32| -> Vec<f32> {
@@ -368,7 +368,7 @@ fn two_live_pairs_paint_their_boxes_and_the_other_pairs_fault() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(600.0, 400.0));
-        draw_view(&view, ui, None, Some(&first), &live, &[], None);
+        draw_view(&view, ui, None, Some(&first), &live, &[], None, None);
     });
     harness.run();
     let shapes = &harness.output().shapes;
@@ -390,5 +390,35 @@ fn two_live_pairs_paint_their_boxes_and_the_other_pairs_fault() {
             egui::Shape::Path(p) if p.points.len() > 1 && p.stroke.color == egui::epaint::ColorMode::Solid(second_colour)
         )),
         "the second pair's curve is not drawn in its own colour"
+    );
+}
+
+/// A loaded target curve is painted dashed in the value colour with its
+/// caption, on the trace's axes.
+#[test]
+fn a_target_curve_paints_dashed_with_its_caption() {
+    let target =
+        ac_scene::target::TargetCurve::parse("house.txt", "20 6\n1000 0\n20000 -3\n").unwrap();
+    let drawn = ac_view::view::TargetTrace {
+        trace: target.trace(FREQ_RANGE, DB_RANGE),
+        caption: target.caption(),
+    };
+    let first = scene(Smoothing::Off);
+    let view = ViewKind::Transfer(TransferViewState::default());
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(600.0, 400.0));
+        draw_view(&view, ui, None, Some(&first), &[], &[], None, Some(&drawn));
+    });
+    harness.run();
+    let shapes = &harness.output().shapes;
+    let texts = extract_texts(shapes);
+    assert!(texts.iter().any(|t| t == "target: house.txt"), "{texts:?}");
+    let value = ac_view::view::palette::COLOR_VALUE;
+    assert!(
+        shapes.iter().any(|cs| matches!(
+            &cs.shape,
+            egui::Shape::LineSegment { stroke, .. } if stroke.color == value
+        )),
+        "no dashed segment in the value colour"
     );
 }

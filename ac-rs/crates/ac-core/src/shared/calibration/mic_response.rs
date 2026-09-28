@@ -77,69 +77,18 @@ impl MicResponse {
 }
 
 /// Parse the two-column ASCII format used by Behringer / Dayton / miniDSP
-/// mic calibration files. One `<freq_hz> <gain_db>` pair per line, optional
-/// whitespace, comments starting with `*` or `#` are ignored. An optional
+/// mic calibration files ([`crate::shared::freq_curve`], shared with target
+/// curves). One `<freq_hz> <gain_db>` pair per line, separated by
+/// whitespace or a comma; comments starting with `*`, `#` or `;` are ignored. An optional
 /// third column (phase) is ignored. Validates monotonically increasing
 /// frequencies, finite values, and the [`MicResponse::MIN_POINTS`] /
 /// [`MicResponse::MAX_POINTS`] bounds.
 pub fn parse_mic_curve(text: &str, source_path: Option<String>) -> Result<MicResponse> {
-    let mut freqs = Vec::new();
-    let mut gains = Vec::new();
-    for (line_no, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('*') || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let mut cols = line.split_whitespace();
-        let f_tok = cols.next();
-        let g_tok = cols.next();
-        let (f_str, g_str) = match (f_tok, g_tok) {
-            (Some(f), Some(g)) => (f, g),
-            _ => anyhow::bail!(
-                "line {}: expected `freq_hz gain_db [phase]`, got {raw:?}",
-                line_no + 1
-            ),
-        };
-        let f: f32 = f_str.parse().map_err(|e| {
-            anyhow::anyhow!("line {}: failed to parse freq {f_str:?}: {e}", line_no + 1)
-        })?;
-        let g: f32 = g_str.parse().map_err(|e| {
-            anyhow::anyhow!("line {}: failed to parse gain {g_str:?}: {e}", line_no + 1)
-        })?;
-        if !f.is_finite() || f <= 0.0 {
-            anyhow::bail!("line {}: freq must be > 0 Hz, got {f}", line_no + 1);
-        }
-        if !g.is_finite() {
-            anyhow::bail!("line {}: gain must be finite, got {g}", line_no + 1);
-        }
-        if let Some(&prev) = freqs.last() {
-            if f <= prev {
-                anyhow::bail!(
-                    "line {}: frequencies must increase strictly (got {f} after {prev})",
-                    line_no + 1
-                );
-            }
-        }
-        freqs.push(f);
-        gains.push(g);
-    }
-    if freqs.len() < MicResponse::MIN_POINTS {
-        anyhow::bail!(
-            "mic curve too sparse: got {} points, need ≥ {}",
-            freqs.len(),
-            MicResponse::MIN_POINTS
-        );
-    }
-    if freqs.len() > MicResponse::MAX_POINTS {
-        anyhow::bail!(
-            "mic curve too dense: got {} points, max {}",
-            freqs.len(),
-            MicResponse::MAX_POINTS
-        );
-    }
+    let (freqs, gains) = crate::shared::freq_curve::parse_freq_db(
+        text,
+        "mic curve",
+        MicResponse::MIN_POINTS..=MicResponse::MAX_POINTS,
+    )?;
     Ok(MicResponse {
         freqs_hz: freqs,
         gain_db: gains,

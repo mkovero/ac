@@ -99,6 +99,20 @@ pub struct AcViewApp {
     average_scene: Option<(ac_scene::TransferScene, String)>,
     /// The saved-captures list (`F`, #256). `None` = closed.
     file_list: Option<crate::file_list::FileList>,
+    /// The target-curve list (`Z`). `None` = closed.
+    target_list: Option<crate::file_list::FileList>,
+    /// The loaded target curve, and its trace built against the current
+    /// axes every pass.
+    target: Option<ac_scene::target::TargetCurve>,
+    target_trace: Option<crate::view::TargetTrace>,
+    /// A target file being read on its thread, with its name.
+    target_rx: Option<(
+        String,
+        std::sync::mpsc::Receiver<Result<ac_scene::target::TargetCurve, String>>,
+    )>,
+    /// Where `Z` lists from: [`crate::capture::targets_dir`], held so a test
+    /// can point it elsewhere.
+    targets_dir: std::path::PathBuf,
     /// Where `F` lists from and `C` writes to: [`crate::capture::captures_dir`],
     /// held so a test can point it elsewhere.
     captures_dir: std::path::PathBuf,
@@ -155,6 +169,11 @@ impl AcViewApp {
             capture_rx: None,
             capture_slot: None,
             file_list: None,
+            target_list: None,
+            target: None,
+            target_trace: None,
+            target_rx: None,
+            targets_dir: crate::capture::targets_dir(),
             average_scene: None,
             captures_dir: crate::capture::captures_dir(),
             quit_requested: false,
@@ -477,6 +496,10 @@ impl AcViewApp {
                         (scene, label)
                     });
                 self.scene = None;
+                self.target_trace = self.target.as_ref().map(|t| crate::view::TargetTrace {
+                    trace: t.trace(freq_range, db_range),
+                    caption: t.caption(),
+                });
             }
         }
         self.rebuild_ir_scene();
@@ -625,6 +648,14 @@ impl AcViewApp {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::OpenSnapshot => self.open_file_list(Instant::now()),
+            Action::OpenTargets => {
+                if shift {
+                    self.target = None;
+                    self.target_list = None;
+                } else {
+                    self.open_target_list(Instant::now());
+                }
+            }
             Action::ExportCsv => self.export_csv(shift, Instant::now()),
             Action::CycleCoherenceMask => self.with_transfer(|t| t.cycle_coherence_mask()),
             Action::ToggleAverage => self.toggle_average(shift, Instant::now()),
@@ -870,6 +901,102 @@ impl AcViewApp {
             );
         } else {
             self.file_list = Some(list);
+        }
+    }
+
+    /// `Z`: open the target-curve list, or close it.
+    fn open_target_list(&mut self, now: Instant) {
+        if self.target_list.take().is_some() {
+            return;
+        }
+        let dir = self.targets_dir.clone();
+        let list = crate::file_list::FileList::read_with(&dir, &crate::capture::TARGET_EXTENSIONS);
+        if list.entries().is_empty() {
+            self.set_toast(
+                format!(
+                    "no target curves in {} (.txt, .frd, .csv: freq_hz gain_db per line)",
+                    dir.display()
+                ),
+                now,
+                Some(5.0),
+            );
+        } else {
+            self.target_list = Some(list);
+        }
+    }
+
+    /// `Z` in the list: read the selected target on a thread
+    /// ([`crate::capture::spawn_target`]); [`Self::poll_target`] draws it
+    /// or says why not.
+    fn load_selected_target(&mut self, now: Instant) {
+        let Some(path) = self
+            .target_list
+            .take()
+            .and_then(|l| l.selected_path().map(std::path::Path::to_path_buf))
+        else {
+            return;
+        };
+        let name = crate::file_list::FileList::name(&path);
+        self.set_toast(format!("reading target {name}\u{2026}"), now, None);
+        self.target_rx = Some((name, crate::capture::spawn_target(path)));
+    }
+
+    /// Collect a finished target read, if any.
+    fn poll_target(&mut self, now: Instant) {
+        let Some((_, rx)) = &self.target_rx else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the read ended without a result".to_string())
+            }
+        };
+        let (name, _) = self.target_rx.take().expect("checked above");
+        self.finish_target(&name, result, now);
+    }
+
+    fn finish_target(
+        &mut self,
+        name: &str,
+        result: Result<ac_scene::target::TargetCurve, String>,
+        now: Instant,
+    ) {
+        match result {
+            Ok(t) => {
+                // A target is drawn on a trace's axes, in the magnitude
+                // pane: say where it is when that is not on screen (Codex
+                // review).
+                let ir_open = matches!(&self.view, ViewKind::Transfer(v) if v.ir_panel_open());
+                let on_screen =
+                    self.current_transfer_scene().is_some() || !self.loaded_scenes.is_empty();
+                let msg = if ir_open {
+                    format!("target {name} loaded \u{2014} H closes the IR panel to show it")
+                } else if on_screen {
+                    format!("target {name} drawn")
+                } else {
+                    format!("target {name} loaded \u{2014} it draws with the first trace")
+                };
+                self.set_toast(msg, now, Some(3.0));
+                self.target = Some(t);
+            }
+            Err(e) => self.set_toast(
+                format!("target {name} not loaded \u{2014} {e}"),
+                now,
+                Some(6.0),
+            ),
+        }
+    }
+
+    /// Wait for a started target read, as a frame's poll would.
+    #[cfg(test)]
+    pub(crate) fn wait_target_for_test(&mut self) {
+        if let Some((name, rx)) = self.target_rx.take() {
+            let result = rx
+                .recv()
+                .unwrap_or_else(|_| Err("the read ended without a result".to_string()));
+            self.finish_target(&name, result, Instant::now());
         }
     }
 
@@ -1442,6 +1569,43 @@ impl AcViewApp {
             return;
         }
 
+        // The target list (`Z`) takes its keys: ↑/↓ select, `Z` loads, Esc
+        // closes. Esc reaches here only while the stimulus is idle.
+        if self.target_list.is_some() {
+            let (up, down, load, clear, close) = ctx.input(|i| {
+                let z = i.key_pressed(Key::Z);
+                (
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    z && !i.modifiers.shift,
+                    z && i.modifiers.shift,
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            if clear {
+                // Shift+Z clears here too (Codex review), as it does
+                // outside the list.
+                self.handle_action(Action::OpenTargets, true);
+                return;
+            }
+            if close {
+                self.target_list = None;
+                return;
+            }
+            if let Some(list) = &mut self.target_list {
+                if up {
+                    list.move_selection(false);
+                }
+                if down {
+                    list.move_selection(true);
+                }
+            }
+            if load {
+                self.load_selected_target(Instant::now());
+            }
+            return;
+        }
+
         // The saved-captures list (`F`, #256) takes its keys: ↑/↓ select,
         // a digit loads into that slot, Esc or F closes. Esc reaches here
         // only while the stimulus is idle — panic-first owns it otherwise.
@@ -1676,6 +1840,26 @@ impl AcViewApp {
             }
         }
 
+        if let Some(list) = &self.target_list {
+            egui::Window::new("target curves")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    for (i, path) in list.entries().iter().enumerate() {
+                        let marker = if i == list.selected() {
+                            "\u{25b8} "
+                        } else {
+                            "  "
+                        };
+                        ui.label(format!(
+                            "{marker}{}",
+                            crate::file_list::FileList::name(path)
+                        ));
+                    }
+                    ui.separator();
+                    ui.label("\u{2191}\u{2193} select   Z draw   Esc close   (Shift+Z clears)");
+                });
+        }
+
         if let Some(list) = &self.file_list {
             egui::Window::new("saved captures")
                 .collapsible(false)
@@ -1747,6 +1931,7 @@ impl eframe::App for AcViewApp {
         // keepalive_tick).
         self.keepalive_tick(std::time::Instant::now());
         self.poll_capture(std::time::Instant::now());
+        self.poll_target(std::time::Instant::now());
 
         let got_new_frame = self.drain_frames();
         // Rebuild the scenes once per pass — never once per backlog
@@ -1767,6 +1952,7 @@ impl eframe::App for AcViewApp {
             &live_traces,
             &stored_refs,
             self.ir_scene.as_ref(),
+            self.target_trace.as_ref(),
         );
 
         self.draw_overlays(&ctx);
