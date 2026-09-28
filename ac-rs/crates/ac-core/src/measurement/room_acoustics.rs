@@ -191,6 +191,39 @@ fn fit_slope(level: &[f64], from: usize, top: f64, bottom: f64, fs: f64) -> Opti
     (den > 0.0).then(|| (n * sxy - sx * sy) / den)
 }
 
+/// §5.3.3's rate for the tail correction, dB/s (negative): the decay of
+/// the smoothed `level` between t0 — where it first falls to 10 dB above
+/// `noise_db` after `from` — and `t1`. `line` (the slope that placed t1)
+/// stands in when that stretch has fewer than two points or does not fall.
+fn tail_rate(level: &[f64], from: usize, t1: usize, noise_db: f64, line: f64, fs: f64) -> f64 {
+    let t1 = t1.min(level.len() - 1);
+    if from > t1 {
+        return line;
+    }
+    let t0 = level[from..=t1]
+        .iter()
+        .position(|&l| l <= noise_db + 10.0)
+        .map_or(from, |k| k + from);
+    fit_over(&level[t0..=t1], t0, fs)
+        .filter(|s| *s < 0.0)
+        .unwrap_or(line)
+}
+
+/// Least-squares slope, dB per second, of `level` taken as samples
+/// `offset…offset + level.len()` at rate `fs`. `None` below two points.
+fn fit_over(level: &[f64], offset: usize, fs: f64) -> Option<f64> {
+    let n = level.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let ts = (0..level.len()).map(|k| (k + offset) as f64 / fs);
+    let (sx, sy) = (ts.clone().sum::<f64>(), level.iter().sum::<f64>());
+    let sxx: f64 = ts.clone().map(|t| t * t).sum();
+    let sxy: f64 = ts.zip(level).map(|(t, l)| t * l).sum();
+    let den = n * sxx - sx * sx;
+    (den > 0.0).then(|| (n * sxy - sx * sy) / den)
+}
+
 /// Time for half of band `i`'s impulse-response energy, samples (A.3.4's
 /// filter delay).
 fn filter_delay(fb: &Filterbank, i: usize, fs: f64) -> usize {
@@ -265,13 +298,32 @@ fn band_params(
             let t_peak = peak_blk as f64 * w as f64 / fs;
             let t1_s = t_peak + (noise_db - smooth[peak_blk]) / slope;
             let t1 = ((t1_s * fs) as usize).clamp(end * w, n - 1);
-            let d = -slope; // dB/s
+            // §5.3.3: the correction's rate is the decay between t0 and t1,
+            // t0 where the level is 10 dB above that at t1 (the background)
+            // — the late slope, not the whole line's (Codex review: a fast
+            // start and slow tail understated the tail). The line's slope
+            // stands in when that stretch holds too few points.
+            let t1_blk = (t1 / w).min(smooth.len() - 1);
+            let d = -tail_rate(&smooth, peak_blk, t1_blk, noise_db, slope, fs / w as f64); // dB/s
             let c = noise * fs * 10.0 / (d * std::f64::consts::LN_10);
             (t1, c)
         }
         None => {
+            // No decay: nothing here is the room. Every value is refused
+            // (Codex review: a steady noise's reverse integral fell 10 dB
+            // near the capture's end and read as an EDT).
             refused.push("no decay found above the band's background".to_string());
-            (n - 1, 0.0)
+            return BandParams {
+                centre_hz: fc,
+                t20_s: None,
+                t30_s: None,
+                edt_s: None,
+                c50_db: None,
+                c80_db: None,
+                d50: None,
+                peak_to_noise_db,
+                refused,
+            };
         }
     };
 
@@ -316,7 +368,8 @@ fn band_params(
     let edt_s = rt(0.0, -10.0);
 
     // A.2.3 on the filtered band (A.3.4's filtered-first procedure): the
-    // early interval runs from the start for `te` plus half the band's
+    // early interval runs from the band's own start (where its filtered
+    // response first comes within 20 dB of its maximum) for `te` plus half the band's
     // filter delay, the late one from there to `t1` plus the tail
     // correction. Windowing the broadband IR before filtering (A.3.4's
     // other option) leaked the step of a hard cut through strong low
@@ -327,16 +380,16 @@ fn band_params(
     // for it rather than reported (the rig's 250 Hz C80 read +41 dB so).
     let half_delay = filter_delay(fb, i, fs) / 2;
     let ratio = |te: f64| -> Result<(f64, f64), String> {
-        let split = start + (te * fs) as usize + half_delay;
+        let split = band_start + (te * fs) as usize + half_delay;
         if split > t1 {
             return Err(format!(
                 "reaches its background {:.0} ms after the start, before the {:.0} ms early limit: \
                  no measured late energy",
-                t1.saturating_sub(start) as f64 / fs * 1000.0,
+                t1.saturating_sub(band_start) as f64 / fs * 1000.0,
                 te * 1000.0
             ));
         }
-        let early: f64 = e[start..split].iter().sum();
+        let early: f64 = e[band_start..split].iter().sum();
         let late: f64 = e[split..=t1].iter().sum::<f64>() + correction;
         if early > 0.0 && late > 0.0 {
             Ok((early, late))
@@ -661,6 +714,53 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Codex review: steady noise with no decay reports nothing — not an
+    /// EDT from the reverse integral's fall at the end, not C/D.
+    #[test]
+    fn steady_noise_reports_nothing() {
+        let ir = noise(3 * FS as usize, 21);
+        let r = room_acoustics(&ir, FS, 20.0, 20_000.0).unwrap();
+        for b in &r.bands {
+            assert_eq!(
+                (b.t20_s, b.t30_s, b.edt_s, b.c50_db, b.c80_db, b.d50),
+                (None, None, None, None, None, None),
+                "{:.0} Hz: {:?}",
+                b.centre_hz,
+                b.refused
+            );
+        }
+    }
+
+    /// Codex review: the tail correction's rate is the late slope between
+    /// t0 (10 dB above the background) and t1 (§5.3.3). On a double slope
+    /// — 300 dB/s for 0.1 s, then 50 dB/s down to the background — it is
+    /// the slow rate; the whole line's slope (the rejected rule, computed
+    /// here) is far steeper and would understate the tail.
+    #[test]
+    fn the_tail_rate_is_the_late_slope() {
+        let fs = 100.0; // blocks per second
+        let noise_db = -60.0;
+        let level: Vec<f64> = (0..120)
+            .map(|k| {
+                let t = k as f64 / fs;
+                let l = if t < 0.1 {
+                    -300.0 * t
+                } else {
+                    -30.0 - 50.0 * (t - 0.1)
+                };
+                l.max(noise_db)
+            })
+            .collect();
+        let t1 = level.iter().position(|&l| l <= noise_db).unwrap();
+        let line = fit_over(&level[..=t1], 0, fs).unwrap();
+        let rate = tail_rate(&level, 0, t1, noise_db, line, fs);
+        assert!((rate + 50.0).abs() < 1.0, "tail rate {rate}");
+        assert!(
+            line < 1.2 * rate,
+            "the whole line was meant to be steeper: {line}"
+        );
     }
 
     #[test]
