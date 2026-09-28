@@ -2098,6 +2098,15 @@ fn z_loads_draws_clears_and_refuses_target_curves() {
     app.handle_action(Action::OpenTargets, false);
     assert!(app.target_list.is_some());
     app.load_selected_target(Instant::now());
+    // No trace on screen yet: loaded, and it says it waits for one.
+    assert_eq!(
+        app.toast_text(),
+        Some("target house.txt loaded \u{2014} it draws with the first trace")
+    );
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    assert_eq!(app.toast_text(), Some("target house.txt drawn"));
     app.rebuild_scenes(true, 0.0);
     let t = app.target_trace.as_ref().expect("target drawn");
     assert_eq!(t.caption, "target: house.txt");
@@ -2123,4 +2132,37 @@ fn z_loads_draws_clears_and_refuses_target_curves() {
     assert!(app
         .toast_text()
         .is_some_and(|t| t.starts_with("no target curves in")));
+}
+
+/// Codex review: a file past the size cap is refused before it is read,
+/// and a named pipe with a listed extension is never listed.
+#[test]
+fn z_refuses_an_oversized_file_and_never_lists_a_pipe() {
+    let dir = std::env::temp_dir().join(format!("ac-target-big-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let big = vec![b'#'; (crate::capture::TARGET_MAX_BYTES + 1) as usize];
+    std::fs::write(dir.join("big.txt"), big).unwrap();
+    let fifo = dir.join("pipe.txt");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+    app.handle_action(Action::OpenTargets, false);
+    let names: Vec<String> = app
+        .target_list
+        .as_ref()
+        .unwrap()
+        .entries()
+        .iter()
+        .map(|p| crate::file_list::FileList::name(p))
+        .collect();
+    if made.is_ok_and(|s| s.success()) {
+        assert!(!names.contains(&"pipe.txt".to_string()), "{names:?}");
+    }
+    assert_eq!(names, ["big.txt"]);
+    app.load_selected_target(Instant::now());
+    assert!(app.target.is_none());
+    assert!(app
+        .toast_text()
+        .is_some_and(|t| t.contains("more than a target curve")));
+    std::fs::remove_dir_all(&dir).ok();
 }

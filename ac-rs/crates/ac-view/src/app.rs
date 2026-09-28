@@ -904,12 +904,34 @@ impl AcViewApp {
             return;
         };
         let name = crate::file_list::FileList::name(&path);
-        let parsed = std::fs::read_to_string(&path)
+        let parsed = std::fs::metadata(&path)
             .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if !m.is_file() {
+                    Err("not a regular file".to_string())
+                } else if m.len() > crate::capture::TARGET_MAX_BYTES {
+                    Err(format!(
+                        "{} bytes, more than a target curve ({} max)",
+                        m.len(),
+                        crate::capture::TARGET_MAX_BYTES
+                    ))
+                } else {
+                    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+                }
+            })
             .and_then(|text| ac_scene::target::TargetCurve::parse(&name, &text));
         match parsed {
             Ok(t) => {
-                self.set_toast(format!("target {name} drawn"), now, Some(3.0));
+                // A target is drawn on a trace's axes: with nothing on
+                // screen yet it waits, and says so (Codex review).
+                let on_screen =
+                    self.current_transfer_scene().is_some() || !self.loaded_scenes.is_empty();
+                let msg = if on_screen {
+                    format!("target {name} drawn")
+                } else {
+                    format!("target {name} loaded \u{2014} it draws with the first trace")
+                };
+                self.set_toast(msg, now, Some(3.0));
                 self.target = Some(t);
             }
             Err(e) => self.set_toast(
@@ -1435,14 +1457,22 @@ impl AcViewApp {
         // The target list (`Z`) takes its keys: ↑/↓ select, `Z` loads, Esc
         // closes. Esc reaches here only while the stimulus is idle.
         if self.target_list.is_some() {
-            let (up, down, load, close) = ctx.input(|i| {
+            let (up, down, load, clear, close) = ctx.input(|i| {
+                let z = i.key_pressed(Key::Z);
                 (
                     i.key_pressed(Key::ArrowUp),
                     i.key_pressed(Key::ArrowDown),
-                    i.key_pressed(Key::Z),
+                    z && !i.modifiers.shift,
+                    z && i.modifiers.shift,
                     i.key_pressed(Key::Escape),
                 )
             });
+            if clear {
+                // Shift+Z clears here too (Codex review), as it does
+                // outside the list.
+                self.handle_action(Action::OpenTargets, true);
+                return;
+            }
             if close {
                 self.target_list = None;
                 return;

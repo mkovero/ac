@@ -30,6 +30,9 @@ impl FileList {
             .flatten()
             .flatten()
             .map(|e| e.path())
+            // Regular files only: a named pipe with a listed extension
+            // would block the read that loads it (Codex review).
+            .filter(|p| p.is_file())
             .filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())

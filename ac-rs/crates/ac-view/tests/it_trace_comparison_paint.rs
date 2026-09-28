@@ -393,7 +393,7 @@ fn two_live_pairs_paint_their_boxes_and_the_other_pairs_fault() {
 }
 
 /// A loaded target curve is painted dashed in the value colour with its
-/// caption, even with no live frame.
+/// caption, on the trace's axes.
 #[test]
 fn a_target_curve_paints_dashed_with_its_caption() {
     let target =

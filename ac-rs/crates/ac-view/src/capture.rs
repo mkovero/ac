@@ -52,6 +52,11 @@ pub fn targets_dir() -> PathBuf {
 /// The target-curve file extensions `Z` lists.
 pub const TARGET_EXTENSIONS: [&str; 3] = ["txt", "frd", "csv"];
 
+/// Largest target file `Z` reads, bytes. 4096 points of `freq gain phase`
+/// text is about 120 KiB; a file far past that is not a target curve, and
+/// it is read on the UI thread.
+pub const TARGET_MAX_BYTES: u64 = 1 << 20;
+
 /// The file name for slot `slot` captured at `captured_at_utc` (RFC3339):
 /// colons are not portable in file names, so they become `-`.
 ///
