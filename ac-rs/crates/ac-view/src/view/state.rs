@@ -135,6 +135,61 @@ pub struct LoadedRun {
     /// Samples added to the recorded delay by `←`/`→` (#256), applied as a
     /// phase rotation when the scene is built.
     pub delay_offset_samples: i64,
+    /// The stored run's impulse response — the same IFFT of its H1 the
+    /// live sidecar is, computed when the run is derived (off the UI
+    /// thread). `None` only for runs built without a snapshot (tests).
+    pub ir: Option<ac_scene::IrInput>,
+}
+
+/// The live trace's display settings at the moment a slot is stored: the
+/// slot is drawn the way live was drawn when the operator stored it, and
+/// keeps its own copy from then on. Saved beside the capture
+/// ([`crate::capture::settings_path`]) so `F` reopens it the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SlotSettings {
+    pub smoothing: ac_scene::Smoothing,
+    pub invert: bool,
+    pub offset_db: f64,
+}
+
+impl SlotSettings {
+    pub fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "smoothing_bpo": self.smoothing.bpo(),
+            "invert": self.invert,
+            "offset_db": self.offset_db,
+        })
+    }
+
+    /// `None` for anything that is not a settings file this client wrote:
+    /// the run then opens at the defaults, as a file stored before #702 does.
+    pub fn from_json(v: &serde_json::Value) -> Option<SlotSettings> {
+        let smoothing = match v.get("smoothing_bpo")? {
+            serde_json::Value::Null => ac_scene::Smoothing::Off,
+            bpo => {
+                let bpo = bpo.as_u64()?;
+                let mut s = ac_scene::Smoothing::Off.next();
+                while s.bpo() != Some(bpo as u32) {
+                    s = s.next();
+                    if s == ac_scene::Smoothing::Off {
+                        return None;
+                    }
+                }
+                s
+            }
+        };
+        Some(SlotSettings {
+            smoothing,
+            invert: v.get("invert")?.as_bool()?,
+            offset_db: v.get("offset_db")?.as_f64().filter(|o| o.is_finite())?,
+        })
+    }
+
+    pub fn apply(self, run: &mut LoadedRun) {
+        run.smoothing = self.smoothing;
+        run.invert = self.invert;
+        run.offset_db = self.offset_db;
+    }
 }
 
 impl LoadedRun {
@@ -158,6 +213,7 @@ impl LoadedRun {
             color_slot: 0,
             slot: None,
             delay_offset_samples: 0,
+            ir: None,
         }
     }
 }
@@ -305,7 +361,19 @@ impl TransferViewState {
         self.coherence_mask = steps[i];
     }
 
+    /// Live's display settings now — what a slot stored now is drawn with.
+    pub fn live_settings(&self) -> SlotSettings {
+        SlotSettings {
+            smoothing: self.smoothing,
+            invert: self.invert,
+            offset_db: self.offset_db,
+        }
+    }
+
     /// `Ctrl`+`n` (#256): put `run` in slot `n`, replacing what was there.
+    /// `run` arrives with its settings already set (live's at the moment of
+    /// storing, or the saved ones for a file opened with `F`); only the
+    /// slot's visibility carries over from what it replaces.
     /// Slot runs sit in slot order ahead of runs opened from files, so
     /// `Tab` walks them 1, 2, … A slot keeps its colour across
     /// replacements. Focus stays on the trace it was on.
@@ -314,9 +382,6 @@ impl TransferViewState {
         run.color_slot = usize::from(n.saturating_sub(1));
         if let Some(existing) = self.loaded.iter_mut().find(|r| r.slot == Some(n)) {
             run.visible = existing.visible;
-            run.smoothing = existing.smoothing;
-            run.invert = existing.invert;
-            run.offset_db = existing.offset_db;
             *existing = run;
             return;
         }

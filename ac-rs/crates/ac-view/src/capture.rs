@@ -152,10 +152,35 @@ pub(crate) fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<(PathBuf
     unreachable!("an unbounded counter always finds a free name")
 }
 
+/// Where a capture's display settings are saved (#702): beside it, as
+/// `<capture>.view.json`. The file list shows `.acsnap` only, so it never
+/// appears there.
+pub fn settings_path(capture: &Path) -> PathBuf {
+    let mut name = capture.as_os_str().to_owned();
+    name.push(".view.json");
+    PathBuf::from(name)
+}
+
+/// The settings saved beside `capture`, if a readable file of ours is
+/// there. `None` for a capture stored before #702 (it opens at the
+/// defaults).
+pub fn read_settings(capture: &Path) -> Option<crate::view::SlotSettings> {
+    let text = std::fs::read_to_string(settings_path(capture)).ok()?;
+    crate::view::SlotSettings::from_json(&serde_json::from_str(&text).ok()?)
+}
+
 /// Trigger, fetch, write under `dir`, and derive `pair` for `slot` — one
 /// blocking call, for the capture thread. The run is labelled `slot N`;
 /// the file keeps the full name, which the status message reports.
-pub fn capture_into(client: &Client, dir: &Path, slot: u8, pair: usize) -> Result<Captured> {
+/// `settings` (live's, at the key press) are saved beside the file; the UI
+/// thread applies the same copy when the run arrives.
+pub fn capture_into(
+    client: &Client,
+    dir: &Path,
+    slot: u8,
+    pair: usize,
+    settings: crate::view::SlotSettings,
+) -> Result<Captured> {
     let (bytes, snap) = crate::snapshot_flow::trigger_and_fetch_bytes(client)?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let (path, _) = write_new(
@@ -163,6 +188,9 @@ pub fn capture_into(client: &Client, dir: &Path, slot: u8, pair: usize) -> Resul
         &file_name(slot, pair, &snap.meta.captured_at_utc),
         &bytes,
     )?;
+    let settings_file = settings_path(&path);
+    std::fs::write(&settings_file, settings.to_json().to_string())
+        .with_context(|| format!("write {}", settings_file.display()))?;
     let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, pair, format!("slot {slot}"))?;
     Ok(Captured {
         slot,
@@ -175,11 +203,16 @@ pub fn capture_into(client: &Client, dir: &Path, slot: u8, pair: usize) -> Resul
 /// Run [`capture_into`] [`captures_dir`] on a thread with its own
 /// connection to `endpoint`. The receiver yields exactly one result; the
 /// error is already rendered for the status line.
-pub fn spawn(endpoint: Endpoint, slot: u8, pair: usize) -> Receiver<Result<Captured, String>> {
+pub fn spawn(
+    endpoint: Endpoint,
+    slot: u8,
+    pair: usize,
+    settings: crate::view::SlotSettings,
+) -> Receiver<Result<Captured, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = Client::connect(&endpoint)
-            .and_then(|client| capture_into(&client, &captures_dir(), slot, pair))
+            .and_then(|client| capture_into(&client, &captures_dir(), slot, pair, settings))
             .map_err(|e| format!("{e:#}"));
         let _ = tx.send(result);
     });
@@ -195,6 +228,9 @@ pub fn spawn_open(path: PathBuf, slot: u8) -> Receiver<Result<Captured, String>>
         let result = crate::snapshot_flow::open_stored_transfer_run(&path, stored_pair(&path))
             .map(|mut run| {
                 run.label = format!("slot {slot}");
+                if let Some(settings) = read_settings(&path) {
+                    settings.apply(&mut run);
+                }
                 Captured {
                     slot,
                     path,

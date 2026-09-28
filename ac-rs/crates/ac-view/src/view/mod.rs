@@ -30,7 +30,9 @@ use ac_scene::Scene;
 use egui::Ui;
 
 pub use ir::draw_sweep_ir_panel;
-pub use state::{DerotChoice, Focus, LoadedRun, SpectrumViewState, StimState, TransferViewState};
+pub use state::{
+    DerotChoice, Focus, LoadedRun, SlotSettings, SpectrumViewState, StimState, TransferViewState,
+};
 pub use transfer::{LiveTrace, StoredTrace, TargetTrace};
 
 use palette::COLOR_LABEL;

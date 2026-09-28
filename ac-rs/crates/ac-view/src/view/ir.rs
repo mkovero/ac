@@ -16,13 +16,17 @@ use super::palette::{COLOR_LABEL, COLOR_SIGNAL, COLOR_STRUCTURAL, COLOR_VALUE};
 /// contract every other pane in this module tree holds).
 pub(super) fn draw_ir_panel(painter: &Painter, rect: Rect, scene: &ac_scene::IrScene) {
     draw_ir_header(painter, rect, scene.header);
-    // Which view (`Shift+H`), or why it has no trace: verbatim ac-scene,
-    // on the row under the header.
+    // Whose IR (#702) and which view (`Shift+H`), or why it has no trace:
+    // verbatim ac-scene, on the row under the header.
+    let readout = match &scene.label {
+        Some(label) => format!("{label} \u{b7} {}", scene.view_readout),
+        None => scene.view_readout.to_string(),
+    };
     text(
         painter,
         rect.left_top() + egui::vec2(0.0, 16.0),
         Align2::LEFT_TOP,
-        scene.view_readout,
+        &readout,
         COLOR_VALUE,
     );
 

@@ -65,6 +65,10 @@ pub struct AcViewApp {
     /// Built only when the Transfer view is active AND its IR panel is
     /// open (`H`) — the accessory-panel cost should not be paid every
     /// frame just because a sidecar frame arrived.
+    /// Live's display settings at the `Ctrl`+digit press (#702), applied
+    /// to the run when its capture arrives — what the operator was looking
+    /// at when they stored it, not what they changed to while it stored.
+    capture_settings: Option<crate::view::SlotSettings>,
     ir_scene: Option<ac_scene::IrScene>,
 
     // --- stream health, backing the status line's `malformed` state ---
@@ -164,6 +168,7 @@ impl AcViewApp {
             shared_phase_range: None,
             last_scene_ranges: None,
             loaded_scenes: Vec::new(),
+            capture_settings: None,
             ir_scene: None,
             frame_parse_failures: 0,
             first_malformed_since: None,
@@ -390,20 +395,35 @@ impl AcViewApp {
         false
     }
 
-    /// Rebuild `ir_scene` from the selected pair's IR frame if the Transfer view's IR
-    /// panel is open, else clear it — the one place this decision is
-    /// made, called from both the live paint pass and the test helpers
-    /// below so they can't drift apart.
+    /// Rebuild `ir_scene` if the Transfer view's IR panel is open, else
+    /// clear it — the one place this decision is made, called from both the
+    /// live paint pass and the test helpers below so they can't drift apart.
+    ///
+    /// The panel follows focus (#702): a focused slot shows its stored IR,
+    /// live shows the selected pair's sidecar — and nothing while live is
+    /// paused, since pause holds the live trace off the screen.
     fn rebuild_ir_scene(&mut self) {
-        let view = match &self.view {
-            ViewKind::Transfer(t) if t.ir_panel_open() => Some(t.ir_view),
-            _ => None,
+        let ViewKind::Transfer(t) = &self.view else {
+            self.ir_scene = None;
+            return;
         };
-        self.ir_scene = view.and_then(|view| {
-            self.live_selected().ir.as_ref().map(|f| {
+        if !t.ir_panel_open() {
+            self.ir_scene = None;
+            return;
+        }
+        let view = t.ir_view;
+        self.ir_scene = match t.focus {
+            crate::view::Focus::Stored(i) => t.loaded.get(i).and_then(|run| {
+                run.ir.as_ref().map(|ir| {
+                    ac_scene::IrScene::from_input_view(ir, view).labelled(run.label.clone())
+                })
+            }),
+            crate::view::Focus::Live if t.paused => None,
+            crate::view::Focus::Live => self.live_selected().ir.as_ref().map(|f| {
                 ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
-            })
-        });
+                    .labelled("live")
+            }),
+        };
     }
 
     /// Rebuild the active view's scenes from the held frames — the one
@@ -1175,10 +1195,16 @@ impl AcViewApp {
         } else {
             // The selected live pair (#685): the snapshot holds every pair,
             // the slot keeps the one the operator is looking at.
+            let settings = match &self.view {
+                ViewKind::Transfer(t) => t.live_settings(),
+                _ => unreachable!("checked above"),
+            };
+            self.capture_settings = Some(settings);
             self.capture_rx = Some(crate::capture::spawn(
                 self.endpoint.clone(),
                 n,
                 self.selected_pair(),
+                settings,
             ));
             self.capture_slot = Some(n);
             self.set_toast(format!("storing slot {n}\u{2026}"), now, None);
@@ -1210,10 +1236,22 @@ impl AcViewApp {
 
     fn finish_capture(&mut self, result: Result<crate::capture::Captured, String>, now: Instant) {
         match result {
-            Ok(captured) => {
+            Ok(mut captured) => {
                 let n = captured.slot;
                 let path = captured.path.display().to_string();
                 let opened = captured.opened;
+                // A live store is drawn as live was at the key press (#702);
+                // an opened file already carries its saved settings.
+                let settings = self.capture_settings.take();
+                let live_settings = match &self.view {
+                    ViewKind::Transfer(t) => Some(t.live_settings()),
+                    _ => None,
+                };
+                if !opened {
+                    if let Some(s) = settings.or(live_settings) {
+                        s.apply(&mut captured.run);
+                    }
+                }
                 self.with_transfer(|t| {
                     t.store_slot(n, captured.run);
                     // A recalled slot is selected; a live store leaves the
@@ -1229,7 +1267,10 @@ impl AcViewApp {
                 };
                 self.set_toast(format!("slot {n} {verb} {path}"), now, Some(5.0));
             }
-            Err(e) => self.set_toast(format!("storing failed \u{2014} {e}"), now, Some(8.0)),
+            Err(e) => {
+                self.capture_settings = None;
+                self.set_toast(format!("storing failed \u{2014} {e}"), now, Some(8.0))
+            }
         }
     }
 

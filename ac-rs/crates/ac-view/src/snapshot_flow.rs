@@ -136,13 +136,18 @@ pub fn stored_run_from_snapshot(
         .map(|c| c.role.clone())
         .unwrap_or_else(|| format!("meas_{meas_ch}"));
     let derivation = snap.derive_pair(pair_idx, WeightingCurve::Z, None)?;
-    Ok(LoadedRun::new(
+    // The run's IR (#702), here rather than on the UI thread: it is an
+    // IFFT of the whole H1.
+    let ir = ac_scene::IrInput::from_pair_derivation(&derivation, &channel_role, snap.meta.sr);
+    let mut run = LoadedRun::new(
         label,
         snap.meta.captured_at_utc.clone(),
         derivation,
         channel_role,
         snap.meta.sr,
-    ))
+    );
+    run.ir = Some(ir);
+    Ok(run)
 }
 
 /// A stored run's trace as drawn: its derivation, moved by its `←`/`→`
