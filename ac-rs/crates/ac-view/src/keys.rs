@@ -84,6 +84,11 @@ pub enum Action {
     NudgeDelayLater,
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
+    /// `U`: draw the selected trace inverted, or put it back (Smaart's
+    /// Invert, for setting an EQ against a response).
+    ToggleInvert,
+    /// `J`: type a dB offset for the selected trace; `J` applies.
+    TypeOffset,
     TypeDelay,
     /// Show or hide the focused trace (#256). Shift: show every trace.
     ToggleTraceVisible,
@@ -310,6 +315,18 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::TypeDelay,
         scope: Scope::Transfer,
         description: "Type a delay in samples (T again to apply)",
+    },
+    Binding {
+        key: Key::U,
+        action: Action::ToggleInvert,
+        scope: Scope::Transfer,
+        description: "Invert the selected trace (display only)",
+    },
+    Binding {
+        key: Key::J,
+        action: Action::TypeOffset,
+        scope: Scope::Transfer,
+        description: "Type a dB offset for the selected trace (J applies, empty resets)",
     },
     Binding {
         key: Key::H,

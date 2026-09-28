@@ -312,3 +312,83 @@ fn f4_absent_and_null_peaks_are_indistinguishable() {
         meter_height(b.meas_peak_dbfs)
     );
 }
+
+// ─── invert and offset (Smaart's trace controls) ─────────────────────
+
+fn scene_with(inp: &TransferInput, invert: bool, offset_db: f64) -> TransferScene {
+    let mut meters = (MeterState::default(), MeterState::default());
+    TransferScene::from_input(
+        inp,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off).with_invert_offset(invert, offset_db),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    )
+}
+
+/// y of a dB value in this file's range, the inverse of nothing: the
+/// same mapping the scene uses, rebuilt from its documented affine form.
+fn y_of_db(db: f64) -> f64 {
+    (db - DB_RANGE.0) / (DB_RANGE.1 - DB_RANGE.0)
+}
+
+/// Inverting negates magnitude (dB) and phase; the offset adds dB after
+/// it. The caption says so, and nothing else about the scene moves.
+#[test]
+fn invert_and_offset_transform_the_drawn_trace_and_say_so() {
+    let freqs = vec![100.0, 1000.0, 10_000.0];
+    let inp = input(freqs, vec![30.0, -120.0, 170.0], 0.0);
+    let plain = scene_with(&inp, false, 0.0);
+    let flipped = scene_with(&inp, true, 0.0);
+    let moved = scene_with(&inp, true, 3.0);
+
+    let mag_y = |s: &TransferScene| s.magnitude.segments[0][1].1;
+    assert!((mag_y(&plain) - y_of_db(-6.0206)).abs() < 1e-9);
+    assert!((mag_y(&flipped) - y_of_db(6.0206)).abs() < 1e-9);
+    assert!((mag_y(&moved) - y_of_db(9.0206)).abs() < 1e-9);
+
+    for (i, want) in [(0, -30.0), (1, 120.0), (2, -170.0)] {
+        let got = phase_deg_at(&flipped, 0, i);
+        assert!((got - want).abs() < 1e-6, "phase {i}: {got} vs {want}");
+    }
+
+    assert_eq!(plain.invert_offset_readout, None);
+    assert_eq!(flipped.invert_offset_readout.as_deref(), Some("inverted"));
+    assert_eq!(
+        moved.invert_offset_readout.as_deref(),
+        Some("inverted \u{b7} offset +3.0 dB")
+    );
+    assert_eq!(
+        scene_with(&inp, false, -6.0)
+            .invert_offset_readout
+            .as_deref(),
+        Some("offset -6.0 dB")
+    );
+    // Display only: the readouts that describe the measurement stay put.
+    assert_eq!(flipped.delay_readout, plain.delay_readout);
+    assert_eq!(
+        flipped.magnitude.segments.len(),
+        plain.magnitude.segments.len()
+    );
+}
+
+/// The coherence mask gaps an inverted trace exactly where it gaps the
+/// measured one: inverting must not draw a column the mask hides.
+#[test]
+fn an_inverted_trace_keeps_the_measured_trace_gaps() {
+    let mut inp = input(vec![100.0, 1000.0, 10_000.0], vec![0.0; 3], 0.0);
+    inp.coherence = vec![0.9, 0.1, 0.9];
+    let plain = scene_with(&inp, false, 0.0);
+    let flipped = scene_with(&inp, true, 12.0);
+    let lens = |s: &TransferScene| {
+        s.magnitude
+            .segments
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(lens(&flipped), lens(&plain));
+    assert_eq!(lens(&plain), vec![1, 1]);
+}

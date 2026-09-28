@@ -2168,3 +2168,104 @@ fn y_stays_pending_until_new_frames_settle_it() {
         .collect();
     assert_eq!(sent, vec![true, false, true, false]);
 }
+
+// ---- invert and offset (Smaart's trace controls) ----
+
+/// A live store into `slot`, as the capture thread returns it.
+fn captured(slot: u8) -> Result<crate::capture::Captured, String> {
+    Ok(crate::capture::Captured {
+        slot,
+        opened: false,
+        path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+        run: loaded_run(&format!("slot {slot}"), "2026-09-28T00:00:00Z"),
+    })
+}
+
+/// `U` inverts the selected trace only — live here, then a slot — and the
+/// built scene says so.
+#[test]
+fn u_inverts_the_selected_trace_only() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.finish_capture_for_test(captured(1));
+    app.handle_action(Action::ToggleInvert, false);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(
+        app.current_transfer_scene()
+            .unwrap()
+            .invert_offset_readout
+            .as_deref(),
+        Some("inverted")
+    );
+    assert_eq!(app.current_loaded_scenes()[0].invert_offset_readout, None);
+
+    app.handle_action(Action::CycleFocus, false); // slot 1
+    app.handle_action(Action::ToggleInvert, false); // slot inverted
+    app.handle_action(Action::CycleFocus, false); // back to live
+    app.handle_action(Action::ToggleInvert, false); // live back to measured
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(
+        app.current_transfer_scene().unwrap().invert_offset_readout,
+        None
+    );
+    assert_eq!(
+        app.current_loaded_scenes()[0]
+            .invert_offset_readout
+            .as_deref(),
+        Some("inverted")
+    );
+}
+
+/// `J` types an offset for the selected trace; an empty entry resets it,
+/// and a value past ±60 dB applies nothing and says why.
+#[test]
+fn j_applies_resets_and_refuses_an_offset() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    let readout = |app: &AcViewApp| {
+        app.current_transfer_scene()
+            .unwrap()
+            .invert_offset_readout
+            .clone()
+    };
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("-6,5", false, true, false);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(readout(&app).as_deref(), Some("offset -6.5 dB"));
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("75", false, true, false);
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(
+        readout(&app).as_deref(),
+        Some("offset -6.5 dB"),
+        "75 dB applied"
+    );
+    assert!(app.toast_text().is_some_and(|t| t.contains("not applied")));
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("", false, true, false);
+    app.rebuild_scenes(true, 0.3);
+    assert_eq!(readout(&app), None, "an empty entry did not reset");
+    assert!(app.offset_entry.is_none());
+}
+
+/// Storing over a slot keeps its invert and offset, as it keeps its
+/// smoothing: replacing the capture must not quietly change how it is drawn.
+#[test]
+fn a_replaced_slot_keeps_its_invert_and_offset() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(captured(2));
+    app.with_transfer(|t| {
+        t.select_slot(2);
+        t.toggle_invert();
+        t.set_offset(3.0);
+    });
+    app.finish_capture_for_test(captured(2));
+    app.with_transfer(|t| {
+        let run = t.loaded.iter().find(|r| r.slot == Some(2)).unwrap();
+        assert!(run.invert);
+        assert_eq!(run.offset_db, 3.0);
+    });
+}

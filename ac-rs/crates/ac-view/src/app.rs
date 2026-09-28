@@ -88,6 +88,8 @@ pub struct AcViewApp {
     settings: Option<crate::settings::SettingsOverlay>,
     /// The typed-delay entry (`T`, transfer view, #669). `None` = closed.
     delay_entry: Option<crate::delay_entry::DelayEntry>,
+    /// The typed trace-offset entry (`J`). `None` = closed.
+    offset_entry: Option<crate::offset_entry::OffsetEntry>,
     /// A snapshot being taken on its own thread (`S`, #256). One at a time.
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
     /// The slot the running capture is for.
@@ -149,6 +151,7 @@ impl AcViewApp {
             help_open: false,
             settings: None,
             delay_entry: None,
+            offset_entry: None,
             capture_rx: None,
             capture_slot: None,
             file_list: None,
@@ -418,7 +421,8 @@ impl AcViewApp {
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
                 let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
-                    .with_coherence_mask(state.coherence_mask);
+                    .with_coherence_mask(state.coherence_mask)
+                    .with_invert_offset(state.invert, state.offset_db);
                 // Every pair every pass, each through its own meter and
                 // fault state (#685): both carry time between frames.
                 for pair in &mut self.live {
@@ -718,6 +722,8 @@ impl AcViewApp {
                 self.live[i].track_pending = Some((on, self.live[i].frames_in));
                 self.send_delay(serde_json::json!({"track": on}));
             }
+            Action::ToggleInvert => self.with_transfer(|t| t.toggle_invert()),
+            Action::TypeOffset => self.offset_entry = Some(Default::default()),
             Action::ToggleTraceVisible => self.with_transfer(|t| {
                 if shift {
                     t.show_all();
@@ -1084,6 +1090,37 @@ impl AcViewApp {
         }
     }
 
+    /// Route a frame's typed-offset keypresses (`J`): `J` applies to the
+    /// selected trace (an empty entry resets it to 0 dB, a value that does
+    /// not parse or exceeds ±60 dB applies nothing and says so), Esc
+    /// cancels.
+    fn handle_offset_entry_keys(&mut self, chars: &str, backspace: bool, apply: bool, esc: bool) {
+        let Some(entry) = &mut self.offset_entry else {
+            return;
+        };
+        if esc {
+            self.offset_entry = None;
+            return;
+        }
+        chars.chars().for_each(|c| entry.push(c));
+        if backspace {
+            entry.backspace();
+        }
+        if apply {
+            let value = entry.value();
+            let text = entry.text().to_string();
+            self.offset_entry = None;
+            match value {
+                Some(v) => self.with_transfer(|t| t.set_offset(v)),
+                None => self.set_toast(
+                    format!("offset {text:?} not applied \u{2014} a dB value within \u{b1}60"),
+                    Instant::now(),
+                    Some(4.0),
+                ),
+            }
+        }
+    }
+
     /// Route a frame's typed-delay keypresses. `T` applies (an empty entry
     /// cancels); Esc cancels — it only reaches here while the stimulus is
     /// idle, since panic-first owns it otherwise.
@@ -1350,6 +1387,32 @@ impl AcViewApp {
                 ev.esc = i.key_pressed(Key::Escape) || i.key_pressed(Key::G);
             });
             self.handle_settings_keys(ev);
+            return;
+        }
+
+        if self.offset_entry.is_some() {
+            let (chars, backspace, apply, esc) = ctx.input(|i| {
+                let chars: String = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    chars,
+                    i.key_pressed(Key::Backspace),
+                    i.key_pressed(Key::J),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            // `J` arrives as text too; it is the apply key.
+            let chars: String = chars
+                .chars()
+                .filter(|c| !c.eq_ignore_ascii_case(&'j'))
+                .collect();
+            self.handle_offset_entry_keys(&chars, backspace, apply, esc);
             return;
         }
 
@@ -1635,6 +1698,16 @@ impl AcViewApp {
                 });
         }
 
+        if let Some(entry) = &self.offset_entry {
+            egui::Window::new("offset")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("offset (dB):  {}\u{258f}", entry.text()));
+                    ui.separator();
+                    ui.label("digits, -, .   Backspace   J apply (empty: none)   Esc cancel");
+                });
+        }
+
         if let Some(entry) = &self.delay_entry {
             egui::Window::new("delay")
                 .collapsible(false)
@@ -1726,7 +1799,8 @@ fn rebuild_loaded_scenes(
                 run.sr,
                 run.delay_offset_samples,
                 ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
-                    .with_coherence_mask(state.coherence_mask),
+                    .with_coherence_mask(state.coherence_mask)
+                    .with_invert_offset(run.invert, run.offset_db),
                 freq_range,
                 db_range,
             )

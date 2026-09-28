@@ -391,6 +391,18 @@ fn draw_mag_annotations(
         );
         calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
     }
+    // An inverted or offset trace is not what was measured: said in the
+    // value colour, beside the smoothing caption. ac-scene's string.
+    if let Some(label) = &scene.invert_offset_readout {
+        let drawn = painter.text(
+            calibration_pos,
+            Align2::LEFT_TOP,
+            label,
+            FontId::default(),
+            COLOR_VALUE,
+        );
+        calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
+    }
 
     // #466: the session check's verdict on the applied voltage scale, on
     // the same row. The weight comes from `state`, never from the text:
@@ -555,6 +567,7 @@ fn draw_legend(
         for caption in [
             run.scene.estimator_readout.as_deref(),
             run.scene.smoothing_readout,
+            run.scene.invert_offset_readout.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -598,6 +611,7 @@ fn draw_legend(
         for caption in [
             run.scene.estimator_readout.as_deref(),
             run.scene.smoothing_readout,
+            run.scene.invert_offset_readout.as_deref(),
         ]
         .into_iter()
         .flatten()
