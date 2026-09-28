@@ -84,6 +84,14 @@ pub enum Action {
     NudgeDelayLater,
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
+    /// `U`: draw the selected trace inverted, or put it back (Smaart's
+    /// Invert, for setting an EQ against a response).
+    ToggleInvert,
+    /// `J`: type a dB offset for the selected trace; `J` applies.
+    TypeOffset,
+    /// `Z`: list target curves to draw over the magnitude pane (`Z`
+    /// loads the selected one); `Shift+Z` clears it.
+    OpenTargets,
     TypeDelay,
     /// Show or hide the focused trace (#256). Shift: show every trace.
     ToggleTraceVisible,
@@ -97,6 +105,9 @@ pub enum Action {
     /// stored run in a production build — loading one is #256's file
     /// picker, still a stub — but wired and tested now, same pattern
     /// `Action::OpenSnapshot` already documents.
+    /// `Y` (#687): delay tracking on or off for the selected live pair —
+    /// the daemon then follows the arrival as the mic moves.
+    ToggleDelayTracking,
     CycleFocus,
     /// Close the focused stored run (#321). A no-op while focus is on
     /// the live trace.
@@ -234,7 +245,8 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::P,
         action: Action::ToggleRawPhase,
         scope: Scope::Transfer,
-        description: "Toggle raw (measured) phase vs de-rotated",
+        description:
+            "Toggle raw (measured) phase vs de-rotated (Shift: wrapped / unwrapped / group delay)",
     },
     Binding {
         key: Key::R,
@@ -259,6 +271,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::InsertDelay,
         scope: Scope::Transfer,
         description: "Insert found delay (Shift: find again)",
+    },
+    Binding {
+        key: Key::Y,
+        action: Action::ToggleDelayTracking,
+        scope: Scope::Transfer,
+        description: "Delay tracking on/off for the selected live pair",
     },
     Binding {
         key: Key::ArrowLeft,
@@ -303,10 +321,28 @@ pub const BINDINGS: &[Binding] = &[
         description: "Type a delay in samples (T again to apply)",
     },
     Binding {
+        key: Key::U,
+        action: Action::ToggleInvert,
+        scope: Scope::Transfer,
+        description: "Invert the selected trace (display only)",
+    },
+    Binding {
+        key: Key::J,
+        action: Action::TypeOffset,
+        scope: Scope::Transfer,
+        description: "Type a dB offset for the selected trace (J applies, empty resets)",
+    },
+    Binding {
+        key: Key::Z,
+        action: Action::OpenTargets,
+        scope: Scope::Transfer,
+        description: "Target curves: list, Z loads (Shift: clear)",
+    },
+    Binding {
         key: Key::H,
         action: Action::ToggleIrPanel,
         scope: Scope::Transfer,
-        description: "Toggle IR panel — h(t), live arrival",
+        description: "Toggle IR panel — h(t), live arrival (Shift: linear / log / ETC)",
     },
     Binding {
         key: Key::Tab,

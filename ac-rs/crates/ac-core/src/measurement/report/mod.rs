@@ -164,7 +164,12 @@ pub use provenance::{
 ///   and a refused `interface_latency.session_check` no longer withholds
 ///   the flight time. Absent on v1-v11 reports, whose re-derived flight
 ///   time is withheld as predating v12.
-pub const SCHEMA_VERSION: u32 = 12;
+/// - v13: optional top-level `room_acoustics: RoomAcoustics` on `plot_ir`
+///   reports — ISO 3382-1 T20, T30, EDT, C50, C80, D50 per octave band
+///   from the IR with its tail
+///   ([`crate::measurement::room_acoustics`]). Absent on v1-v12 reports
+///   and on producers that are not `plot_ir`.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /
 /// [`MeasurementReport::from_value`] still read (#429). Everything from
@@ -272,6 +277,11 @@ pub struct MeasurementReport {
     /// before v12 and on producers that are not `plot_ir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_pair_offset: Option<InterPairOffset>,
+    /// ISO 3382-1 room acoustic parameters of a `plot_ir` capture (schema
+    /// v13). `None` on older reports, on other producers, and when the
+    /// capture could not yield them (the reason is in `notes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_acoustics: Option<crate::measurement::room_acoustics::RoomAcoustics>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -432,7 +442,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 12"));
+        assert!(json.contains("\"schema_version\": 13"));
     }
 
     #[test]
@@ -456,7 +466,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 12"));
+            assert!(json.contains("\"schema_version\": 13"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

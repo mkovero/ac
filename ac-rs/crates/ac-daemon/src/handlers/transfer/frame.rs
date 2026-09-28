@@ -173,6 +173,7 @@ pub(super) fn settling_frame(
         delay_attempts: st.attempts,
         delay_residual: None,
         delay_operator: st.delay.is_some_and(|l| l.operator),
+        delay_tracking: st.tracking,
         meas_peak_dbfs: meas_peak,
         ref_peak_dbfs: ref_peak,
         ref_channel: ctx.ref_ch.into(),
@@ -281,11 +282,11 @@ pub(super) fn build_pair_messages(
         mc_enabled,
     );
 
-    // Multi-time-window columns (additive; `null` until every rung holds a
-    // full N blocks — 2.56 s at the bottom, the design's stated settling
-    // time. Gating on the full N is what makes the reported N
-    // unambiguous: every column is the mean of the same number of
-    // blocks). Unlike the Welch arrays above, these are recomputed every
+    // Multi-time-window columns (additive; `null` until the top rung holds
+    // its full block count, deeper rungs joining as they fill — 2.43 s at
+    // the bottom. Gating each rung on its full count is what makes the
+    // reported n unambiguous: every column of a rung is the mean of that
+    // rung's fixed number of blocks, 4 / 6 / 12 at N = 4). Unlike the Welch arrays above, these are recomputed every
     // tick: the ladder is a push pipeline fed the fresh capture buffers,
     // so its columns really do move at the frame rate.
     //
@@ -330,6 +331,7 @@ pub(super) fn build_pair_messages(
         delay_attempts: st.attempts,
         delay_residual: a.ir_peak_lag,
         delay_operator: st.delay.is_some_and(|l| l.operator),
+        delay_tracking: st.tracking,
         meas_peak_dbfs: meas_peak,
         ref_peak_dbfs: ref_peak,
         ref_channel: ref_ch.into(),
@@ -365,6 +367,8 @@ pub(super) fn build_pair_messages(
         cmd: "transfer_stream".to_string(),
         wire_version: None,
         samples: ir.samples.clone(),
+        log_db: ir.log_db.clone(),
+        etc_db: ir.etc_db.clone(),
         sr,
         stride: ir.stride,
         dt_ms: ir.dt_ms,

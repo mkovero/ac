@@ -145,6 +145,10 @@ pub struct MtwColumns {
     pub bins: Vec<usize>,
     #[serde(default)]
     pub ppo: f64,
+    /// The session's base block count `N`. Stage 0 averages `N` blocks; the
+    /// deeper stages, which overlap more, average a fixed multiple of it
+    /// (`ladder::STAGE_BLOCKS`: 4 / 6 / 12 at `N = 4`). A column's own count
+    /// is [`Self::n`].
     #[serde(default)]
     pub n_blocks: usize,
     /// Which rungs have settled, shallowest first. Distinguishes "still
@@ -287,6 +291,11 @@ pub struct TransferFrame {
     /// operator-set delay is never replaced by the daemon.
     #[serde(default)]
     pub delay_operator: bool,
+    /// Delay tracking is on for this pair (#687): the daemon moves
+    /// [`Self::delay_samples`] by the residual once two analysis windows
+    /// that share no samples agree on it. `false` on a daemon predating it.
+    #[serde(default)]
+    pub delay_tracking: bool,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's
@@ -323,8 +332,10 @@ pub struct TransferFrame {
     pub backend: String,
 
     // ---- three-stage transfer columns — the display's source ----
-    /// `None` until every ladder rung holds a full N blocks (2.56 s at the
-    /// bottom rung), and on any daemon predating the ladder.
+    /// `None` until the top rung holds its full block count (0.11 s at
+    /// 96 kHz), and on any daemon predating the ladder. Deeper rungs join as
+    /// they fill (the bottom at 2.43 s); [`MtwColumns::settled_stages`] says
+    /// which have, so a present value is not a settled ladder.
     ///
     /// Absent is **not** a reason to fall back to the Welch arrays above: the
     /// two are different measurements, and silently swapping between them
@@ -372,6 +383,16 @@ pub struct IrFrame {
     /// (stride-picked, not interpolated).
     #[serde(default)]
     pub samples: Vec<f32>,
+    /// `20·log10|h|`, dB re its peak, one per [`Self::samples`] entry: the
+    /// maximum over the stride bucket centred on that entry of the full-resolution
+    /// curve (`ac_core::visualize::ir_views`). Empty from a daemon that
+    /// predates it.
+    #[serde(default)]
+    pub log_db: Vec<f32>,
+    /// The ETC (envelope of the analytic IR), dB re its peak, bucketed like
+    /// [`Self::log_db`].
+    #[serde(default)]
+    pub etc_db: Vec<f32>,
     pub sr: u32,
     /// Downsample factor (`ir_full.len() / samples.len()`).
     #[serde(default)]

@@ -568,6 +568,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            room_acoustics: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -911,6 +912,7 @@ fn emit_spectrum_bands(
         reference_latency: None,
         reference_stored_latency: None,
         inter_pair_offset: None,
+        room_acoustics: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -1438,11 +1440,41 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // the tail past the linear-IR peak is exactly what the criterion
         // asks about and `extract_irs` below discards everything outside
         // `window_len`.
+        let mut room_note: Option<String> = None;
         let decay_note = match check_tail_decay(&full, &params, tail_s) {
             Ok(check) => check.note(),
             Err(e) => format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
         };
+
+        // ISO 3382-1 room acoustic parameters, from the linear IR and its
+        // captured tail, starting 10 ms before the linear peak so the direct
+        // sound is whole. The span ends one sweep duration past the peak at
+        // most (`noise_tail_start_s`): beyond it the linear deconvolution
+        // leaves only noise convolved with the reversed sweep, a floor that
+        // decays and loses its highs (ISO 18233 §B.5). Read as background,
+        // it put the high bands' truncation late on the rig.
+        let room_acoustics = {
+            let centre = params.n_samples().saturating_sub(1);
+            let pre = (0.010 * sr as f64) as usize;
+            let flat_noise = (noise_tail_start_s(&params) * sr as f64) as usize;
+            let tail_len = ((tail_s * sr as f64).round() as usize)
+                .min(flat_noise)
+                .min(full.len().saturating_sub(centre));
+            let from = centre.saturating_sub(pre);
+            let span = &full[from..(centre + tail_len).min(full.len())];
+            match ac_core::measurement::room_acoustics::room_acoustics(span, sr, f1_hz, f2_hz) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    room_note = Some(format!(
+                        "ISO 3382-1 room acoustic parameters not computed: {e} \
+                         (tail_s {tail_s:.2} s \u{2014} a longer tail_s gives the decay room)"
+                    ));
+                    None
+                }
+            }
+        };
         let mut notes = vec![decay_note];
+        notes.extend(room_note);
 
         let irs = match extract_irs(&full, &params, n_harmonics.max(1), window_len) {
             Ok(r) => r,
@@ -1680,6 +1712,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             reference_latency,
             reference_stored_latency,
             inter_pair_offset,
+            room_acoustics,
             data: vec![
                 MeasurementPayload {
                     data,

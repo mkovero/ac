@@ -44,6 +44,13 @@ pub struct LiveTrace<'a> {
     pub selected: bool,
 }
 
+/// The loaded target curve, as `ac-scene` built it: its trace on the
+/// magnitude pane and its caption.
+pub struct TargetTrace {
+    pub trace: ac_scene::Trace,
+    pub caption: String,
+}
+
 pub struct StoredTrace<'a> {
     /// Attribution (acceptance criterion 1) — the file's own name.
     pub label: &'a str,
@@ -114,6 +121,7 @@ pub(super) fn draw_transfer(
     live: &[LiveTrace<'_>],
     stored: &[StoredTrace<'_>],
     ir: Option<&ac_scene::IrScene>,
+    target: Option<&TargetTrace>,
 ) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
@@ -188,6 +196,24 @@ pub(super) fn draw_transfer(
 
     draw_axes(painter, &layout, scene, stored);
     let shown: &[LiveTrace<'_>] = if state.live_trace_shown() { live } else { &[] };
+    // The target first, under the traces it is compared with: dashed, in
+    // the value colour, magnitude pane only — it has no phase.
+    if let Some(target) = target {
+        draw_trace(
+            painter,
+            &target.trace,
+            layout.mag,
+            Stroke::new(TRACE_WIDTH, COLOR_VALUE),
+            true,
+        );
+        text(
+            painter,
+            egui::pos2(layout.mag.x + 4.0, layout.mag.y + layout.mag.height - 4.0),
+            Align2::LEFT_BOTTOM,
+            &target.caption,
+            COLOR_VALUE,
+        );
+    }
     draw_traces(painter, &layout, shown, stored);
     draw_mag_annotations(painter, &layout, scene);
     draw_delay_readout(painter, &layout, state, scene, stored);
@@ -224,6 +250,22 @@ pub(super) fn draw_transfer(
     // no input-level reading without a live frame.
     if let Some(scene) = scene {
         draw_input_meters(painter, content, scene);
+    }
+
+    // The phase pane's view when it is not the wrapped one (#695) —
+    // unwrapped phase and group delay follow the phase reference and a
+    // mask gap, which the caption says. ac-scene's string.
+    if let Some(label) = scene
+        .or_else(|| stored.first().map(|r| r.scene))
+        .and_then(|s| s.phase_view_readout)
+    {
+        text(
+            painter,
+            egui::pos2(layout.phase.x + 4.0, layout.phase.y + 2.0),
+            Align2::LEFT_TOP,
+            label,
+            COLOR_VALUE,
+        );
     }
 
     // Last, so the fault indicator is over the traces rather than under
@@ -391,6 +433,18 @@ fn draw_mag_annotations(
         );
         calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
     }
+    // An inverted or offset trace is not what was measured: said in the
+    // value colour, beside the smoothing caption. ac-scene's string.
+    if let Some(label) = &scene.invert_offset_readout {
+        let drawn = painter.text(
+            calibration_pos,
+            Align2::LEFT_TOP,
+            label,
+            FontId::default(),
+            COLOR_VALUE,
+        );
+        calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
+    }
 
     // #466: the session check's verdict on the applied voltage scale, on
     // the same row. The weight comes from `state`, never from the text:
@@ -555,6 +609,7 @@ fn draw_legend(
         for caption in [
             run.scene.estimator_readout.as_deref(),
             run.scene.smoothing_readout,
+            run.scene.invert_offset_readout.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -598,6 +653,7 @@ fn draw_legend(
         for caption in [
             run.scene.estimator_readout.as_deref(),
             run.scene.smoothing_readout,
+            run.scene.invert_offset_readout.as_deref(),
         ]
         .into_iter()
         .flatten()

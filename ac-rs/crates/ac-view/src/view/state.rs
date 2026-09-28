@@ -118,6 +118,10 @@ pub struct LoadedRun {
     /// non-persistence reasoning as the live view's `smoothing` field:
     /// every load opens at the honest, unsmoothed default.
     pub smoothing: ac_scene::Smoothing,
+    /// Drawn inverted (`U`) and offset in dB (`J`) — this run's own, like
+    /// its smoothing. Display only.
+    pub invert: bool,
+    pub offset_db: f64,
     /// Drawn or hidden (#256, `V`). Hidden runs keep their legend row, so
     /// nothing leaves the comparison without the operator removing it.
     pub visible: bool,
@@ -148,6 +152,8 @@ impl LoadedRun {
             channel_role,
             sr,
             smoothing: ac_scene::Smoothing::Off,
+            invert: false,
+            offset_db: 0.0,
             visible: true,
             color_slot: 0,
             slot: None,
@@ -191,11 +197,21 @@ pub struct TransferViewState {
     /// default. The cost is one keypress, on a control the operator changes
     /// while looking at the screen anyway.
     pub smoothing: ac_scene::Smoothing,
+    /// The live traces drawn inverted (`U`) and offset (`J`), shared by
+    /// every live pair like `smoothing`. Not persisted, for the same
+    /// reason: every session opens showing what it measures.
+    pub invert: bool,
+    pub offset_db: f64,
     /// IR panel visibility (#286), toggled by `H`. Off by default — the
     /// mag/phase panes are the resting state of the transfer view; the
     /// panel is an on-demand accessory, not a third pane always fighting
     /// the other two for the same screen.
     ir_panel_open: bool,
+    /// Which view the IR panel draws: linear, log or ETC (`Shift+H`).
+    pub ir_view: ac_scene::IrView,
+    /// What the phase pane shows (#695), for every trace: wrapped phase,
+    /// unwrapped phase or group delay (`Shift+P`).
+    pub phase_view: ac_scene::transfer::PhaseView,
     /// Stored runs loaded for comparison (#321), in load order. Unbounded
     /// on purpose — triage and the architect both left the comparison-set
     /// size open as a later UX-driven constraint, not an architectural one.
@@ -245,7 +261,11 @@ impl TransferViewState {
             stimulus: crate::stimulus::StimulusMachine::new(drive_max_dbfs, start_level_dbfs),
             snapshot_delay_ms: 0.0,
             smoothing: ac_scene::Smoothing::Off,
+            invert: false,
+            offset_db: 0.0,
             ir_panel_open: false,
+            ir_view: ac_scene::IrView::Linear,
+            phase_view: ac_scene::transfer::PhaseView::Wrapped,
             loaded: Vec::new(),
             focus: Focus::Live,
             live_count: 1,
@@ -295,6 +315,8 @@ impl TransferViewState {
         if let Some(existing) = self.loaded.iter_mut().find(|r| r.slot == Some(n)) {
             run.visible = existing.visible;
             run.smoothing = existing.smoothing;
+            run.invert = existing.invert;
+            run.offset_db = existing.offset_db;
             *existing = run;
             return;
         }
@@ -394,6 +416,30 @@ impl TransferViewState {
             Focus::Stored(idx) => {
                 if let Some(run) = self.loaded.get_mut(idx) {
                     run.smoothing = run.smoothing.next();
+                }
+            }
+        }
+    }
+
+    /// `U`: invert the focused trace, or put it back.
+    pub fn toggle_invert(&mut self) {
+        match self.focus {
+            Focus::Live => self.invert = !self.invert,
+            Focus::Stored(idx) => {
+                if let Some(run) = self.loaded.get_mut(idx) {
+                    run.invert = !run.invert;
+                }
+            }
+        }
+    }
+
+    /// `J` applied: the focused trace's offset, dB.
+    pub fn set_offset(&mut self, offset_db: f64) {
+        match self.focus {
+            Focus::Live => self.offset_db = offset_db,
+            Focus::Stored(idx) => {
+                if let Some(run) = self.loaded.get_mut(idx) {
+                    run.offset_db = offset_db;
                 }
             }
         }
@@ -506,6 +552,16 @@ impl TransferViewState {
     }
 
     /// `H`: toggle the IR panel.
+    /// `Shift+H`: the next IR view, opening the panel if it is closed —
+    /// the key is only ever pressed to look at a view.
+    pub fn cycle_ir_view(&mut self) {
+        if self.ir_panel_open {
+            self.ir_view = self.ir_view.next();
+        } else {
+            self.ir_panel_open = true;
+        }
+    }
+
     pub fn toggle_ir_panel(&mut self) {
         self.ir_panel_open = !self.ir_panel_open;
     }

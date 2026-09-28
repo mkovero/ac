@@ -199,6 +199,108 @@ pub struct DisplayModes {
     /// Columns below this coherence are not drawn (#670). Display policy
     /// only — the fault indicator keeps [`COHERENCE_THRESHOLD`].
     pub coherence_mask: f64,
+    /// Draw the trace inverted (Smaart's Invert, for setting an EQ against
+    /// a response): magnitude and phase negated. Display only.
+    pub invert: bool,
+    /// dB added to the drawn magnitude (Smaart's trace offset), after the
+    /// inversion. Display only.
+    pub offset_db: f64,
+    /// What the phase pane shows (#695): wrapped phase, unwrapped phase,
+    /// or group delay.
+    pub phase_view: PhaseView,
+    /// A fixed range for the unwrapped / group-delay pane, so traces drawn
+    /// together share one scale. `None` fits the range to this trace.
+    pub phase_range: Option<(f64, f64)>,
+}
+
+/// The phase pane's view (#695, Smaart's phase / unwrapped / group
+/// delay), cycled by `Shift+P`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseView {
+    /// Degrees in (−180, +180], the fixed ±180° pane.
+    #[default]
+    Wrapped,
+    /// Degrees unwrapped along each unmasked run, on an axis fitted to the
+    /// data.
+    Unwrapped,
+    /// `−dφ/df / 360`, ms, on an axis fitted to the data.
+    GroupDelay,
+}
+
+impl PhaseView {
+    pub fn next(self) -> PhaseView {
+        match self {
+            PhaseView::Wrapped => PhaseView::Unwrapped,
+            PhaseView::Unwrapped => PhaseView::GroupDelay,
+            PhaseView::GroupDelay => PhaseView::Wrapped,
+        }
+    }
+
+    /// The caption the pane carries: `None` for the resting wrapped view.
+    /// Both others follow the phase reference (the de-rotation), and a gap
+    /// in the mask restarts the unwrapping, so they say so.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            PhaseView::Wrapped => None,
+            PhaseView::Unwrapped => {
+                Some("phase unwrapped \u{b7} each unmasked run from its own start")
+            }
+            PhaseView::GroupDelay => Some("group delay \u{b7} relative to the phase reference"),
+        }
+    }
+}
+
+/// The share of drawn values the unwrapped and group-delay axes cover, from
+/// each end: 2 % either side, so one noisy spike does not flatten the
+/// curve. What falls outside runs off the pane, which is honest.
+const PHASE_VIEW_RANGE_TRIM: f64 = 0.02;
+
+/// Unwrap `deg` in place: add or remove 360 wherever a step exceeds 180.
+fn unwrap_deg(deg: &mut [f64]) {
+    let mut offset = 0.0;
+    for i in 1..deg.len() {
+        let prev = deg[i - 1];
+        let mut cur = deg[i] + offset;
+        while cur - prev > 180.0 {
+            cur -= 360.0;
+            offset -= 360.0;
+        }
+        while cur - prev <= -180.0 {
+            cur += 360.0;
+            offset += 360.0;
+        }
+        deg[i] = cur;
+    }
+}
+
+/// Group delay, ms, of unwrapped `deg` over `freqs`: `−dφ/df / 360`.
+/// Inside the run the slope is the three-point derivative for **uneven**
+/// spacing (the ladder grid is not uniform): the secant between the two
+/// neighbours is the slope at their midpoint, not at the column (Codex
+/// review). One-sided at the run's ends. A run of one point has no slope.
+fn group_delay_ms(freqs: &[f64], deg: &[f64]) -> Vec<f64> {
+    let n = deg.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let slope = |i: usize| -> f64 {
+        if i == 0 || i == n - 1 {
+            let (a, b) = if i == 0 { (0, 1) } else { (n - 2, n - 1) };
+            let df = freqs[b] - freqs[a];
+            return if df > 0.0 {
+                (deg[b] - deg[a]) / df
+            } else {
+                f64::NAN
+            };
+        }
+        let (h1, h2) = (freqs[i] - freqs[i - 1], freqs[i + 1] - freqs[i]);
+        if !(h1 > 0.0 && h2 > 0.0) {
+            return f64::NAN;
+        }
+        (h1 * h1 * deg[i + 1] - h2 * h2 * deg[i - 1] + (h2 * h2 - h1 * h1) * deg[i])
+            / (h1 * h2 * (h1 + h2))
+    };
+    (0..n).map(|i| -slope(i) / 360.0 * 1000.0).collect()
 }
 
 impl DisplayModes {
@@ -209,6 +311,10 @@ impl DisplayModes {
             derot,
             smoothing,
             coherence_mask: COHERENCE_THRESHOLD,
+            invert: false,
+            offset_db: 0.0,
+            phase_view: PhaseView::Wrapped,
+            phase_range: None,
         }
     }
 }
@@ -225,6 +331,41 @@ impl DisplayModes {
     pub fn with_coherence_mask(self, coherence_mask: f64) -> DisplayModes {
         DisplayModes {
             coherence_mask,
+            ..self
+        }
+    }
+
+    /// The same modes, drawn inverted and/or offset.
+    pub fn with_invert_offset(self, invert: bool, offset_db: f64) -> DisplayModes {
+        DisplayModes {
+            invert,
+            offset_db,
+            ..self
+        }
+    }
+
+    /// `"inverted · +3.0 dB"`, `"inverted"`, `"-6.0 dB"`, or `None` for an
+    /// unaltered trace — said on screen, so a moved or flipped curve is
+    /// never read as measured.
+    pub fn invert_offset_readout(&self) -> Option<String> {
+        let offset = (self.offset_db != 0.0).then(|| format!("{:+.1} dB", self.offset_db));
+        match (self.invert, offset) {
+            (false, None) => None,
+            (true, None) => Some("inverted".to_string()),
+            (false, Some(o)) => Some(format!("offset {o}")),
+            (true, Some(o)) => Some(format!("inverted \u{b7} offset {o}")),
+        }
+    }
+    /// The same modes with a different phase-pane view (#695).
+    pub fn with_phase_view(self, phase_view: PhaseView) -> DisplayModes {
+        DisplayModes { phase_view, ..self }
+    }
+
+    /// The same modes with the unwrapped / group-delay pane held to
+    /// `range`, shared by every trace drawn together.
+    pub fn with_phase_range(self, range: (f64, f64)) -> DisplayModes {
+        DisplayModes {
+            phase_range: Some(range),
             ..self
         }
     }
@@ -283,6 +424,9 @@ pub struct DelayControl {
     pub residual: Option<i64>,
     /// Whether [`Self::samples`] was set by the operator (`delay_operator`).
     pub operator: bool,
+    /// Delay tracking is on (`delay_tracking`, #687): the daemon moves
+    /// [`Self::samples`] by the residual once independent windows agree.
+    pub tracking: bool,
 }
 
 impl DelayControl {
@@ -291,6 +435,7 @@ impl DelayControl {
             samples: frame.delay_samples,
             residual: frame.delay_residual,
             operator: frame.delay_operator,
+            tracking: frame.delay_tracking,
         })
     }
 
@@ -300,9 +445,16 @@ impl DelayControl {
     }
 
     /// `"set · find +12 smp (+0.25 ms)"` — where the delay came from, and
-    /// what Find reads against it right now.
+    /// what Find reads against it right now. `tracking` replaces the source
+    /// while tracking is on (#687): the delay is then the daemon's to move.
     pub fn readout(&self, sr: u32) -> String {
-        let source = if self.operator { "set" } else { "found" };
+        let source = if self.tracking {
+            "tracking"
+        } else if self.operator {
+            "set"
+        } else {
+            "found"
+        };
         match self.residual {
             Some(r) if sr > 0 => {
                 let ms = r as f64 * 1000.0 / sr as f64;
@@ -326,16 +478,16 @@ pub struct BandLabel {
     /// span, mapped by [`freq_to_x`], the same mapping the traces and the
     /// frequency ticks use.
     pub position: f64,
-    /// `"0.98 Hz / 2.56 s"` — this band's bin width and settling time.
+    /// `"0.98 Hz / 2.43 s"` — this band's bin width and settling time.
     pub text: String,
 }
 
 /// `"{Δf} Hz / {settling} s"`, both figures to [`band_figure`]'s precision.
 ///
-/// The settling figure is the ladder's own `W + hop·(N−1)` (the wire's
+/// The settling figure is the ladder's own `W + hop·(blocks−1)` (the wire's
 /// `settling_s`), **not** the raw analysis window: at the bottom rung the
-/// window is 1.02 s while the average does not fill for 2.56 s, so a
-/// window-derived label would understate the wait by 2.5x — which is the
+/// window is 1.02 s while the average does not fill for 2.43 s, so a
+/// window-derived label would understate the wait by 2.4x — which is the
 /// one number an operator acts on after an EQ change.
 pub fn format_band_label(df_hz: f64, settling_s: f64) -> String {
     format!("{} Hz / {} s", band_figure(df_hz), band_figure(settling_s))
@@ -345,7 +497,7 @@ pub fn format_band_label(df_hz: f64, settling_s: f64) -> String {
 ///
 /// Fixed by the ratified label set rather than by a significant-figure
 /// rule: `0.98`, `2.56`, `2.93`, `0.85`, `23.4`, `0.11` are the strings the
-/// UX review drew, and a plain 2- or 3-significant-figure rule reproduces
+/// UX review drew (the settling figures are 2.43 and 0.77 since #699), and a plain 2- or 3-significant-figure rule reproduces
 /// neither the `23.4` nor the `0.98` end of that list. Both quantities are
 /// context for reading the curve, not readings themselves, so the display
 /// precision is capped here — the underlying `f64`s are untouched.
@@ -516,6 +668,13 @@ pub struct TransferScene {
     /// Degrees gridlines for the phase pane — `{+180, +90, 0, −90}`, with
     /// no −180 line (matches the trace's `(−180, +180]` wrap boundary).
     pub phase_axis: crate::ticks::Axis,
+    /// [`PhaseView::label`]: which view the phase pane is (#695).
+    pub phase_view_readout: Option<&'static str>,
+    /// The span of this trace's drawn values in the unwrapped / group-delay
+    /// view (2–98 %), before rounding to the axis: what a caller unions
+    /// across traces for [`DisplayModes::with_phase_range`]. `None` in the
+    /// wrapped view or with nothing drawn.
+    pub phase_span: Option<(f64, f64)>,
     /// `"2.50 ms"` — τ_sess, milliseconds only (#391).
     pub delay_readout: String,
     /// [`DelayControl::readout`] on a live frame with a delay; `None`
@@ -526,6 +685,8 @@ pub struct TransferScene {
     pub delay_samples: Option<i64>,
     /// What "Insert" sends ([`DelayControl::insert_samples`]).
     pub delay_insert_samples: Option<i64>,
+    /// Delay tracking is on for this pair (#687), held delay or not.
+    pub delay_tracking: bool,
     /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
     /// (#229).
     ///
@@ -537,6 +698,9 @@ pub struct TransferScene {
     /// resolution: those say what the analyser resolved, this says what is on
     /// screen, and this one is authoritative for the drawn trace.
     pub smoothing_readout: Option<&'static str>,
+    /// [`DisplayModes::invert_offset_readout`]: the drawn trace is inverted
+    /// or offset, not as measured.
+    pub invert_offset_readout: Option<String>,
     /// `"coherence mask 0.70"` when the display mask is not the default
     /// (#670); `None` at the default.
     pub coherence_mask_readout: Option<String>,
@@ -680,6 +844,10 @@ pub struct TransferInput {
     pub delay_locked: Option<bool>,
     /// The operator's delay control (#669); `None` off the live path.
     pub delay_control: Option<DelayControl>,
+    /// Delay tracking is on for this pair (#687), whether or not it holds
+    /// a delay yet — a pair switched on while silent must still read as on
+    /// (Codex review: `Y` would otherwise send `track: true` again).
+    pub delay_tracking: bool,
     /// This pair's channel numbers — distinct from [`Self::channel_role`],
     /// which is a display label, not a wire identity.
     pub meas_channel: i64,
@@ -820,7 +988,7 @@ impl TransferInput {
         // re-segmentation, uniform density with interpolation below 69 Hz),
         // and falling back to them when the ladder is not yet warm would
         // change the display's resolution and settling mid-session without
-        // saying so. No trace is the honest state for the ~2.56 s the bottom
+        // saying so. No trace is the honest state for the ~2.43 s the bottom
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
         //
@@ -845,6 +1013,7 @@ impl TransferInput {
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
             delay_control: DelayControl::from_wire_frame(frame),
+            delay_tracking: frame.delay_tracking,
             meas_channel: frame.meas_channel,
             ref_channel: frame.ref_channel,
             meas_peak_dbfs: frame.meas_peak_dbfs,
@@ -929,6 +1098,7 @@ impl TransferInput {
             delay_ms: f64::NAN,
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             meas_channel: -1,
             ref_channel: -1,
             meas_peak_dbfs: None,
@@ -1045,6 +1215,7 @@ impl TransferInput {
             // claim about whether it was a measured lock.
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             // `PairDerivation` carries no wire channel identity — a
             // `channel_role` label is all the caller has (see above). `-1`
             // is never a real channel number.
@@ -1116,6 +1287,8 @@ impl TransferScene {
             && input.freqs.len() == input.phase_deg.len()
             && input.freqs.len() == input.coherence.len();
 
+        let mut phase_axis = crate::ticks::phase_axis();
+        let mut phase_span = None;
         let (mag_segments, phase_segments) = if lengths_agree {
             // De-rotate first, then smooth. The two orders do not commute,
             // and this one is right for a reason, not by accident:
@@ -1157,6 +1330,19 @@ impl TransferScene {
                 }
             };
 
+            // Invert and offset last (Smaart's trace controls): a display
+            // transform of the finished curve, so smoothing and masking are
+            // exactly what they are for the measured one.
+            let sign = if modes.invert { -1.0 } else { 1.0 };
+            let magnitude_db: Vec<f64> = magnitude_db
+                .iter()
+                .map(|m| sign * m + modes.offset_db)
+                .collect();
+            let phase_deg: Vec<f64> = if modes.invert {
+                phase_deg.iter().map(|p| wrap_deg(-p)).collect()
+            } else {
+                phase_deg
+            };
             let mag_points = |i: usize| {
                 // db_to_y is the crate's one dB→y mapping — do not
                 // re-implement it, and do not clamp: an over-range
@@ -1177,9 +1363,94 @@ impl TransferScene {
                 // (the AC3 shared-mapping law, extended to the phase pane).
                 (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
+            let phase_segments = match modes.phase_view {
+                PhaseView::Wrapped => {
+                    split_on_mask(&input.coherence, modes.coherence_mask, phase_points)
+                }
+                view => {
+                    // Per unmasked run: the jump across a masked gap is not
+                    // knowable, so each run unwraps from its own start.
+                    let index_runs =
+                        split_on_mask(&input.coherence, modes.coherence_mask, |i| (i as f64, 0.0));
+                    let runs: Vec<(Vec<usize>, Vec<f64>)> = index_runs
+                        .iter()
+                        .map(|run| {
+                            let idx: Vec<usize> = run.iter().map(|p| p.0 as usize).collect();
+                            let mut deg: Vec<f64> = idx.iter().map(|&i| phase_deg[i]).collect();
+                            unwrap_deg(&mut deg);
+                            let values = if view == PhaseView::GroupDelay {
+                                let f: Vec<f64> = idx.iter().map(|&i| input.freqs[i]).collect();
+                                group_delay_ms(&f, &deg)
+                            } else {
+                                deg
+                            };
+                            (idx, values)
+                        })
+                        .collect();
+                    // Only what is on screen sets the scale: a column outside
+                    // the frequency view would compress the part being
+                    // looked at (Codex review).
+                    // A column counts when it is in view, or when the
+                    // segment from it to its run neighbour crosses a view
+                    // edge — a segment can cross the whole view with
+                    // neither end inside (Codex recheck).
+                    let in_view = |f: f64| (f_min..=f_max).contains(&f);
+                    let mut all: Vec<f64> = Vec::new();
+                    for (idx, v) in &runs {
+                        for k in 0..idx.len() {
+                            let f = input.freqs[idx[k]];
+                            let crosses_next = idx
+                                .get(k + 1)
+                                .is_some_and(|&j| f < f_min && input.freqs[j] >= f_min);
+                            let crosses_prev =
+                                k > 0 && f > f_max && input.freqs[idx[k - 1]] <= f_max;
+                            if v[k].is_finite() && (in_view(f) || crosses_next || crosses_prev) {
+                                all.push(v[k]);
+                            }
+                        }
+                    }
+                    all.sort_by(f64::total_cmp);
+                    let pick = |q: f64| {
+                        all.get(((all.len() as f64 - 1.0) * q).round() as usize)
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    let unit = if view == PhaseView::GroupDelay {
+                        "ms"
+                    } else {
+                        "\u{b0}"
+                    };
+                    let span = (
+                        pick(PHASE_VIEW_RANGE_TRIM),
+                        pick(1.0 - PHASE_VIEW_RANGE_TRIM),
+                    );
+                    if span.0.is_finite() && span.1.is_finite() {
+                        phase_span = Some(span);
+                    }
+                    let (lo_in, hi_in) = modes.phase_range.unwrap_or(span);
+                    let (axis, (lo, hi)) = crate::ticks::linear_axis(lo_in, hi_in, unit);
+                    phase_axis = axis;
+                    runs.into_iter()
+                        .filter(|(idx, _)| !idx.is_empty())
+                        .map(|(idx, values)| {
+                            idx.iter()
+                                .zip(values)
+                                .filter(|(_, v)| v.is_finite())
+                                .map(|(&i, v)| {
+                                    (
+                                        freq_to_x(input.freqs[i], f_min, f_max),
+                                        crate::ticks::linear_to_y(v, lo, hi),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|seg| !seg.is_empty())
+                        .collect()
+                }
+            };
             (
                 split_on_mask(&input.coherence, modes.coherence_mask, mag_points),
-                split_on_mask(&input.coherence, modes.coherence_mask, phase_points),
+                phase_segments,
             )
         } else {
             (Vec::new(), Vec::new())
@@ -1198,12 +1469,16 @@ impl TransferScene {
             },
             freq_axis: crate::ticks::freq_axis(f_min, f_max),
             mag_axis: crate::ticks::db_axis(db_min, db_max),
-            phase_axis: crate::ticks::phase_axis(),
+            phase_axis,
+            phase_view_readout: modes.phase_view.label(),
+            phase_span,
             delay_readout: delay.delay_readout,
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
             delay_samples: input.delay_control.map(|c| c.samples),
             delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
+            delay_tracking: input.delay_tracking,
             smoothing_readout: modes.smoothing.label(),
+            invert_offset_readout: modes.invert_offset_readout(),
             coherence_mask_readout: (modes.coherence_mask != COHERENCE_THRESHOLD)
                 .then(|| format!("coherence mask {:.2}", modes.coherence_mask)),
             protection_readout: None,
@@ -1268,6 +1543,36 @@ fn split_on_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex review of #695: on an uneven grid the slope at a column is
+    /// the three-point derivative. For a quadratic phase φ = −a·f² it is
+    /// exact (−2a·f); the rejected neighbours' secant is not.
+    #[test]
+    fn group_delay_is_exact_for_a_quadratic_phase_on_an_uneven_grid() {
+        let freqs = [100.0, 110.0, 200.0, 260.0];
+        let a = 0.001;
+        let deg: Vec<f64> = freqs.iter().map(|f| -a * f * f).collect();
+        let gd = group_delay_ms(&freqs, &deg);
+        let exact = |f: f64| 2.0 * a * f / 360.0 * 1000.0;
+        for i in 1..3 {
+            assert!(
+                (gd[i] - exact(freqs[i])).abs() < 1e-9,
+                "{i}: {} vs {}",
+                gd[i],
+                exact(freqs[i])
+            );
+        }
+        let secant = -(deg[2] - deg[0]) / (freqs[2] - freqs[0]) / 360.0 * 1000.0;
+        assert!(
+            (secant - exact(110.0)).abs() > 0.1,
+            "the secant was meant to miss"
+        );
+        // A pure delay: 1 ms at every column, ends included.
+        let delay: Vec<f64> = freqs.iter().map(|f| -360.0 * f * 0.001).collect();
+        assert!(group_delay_ms(&freqs, &delay)
+            .iter()
+            .all(|g| (g - 1.0).abs() < 1e-9));
+    }
 
     #[test]
     fn wrap_interval_is_open_at_minus_180_closed_at_plus_180() {
@@ -1396,8 +1701,8 @@ mod tests {
 
     /// The wire's stage list for `sr`, as the daemon builds it — the same
     /// `settling_seconds(stage, N)` it puts on the wire, with `N = 4`
-    /// (`mtw_n_blocks`, the ratified depth the 2.56 s bottom figure is
-    /// derived from).
+    /// (`mtw_n_blocks`, the base depth the 2.43 s bottom figure is derived
+    /// from; the deeper stages scale it, #699).
     fn wire_stages(sr: u32) -> Vec<MtwStage> {
         use ac_core::visualize::mtw::{ladder, settling_seconds};
         ladder::layout(sr)
@@ -1434,8 +1739,8 @@ mod tests {
         // band is the coarse-resolution/fast-settling one.
         assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!(got[0].1, "23.4 Hz / 0.11 s");
-        assert_eq!(got[1].1, "2.93 Hz / 0.85 s");
-        assert_eq!(got[2].1, "0.98 Hz / 2.56 s");
+        assert_eq!(got[1].1, "2.93 Hz / 0.77 s");
+        assert_eq!(got[2].1, "0.98 Hz / 2.43 s");
         for (got, want) in got.iter().zip([0.818, 0.486, 0.168]) {
             assert!(
                 (got.0 - want).abs() < 5e-4,
@@ -1447,8 +1752,8 @@ mod tests {
     }
 
     // The rejected implementation, computed inside the test: labelling the
-    // raw analysis window instead of `W + hop·(N−1)`. At the bottom rung
-    // the two differ by 2.5x, and the window is the one an operator would
+    // raw analysis window instead of `W + hop·(blocks−1)`. At the bottom
+    // rung the two differ by 2.4x, and the window is the one an operator would
     // wait out and conclude the instrument had stalled.
     #[test]
     fn settling_is_the_filled_average_not_the_analysis_window() {
@@ -1460,10 +1765,10 @@ mod tests {
         let labels = band_labels(&stages, 20.0, 20_000.0);
         let bottom_label = &labels.last().expect("three labels").text;
         assert_ne!(bottom_label, &window_label);
-        assert_eq!(bottom_label, "0.98 Hz / 2.56 s");
-        // And the gap is the 2.5x the issue names, not a rounding
+        assert_eq!(bottom_label, "0.98 Hz / 2.43 s");
+        // And the gap is the 2.4x the ladder settles in, not a rounding
         // difference.
-        assert!(bottom.settling_s / bottom.window_s > 2.4);
+        assert!(bottom.settling_s / bottom.window_s > 2.3);
     }
 
     // Three labels at every supported rate, all distinct — the claim the
@@ -1492,10 +1797,12 @@ mod tests {
                 );
             }
         }
-        // The 44.1 kHz deep rungs run 0.23% slow, which the labels round
-        // away at the bottom and show in the middle's settling figure.
+        // The 44.1 kHz bottom rung runs 0.23% slow, which its label rounds
+        // away; the middle rung runs at 11.025 kHz, so both of its figures
+        // differ from 96 kHz's.
         let at_44k = band_labels(&wire_stages(44_100), 20.0, 20_000.0);
-        assert_eq!(at_44k[2].text, "0.98 Hz / 2.55 s");
+        assert_eq!(at_44k[2].text, "0.98 Hz / 2.43 s");
+        assert_eq!(at_44k[1].text, "2.69 Hz / 0.84 s");
     }
 
     // The label content is a function of the ladder alone. Two frames of
@@ -1515,6 +1822,7 @@ mod tests {
                 delay_ms: 0.0,
                 delay_locked: Some(true),
                 delay_control: None,
+                delay_tracking: false,
                 meas_channel: 0,
                 ref_channel: 1,
                 meas_peak_dbfs: Some(-20.0),
@@ -1611,6 +1919,7 @@ mod tests {
             samples: 470,
             residual: Some(12),
             operator: true,
+            tracking: false,
         };
         assert_eq!(c.readout(48_000), "set · find +12 smp (+0.25 ms)");
         assert_eq!(c.insert_samples(), Some(482));
@@ -1626,6 +1935,14 @@ mod tests {
         };
         assert_eq!(none.readout(48_000), "set · find —");
         assert_eq!(none.insert_samples(), None);
+        let tracking = DelayControl {
+            tracking: true,
+            ..c
+        };
+        assert_eq!(
+            tracking.readout(48_000),
+            "tracking · find +12 smp (+0.25 ms)"
+        );
     }
 
     /// Nothing to insert or nudge on a pair without a delay.
@@ -1646,7 +1963,8 @@ mod tests {
             Some(DelayControl {
                 samples: 400,
                 residual: Some(0),
-                operator: false
+                operator: false,
+                tracking: false,
             })
         );
     }
@@ -1782,6 +2100,7 @@ mod tests {
             delay_ms: 3.3958,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1916,6 +2235,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1970,6 +2290,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,

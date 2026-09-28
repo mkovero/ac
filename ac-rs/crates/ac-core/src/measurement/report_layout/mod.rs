@@ -125,6 +125,7 @@ pub(crate) mod tests_support {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            room_acoustics: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points: vec![] },
                 standard: vec![],

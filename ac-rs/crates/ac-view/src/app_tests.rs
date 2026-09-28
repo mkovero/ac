@@ -2081,3 +2081,378 @@ fn meas_lists_parse_or_are_refused() {
         Err("channel 4 is listed twice".to_string())
     );
 }
+
+/// `Y` (#687) switches delay tracking for the selected pair: on when the
+/// frame says it is off, off when the frame says it is on.
+#[test]
+fn y_toggles_delay_tracking_from_what_the_frame_says() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    let mut tracking = found_frame();
+    tracking.delay_tracking = true;
+    app.ingest_frame_for_test(tracking, 1.0);
+    assert_eq!(
+        app.current_transfer_scene()
+            .unwrap()
+            .delay_control_readout
+            .as_deref(),
+        Some("tracking \u{b7} find +12 smp (+0.25 ms)")
+    );
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "track": true, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0}),
+        ]
+    );
+}
+
+/// Codex review of #687: two `Y` presses before the next frame toggle
+/// twice rather than sending the same value.
+#[test]
+fn y_toggles_twice_between_frames() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![
+            serde_json::json!({"cmd": "set_delay", "track": true, "pair": 0}),
+            serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0}),
+        ]
+    );
+}
+
+/// Codex review of #687: a pair switched on while it holds no delay reads
+/// as on, so `Y` turns it off.
+#[test]
+fn y_reads_tracking_on_a_pair_without_a_delay() {
+    let mut app = transfer_app();
+    let mut unlocked = unaligned_frame();
+    unlocked.delay_tracking = true;
+    app.ingest_frame_for_test(unlocked, 0.0);
+    app.handle_action(Action::ToggleDelayTracking, false);
+    assert_eq!(
+        app.sent_delay,
+        vec![serde_json::json!({"cmd": "set_delay", "track": false, "pair": 0})]
+    );
+}
+
+/// Codex recheck of #687: a repaint over the stored frame, or a frame from
+/// before the presses, must not end the pending toggle; frames after it
+/// settle it.
+#[test]
+fn y_stays_pending_until_new_frames_settle_it() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0); // tracking off
+    app.handle_action(Action::ToggleDelayTracking, false); // on
+    app.handle_action(Action::ToggleDelayTracking, false); // off
+    app.rebuild_scenes(false, 0.1); // a repaint over the stored frame
+    let mut on = found_frame();
+    on.delay_tracking = true;
+    app.ingest_frame_for_test(on, 0.2); // the first press, in flight
+    app.handle_action(Action::ToggleDelayTracking, false); // on again
+    for k in 0..TRACK_PENDING_FRAMES {
+        let mut f = found_frame();
+        f.delay_tracking = true;
+        app.ingest_frame_for_test(f, 0.3 + k as f64 * 0.05);
+    }
+    app.handle_action(Action::ToggleDelayTracking, false); // settled on: off
+    let sent: Vec<bool> = app
+        .sent_delay
+        .iter()
+        .map(|r| r["track"].as_bool().unwrap())
+        .collect();
+    assert_eq!(sent, vec![true, false, true, false]);
+}
+
+// ---- invert and offset (Smaart's trace controls) ----
+
+/// A live store into `slot`, as the capture thread returns it.
+fn captured(slot: u8) -> Result<crate::capture::Captured, String> {
+    Ok(crate::capture::Captured {
+        slot,
+        opened: false,
+        path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
+        run: loaded_run(&format!("slot {slot}"), "2026-09-28T00:00:00Z"),
+    })
+}
+
+/// `U` inverts the selected trace only — live here, then a slot — and the
+/// built scene says so.
+#[test]
+fn u_inverts_the_selected_trace_only() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.finish_capture_for_test(captured(1));
+    app.handle_action(Action::ToggleInvert, false);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(
+        app.current_transfer_scene()
+            .unwrap()
+            .invert_offset_readout
+            .as_deref(),
+        Some("inverted")
+    );
+    assert_eq!(app.current_loaded_scenes()[0].invert_offset_readout, None);
+
+    app.handle_action(Action::CycleFocus, false); // slot 1
+    app.handle_action(Action::ToggleInvert, false); // slot inverted
+    app.handle_action(Action::CycleFocus, false); // back to live
+    app.handle_action(Action::ToggleInvert, false); // live back to measured
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(
+        app.current_transfer_scene().unwrap().invert_offset_readout,
+        None
+    );
+    assert_eq!(
+        app.current_loaded_scenes()[0]
+            .invert_offset_readout
+            .as_deref(),
+        Some("inverted")
+    );
+}
+
+/// `J` types an offset for the selected trace; an empty entry resets it,
+/// and a value past ±60 dB applies nothing and says why.
+#[test]
+fn j_applies_resets_and_refuses_an_offset() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    let readout = |app: &AcViewApp| {
+        app.current_transfer_scene()
+            .unwrap()
+            .invert_offset_readout
+            .clone()
+    };
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("-6,5", false, true, false);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(readout(&app).as_deref(), Some("offset -6.5 dB"));
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("75", false, true, false);
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(
+        readout(&app).as_deref(),
+        Some("offset -6.5 dB"),
+        "75 dB applied"
+    );
+    assert!(app.toast_text().is_some_and(|t| t.contains("not applied")));
+
+    app.handle_action(Action::TypeOffset, false);
+    app.handle_offset_entry_keys("", false, true, false);
+    app.rebuild_scenes(true, 0.3);
+    assert_eq!(readout(&app), None, "an empty entry did not reset");
+    assert!(app.offset_entry.is_none());
+}
+
+/// Storing over a slot keeps its invert and offset, as it keeps its
+/// smoothing: replacing the capture must not quietly change how it is drawn.
+#[test]
+fn a_replaced_slot_keeps_its_invert_and_offset() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(captured(2));
+    app.with_transfer(|t| {
+        t.select_slot(2);
+        t.toggle_invert();
+        t.set_offset(3.0);
+    });
+    app.finish_capture_for_test(captured(2));
+    app.with_transfer(|t| {
+        let run = t.loaded.iter().find(|r| r.slot == Some(2)).unwrap();
+        assert!(run.invert);
+        assert_eq!(run.offset_db, 3.0);
+    });
+}
+
+// ---- target curves ----
+
+/// `Z` lists the targets folder; `Z` in the list draws the selected curve
+/// with its caption; `Shift+Z` clears it; a file that does not parse is
+/// refused with the reason.
+#[test]
+fn z_loads_draws_clears_and_refuses_target_curves() {
+    let dir = std::env::temp_dir().join(format!("ac-target-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("house.txt"), "20 6\n1000 0\n20000 -3\n").unwrap();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+
+    app.handle_action(Action::OpenTargets, false);
+    assert!(app.target_list.is_some());
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    // No trace on screen yet: loaded, and it says it waits for one.
+    assert_eq!(
+        app.toast_text(),
+        Some("target house.txt loaded \u{2014} it draws with the first trace")
+    );
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    assert_eq!(app.toast_text(), Some("target house.txt drawn"));
+    app.rebuild_scenes(true, 0.0);
+    let t = app.target_trace.as_ref().expect("target drawn");
+    assert_eq!(t.caption, "target: house.txt");
+    assert_eq!(t.trace.segments[0].len(), 3);
+
+    app.handle_action(Action::OpenTargets, true);
+    app.rebuild_scenes(true, 0.1);
+    assert!(app.target_trace.is_none(), "Shift+Z did not clear");
+
+    std::fs::remove_file(dir.join("house.txt")).unwrap();
+    std::fs::write(dir.join("bad.txt"), "1000 0\n").unwrap();
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    assert!(app.target.is_none());
+    assert_eq!(
+        app.toast_text(),
+        Some("target bad.txt not loaded \u{2014} target curve too sparse: got 1 points, need ≥ 2")
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    app.handle_action(Action::OpenTargets, false);
+    assert!(app.target_list.is_none());
+    assert!(app
+        .toast_text()
+        .is_some_and(|t| t.starts_with("no target curves in")));
+}
+
+/// Codex review: a file past the size cap is refused before it is read,
+/// and a named pipe with a listed extension is never listed.
+#[test]
+fn z_refuses_an_oversized_file_and_never_lists_a_pipe() {
+    let dir = std::env::temp_dir().join(format!("ac-target-big-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let big = vec![b'#'; (crate::capture::TARGET_MAX_BYTES + 1) as usize];
+    std::fs::write(dir.join("big.txt"), big).unwrap();
+    let fifo = dir.join("pipe.txt");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+    app.handle_action(Action::OpenTargets, false);
+    let names: Vec<String> = app
+        .target_list
+        .as_ref()
+        .unwrap()
+        .entries()
+        .iter()
+        .map(|p| crate::file_list::FileList::name(p))
+        .collect();
+    if made.is_ok_and(|s| s.success()) {
+        assert!(!names.contains(&"pipe.txt".to_string()), "{names:?}");
+    }
+    assert_eq!(names, ["big.txt"]);
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    assert!(app.target.is_none());
+    assert!(app
+        .toast_text()
+        .is_some_and(|t| t.contains("more than a target curve")));
+    // The same bound on a file read directly: the cap is on the read, not
+    // only on the size seen before it.
+    assert!(crate::capture::read_target(&dir.join("big.txt"))
+        .unwrap_err()
+        .contains("more than a target curve"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Codex recheck: with the IR panel open a loaded target is hidden behind
+/// it, and the status says how to see it.
+#[test]
+fn a_target_loaded_behind_the_ir_panel_says_so() {
+    let dir = std::env::temp_dir().join(format!("ac-target-ir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("house.txt"), "20 6\n1000 0\n").unwrap();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleIrPanel, false);
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    assert_eq!(
+        app.toast_text(),
+        Some("target house.txt loaded \u{2014} H closes the IR panel to show it")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `Shift+H` walks the IR panel through linear, log and ETC (opening it
+/// if closed); the built scene follows, with the daemon's dB curves.
+#[test]
+fn shift_h_cycles_the_ir_view_and_the_scene_follows() {
+    let mut app = ir_app();
+    let mut frame = ir_frame();
+    frame.log_db = vec![-150.0, 0.0, -6.0, -150.0];
+    frame.etc_db = vec![-40.0, 0.0, -3.0, -40.0];
+    app.ingest_ir_frame_for_test(frame);
+    let view = |app: &AcViewApp| app.current_ir_scene().map(|s| s.view);
+
+    app.handle_action(Action::ToggleIrPanel, true); // opens, linear
+    app.rebuild_ir_scene();
+    assert_eq!(view(&app), Some(ac_scene::IrView::Linear));
+    app.handle_action(Action::ToggleIrPanel, true);
+    app.rebuild_ir_scene();
+    assert_eq!(view(&app), Some(ac_scene::IrView::Log));
+    app.handle_action(Action::ToggleIrPanel, true);
+    app.rebuild_ir_scene();
+    let scene = app.current_ir_scene().unwrap();
+    assert_eq!(scene.view, ac_scene::IrView::Etc);
+    assert_eq!(scene.trace.segments[0][1].1, 1.0, "ETC peak at the top");
+    app.handle_action(Action::ToggleIrPanel, false); // H closes
+    app.rebuild_ir_scene();
+    assert!(app.current_ir_scene().is_none());
+}
+
+// ---- phase views (#695) ----
+
+/// `Shift+P` walks wrapped → unwrapped → group delay → wrapped; outside
+/// the wrapped view the live trace and a stored run are drawn on one
+/// shared axis (fitted on the previous pass), whatever their own spans.
+#[test]
+fn shift_p_cycles_the_phase_view_and_traces_share_its_axis() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("a.acsnap", "2026-09-28T00:00:00Z")));
+    let view = |app: &AcViewApp| app.current_transfer_scene().unwrap().phase_view_readout;
+
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(
+        view(&app),
+        Some("phase unwrapped \u{b7} each unmasked run from its own start")
+    );
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.2); // fits the shared range
+    app.rebuild_scenes(true, 0.3); // draws on it
+    let live_axis = app.current_transfer_scene().unwrap().phase_axis.clone();
+    assert!(live_axis.ticks.iter().all(|t| t.label.ends_with(" ms")));
+    assert_eq!(app.current_loaded_scenes()[0].phase_axis, live_axis);
+
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.4);
+    assert_eq!(view(&app), None, "back to wrapped");
+}
+
+/// Codex review of #695: a hidden run does not widen the shared phase
+/// range — only what is on screen sets the scale.
+#[test]
+fn a_hidden_run_does_not_set_the_shared_phase_range() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("a.acsnap", "2026-09-28T00:00:00Z")));
+    app.handle_action(Action::ToggleRawPhase, true); // unwrapped
+    app.rebuild_scenes(true, 0.1);
+    let live_only = app.current_transfer_scene().unwrap().phase_span;
+    app.with_transfer(|t| t.loaded[0].visible = false);
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(app.shared_phase_range, live_only);
+}

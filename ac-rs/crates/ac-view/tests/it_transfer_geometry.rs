@@ -36,6 +36,7 @@ fn masked_scene() -> TransferScene {
         delay_ms: 0.0,
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: None,
@@ -82,7 +83,7 @@ fn masked_columns_leave_a_gap_in_the_painted_transfer_polyline() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(&scene), &[], &[], None);
+        draw_view(&view, ui, None, Some(&scene), &[], &[], None, None);
     });
     harness.run();
 
@@ -157,6 +158,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         delay_ms: 0.0,
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),
@@ -189,7 +191,7 @@ fn painted_texts(scene: &TransferScene) -> Vec<String> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(scene), &[], &[], None);
+        draw_view(&view, ui, None, Some(scene), &[], &[], None, None);
     });
     harness.run();
     extract_texts(&harness.output().shapes)
@@ -211,6 +213,7 @@ fn scene_over(
         delay_ms: 0.0,
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),
@@ -328,7 +331,7 @@ fn painted_text_centres(scene: &TransferScene) -> Vec<(String, f32)> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(960.0, 420.0));
-        draw_view(&view, ui, None, Some(scene), &[], &[], None);
+        draw_view(&view, ui, None, Some(scene), &[], &[], None, None);
     });
     harness.run();
     harness
@@ -352,7 +355,7 @@ fn painted_text_rects(scene: &TransferScene) -> Vec<(String, egui::Rect)> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(960.0, 420.0));
-        draw_view(&view, ui, None, Some(scene), &[], &[], None);
+        draw_view(&view, ui, None, Some(scene), &[], &[], None, None);
     });
     harness.run();
     harness
@@ -400,6 +403,7 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         delay_ms,
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),

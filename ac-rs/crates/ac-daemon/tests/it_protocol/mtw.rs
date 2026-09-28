@@ -19,7 +19,7 @@ fn f64s(v: &Value, key: &str) -> Vec<f64> {
 ///
 /// The `mtw` block itself appears as soon as the *top* rung settles (0.11 s at
 /// 96 kHz) — the display fills downward rather than staying blank for the
-/// bottom rung's 2.56 s — so an assertion that needs the full band must key on
+/// bottom rung's 2.43 s — so an assertion that needs the full band must key on
 /// the frame's own `settled_stages` rather than on the block's presence, and
 /// certainly not on elapsed time, which would be a race.
 fn wait_for_mtw_fully_settled(c: &Client, timeout: Duration) -> Value {
@@ -154,14 +154,18 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
         window[freqs.len() - 1]
     );
 
-    // Criterion 5: N is present and equals the configured value, in every
-    // column. Uniform across stages is the whole point — an N that varied with
-    // frequency would put a coherence step at a fixed frequency.
-    assert!(
-        n.iter().all(|&v| v == 4.0),
-        "N must be the configured 4 in every column, got {:?}",
-        n.iter().take(8).collect::<Vec<_>>()
-    );
+    // Criterion 5: every column carries its stage's block count. What must be
+    // uniform across stages is the coherence floor, not the count: the deeper
+    // stages overlap more (#699) and so average proportionally more blocks,
+    // 4 / 6 / 12 at the configured N = 4 (ac-core measures the floor).
+    for i in 0..freqs.len() {
+        let want = [4.0, 6.0, 12.0][stage[i] as usize];
+        assert_eq!(
+            n[i], want,
+            "column {i} at {} Hz (stage {})",
+            freqs[i], stage[i]
+        );
+    }
     assert_eq!(m["n_blocks"], json!(4));
 
     // The stage table ships alongside so `stage` is interpretable.
@@ -179,6 +183,11 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
         settling(2)
     );
     assert!(settling(0) < 0.25, "top rung settles in {} s", settling(0));
+    // #699: the bottom rung must move often enough to monitor live. At 50 %
+    // overlap it hopped every 0.51 s.
+    let hop = |i: usize| stages[i]["hop_s"].as_f64().unwrap();
+    assert!(hop(2) < 0.15, "bottom rung hops every {} s", hop(2));
+    assert!(hop(1) < 0.1, "middle rung hops every {} s", hop(1));
 }
 
 /// The ladder is additive. Everything the frame carried before it must be

@@ -844,7 +844,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "set_delay",
-        fields: &["pair", "samples", "step"],
+        fields: &["pair", "samples", "step", "track"],
         run: handlers::set_delay,
     },
     Command {

@@ -7,6 +7,7 @@ pub mod average;
 pub mod cqt;
 pub mod cwt;
 pub mod fractional_octave;
+pub mod ir_views;
 pub mod mtw;
 pub mod pair_derivation;
 pub mod protection;

@@ -78,16 +78,30 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
 /// no drive edge discards. `null` discards the held delay so the session
 /// finds it again from the unaligned live IR — what `relock` (#226) did.
 /// `step` instead of `samples`: move the held delay by that many samples.
+/// `track`: `true`/`false` instead of `samples`/`step` switches delay
+/// tracking (#687) — the held delay follows the live IR's residual once two
+/// analysis windows that share no samples agree on it.
 /// `pair`: a pair index in launch order; absent applies to every pair.
 ///
 /// Dispatched like `set_drive`: targets a live worker without spawning one,
 /// so it has no `cmd_group` entry and never consults `check_busy`.
 pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
     use crate::workers::DelayAction;
+    let given = ["samples", "step", "track"]
+        .iter()
+        .filter(|k| cmd.get(**k).is_some())
+        .count();
+    if given > 1 {
+        return json!({"ok": false, "error": "give one of 'samples', 'step' or 'track'"});
+    }
+    if let Some(v) = cmd.get("track") {
+        let Some(on) = v.as_bool() else {
+            return json!({"ok": false, "error": "'track' must be true or false"});
+        };
+        return queue_delay_cmd(state, cmd, DelayAction::Track(on));
+    }
     let action = match (cmd.get("samples"), cmd.get("step")) {
-        (Some(_), Some(_)) => {
-            return json!({"ok": false, "error": "give 'samples' or 'step', not both"})
-        }
+        (Some(_), Some(_)) => unreachable!("refused above"),
         (Some(Value::Null), None) => DelayAction::Find,
         (Some(v), None) => match v.as_i64() {
             Some(n) => DelayAction::Set(n),
@@ -98,9 +112,14 @@ pub fn set_delay(state: &ServerState, cmd: &Value) -> Value {
             None => return json!({"ok": false, "error": "'step' must be an integer"}),
         },
         (None, None) => {
-            return json!({"ok": false, "error": "'samples' (integer or null) or 'step' (integer) required"})
+            return json!({"ok": false, "error": "'samples' (integer or null), 'step' (integer) or 'track' (bool) required"})
         }
     };
+    queue_delay_cmd(state, cmd, action)
+}
+
+/// Validate `pair` and queue `action` for the running session.
+fn queue_delay_cmd(state: &ServerState, cmd: &Value, action: crate::workers::DelayAction) -> Value {
     let pair = match cmd.get("pair") {
         None | Some(Value::Null) => None,
         Some(v) => match v.as_u64() {

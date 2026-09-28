@@ -16,17 +16,33 @@ use super::palette::{COLOR_LABEL, COLOR_SIGNAL, COLOR_STRUCTURAL, COLOR_VALUE};
 /// contract every other pane in this module tree holds).
 pub(super) fn draw_ir_panel(painter: &Painter, rect: Rect, scene: &ac_scene::IrScene) {
     draw_ir_header(painter, rect, scene.header);
+    // Which view (`Shift+H`), or why it has no trace: verbatim ac-scene,
+    // on the row under the header.
+    text(
+        painter,
+        rect.left_top() + egui::vec2(0.0, 16.0),
+        Align2::LEFT_TOP,
+        scene.view_readout,
+        COLOR_VALUE,
+    );
 
     if scene.trace.segments.is_empty() {
+        let why = if scene.view == ac_scene::IrView::Linear {
+            "no samples yet"
+        } else {
+            scene.view_readout
+        };
         text(
             painter,
             rect.center(),
             Align2::CENTER_CENTER,
-            "no samples yet",
+            why,
             COLOR_STRUCTURAL,
         );
         return;
     }
+    // dB gridlines for the log and ETC views, behind the trace.
+    super::paint::draw_pane_grid(painter, &scene.level_axis, Viewport::from(rect));
 
     draw_ir_trace_and_arrival(
         painter,

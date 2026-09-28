@@ -17,7 +17,7 @@ use ac_core::visualize::pair_derivation::PairDerivation;
 use ac_core::visualize::transfer::impulse_response_from_h;
 
 use crate::scene::{Provenance, Source, Trace};
-use crate::ticks::{time_axis, time_to_x, Axis};
+use crate::ticks::{db_axis, db_to_y, time_axis, time_to_x, Axis};
 use ac_core::wire::IrFrame;
 
 /// The header line every IR panel draws verbatim, top of the pane.
@@ -59,7 +59,50 @@ pub struct IrInput {
     pub channel_role: String,
     pub source: Source,
     pub sr: u32,
+    /// `20·log10|h|` and the ETC, dB re their peak, one per `samples`
+    /// entry (`ac_core::visualize::ir_views`, bucket maxima). Empty from a
+    /// daemon that predates them.
+    pub log_db: Vec<f32>,
+    pub etc_db: Vec<f32>,
 }
+
+/// Which view of the IR the panel draws (Smaart's live IR modes), cycled
+/// by `Shift+H`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IrView {
+    /// h(t), autoscaled to its own peak.
+    #[default]
+    Linear,
+    /// `20·log10|h|`, dB re the peak.
+    Log,
+    /// The energy-time curve: the analytic signal's envelope, dB re its
+    /// peak — each arrival at the level it reaches, without its cycles.
+    Etc,
+}
+
+impl IrView {
+    pub fn next(self) -> IrView {
+        match self {
+            IrView::Linear => IrView::Log,
+            IrView::Log => IrView::Etc,
+            IrView::Etc => IrView::Linear,
+        }
+    }
+
+    /// The caption the panel draws for this view.
+    pub fn label(self) -> &'static str {
+        match self {
+            IrView::Linear => "linear",
+            IrView::Log => "log  (dB re peak)",
+            IrView::Etc => "ETC  (dB re peak)",
+        }
+    }
+}
+
+/// The dB span of the log and ETC views: 80 dB below the peak, the depth
+/// an energy-time curve is read over in a room; the curve itself goes on
+/// down to −150 dB off the bottom of the pane.
+pub const IR_DB_RANGE: (f64, f64) = (-80.0, 0.0);
 
 impl IrInput {
     /// Adapt a live `visualize/ir` wire frame.
@@ -73,6 +116,8 @@ impl IrInput {
             channel_role: format!("meas_{}", frame.meas_channel),
             source: Source::Live,
             sr: frame.sr,
+            log_db: frame.log_db.clone(),
+            etc_db: frame.etc_db.clone(),
         }
     }
 
@@ -84,6 +129,9 @@ impl IrInput {
         let ir_full = impulse_response_from_h(&d.h1.re, &d.h1.im);
         let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
         let samples: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        use ac_core::visualize::ir_views;
+        let log_db = ir_views::bucket_max(&ir_views::log_db(&ir_full), stride);
+        let etc_db = ir_views::bucket_max(&ir_views::etc_db(&ir_full), stride);
         let dt_ms = 1000.0 / sr as f64 * stride as f64;
         let t_origin_ms = -((samples.len() / 2) as f64) * dt_ms;
         IrInput {
@@ -97,6 +145,8 @@ impl IrInput {
             channel_role: channel_role.to_string(),
             source: Source::Snapshot,
             sr,
+            log_db,
+            etc_db,
         }
     }
 }
@@ -135,6 +185,14 @@ pub struct IrScene {
     /// travels on `TransferScene` rather than living as a literal in
     /// `ac-view`).
     pub header: &'static str,
+    /// Which view the trace is (`Shift+H`).
+    pub view: IrView,
+    /// [`IrView::label`], or why the view has no trace (a daemon that
+    /// sends no log/ETC data).
+    pub view_readout: &'static str,
+    /// dB gridlines for the log and ETC views ([`IR_DB_RANGE`]); empty for
+    /// the linear view, which has no unit.
+    pub level_axis: Axis,
 }
 
 impl IrScene {
@@ -144,6 +202,13 @@ impl IrScene {
     /// `t_origin_ms`/`dt_ms`/sample count, so there is nothing for a
     /// caller to supply.
     pub fn from_input(input: &IrInput) -> IrScene {
+        Self::from_input_view(input, IrView::Linear)
+    }
+
+    /// Build the scene drawing `view`. The time axis and the arrival
+    /// marker are the same in every view: the log and ETC views change the
+    /// vertical reading only, never where the arrival is.
+    pub fn from_input_view(input: &IrInput, view: IrView) -> IrScene {
         let n = input.samples.len();
         let t_min_ms = input.t_origin_ms;
         let t_max_ms = t_min_ms + (n.saturating_sub(1)) as f64 * input.dt_ms;
@@ -160,7 +225,33 @@ impl IrScene {
         // defensive posture `ticks::freq_axis`/`db_axis` take.
         let has_span = n > 1 && t_max_ms > t_min_ms;
 
-        let trace = if has_span {
+        let db_curve = match view {
+            IrView::Linear => None,
+            IrView::Log => Some(&input.log_db),
+            IrView::Etc => Some(&input.etc_db),
+        };
+        // A dB view with no data for it (an older daemon): no trace, and
+        // the caption says why, rather than a curve from something else.
+        let missing = db_curve.is_some_and(|c| c.len() != n);
+        let trace = if let (true, Some(curve), false) = (has_span, db_curve, missing) {
+            let points: Vec<(f64, f64)> = curve
+                .iter()
+                .enumerate()
+                .map(|(i, &db)| {
+                    let t_ms = t_min_ms + i as f64 * input.dt_ms;
+                    (
+                        time_to_x(t_ms, t_min_ms, t_max_ms),
+                        db_to_y(f64::from(db), IR_DB_RANGE.0, IR_DB_RANGE.1),
+                    )
+                })
+                .collect();
+            Trace::single(points, provenance)
+        } else if db_curve.is_some() {
+            Trace {
+                segments: Vec::new(),
+                provenance,
+            }
+        } else if has_span {
             // Autoscaled to this frame's own peak — the trace has no
             // calibrated amplitude (mic curve not applied, no voltage
             // cal), so there is no fixed unit to hold a fixed viewport
@@ -211,6 +302,17 @@ impl IrScene {
             time_axis,
             arrival,
             header: IR_HEADER,
+            view,
+            view_readout: if missing {
+                "log/ETC not sent by this daemon"
+            } else {
+                view.label()
+            },
+            level_axis: if db_curve.is_some() && !missing {
+                db_axis(IR_DB_RANGE.0, IR_DB_RANGE.1)
+            } else {
+                Axis { ticks: Vec::new() }
+            },
         }
     }
 }
@@ -233,7 +335,52 @@ mod tests {
             channel_role: "meas_0".to_string(),
             source: Source::Live,
             sr: 48_000,
+            log_db: Vec::new(),
+            etc_db: Vec::new(),
         }
+    }
+
+    /// The log and ETC views draw their dB curves on the fixed 80 dB span,
+    /// with gridlines, at the same x and with the same arrival marker as
+    /// the linear view; with no data for them they draw nothing and say
+    /// why.
+    #[test]
+    fn log_and_etc_views_draw_db_on_the_same_time_axis() {
+        let mut input = locked_input(vec![0.0, 0.5, 1.0, -0.5, 0.0]);
+        input.log_db = vec![-150.0, -6.0, 0.0, -6.0, -150.0];
+        input.etc_db = vec![-40.0, -3.0, 0.0, -3.0, -40.0];
+        input.delay_ms = 250.0;
+        let linear = IrScene::from_input(&input);
+        let etc = IrScene::from_input_view(&input, IrView::Etc);
+        let log = IrScene::from_input_view(&input, IrView::Log);
+        let y = |s: &IrScene, i: usize| s.trace.segments[0][i].1;
+        assert_eq!(y(&etc, 2), 1.0);
+        assert!(
+            (y(&etc, 0) - 0.5).abs() < 1e-12,
+            "-40 dB sits halfway down 80 dB"
+        );
+        assert!(
+            y(&log, 0) < 0.0,
+            "-150 dB runs off the bottom, not pinned to it"
+        );
+        let xs = |s: &IrScene| s.trace.segments[0].iter().map(|p| p.0).collect::<Vec<_>>();
+        assert_eq!(xs(&etc), xs(&linear));
+        assert_eq!(etc.arrival, linear.arrival);
+        assert_eq!(etc.view_readout, "ETC  (dB re peak)");
+        assert!(!etc.level_axis.ticks.is_empty());
+        assert!(linear.level_axis.ticks.is_empty());
+
+        input.etc_db.clear();
+        let old = IrScene::from_input_view(&input, IrView::Etc);
+        assert!(old.trace.segments.is_empty());
+        assert_eq!(old.view_readout, "log/ETC not sent by this daemon");
+    }
+
+    #[test]
+    fn shift_h_cycles_linear_log_etc() {
+        assert_eq!(IrView::default().next(), IrView::Log);
+        assert_eq!(IrView::Log.next(), IrView::Etc);
+        assert_eq!(IrView::Etc.next(), IrView::Linear);
     }
 
     // The trace is autoscaled to the frame's own peak: a sample equal to
@@ -389,6 +536,8 @@ mod tests {
             analysis_seq: 0,
             backend: String::new(),
             samples,
+            log_db: Vec::new(),
+            etc_db: Vec::new(),
             sr,
             stride,
             dt_ms,

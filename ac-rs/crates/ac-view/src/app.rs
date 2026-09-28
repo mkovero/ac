@@ -45,6 +45,11 @@ pub struct AcViewApp {
     /// always at least one, so a frame reaching an app built without a
     /// session still has somewhere to go.
     live: Vec<LivePair>,
+    /// The unwrapped / group-delay pane's range (#695): the union of every
+    /// drawn trace's span on the previous pass, so all share one scale. A
+    /// pass behind by design: fitting it within the pass would build each
+    /// live scene twice, feeding its meters and fault clock twice.
+    shared_phase_range: Option<(f64, f64)>,
     /// The ranges the current `scene` was last built with, so a
     /// range change alone (no new frame) is detected and triggers a
     /// rebuild from the first pair's held frame.
@@ -88,6 +93,8 @@ pub struct AcViewApp {
     settings: Option<crate::settings::SettingsOverlay>,
     /// The typed-delay entry (`T`, transfer view, #669). `None` = closed.
     delay_entry: Option<crate::delay_entry::DelayEntry>,
+    /// The typed trace-offset entry (`J`). `None` = closed.
+    offset_entry: Option<crate::offset_entry::OffsetEntry>,
     /// A snapshot being taken on its own thread (`S`, #256). One at a time.
     capture_rx: Option<std::sync::mpsc::Receiver<Result<crate::capture::Captured, String>>>,
     /// The slot the running capture is for.
@@ -97,6 +104,20 @@ pub struct AcViewApp {
     average_scene: Option<(ac_scene::TransferScene, String)>,
     /// The saved-captures list (`F`, #256). `None` = closed.
     file_list: Option<crate::file_list::FileList>,
+    /// The target-curve list (`Z`). `None` = closed.
+    target_list: Option<crate::file_list::FileList>,
+    /// The loaded target curve, and its trace built against the current
+    /// axes every pass.
+    target: Option<ac_scene::target::TargetCurve>,
+    target_trace: Option<crate::view::TargetTrace>,
+    /// A target file being read on its thread, with its name.
+    target_rx: Option<(
+        String,
+        std::sync::mpsc::Receiver<Result<ac_scene::target::TargetCurve, String>>,
+    )>,
+    /// Where `Z` lists from: [`crate::capture::targets_dir`], held so a test
+    /// can point it elsewhere.
+    targets_dir: std::path::PathBuf,
     /// Where `F` lists from and `C` writes to: [`crate::capture::captures_dir`],
     /// held so a test can point it elsewhere.
     captures_dir: std::path::PathBuf,
@@ -140,6 +161,7 @@ impl AcViewApp {
             scene: None,
             pairs: Vec::new(),
             live: vec![LivePair::default()],
+            shared_phase_range: None,
             last_scene_ranges: None,
             loaded_scenes: Vec::new(),
             ir_scene: None,
@@ -149,9 +171,15 @@ impl AcViewApp {
             help_open: false,
             settings: None,
             delay_entry: None,
+            offset_entry: None,
             capture_rx: None,
             capture_slot: None,
             file_list: None,
+            target_list: None,
+            target: None,
+            target_trace: None,
+            target_rx: None,
+            targets_dir: crate::capture::targets_dir(),
             average_scene: None,
             captures_dir: crate::capture::captures_dir(),
             quit_requested: false,
@@ -367,15 +395,15 @@ impl AcViewApp {
     /// made, called from both the live paint pass and the test helpers
     /// below so they can't drift apart.
     fn rebuild_ir_scene(&mut self) {
-        let open = matches!(&self.view, ViewKind::Transfer(t) if t.ir_panel_open());
-        self.ir_scene = if open {
-            self.live_selected()
-                .ir
-                .as_ref()
-                .map(|f| ac_scene::IrScene::from_input(&ac_scene::IrInput::from_wire_frame(f)))
-        } else {
-            None
+        let view = match &self.view {
+            ViewKind::Transfer(t) if t.ir_panel_open() => Some(t.ir_view),
+            _ => None,
         };
+        self.ir_scene = view.and_then(|view| {
+            self.live_selected().ir.as_ref().map(|f| {
+                ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
+            })
+        });
     }
 
     /// Rebuild the active view's scenes from the held frames — the one
@@ -417,8 +445,13 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
-                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
-                    .with_coherence_mask(state.coherence_mask);
+                let phase = (state.phase_view, self.shared_phase_range);
+                let modes = with_phase(
+                    ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
+                        .with_coherence_mask(state.coherence_mask)
+                        .with_invert_offset(state.invert, state.offset_db),
+                    phase,
+                );
                 // Every pair every pass, each through its own meter and
                 // fault state (#685): both carry time between frames.
                 for pair in &mut self.live {
@@ -439,12 +472,18 @@ impl AcViewApp {
                     // the scene keeps rolling so the meters, the fault
                     // indicator and the readouts stay live.
                     live.set_protection(wire_frame.protection.as_ref());
+                    if pair
+                        .track_pending
+                        .is_some_and(|(_, at)| pair.frames_in >= at + TRACK_PENDING_FRAMES)
+                    {
+                        pair.track_pending = None;
+                    }
                     pair.scene = Some(live);
                 }
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
                 // curve exactly as reliably as the live one's.
-                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range);
+                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range, phase);
                 // The slot average (#671), drawn like a stored run in its
                 // own colour, unsmoothed, under the same mask.
                 self.average_scene = crate::snapshot_flow::average_input(state)
@@ -453,11 +492,14 @@ impl AcViewApp {
                     .map(|(input, label)| {
                         let scene = ac_scene::TransferScene::from_input(
                             &input,
-                            ac_scene::DisplayModes::new(
-                                ac_scene::DerotMode::Session,
-                                Default::default(),
-                            )
-                            .with_coherence_mask(state.coherence_mask),
+                            with_phase(
+                                ac_scene::DisplayModes::new(
+                                    ac_scene::DerotMode::Session,
+                                    Default::default(),
+                                )
+                                .with_coherence_mask(state.coherence_mask),
+                                phase,
+                            ),
                             freq_range,
                             db_range,
                             &mut Default::default(),
@@ -466,7 +508,31 @@ impl AcViewApp {
                         );
                         (scene, label)
                     });
+                // The range the next pass draws every trace on: the union
+                // of this pass's spans.
+                // Only traces on screen count: a hidden run's span would
+                // flatten the ones being looked at (Codex review).
+                let live_shown = state.live_trace_shown();
+                self.shared_phase_range = self
+                    .live
+                    .iter()
+                    .filter(|_| live_shown)
+                    .filter_map(|p| p.scene.as_ref())
+                    .chain(
+                        self.loaded_scenes
+                            .iter()
+                            .zip(state.loaded.iter())
+                            .filter(|(_, run)| run.visible)
+                            .map(|(s, _)| s),
+                    )
+                    .chain(self.average_scene.iter().map(|(s, _)| s))
+                    .filter_map(|s| s.phase_span)
+                    .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
                 self.scene = None;
+                self.target_trace = self.target.as_ref().map(|t| crate::view::TargetTrace {
+                    trace: t.trace(freq_range, db_range),
+                    caption: t.caption(),
+                });
             }
         }
         self.rebuild_ir_scene();
@@ -496,6 +562,7 @@ impl AcViewApp {
                 match self.route(wire_frame.meas_channel, wire_frame.ref_channel) {
                     Some(i) => {
                         self.live[i].frame = Some(wire_frame);
+                        self.live[i].frames_in += 1;
                         true
                     }
                     None => false,
@@ -585,6 +652,7 @@ impl AcViewApp {
             .route(frame.meas_channel, frame.ref_channel)
             .expect("a test frame for a launched pair");
         self.live[i].frame = Some(frame);
+        self.live[i].frames_in += 1;
         self.rebuild_scenes(true, now_s);
     }
 
@@ -613,6 +681,14 @@ impl AcViewApp {
             // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::OpenSnapshot => self.open_file_list(Instant::now()),
+            Action::OpenTargets => {
+                if shift {
+                    self.target = None;
+                    self.target_list = None;
+                } else {
+                    self.open_target_list(Instant::now());
+                }
+            }
             Action::ExportCsv => self.export_csv(shift, Instant::now()),
             Action::CycleCoherenceMask => self.with_transfer(|t| t.cycle_coherence_mask()),
             Action::ToggleAverage => self.toggle_average(shift, Instant::now()),
@@ -645,11 +721,24 @@ impl AcViewApp {
                 self.with_spectrum(|s| s.ref_trace_visible = !s.ref_trace_visible)
             }
             // -- transfer view: toggles --
-            Action::ToggleRawPhase => self.with_transfer(|t| t.toggle_raw_phase()),
+            Action::ToggleRawPhase => self.with_transfer(|t| {
+                if shift {
+                    // `Shift+P` (#695): wrapped → unwrapped → group delay.
+                    t.phase_view = t.phase_view.next();
+                } else {
+                    t.toggle_raw_phase();
+                }
+            }),
             Action::CycleDerotReference => self.with_transfer(|t| t.cycle_derot()),
             Action::CycleSmoothing => self.with_transfer(|t| t.cycle_smoothing()),
             Action::OpenSettings => self.open_settings(),
-            Action::ToggleIrPanel => self.with_transfer(|t| t.toggle_ir_panel()),
+            Action::ToggleIrPanel => self.with_transfer(|t| {
+                if shift {
+                    t.cycle_ir_view();
+                } else {
+                    t.toggle_ir_panel();
+                }
+            }),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
             // -- transfer view: the operator's delay (#669). The values
@@ -698,6 +787,20 @@ impl AcViewApp {
                 }
             }
             Action::TypeDelay => self.delay_entry = Some(Default::default()),
+            // `Y` (#687): the daemon owns the rule; this only flips it,
+            // from what was last asked if the frame has not caught up.
+            Action::ToggleDelayTracking => {
+                let i = self.selected_pair();
+                let shown = self.live[i]
+                    .scene
+                    .as_ref()
+                    .is_some_and(|s| s.delay_tracking);
+                let on = !self.live[i].track_pending.map_or(shown, |(v, _)| v);
+                self.live[i].track_pending = Some((on, self.live[i].frames_in));
+                self.send_delay(serde_json::json!({"track": on}));
+            }
+            Action::ToggleInvert => self.with_transfer(|t| t.toggle_invert()),
+            Action::TypeOffset => self.offset_entry = Some(Default::default()),
             Action::ToggleTraceVisible => self.with_transfer(|t| {
                 if shift {
                     t.show_all();
@@ -844,6 +947,102 @@ impl AcViewApp {
             );
         } else {
             self.file_list = Some(list);
+        }
+    }
+
+    /// `Z`: open the target-curve list, or close it.
+    fn open_target_list(&mut self, now: Instant) {
+        if self.target_list.take().is_some() {
+            return;
+        }
+        let dir = self.targets_dir.clone();
+        let list = crate::file_list::FileList::read_with(&dir, &crate::capture::TARGET_EXTENSIONS);
+        if list.entries().is_empty() {
+            self.set_toast(
+                format!(
+                    "no target curves in {} (.txt, .frd, .csv: freq_hz gain_db per line)",
+                    dir.display()
+                ),
+                now,
+                Some(5.0),
+            );
+        } else {
+            self.target_list = Some(list);
+        }
+    }
+
+    /// `Z` in the list: read the selected target on a thread
+    /// ([`crate::capture::spawn_target`]); [`Self::poll_target`] draws it
+    /// or says why not.
+    fn load_selected_target(&mut self, now: Instant) {
+        let Some(path) = self
+            .target_list
+            .take()
+            .and_then(|l| l.selected_path().map(std::path::Path::to_path_buf))
+        else {
+            return;
+        };
+        let name = crate::file_list::FileList::name(&path);
+        self.set_toast(format!("reading target {name}\u{2026}"), now, None);
+        self.target_rx = Some((name, crate::capture::spawn_target(path)));
+    }
+
+    /// Collect a finished target read, if any.
+    fn poll_target(&mut self, now: Instant) {
+        let Some((_, rx)) = &self.target_rx else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the read ended without a result".to_string())
+            }
+        };
+        let (name, _) = self.target_rx.take().expect("checked above");
+        self.finish_target(&name, result, now);
+    }
+
+    fn finish_target(
+        &mut self,
+        name: &str,
+        result: Result<ac_scene::target::TargetCurve, String>,
+        now: Instant,
+    ) {
+        match result {
+            Ok(t) => {
+                // A target is drawn on a trace's axes, in the magnitude
+                // pane: say where it is when that is not on screen (Codex
+                // review).
+                let ir_open = matches!(&self.view, ViewKind::Transfer(v) if v.ir_panel_open());
+                let on_screen =
+                    self.current_transfer_scene().is_some() || !self.loaded_scenes.is_empty();
+                let msg = if ir_open {
+                    format!("target {name} loaded \u{2014} H closes the IR panel to show it")
+                } else if on_screen {
+                    format!("target {name} drawn")
+                } else {
+                    format!("target {name} loaded \u{2014} it draws with the first trace")
+                };
+                self.set_toast(msg, now, Some(3.0));
+                self.target = Some(t);
+            }
+            Err(e) => self.set_toast(
+                format!("target {name} not loaded \u{2014} {e}"),
+                now,
+                Some(6.0),
+            ),
+        }
+    }
+
+    /// Wait for a started target read, as a frame's poll would.
+    #[cfg(test)]
+    pub(crate) fn wait_target_for_test(&mut self) {
+        if let Some((name, rx)) = self.target_rx.take() {
+            let result = rx
+                .recv()
+                .unwrap_or_else(|_| Err("the read ended without a result".to_string()));
+            self.finish_target(&name, result, Instant::now());
         }
     }
 
@@ -1061,6 +1260,37 @@ impl AcViewApp {
         self.sent_delay.push(request.clone());
         if let Some(session) = &self.session {
             let _ = session.client().call(&request);
+        }
+    }
+
+    /// Route a frame's typed-offset keypresses (`J`): `J` applies to the
+    /// selected trace (an empty entry resets it to 0 dB, a value that does
+    /// not parse or exceeds ±60 dB applies nothing and says so), Esc
+    /// cancels.
+    fn handle_offset_entry_keys(&mut self, chars: &str, backspace: bool, apply: bool, esc: bool) {
+        let Some(entry) = &mut self.offset_entry else {
+            return;
+        };
+        if esc {
+            self.offset_entry = None;
+            return;
+        }
+        chars.chars().for_each(|c| entry.push(c));
+        if backspace {
+            entry.backspace();
+        }
+        if apply {
+            let value = entry.value();
+            let text = entry.text().to_string();
+            self.offset_entry = None;
+            match value {
+                Some(v) => self.with_transfer(|t| t.set_offset(v)),
+                None => self.set_toast(
+                    format!("offset {text:?} not applied \u{2014} a dB value within \u{b1}60"),
+                    Instant::now(),
+                    Some(4.0),
+                ),
+            }
         }
     }
 
@@ -1333,6 +1563,32 @@ impl AcViewApp {
             return;
         }
 
+        if self.offset_entry.is_some() {
+            let (chars, backspace, apply, esc) = ctx.input(|i| {
+                let chars: String = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    chars,
+                    i.key_pressed(Key::Backspace),
+                    i.key_pressed(Key::J),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            // `J` arrives as text too; it is the apply key.
+            let chars: String = chars
+                .chars()
+                .filter(|c| !c.eq_ignore_ascii_case(&'j'))
+                .collect();
+            self.handle_offset_entry_keys(&chars, backspace, apply, esc);
+            return;
+        }
+
         if self.delay_entry.is_some() {
             let (chars, backspace, apply, esc) = ctx.input(|i| {
                 let chars: String = i
@@ -1356,6 +1612,43 @@ impl AcViewApp {
                 .filter(|c| !c.eq_ignore_ascii_case(&'t'))
                 .collect();
             self.handle_delay_entry_keys(&chars, backspace, apply, esc);
+            return;
+        }
+
+        // The target list (`Z`) takes its keys: ↑/↓ select, `Z` loads, Esc
+        // closes. Esc reaches here only while the stimulus is idle.
+        if self.target_list.is_some() {
+            let (up, down, load, clear, close) = ctx.input(|i| {
+                let z = i.key_pressed(Key::Z);
+                (
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    z && !i.modifiers.shift,
+                    z && i.modifiers.shift,
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            if clear {
+                // Shift+Z clears here too (Codex review), as it does
+                // outside the list.
+                self.handle_action(Action::OpenTargets, true);
+                return;
+            }
+            if close {
+                self.target_list = None;
+                return;
+            }
+            if let Some(list) = &mut self.target_list {
+                if up {
+                    list.move_selection(false);
+                }
+                if down {
+                    list.move_selection(true);
+                }
+            }
+            if load {
+                self.load_selected_target(Instant::now());
+            }
             return;
         }
 
@@ -1593,6 +1886,26 @@ impl AcViewApp {
             }
         }
 
+        if let Some(list) = &self.target_list {
+            egui::Window::new("target curves")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    for (i, path) in list.entries().iter().enumerate() {
+                        let marker = if i == list.selected() {
+                            "\u{25b8} "
+                        } else {
+                            "  "
+                        };
+                        ui.label(format!(
+                            "{marker}{}",
+                            crate::file_list::FileList::name(path)
+                        ));
+                    }
+                    ui.separator();
+                    ui.label("\u{2191}\u{2193} select   Z draw   Esc close   (Shift+Z clears)");
+                });
+        }
+
         if let Some(list) = &self.file_list {
             egui::Window::new("saved captures")
                 .collapsible(false)
@@ -1612,6 +1925,16 @@ impl AcViewApp {
                     ui.label(
                         "\u{2191}\u{2193} select   1\u{2026}9 load into that slot   Esc close",
                     );
+                });
+        }
+
+        if let Some(entry) = &self.offset_entry {
+            egui::Window::new("offset")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("offset (dB):  {}\u{258f}", entry.text()));
+                    ui.separator();
+                    ui.label("digits, -, .   Backspace   J apply (empty: none)   Esc cancel");
                 });
         }
 
@@ -1654,6 +1977,7 @@ impl eframe::App for AcViewApp {
         // keepalive_tick).
         self.keepalive_tick(std::time::Instant::now());
         self.poll_capture(std::time::Instant::now());
+        self.poll_target(std::time::Instant::now());
 
         let got_new_frame = self.drain_frames();
         // Rebuild the scenes once per pass — never once per backlog
@@ -1674,6 +1998,7 @@ impl eframe::App for AcViewApp {
             &live_traces,
             &stored_refs,
             self.ir_scene.as_ref(),
+            self.target_trace.as_ref(),
         );
 
         self.draw_overlays(&ctx);
@@ -1695,6 +2020,7 @@ fn rebuild_loaded_scenes(
     state: &crate::view::TransferViewState,
     freq_range: (f64, f64),
     db_range: (f64, f64),
+    phase: (ac_scene::transfer::PhaseView, Option<(f64, f64)>),
 ) -> Vec<ac_scene::TransferScene> {
     state
         .loaded
@@ -1705,13 +2031,30 @@ fn rebuild_loaded_scenes(
                 &run.channel_role,
                 run.sr,
                 run.delay_offset_samples,
-                ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
-                    .with_coherence_mask(state.coherence_mask),
+                with_phase(
+                    ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
+                        .with_coherence_mask(state.coherence_mask)
+                        .with_invert_offset(run.invert, run.offset_db),
+                    phase,
+                ),
                 freq_range,
                 db_range,
             )
         })
         .collect()
+}
+
+/// `modes` with the phase pane's view and, outside the wrapped view, the
+/// shared range (#695).
+fn with_phase(
+    modes: ac_scene::DisplayModes,
+    (view, range): (ac_scene::transfer::PhaseView, Option<(f64, f64)>),
+) -> ac_scene::DisplayModes {
+    let modes = modes.with_phase_view(view);
+    match range {
+        Some(r) if view != ac_scene::transfer::PhaseView::Wrapped => modes.with_phase_range(r),
+        _ => modes,
+    }
 }
 
 /// `--meas 0,4` (#685): one or more measurement channels, comma
@@ -1837,7 +2180,22 @@ struct LivePair {
     fault: ac_scene::FaultState,
     /// Built from `frame` every pass in the transfer view.
     scene: Option<ac_scene::TransferScene>,
+    /// Frames received for this pair, ever.
+    frames_in: u64,
+    /// The tracking state `Y` last asked for (#687), with `frames_in` at
+    /// the press. Two presses before the frames catch up then toggle twice
+    /// instead of sending the same value (Codex review).
+    track_pending: Option<(bool, u64)>,
 }
+
+/// New frames of a pair after which a `Y` press is no longer pending: the
+/// frames then say what the daemon holds. The daemon applies a queued
+/// `set_delay` at the start of its next 50 ms tick, so the second frame
+/// after a press already reflects it; five leaves room for frames already
+/// in flight. Assumed, not measured. Counting frames rather than matching
+/// values: a stored frame, or one in flight from before the press, can
+/// match the pending value by accident (Codex recheck).
+const TRACK_PENDING_FRAMES: u64 = 5;
 
 /// The version-mismatch state's cross-frame record (#112).
 struct VersionRefusal {

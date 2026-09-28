@@ -974,3 +974,139 @@ fn a_silent_reference_pauses_only_its_own_pair() {
         "a Find ran on the silent pair"
     );
 }
+
+/// Delay tracking (#687) moves an operator's wrong delay back to the
+/// arrival, and only after a window that shares no samples with the first
+/// one agrees: the consecutive-tick rule would have moved within about
+/// 0.5 s (two hops).
+#[test]
+fn tracking_restores_the_arrival_after_an_independent_window() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 25, 480, events(true), t0);
+    for action in [DelayAction::Track(true), DelayAction::Set(460)] {
+        s.apply_delay_cmd(DelayCmd { pair: None, action }, true);
+    }
+    let frames = run_correlated(
+        &mut s,
+        120,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(2),
+    );
+    let delays: Vec<i64> = frames
+        .iter()
+        .map(|f| f["delay_samples"].as_i64().unwrap())
+        .collect();
+    let moved_at = delays
+        .iter()
+        .position(|&d| d != 460)
+        .expect("tracking never moved the delay");
+    // The ring is 2.5 s (50 ticks) and drains a hop (10 ticks) at a time.
+    // The candidate's window ends on the block lattice, up to one hop
+    // before the tick that took it, so the first window sharing none of
+    // its samples arrives 4–5 hops later: never before 40 ticks. The
+    // consecutive-analysis rule would move on the next hop, by tick 10.
+    assert!(
+        moved_at >= 40,
+        "moved after {moved_at} ticks, before an independent window"
+    );
+    assert_eq!(delays[moved_at], 480);
+    assert!(delays[moved_at..].iter().all(|&d| d == 480), "{delays:?}");
+    let last = frames.last().unwrap();
+    assert_eq!(last["delay_tracking"], json!(true));
+    assert_eq!(last["delay_operator"], json!(true));
+    assert_eq!(last["delay_residual"], json!(0));
+}
+
+/// Without tracking the same wrong delay stays where the operator put it.
+#[test]
+fn without_tracking_an_operator_delay_stays_put() {
+    let mut s = session();
+    let t0 = std::time::Instant::now();
+    run_correlated(&mut s, 25, 480, events(true), t0);
+    s.apply_delay_cmd(
+        DelayCmd {
+            pair: None,
+            action: DelayAction::Set(460),
+        },
+        true,
+    );
+    let frames = run_correlated(
+        &mut s,
+        120,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(2),
+    );
+    assert!(frames.iter().all(|f| f["delay_samples"] == json!(460)));
+    assert_eq!(frames.last().unwrap()["delay_tracking"], json!(false));
+}
+
+/// Codex review of #687: a pause (#670) or a drive edge clears tracking's
+/// candidate, so the next move needs two windows from after it.
+#[test]
+fn a_pause_or_a_drive_edge_clears_the_tracking_candidate() {
+    let t0 = std::time::Instant::now();
+    let with_candidate = || {
+        let mut s = session();
+        run_correlated(&mut s, 25, 480, events(true), t0);
+        for action in [DelayAction::Track(true), DelayAction::Set(460)] {
+            s.apply_delay_cmd(DelayCmd { pair: None, action }, true);
+        }
+        run_correlated(
+            &mut s,
+            12,
+            480,
+            events(true),
+            t0 + std::time::Duration::from_secs(2),
+        );
+        assert!(
+            s.pairs[0].track_candidate.is_some(),
+            "no candidate to clear"
+        );
+        s
+    };
+
+    let mut paused = with_candidate();
+    run_silent_ref(
+        &mut paused,
+        &[t0 + std::time::Duration::from_secs(4)],
+        events(true),
+    );
+    assert_eq!(
+        paused.pairs[0].track_candidate, None,
+        "a pause kept the candidate"
+    );
+
+    let mut edged = with_candidate();
+    let edge = TickEvents {
+        drive_edge_on: true,
+        ..events(true)
+    };
+    run_correlated(
+        &mut edged,
+        1,
+        480,
+        edge,
+        t0 + std::time::Duration::from_secs(4),
+    );
+    assert_eq!(
+        edged.pairs[0].track_candidate, None,
+        "a drive edge kept the candidate"
+    );
+    assert!(edged.pairs[0].track_from.is_some());
+    // No window before the edge may count: the delay stays put until one
+    // after it has been confirmed by another.
+    let frames = run_correlated(
+        &mut edged,
+        30,
+        480,
+        events(true),
+        t0 + std::time::Duration::from_secs(5),
+    );
+    assert!(
+        frames.iter().all(|f| f["delay_samples"] == json!(460)),
+        "moved on pre-edge evidence"
+    );
+}

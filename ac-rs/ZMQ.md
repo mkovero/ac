@@ -3029,6 +3029,12 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // drive edge.
   "delay_operator":  <bool>,
 
+  // Additive (#687) — delay tracking is on for this pair: the daemon moves
+  // `delay_samples` by the residual once two analysis windows that share no
+  // samples agree on it (±1 sample). Set with `set_delay {track}`. false on
+  // a daemon predating it.
+  "delay_tracking":  <bool>,
+
   // Additive (#238) — how many start-up Finds this pair has completed, with
   // or without a peak. 0 before the first, and absent entirely on a daemon
   // predating #238 (consumers must default it to 0, never to "it ran").
@@ -3146,8 +3152,10 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "backend":         "jack" | "cpal" | "fake",
 
   // The three-stage transfer columns — the display's source. `null` until
-  // every ladder rung holds a full `n_blocks` (2.56 s at the bottom rung),
-  // and on a settling frame. Recomputed every tick. Absent is not a reason
+  // the top rung holds its full block count (0.11 s at 96 kHz), and on a
+  // pre-analysis frame (`n_averages: 0`). Deeper rungs join as they fill
+  // (the bottom at 2.43 s); `settled_stages` says which have — a present
+  // `mtw` is not a settled ladder. Recomputed every tick. Absent is not a reason
   // to fall back to the Welch arrays above: they are a different
   // measurement. Column spacing is NOT uniform in log frequency — map each
   // column by its own `freqs[i]`, never by index. dB is applied daemon-side.
@@ -3167,7 +3175,9 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // a crossover
     "bins":           [<int>, ...],      // source bins behind each column; never 0
     "ppo":            <float>,           // requested columns per octave
-    "n_blocks":       <int>,             // blocks each rung averages once settled
+    "n_blocks":       <int>,             // base block count N: stage 0 averages N,
+                                          // deeper stages a fixed multiple (4/6/12
+                                          // at N = 4; they overlap 75/87.5 %)
     "settled_stages": [<bool>, ...],     // which rungs have settled, shallowest
                                           // first: "more band coming" versus
                                           // "this is all there is"
@@ -3182,7 +3192,7 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
         "f_valid":    <float>,           // validity edge, Hz
         "f_top":      <float>,           // where it hands over to the rung above, Hz
         "blend_top":  <float>,           // top of the blend region, Hz
-        "settling_s": <float>            // W + hop·(N−1): time to fill its average
+        "settling_s": <float>            // W + hop·(blocks−1): time to fill its average
       }
     ]
   }
@@ -3238,7 +3248,8 @@ tells that apart from a stationary DUT.
 What does move every frame: `mtw` (the ladder is a push pipeline fed the
 fresh capture buffers), `meas_peak_dbfs` / `ref_peak_dbfs`, `drive`,
 `spl` (the F/S integrator steps every tick over the held broadband
-level), `delay_locked`, `delay_operator` and `delay_attempts`.
+level), `delay_locked`, `delay_operator`, `delay_tracking` and
+`delay_attempts`.
 `delay_residual` moves with the analysis, once per hop.
 
 The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
@@ -3304,6 +3315,12 @@ toggled on/off in the UI without re-issuing the transfer command.
   "cmd":           "transfer_stream",
   "wire_version":  <int>,            // see DATA frame envelope
   "samples":       [<float>, ...],   // h(t) downsampled to ≤2000 samples
+  "log_db":        [<float>, ...],   // additive — 20·log10|h| re its peak,
+                                     // one per samples entry, the MAX over
+                                     // the stride bucket centred on it
+  "etc_db":        [<float>, ...],   // additive — ETC (envelope of the
+                                     // analytic IR) re its peak, bucketed
+                                     // like log_db
   "sr":            <int>,            // capture sample rate
   "stride":        <int>,            // downsample factor (ir_full / samples)
   "dt_ms":         <float>,          // ms per output sample (1000/sr * stride)
@@ -3329,6 +3346,17 @@ peak sits at the middle of the array. The first sample's time is
 half of the array are normal output of a delay-compensated H₁
 estimate — they capture phase wrap and pre-ringing of bandlimited
 filters, not actual non-causality.
+
+**Log and ETC.** `log_db` and `etc_db` are computed from the
+full-resolution IR, then reduced to the `samples` grid by the maximum of
+a `stride`-long bucket centred on each picked sample — a stride pick would
+step over an arrival one sample wide, and centring puts a peak within half
+a bucket (`dt_ms / 2`) of its time. The last bucket also holds the tail
+after the last pick, so a peak there (at the window's far end) is drawn
+up to one bucket early. Both are 0 dB at their peak and floored at −150 dB. The ETC
+is `|h + j·H{h}|`, the analytic signal's magnitude: the level each
+arrival reaches without its oscillation. Empty arrays from a daemon
+predating them.
 
 **No mic-curve correction.** The IR is computed from the raw
 ac-core `TransferResult.re` / `.im` (full resolution), which is NOT
@@ -3430,7 +3458,7 @@ UI-driven session goes through `set_drive`, so the UI is always covered.
 
 An `on: false → true` transition discards a per-pair delay **that the
 daemon found while the drive was off** — a Find against silence — and finds
-it again, flushing that pair's averages and re-settling (2.56 s at the
+it again, flushing that pair's averages and re-settling (2.43 s at the
 bottom stage). A delay found while driving is kept, so the dead-man
 expiring and the client resuming does not disturb a running measurement,
 and a delay set with `set_delay` is never discarded (#669). `on: true →
@@ -3455,6 +3483,7 @@ spawning one, so it does not go through the busy guard.
 ```json
 { "cmd": "set_delay", "samples": <int> | null, "pair": <int> }
 { "cmd": "set_delay", "step": <int>, "pair": <int> }
+{ "cmd": "set_delay", "track": <bool>, "pair": <int> }
 ```
 
 - `samples` (required): an integer holds that delay, marked
@@ -3464,6 +3493,16 @@ spawning one, so it does not go through the busy guard.
 - `step` (instead of `samples`): move the held delay by that many samples,
   operator-set. Applied by the daemon in arrival order, so two nudges sent
   before the next frame both land. A pair with no delay yet is left alone.
+- `track` (instead of `samples`/`step`, #687): switch delay tracking on or
+  off. While on, after each analysis the pair's live IR residual is held as
+  a candidate; when a later window that shares **no samples** with the
+  candidate's (the ring is 2.5 s, so about 2.5 s later) reads the same
+  residual within ±1 sample against the same held delay, the delay moves by
+  it, exactly as a `step` would: operator-set, ladder restarted. A residual
+  of 0, no residual (a silent leg), a pair paused by data protection, or any
+  other `set_delay` clears the candidate. A move is therefore followed
+  about two ring lengths (≈5 s) after it stops. Published as
+  `delay_tracking`.
 - `pair` (optional): a pair index in launch order. Absent: every pair.
 
 Setting the value a pair already holds only marks it operator-set; a
@@ -3478,8 +3517,9 @@ offset is applied before decimation).
 **Errors**
 ```json
 { "ok": false, "error": "no transfer_stream session running" }
-{ "ok": false, "error": "'samples' (integer or null) or 'step' (integer) required" }
-{ "ok": false, "error": "give 'samples' or 'step', not both" }
+{ "ok": false, "error": "'samples' (integer or null), 'step' (integer) or 'track' (bool) required" }
+{ "ok": false, "error": "give one of 'samples', 'step' or 'track'" }
+{ "ok": false, "error": "'track' must be true or false" }
 { "ok": false, "error": "'samples' must be an integer or null" }
 { "ok": false, "error": "'step' must be an integer" }
 { "ok": false, "error": "'pair' must be a non-negative integer" }
