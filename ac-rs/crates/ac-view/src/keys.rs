@@ -349,7 +349,7 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::T,
         action: Action::TypeDelay,
         scope: Scope::Transfer,
-        description: "Type a delay in samples (T again applies)",
+        description: "Type a delay in samples (Enter applies)",
         shift: None,
     },
     Binding {
@@ -363,7 +363,7 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::J,
         action: Action::TypeOffset,
         scope: Scope::Transfer,
-        description: "Type a dB offset for the selected trace (J applies, empty resets)",
+        description: "Type a dB offset for the selected trace (Enter applies, empty resets)",
         shift: None,
     },
     Binding {

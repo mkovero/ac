@@ -264,20 +264,30 @@ pub(super) fn draw_transfer(
         draw_input_meters(painter, content, scene);
     }
 
-    // The phase pane's view when it is not the wrapped one (#695) —
-    // unwrapped phase and group delay follow the phase reference and a
-    // mask gap, which the caption says. ac-scene's string.
-    if let Some(label) = scene
-        .or_else(|| stored.first().map(|r| r.scene))
-        .and_then(|s| s.phase_view_readout)
-    {
-        text(
-            painter,
-            egui::pos2(layout.phase.x + 4.0, layout.phase.y + 2.0),
-            Align2::LEFT_TOP,
-            label,
-            COLOR_VALUE,
-        );
+    // The phase pane's caption, for the focused trace: what the phase is
+    // referenced to (`R`, `P` — nothing said it before), then the view when
+    // it is not the wrapped one (#695). ac-scene's strings.
+    let focused_scene = match state.focus {
+        Focus::Stored(idx) => stored.get(idx).map(|r| r.scene),
+        Focus::Live => scene,
+    }
+    .or(scene)
+    .or_else(|| stored.first().map(|r| r.scene));
+    if let Some(s) = focused_scene {
+        let mut next = egui::pos2(layout.phase.x + 4.0, layout.phase.y + 2.0);
+        next = painter
+            .text(
+                next,
+                Align2::LEFT_TOP,
+                &s.phase_ref_readout,
+                FontId::default(),
+                COLOR_LABEL,
+            )
+            .right_top()
+            + egui::vec2(ROW_H, 0.0);
+        if let Some(label) = s.phase_view_readout {
+            text(painter, next, Align2::LEFT_TOP, label, COLOR_VALUE);
+        }
     }
 
     // Last, so the fault indicator is over the traces rather than under
