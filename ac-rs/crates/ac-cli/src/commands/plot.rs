@@ -1806,6 +1806,57 @@ fn print_ir_report(report: &MeasurementReport) {
         stats.gate_window_s * 1000.0,
         stats.gate_f_low_hz,
     );
+    if let Some(room) = &report.room_acoustics {
+        for line in room_acoustics_lines(room) {
+            println!("{line}");
+        }
+    }
+}
+
+/// The ISO 3382-1 block: one row per octave band, then the 500 Hz–1 kHz
+/// single numbers, then why any value is absent. `—` marks an absent value.
+fn room_acoustics_lines(r: &ac_core::measurement::room_acoustics::RoomAcoustics) -> Vec<String> {
+    let s = |v: Option<f64>| v.map_or("\u{2014}".to_string(), |v| format!("{v:.2}"));
+    let db = |v: Option<f64>| v.map_or("\u{2014}".to_string(), |v| format!("{v:+.1}"));
+    let nominal = |fc: f64| {
+        [63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+            .into_iter()
+            .min_by(|a, b| (fc / a).ln().abs().total_cmp(&(fc / b).ln().abs()))
+            .unwrap_or(fc)
+    };
+    let mut lines = vec![
+        String::new(),
+        format!("  room acoustics  ({}, octave bands)", r.citation.standard),
+        "      band     T20 s   T30 s   EDT s   C50 dB  C80 dB   D50   range dB".to_string(),
+    ];
+    for b in &r.bands {
+        lines.push(format!(
+            "  {:>6} Hz  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>5}  {:>7.1}",
+            nominal(b.centre_hz),
+            s(b.t20_s),
+            s(b.t30_s),
+            s(b.edt_s),
+            db(b.c50_db),
+            db(b.c80_db),
+            s(b.d50),
+            b.peak_to_noise_db,
+        ));
+    }
+    lines.push(format!(
+        "  500–1k mean  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>5}",
+        s(r.t20_mid_s),
+        s(r.t30_mid_s),
+        s(r.edt_mid_s),
+        db(r.c50_mid_db),
+        db(r.c80_mid_db),
+        s(r.d50_mid),
+    ));
+    for b in &r.bands {
+        for why in &b.refused {
+            lines.push(format!("  {:>6} Hz  {why}", nominal(b.centre_hz)));
+        }
+    }
+    lines
 }
 
 /// The `setup` command that sets the report directory, as the `report`
@@ -2135,6 +2186,67 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn room_acoustics_block_prints_bands_means_and_reasons() {
+        use ac_core::measurement::room_acoustics::{BandParams, RoomAcoustics};
+        let band = |fc: f64, t: Option<f64>| BandParams {
+            centre_hz: fc,
+            t20_s: t,
+            t30_s: t,
+            edt_s: Some(0.75),
+            c50_db: Some(1.4),
+            c80_db: Some(-0.2),
+            d50: Some(0.58),
+            peak_to_noise_db: 52.0,
+            refused: if t.is_none() {
+                vec![
+                    "T20: decay starts 30.0 dB above the background; ISO 3382-1 §5.3.2 needs 35"
+                        .into(),
+                ]
+            } else {
+                Vec::new()
+            },
+        };
+        let r = RoomAcoustics {
+            bands: vec![band(501.187, Some(0.8)), band(1000.0, None)],
+            t20_mid_s: None,
+            t30_mid_s: None,
+            edt_mid_s: Some(0.75),
+            c50_mid_db: Some(1.4),
+            c80_mid_db: Some(-0.2),
+            d50_mid: Some(0.58),
+            start_s: 0.01,
+            citation: ac_core::measurement::report::StandardsCitation {
+                standard: "ISO 3382-1:2009".into(),
+                clause: String::new(),
+                verified: true,
+            },
+        };
+        let lines = super::room_acoustics_lines(&r);
+        assert_eq!(
+            lines[1],
+            "  room acoustics  (ISO 3382-1:2009, octave bands)"
+        );
+        assert_eq!(
+            lines[3],
+            "     500 Hz    0.80    0.80    0.75    +1.4    -0.2   0.58     52.0"
+        );
+        assert!(
+            lines[4].starts_with("    1000 Hz       \u{2014}       \u{2014}"),
+            "{:?}",
+            lines[4]
+        );
+        assert!(
+            lines[5].starts_with("  500–1k mean       \u{2014}"),
+            "{:?}",
+            lines[5]
+        );
+        assert_eq!(
+            lines[6],
+            "    1000 Hz  T20: decay starts 30.0 dB above the background; ISO 3382-1 §5.3.2 needs 35"
+        );
+    }
     use super::{
         answered_enumeration_lines, arrival_check_lines, arrival_snr_lines, arrival_source_line,
         broadband_delta_lines, captured_line, collect_ir_frames, collect_sweep_frames,

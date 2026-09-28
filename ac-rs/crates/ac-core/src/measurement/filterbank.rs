@@ -227,6 +227,27 @@ impl Filterbank {
             .collect()
     }
 
+    /// Band `band`'s filter applied to `samples` from rest: the filtered
+    /// signal itself, every sample kept (no settling prefix dropped) — for
+    /// time-domain work on a band, such as an ISO 3382-1 decay curve.
+    /// `None` for a band index out of range.
+    pub fn filter_band(&self, band: usize, samples: &[f64]) -> Option<Vec<f64>> {
+        let f = self.filters.get(band)?;
+        let mut state = f.reset_state();
+        Some(
+            samples
+                .iter()
+                .map(|&x| {
+                    let mut y = x;
+                    for (bq, z) in f.sos.iter().zip(state.iter_mut()) {
+                        y = apply_df2t(bq, z, y);
+                    }
+                    y
+                })
+                .collect(),
+        )
+    }
+
     pub fn citation() -> StandardsCitation {
         StandardsCitation {
             standard: "IEC 61260-1:2014".into(),
