@@ -2098,6 +2098,7 @@ fn z_loads_draws_clears_and_refuses_target_curves() {
     app.handle_action(Action::OpenTargets, false);
     assert!(app.target_list.is_some());
     app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
     // No trace on screen yet: loaded, and it says it waits for one.
     assert_eq!(
         app.toast_text(),
@@ -2106,6 +2107,7 @@ fn z_loads_draws_clears_and_refuses_target_curves() {
     app.ingest_frame_for_test(found_frame(), 0.0);
     app.handle_action(Action::OpenTargets, false);
     app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
     assert_eq!(app.toast_text(), Some("target house.txt drawn"));
     app.rebuild_scenes(true, 0.0);
     let t = app.target_trace.as_ref().expect("target drawn");
@@ -2120,6 +2122,7 @@ fn z_loads_draws_clears_and_refuses_target_curves() {
     std::fs::write(dir.join("bad.txt"), "1000 0\n").unwrap();
     app.handle_action(Action::OpenTargets, false);
     app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
     assert!(app.target.is_none());
     assert_eq!(
         app.toast_text(),
@@ -2160,9 +2163,36 @@ fn z_refuses_an_oversized_file_and_never_lists_a_pipe() {
     }
     assert_eq!(names, ["big.txt"]);
     app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
     assert!(app.target.is_none());
     assert!(app
         .toast_text()
         .is_some_and(|t| t.contains("more than a target curve")));
+    // The same bound on a file read directly: the cap is on the read, not
+    // only on the size seen before it.
+    assert!(crate::capture::read_target(&dir.join("big.txt"))
+        .unwrap_err()
+        .contains("more than a target curve"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Codex recheck: with the IR panel open a loaded target is hidden behind
+/// it, and the status says how to see it.
+#[test]
+fn a_target_loaded_behind_the_ir_panel_says_so() {
+    let dir = std::env::temp_dir().join(format!("ac-target-ir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("house.txt"), "20 6\n1000 0\n").unwrap();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::ToggleIrPanel, false);
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    app.wait_target_for_test();
+    assert_eq!(
+        app.toast_text(),
+        Some("target house.txt loaded \u{2014} H closes the IR panel to show it")
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -57,6 +57,40 @@ pub const TARGET_EXTENSIONS: [&str; 3] = ["txt", "frd", "csv"];
 /// it is read on the UI thread.
 pub const TARGET_MAX_BYTES: u64 = 1 << 20;
 
+/// Read and parse a target file (`Z`) on a thread: the read is bounded to
+/// [`TARGET_MAX_BYTES`] as it happens (a size checked beforehand says
+/// nothing about a file that grows), and off the UI thread, where a
+/// stalled mount or a pipe would freeze the window (Codex review).
+pub fn spawn_target(path: PathBuf) -> Receiver<Result<ac_scene::target::TargetCurve, String>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_target(&path));
+    });
+    rx
+}
+
+/// The body of [`spawn_target`]: at most [`TARGET_MAX_BYTES`] of a regular
+/// file, parsed as a target curve named after the file.
+pub fn read_target(path: &Path) -> Result<ac_scene::target::TargetCurve, String> {
+    use std::io::Read;
+    let name = crate::file_list::FileList::name(path);
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(TARGET_MAX_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > TARGET_MAX_BYTES {
+        return Err(format!(
+            "more than a target curve ({TARGET_MAX_BYTES} bytes max)"
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "not text".to_string())?;
+    ac_scene::target::TargetCurve::parse(&name, &text)
+}
+
 /// The file name for slot `slot` captured at `captured_at_utc` (RFC3339):
 /// colons are not portable in file names, so they become `-`.
 ///

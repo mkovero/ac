@@ -103,6 +103,11 @@ pub struct AcViewApp {
     /// axes every pass.
     target: Option<ac_scene::target::TargetCurve>,
     target_trace: Option<crate::view::TargetTrace>,
+    /// A target file being read on its thread, with its name.
+    target_rx: Option<(
+        String,
+        std::sync::mpsc::Receiver<Result<ac_scene::target::TargetCurve, String>>,
+    )>,
     /// Where `Z` lists from: [`crate::capture::targets_dir`], held so a test
     /// can point it elsewhere.
     targets_dir: std::path::PathBuf,
@@ -164,6 +169,7 @@ impl AcViewApp {
             target_list: None,
             target: None,
             target_trace: None,
+            target_rx: None,
             targets_dir: crate::capture::targets_dir(),
             average_scene: None,
             captures_dir: crate::capture::captures_dir(),
@@ -893,8 +899,9 @@ impl AcViewApp {
         }
     }
 
-    /// `Z` in the list: read and draw the selected target, or say why not.
-    /// Small files, read on the UI thread.
+    /// `Z` in the list: read the selected target on a thread
+    /// ([`crate::capture::spawn_target`]); [`Self::poll_target`] draws it
+    /// or says why not.
     fn load_selected_target(&mut self, now: Instant) {
         let Some(path) = self
             .target_list
@@ -904,29 +911,43 @@ impl AcViewApp {
             return;
         };
         let name = crate::file_list::FileList::name(&path);
-        let parsed = std::fs::metadata(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|m| {
-                if !m.is_file() {
-                    Err("not a regular file".to_string())
-                } else if m.len() > crate::capture::TARGET_MAX_BYTES {
-                    Err(format!(
-                        "{} bytes, more than a target curve ({} max)",
-                        m.len(),
-                        crate::capture::TARGET_MAX_BYTES
-                    ))
-                } else {
-                    std::fs::read_to_string(&path).map_err(|e| e.to_string())
-                }
-            })
-            .and_then(|text| ac_scene::target::TargetCurve::parse(&name, &text));
-        match parsed {
+        self.set_toast(format!("reading target {name}\u{2026}"), now, None);
+        self.target_rx = Some((name, crate::capture::spawn_target(path)));
+    }
+
+    /// Collect a finished target read, if any.
+    fn poll_target(&mut self, now: Instant) {
+        let Some((_, rx)) = &self.target_rx else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the read ended without a result".to_string())
+            }
+        };
+        let (name, _) = self.target_rx.take().expect("checked above");
+        self.finish_target(&name, result, now);
+    }
+
+    fn finish_target(
+        &mut self,
+        name: &str,
+        result: Result<ac_scene::target::TargetCurve, String>,
+        now: Instant,
+    ) {
+        match result {
             Ok(t) => {
-                // A target is drawn on a trace's axes: with nothing on
-                // screen yet it waits, and says so (Codex review).
+                // A target is drawn on a trace's axes, in the magnitude
+                // pane: say where it is when that is not on screen (Codex
+                // review).
+                let ir_open = matches!(&self.view, ViewKind::Transfer(v) if v.ir_panel_open());
                 let on_screen =
                     self.current_transfer_scene().is_some() || !self.loaded_scenes.is_empty();
-                let msg = if on_screen {
+                let msg = if ir_open {
+                    format!("target {name} loaded \u{2014} H closes the IR panel to show it")
+                } else if on_screen {
                     format!("target {name} drawn")
                 } else {
                     format!("target {name} loaded \u{2014} it draws with the first trace")
@@ -939,6 +960,17 @@ impl AcViewApp {
                 now,
                 Some(6.0),
             ),
+        }
+    }
+
+    /// Wait for a started target read, as a frame's poll would.
+    #[cfg(test)]
+    pub(crate) fn wait_target_for_test(&mut self) {
+        if let Some((name, rx)) = self.target_rx.take() {
+            let result = rx
+                .recv()
+                .unwrap_or_else(|_| Err("the read ended without a result".to_string()));
+            self.finish_target(&name, result, Instant::now());
         }
     }
 
@@ -1806,6 +1838,7 @@ impl eframe::App for AcViewApp {
         // keepalive_tick).
         self.keepalive_tick(std::time::Instant::now());
         self.poll_capture(std::time::Instant::now());
+        self.poll_target(std::time::Instant::now());
 
         let got_new_frame = self.drain_frames();
         // Rebuild the scenes once per pass — never once per backlog
