@@ -284,6 +284,9 @@ pub struct TransferViewState {
     /// The live IR panel shows the arrival IR (#706, the default) rather
     /// than the 1 s one; `S` switches.
     pub ir_arrival: bool,
+    /// The live trace eases toward each new estimate over 40 ms (#716,
+    /// `ac_scene::tween`) rather than stepping to it; `Shift+W` switches.
+    pub tween: bool,
     /// What the phase pane shows (#695), for every trace: wrapped phase,
     /// unwrapped phase or group delay (`Shift+P`).
     pub phase_view: ac_scene::transfer::PhaseView,
@@ -341,6 +344,7 @@ impl TransferViewState {
             ir_panel_open: false,
             ir_view: ac_scene::IrView::Linear,
             ir_arrival: true,
+            tween: true,
             phase_view: ac_scene::transfer::PhaseView::Wrapped,
             loaded: Vec::new(),
             focus: Focus::Live,

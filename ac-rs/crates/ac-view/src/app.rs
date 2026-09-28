@@ -552,6 +552,14 @@ impl AcViewApp {
                         continue;
                     };
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
+                    // Eased toward the newest estimate (#716); readouts,
+                    // meters and the mask are the frame's either way.
+                    let input = if state.tween {
+                        pair.tween.sample(&input, now_s)
+                    } else {
+                        pair.tween.reset();
+                        input
+                    };
                     let mut live = ac_scene::TransferScene::from_input(
                         &input,
                         modes,
@@ -831,7 +839,14 @@ impl AcViewApp {
                     t.toggle_ir_panel();
                 }
             }),
-            Action::CycleSpeed => self.cycle_speed(),
+            Action::CycleSpeed => {
+                if shift {
+                    // `Shift+W` (#716): ease the live trace, or step it.
+                    self.with_transfer(|t| t.tween = !t.tween);
+                } else {
+                    self.cycle_speed();
+                }
+            }
             Action::ToggleIrSpan => self.with_transfer(|t| t.ir_arrival = !t.ir_arrival),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
@@ -2375,6 +2390,8 @@ struct LivePair {
     /// the press. Two presses before the frames catch up then toggle twice
     /// instead of sending the same value (Codex review).
     track_pending: Option<(bool, u64)>,
+    /// Motion easing toward this pair's newest estimate (#716).
+    tween: ac_scene::tween::Tween,
 }
 
 impl LivePair {

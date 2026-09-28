@@ -3019,3 +3019,33 @@ fn a_relaunch_forgets_a_pending_speed() {
     app.handle_action(Action::CycleSpeed, false);
     assert_eq!(app.sent_speed.last().unwrap()["speed"], "live");
 }
+
+/// #716: the live trace eases toward a new estimate — at its arrival it is
+/// still drawn where it was, TWEEN_S later it is the new one — and
+/// `Shift+W` turns that off, so the new estimate is drawn at once.
+#[test]
+fn the_live_trace_eases_and_shift_w_turns_it_off() {
+    let tw = ac_scene::tween::TWEEN_S;
+    let shifted = |db: f64| {
+        let mut f = found_frame();
+        if let Some(m) = f.mtw.as_mut() {
+            m.magnitude_db.iter_mut().for_each(|v| *v += db);
+        }
+        f
+    };
+    let y0 = |app: &AcViewApp| app.current_transfer_scene().unwrap().magnitude.segments[0][0].1;
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(shifted(0.0), 0.0);
+    let before = y0(&app);
+    app.ingest_frame_for_test(shifted(20.0), 1.0);
+    assert_eq!(y0(&app), before, "jumped on arrival");
+    app.rebuild_scenes(true, 1.0 + tw);
+    let after = y0(&app);
+    assert!(after > before, "never reached the new estimate");
+
+    let mut app = transfer_app();
+    app.handle_action(Action::CycleSpeed, true); // Shift+W: easing off
+    app.ingest_frame_for_test(shifted(0.0), 0.0);
+    app.ingest_frame_for_test(shifted(20.0), 1.0);
+    assert_eq!(y0(&app), after, "easing off still eased");
+}

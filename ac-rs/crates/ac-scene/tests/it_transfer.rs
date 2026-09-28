@@ -590,3 +590,83 @@ fn an_isolated_unmasked_column_does_not_panic_either_phase_view() {
         assert!(s.phase_span.is_some(), "{view:?} fitted no range");
     }
 }
+
+// ─── motion easing (#716) ───────────────────────────────────────────
+
+use ac_scene::tween::{Tween, TWEEN_S};
+
+fn est(mag: f64, phase: f64, coh: f64, delay_ms: f64) -> TransferInput {
+    let mut i = input(vec![100.0, 1000.0], vec![phase; 2], delay_ms);
+    i.magnitude_db = vec![mag; 2];
+    i.coherence = vec![coh; 2];
+    i
+}
+
+/// The curve eases from the drawn estimate to the new one over TWEEN_S,
+/// passing through the midpoint, and is exactly the new one from then on.
+/// The first estimate is drawn as is.
+#[test]
+fn a_new_estimate_is_reached_over_the_tween_time() {
+    let mut tw = Tween::default();
+    assert_eq!(
+        tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0).magnitude_db[0],
+        0.0
+    );
+    let to = est(10.0, 40.0, 0.9, 1.0);
+    let mid = tw.sample(&to, 1.0 + 0.0);
+    assert_eq!(mid.magnitude_db[0], 0.0, "moved before any time passed");
+    let half = tw.sample(&to, 1.0 + TWEEN_S / 2.0);
+    assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
+    assert!((half.phase_deg[0] - 20.0).abs() < 1e-9);
+    for t in [TWEEN_S, TWEEN_S * 3.0] {
+        let s = tw.sample(&to, 1.0 + t);
+        assert_eq!(s.magnitude_db, to.magnitude_db);
+        assert_eq!(s.phase_deg, to.phase_deg);
+    }
+}
+
+/// Phase takes the shorter arc: 170° to −170° passes through 180°, not 0°
+/// — the rejected straight interpolation (computed) would sweep the pane.
+#[test]
+fn phase_eases_along_the_shorter_arc() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 170.0, 0.9, 1.0), 0.0);
+    tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0); // arrives
+    let half = tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0);
+    let p = half.phase_deg[0];
+    assert!((p.abs() - 180.0).abs() < 1e-9, "went the long way: {p}");
+    let straight: f64 = (170.0 + -170.0) / 2.0;
+    assert!(straight.abs() < 1e-9, "the rejected path's midpoint is 0°");
+}
+
+/// A new estimate arriving mid-ease starts from where the curve is drawn,
+/// not from the old target: no jump.
+#[test]
+fn an_estimate_mid_ease_starts_from_the_drawn_curve() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0);
+    tw.sample(&est(10.0, 0.0, 0.9, 1.0), 0.0);
+    let drawn = tw
+        .sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0)
+        .magnitude_db[0];
+    let next = tw
+        .sample(&est(20.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0)
+        .magnitude_db[0];
+    assert!((drawn - 5.0).abs() < 1e-9);
+    assert!((next - drawn).abs() < 1e-9, "jumped from {drawn} to {next}");
+}
+
+/// Incomparable estimates snap: a new delay, or a new column set.
+/// Coherence is never eased — the mask is the latest estimate's.
+#[test]
+fn a_changed_alignment_or_grid_snaps_and_coherence_is_never_eased() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.2, 1.0), 0.0);
+    let s = tw.sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0);
+    assert_eq!(s.coherence, vec![0.9; 2], "coherence was eased");
+    let snapped = tw.sample(&est(30.0, 0.0, 0.9, 2.0), TWEEN_S / 2.0);
+    assert_eq!(snapped.magnitude_db[0], 30.0, "eased across a delay change");
+    let mut other = est(40.0, 0.0, 0.9, 2.0);
+    other.freqs = vec![100.0, 2000.0];
+    assert_eq!(tw.sample(&other, TWEEN_S / 2.0).magnitude_db[0], 40.0);
+}
