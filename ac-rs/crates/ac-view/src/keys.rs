@@ -306,7 +306,7 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::H,
         action: Action::ToggleIrPanel,
         scope: Scope::Transfer,
-        description: "Toggle IR panel — h(t), live arrival",
+        description: "Toggle IR panel — h(t), live arrival (Shift: linear / log / ETC)",
     },
     Binding {
         key: Key::Tab,

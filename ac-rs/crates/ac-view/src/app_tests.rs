@@ -2081,3 +2081,30 @@ fn meas_lists_parse_or_are_refused() {
         Err("channel 4 is listed twice".to_string())
     );
 }
+
+/// `Shift+H` walks the IR panel through linear, log and ETC (opening it
+/// if closed); the built scene follows, with the daemon's dB curves.
+#[test]
+fn shift_h_cycles_the_ir_view_and_the_scene_follows() {
+    let mut app = ir_app();
+    let mut frame = ir_frame();
+    frame.log_db = vec![-150.0, 0.0, -6.0, -150.0];
+    frame.etc_db = vec![-40.0, 0.0, -3.0, -40.0];
+    app.ingest_ir_frame_for_test(frame);
+    let view = |app: &AcViewApp| app.current_ir_scene().map(|s| s.view);
+
+    app.handle_action(Action::ToggleIrPanel, true); // opens, linear
+    app.rebuild_ir_scene();
+    assert_eq!(view(&app), Some(ac_scene::IrView::Linear));
+    app.handle_action(Action::ToggleIrPanel, true);
+    app.rebuild_ir_scene();
+    assert_eq!(view(&app), Some(ac_scene::IrView::Log));
+    app.handle_action(Action::ToggleIrPanel, true);
+    app.rebuild_ir_scene();
+    let scene = app.current_ir_scene().unwrap();
+    assert_eq!(scene.view, ac_scene::IrView::Etc);
+    assert_eq!(scene.trace.segments[0][1].1, 1.0, "ETC peak at the top");
+    app.handle_action(Action::ToggleIrPanel, false); // H closes
+    app.rebuild_ir_scene();
+    assert!(app.current_ir_scene().is_none());
+}

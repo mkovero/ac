@@ -367,15 +367,15 @@ impl AcViewApp {
     /// made, called from both the live paint pass and the test helpers
     /// below so they can't drift apart.
     fn rebuild_ir_scene(&mut self) {
-        let open = matches!(&self.view, ViewKind::Transfer(t) if t.ir_panel_open());
-        self.ir_scene = if open {
-            self.live_selected()
-                .ir
-                .as_ref()
-                .map(|f| ac_scene::IrScene::from_input(&ac_scene::IrInput::from_wire_frame(f)))
-        } else {
-            None
+        let view = match &self.view {
+            ViewKind::Transfer(t) if t.ir_panel_open() => Some(t.ir_view),
+            _ => None,
         };
+        self.ir_scene = view.and_then(|view| {
+            self.live_selected().ir.as_ref().map(|f| {
+                ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
+            })
+        });
     }
 
     /// Rebuild the active view's scenes from the held frames — the one
@@ -649,7 +649,13 @@ impl AcViewApp {
             Action::CycleDerotReference => self.with_transfer(|t| t.cycle_derot()),
             Action::CycleSmoothing => self.with_transfer(|t| t.cycle_smoothing()),
             Action::OpenSettings => self.open_settings(),
-            Action::ToggleIrPanel => self.with_transfer(|t| t.toggle_ir_panel()),
+            Action::ToggleIrPanel => self.with_transfer(|t| {
+                if shift {
+                    t.cycle_ir_view();
+                } else {
+                    t.toggle_ir_panel();
+                }
+            }),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
             // -- transfer view: the operator's delay (#669). The values

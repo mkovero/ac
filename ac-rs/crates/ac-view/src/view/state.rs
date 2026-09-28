@@ -196,6 +196,8 @@ pub struct TransferViewState {
     /// panel is an on-demand accessory, not a third pane always fighting
     /// the other two for the same screen.
     ir_panel_open: bool,
+    /// Which view the IR panel draws: linear, log or ETC (`Shift+H`).
+    pub ir_view: ac_scene::IrView,
     /// Stored runs loaded for comparison (#321), in load order. Unbounded
     /// on purpose — triage and the architect both left the comparison-set
     /// size open as a later UX-driven constraint, not an architectural one.
@@ -246,6 +248,7 @@ impl TransferViewState {
             snapshot_delay_ms: 0.0,
             smoothing: ac_scene::Smoothing::Off,
             ir_panel_open: false,
+            ir_view: ac_scene::IrView::Linear,
             loaded: Vec::new(),
             focus: Focus::Live,
             live_count: 1,
@@ -506,6 +509,16 @@ impl TransferViewState {
     }
 
     /// `H`: toggle the IR panel.
+    /// `Shift+H`: the next IR view, opening the panel if it is closed —
+    /// the key is only ever pressed to look at a view.
+    pub fn cycle_ir_view(&mut self) {
+        if self.ir_panel_open {
+            self.ir_view = self.ir_view.next();
+        } else {
+            self.ir_panel_open = true;
+        }
+    }
+
     pub fn toggle_ir_panel(&mut self) {
         self.ir_panel_open = !self.ir_panel_open;
     }

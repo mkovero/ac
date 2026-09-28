@@ -372,6 +372,16 @@ pub struct IrFrame {
     /// (stride-picked, not interpolated).
     #[serde(default)]
     pub samples: Vec<f32>,
+    /// `20·log10|h|`, dB re its peak, one per [`Self::samples`] entry: the
+    /// maximum over that entry's stride bucket of the full-resolution
+    /// curve (`ac_core::visualize::ir_views`). Empty from a daemon that
+    /// predates it.
+    #[serde(default)]
+    pub log_db: Vec<f32>,
+    /// The ETC (envelope of the analytic IR), dB re its peak, bucketed like
+    /// [`Self::log_db`].
+    #[serde(default)]
+    pub etc_db: Vec<f32>,
     pub sr: u32,
     /// Downsample factor (`ir_full.len() / samples.len()`).
     #[serde(default)]

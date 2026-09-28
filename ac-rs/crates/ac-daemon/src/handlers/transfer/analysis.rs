@@ -104,6 +104,11 @@ pub(super) struct PairAnalysis {
 /// lock fields are added at assembly, from live state.
 pub(super) struct IrPayload {
     pub(super) samples: Vec<f32>,
+    /// `20·log10|h|` and the ETC, dB re their peak, one per `samples`
+    /// entry: the maximum over that entry's stride bucket of the
+    /// full-resolution curve, so no arrival falls between picks.
+    pub(super) log_db: Vec<f32>,
+    pub(super) etc_db: Vec<f32>,
     pub(super) stride: usize,
     pub(super) dt_ms: f64,
     pub(super) t_origin_ms: f64,
@@ -255,6 +260,9 @@ pub(super) fn analyse_pair(
         const IR_MAX_SAMPLES: usize = 2000;
         let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
         let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        use ac_core::visualize::ir_views;
+        let log_db = ir_views::bucket_max(&ir_views::log_db(&ir_full), stride);
+        let etc_db = ir_views::bucket_max(&ir_views::etc_db(&ir_full), stride);
         // t_origin_ms = -mid_ms because `impulse_response_from_h` centres
         // the IR peak at the middle of the array (t=0 in the user's
         // mental model).
@@ -262,6 +270,8 @@ pub(super) fn analyse_pair(
         let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
         Some(IrPayload {
             samples: ir_ds,
+            log_db,
+            etc_db,
             stride,
             dt_ms,
             t_origin_ms,
