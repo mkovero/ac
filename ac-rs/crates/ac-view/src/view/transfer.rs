@@ -297,14 +297,18 @@ pub(super) fn draw_transfer(
     // The pointer cursor (#718): a line and the focused trace's values at
     // the column nearest the pointer, and a pinned one where the operator
     // clicked. ac-scene snaps and formats; this maps x and draws.
+    // Only a trace that is drawn is read: live hidden (`V`) or paused
+    // (Enter), or a hidden run, has nothing on screen to read (Codex review).
     let focused_scene = match state.focus {
-        Focus::Stored(idx) => stored.get(idx).map(|r| r.scene),
-        Focus::Live => scene,
+        Focus::Stored(idx) => stored.get(idx).filter(|r| r.visible).map(|r| r.scene),
+        Focus::Live => scene.filter(|_| state.live_trace_shown()),
     };
     let (f_lo, f_hi) = (state.freq_range.min(), state.freq_range.max());
     let pointer = pane_pointer(ui, &layout);
     if let Some(s) = focused_scene {
-        if let Some(pin) = state.cursor_pin {
+        // A pin outside the zoomed range is off screen, not moved to the
+        // nearest column that is (Codex review).
+        if let Some(pin) = state.cursor_pin.filter(|p| (f_lo..=f_hi).contains(p)) {
             if let Some(r) = s.cursor_readout(pin) {
                 draw_cursor(painter, &layout, &r, 1, COLOR_SIGNAL);
             }
@@ -341,6 +345,11 @@ fn pane_pointer(ui: &Ui, layout: &TransferLayout) -> TransferPointer {
     let Some(p) = pos else {
         return TransferPointer::default();
     };
+    // Only when nothing is over the panes: a window (target list,
+    // settings, help) owns the pointer where it lies (Codex review).
+    if ui.ctx().layer_id_at(p) != Some(ui.layer_id()) {
+        return TransferPointer::default();
+    }
     let inside = |vp: &Viewport| {
         p.x >= vp.x && p.x <= vp.x + vp.width && p.y >= vp.y && p.y <= vp.y + vp.height
     };
@@ -372,17 +381,20 @@ fn draw_cursor(
             Stroke::new(1.0, color.gamma_multiply(0.6)),
         );
     }
-    let right_half = x > layout.mag.x + layout.mag.width * 0.6;
-    let (anchor, dx) = if right_half {
-        (Align2::RIGHT_TOP, -6.0)
+    // Right of the line if the measured label fits there, else left of
+    // it; kept inside the pane either way (Codex review).
+    let galley = painter.layout_no_wrap(r.text.clone(), FontId::default(), color);
+    let w = galley.size().x;
+    let (lo, hi) = (layout.mag.x + 2.0, layout.mag.x + layout.mag.width - 2.0);
+    let left = if x + 6.0 + w <= hi {
+        x + 6.0
     } else {
-        (Align2::LEFT_TOP, 6.0)
+        x - 6.0 - w
     };
-    text(
-        painter,
-        egui::pos2(x + dx, layout.mag.y + 4.0 + row as f32 * ROW_H),
-        anchor,
-        &r.text,
+    let left = left.clamp(lo, (hi - w).max(lo));
+    painter.galley(
+        egui::pos2(left, layout.mag.y + 4.0 + row as f32 * ROW_H),
+        galley,
         color,
     );
 }

@@ -597,3 +597,58 @@ fn the_cursor_draws_the_pinned_and_hovered_readouts() {
         .count();
     assert!(readouts >= 2, "no hover readout beside the pin: {texts:?}");
 }
+
+/// Codex review of #718: no readout for a live trace that is not drawn
+/// (`V` hid it); none for a pin outside the zoomed range; and in a narrow
+/// window the label stays inside the pane.
+#[test]
+fn the_cursor_reads_only_what_is_drawn_and_stays_on_the_pane() {
+    let live_scene = scene(Smoothing::Off);
+    let paint = |state: TransferViewState, width: f32| {
+        let view = ViewKind::Transfer(state);
+        let lives = [LiveTrace {
+            label: "live".to_string(),
+            pair: 0,
+            scene: &live_scene,
+            selected: true,
+        }];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(width, 480.0))
+            .build_ui(|ui| {
+                draw_view(&view, ui, None, Some(&live_scene), &lives, &[], None, None);
+            });
+        harness.run();
+        harness.output().shapes.clone()
+    };
+    let readout = |shapes: &[egui::epaint::ClippedShape]| {
+        extract_texts(shapes)
+            .into_iter()
+            .any(|t| t.starts_with("100.0 Hz ") || t.starts_with("800.0 Hz "))
+    };
+
+    let mut hidden = TransferViewState::new(-10.0, -30.0);
+    hidden.cursor_pin = Some(100.0);
+    hidden.live_visible = false;
+    assert!(!readout(&paint(hidden, 900.0)), "read a hidden trace");
+
+    let mut outside = TransferViewState::new(-10.0, -30.0);
+    outside.cursor_pin = Some(5.0); // below the 20 Hz axis
+    assert!(!readout(&paint(outside, 900.0)), "drew a pin off the axis");
+
+    let mut narrow = TransferViewState::new(-10.0, -30.0);
+    narrow.cursor_pin = Some(800.0); // the last fixture column
+    let shapes = paint(narrow, 320.0);
+    let label = shapes
+        .iter()
+        .find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.text().starts_with("800.0 Hz ") => {
+                Some(t.visual_bounding_rect())
+            }
+            _ => None,
+        })
+        .expect("the pinned readout");
+    assert!(
+        label.min.x >= 0.0 && label.max.x <= 320.0,
+        "label off the pane: {label:?}"
+    );
+}

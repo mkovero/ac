@@ -575,6 +575,9 @@ pub struct CursorColumn {
     pub phase: f64,
     pub coherence: f64,
     pub masked: bool,
+    /// Unmasked but alone between masked neighbours: a one-point segment,
+    /// not drawn.
+    pub lone: bool,
 }
 
 /// The pointer readout at one frequency (#718): where to draw its line and
@@ -612,6 +615,8 @@ impl TransferScene {
         };
         let text = if c.masked {
             format!("{f}  masked (coh {:.2})", c.coherence)
+        } else if c.lone {
+            format!("{f}  not drawn: a lone column (coh {:.2})", c.coherence)
         } else {
             let phase = if !c.phase.is_finite() {
                 "phase \u{2014}".to_string()
@@ -1596,6 +1601,18 @@ impl TransferScene {
                         .collect()
                 }
             };
+            let unmasked: Vec<bool> = input
+                .coherence
+                .iter()
+                .map(|&c| !c.is_nan() && c >= modes.coherence_mask)
+                .collect();
+            // A lone unmasked column is a one-point segment, which no pane
+            // draws (Codex review): the cursor must not report it as drawn.
+            let lone = |i: usize| {
+                unmasked[i]
+                    && !(i > 0 && unmasked[i - 1])
+                    && !unmasked.get(i + 1).copied().unwrap_or(false)
+            };
             cursor_columns = (0..input.freqs.len())
                 .map(|i| CursorColumn {
                     freq: input.freqs[i],
@@ -1603,8 +1620,8 @@ impl TransferScene {
                     magnitude_db: magnitude_db[i],
                     phase: phase_view_vals[i],
                     coherence: input.coherence[i],
-                    masked: input.coherence[i].is_nan()
-                        || input.coherence[i] < modes.coherence_mask,
+                    masked: !unmasked[i],
+                    lone: lone(i),
                 })
                 .collect();
             (
