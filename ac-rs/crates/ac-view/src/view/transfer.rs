@@ -195,16 +195,29 @@ pub(super) fn draw_transfer(
         // The time cursor (#720): hover and a pinned one, on the IR as
         // drawn; ac-scene snaps to the sample and formats.
         let vp = Viewport::from(content);
-        let pointer = pane_pointer(ui, &[vp], vp, true);
-        if let Some(s) = ir {
+        // A view with nothing drawn (log/ETC from a daemon that sends none)
+        // has no time to read or pin (Codex review).
+        let drawn = ir.filter(|s| !s.trace.segments.is_empty());
+        let pointer = if drawn.is_some() {
+            pane_pointer(ui, &[vp], vp, true)
+        } else {
+            TransferPointer::default()
+        };
+        // Labels below the panel's header and view rows (Codex review).
+        let label_vp = Viewport {
+            y: vp.y + 2.0 * ROW_H,
+            height: (vp.height - 2.0 * ROW_H).max(0.0),
+            ..vp
+        };
+        if let Some(s) = drawn {
             let (t_lo, t_hi) = s.t_range;
             if let Some(r) = state.ir_cursor_pin.and_then(|t| s.cursor_readout(t)) {
-                draw_cursor(painter, &[vp], vp, r.x, &r.text, 1, COLOR_SIGNAL);
+                draw_cursor(painter, &[vp], label_vp, r.x, &r.text, 1, COLOR_SIGNAL);
             }
             if let Some(x) = pointer.hover_x {
                 let t = ac_scene::ticks::x_to_time(x, t_lo, t_hi);
                 if let Some(r) = s.cursor_readout(t) {
-                    draw_cursor(painter, &[vp], vp, r.x, &r.text, 0, COLOR_VALUE);
+                    draw_cursor(painter, &[vp], label_vp, r.x, &r.text, 0, COLOR_VALUE);
                 }
             }
         }
@@ -327,9 +340,17 @@ pub(super) fn draw_transfer(
             .map(|s| (s, None)),
     };
     let focused = focused.or_else(|| {
+        // The first visible one with columns in the zoomed range: one that
+        // ends below it has nothing on screen to read (Codex review).
         stored
             .iter()
-            .find(|r| r.visible)
+            .find(|r| {
+                r.visible
+                    && r.scene
+                        .cursor_columns
+                        .iter()
+                        .any(|c| (0.0..=1.0).contains(&c.x))
+            })
             .map(|r| (r.scene, Some(short_owner(r.label))))
     });
     let (f_lo, f_hi) = (state.freq_range.min(), state.freq_range.max());

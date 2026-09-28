@@ -306,3 +306,37 @@ fn ir_panel_toggle_replaces_mag_phase_polylines_through_the_paint_path() {
         "no IR-shaped polyline painted with the panel open: {open_lines:?}"
     );
 }
+
+/// #720 (Codex review): the IR panel's pinned cursor draws its readout
+/// below the panel's header and view rows, so it covers neither.
+#[test]
+fn the_ir_cursor_label_sits_below_the_header_rows() {
+    let transfer = transfer_scene();
+    let ir = ir_scene();
+    let mut state = TransferViewState::new(-10.0, -30.0);
+    state.toggle_ir_panel();
+    state.ir_cursor_pin = Some(-250.0);
+    let view = ViewKind::Transfer(state);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 400.0))
+        .build_ui(|ui| {
+            draw_view(&view, ui, None, Some(&transfer), &[], &[], Some(&ir), None);
+        });
+    harness.run();
+    let rect_of = |pred: &dyn Fn(&str) -> bool| {
+        harness
+            .output()
+            .shapes
+            .iter()
+            .find_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) if pred(t.galley.text()) => Some(t.visual_bounding_rect()),
+                _ => None,
+            })
+    };
+    let header = rect_of(&|t| t == ac_scene::IR_HEADER).expect("header");
+    let label = rect_of(&|t| t.starts_with("-250.00 ms ")).expect("pinned IR readout");
+    assert!(
+        label.min.y >= header.max.y + 10.0,
+        "label {label:?} over the header rows {header:?}"
+    );
+}
