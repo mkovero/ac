@@ -46,6 +46,7 @@ const IR_MAX_SAMPLES: usize = 2000;
 
 /// The canonical intermediate both a live `visualize/ir` wire frame and
 /// a `.acsnap`-derived [`PairDerivation`] funnel through.
+#[derive(Debug, Clone)]
 pub struct IrInput {
     /// h(t), `fftshift`-centred.
     pub samples: Vec<f32>,
@@ -193,6 +194,10 @@ pub struct IrScene {
     /// dB gridlines for the log and ETC views ([`IR_DB_RANGE`]); empty for
     /// the linear view, which has no unit.
     pub level_axis: Axis,
+    /// Whose IR this is (`"live"`, `"slot 2"`), set by the caller with
+    /// [`IrScene::labelled`]; the panel shows one trace's IR at a time
+    /// (#702), so it must say which.
+    pub label: Option<String>,
 }
 
 impl IrScene {
@@ -208,6 +213,14 @@ impl IrScene {
     /// Build the scene drawing `view`. The time axis and the arrival
     /// marker are the same in every view: the log and ETC views change the
     /// vertical reading only, never where the arrival is.
+    /// The same scene, naming whose IR it is.
+    pub fn labelled(self, label: impl Into<String>) -> IrScene {
+        IrScene {
+            label: Some(label.into()),
+            ..self
+        }
+    }
+
     pub fn from_input_view(input: &IrInput, view: IrView) -> IrScene {
         let n = input.samples.len();
         let t_min_ms = input.t_origin_ms;
@@ -302,6 +315,7 @@ impl IrScene {
             time_axis,
             arrival,
             header: IR_HEADER,
+            label: None,
             view,
             view_readout: if missing {
                 "log/ETC not sent by this daemon"

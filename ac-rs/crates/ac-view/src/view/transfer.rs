@@ -178,7 +178,14 @@ pub(super) fn draw_transfer(
                 painter,
                 content.center(),
                 Align2::CENTER_CENTER,
-                "no IR frame yet",
+                // The panel follows focus (#702): say which trace has none.
+                match state.focus {
+                    super::Focus::Stored(_) => "this run has no IR",
+                    super::Focus::Live if state.paused => {
+                        "live is paused \u{2014} Tab to a slot for its IR, Enter resumes"
+                    }
+                    super::Focus::Live => "no IR frame yet",
+                },
                 COLOR_STRUCTURAL,
             ),
         }

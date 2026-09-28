@@ -28,7 +28,19 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
 
     let dir = alloc_home().join("captures");
     let capture_client = Client::connect(&endpoint).expect("connect (capture)");
-    let captured = ac_view::capture::capture_into(&capture_client, &dir, 4, 0).expect("capture");
+    let settings = ac_view::view::SlotSettings {
+        smoothing: ac_scene::Smoothing::Oct6,
+        invert: true,
+        offset_db: 3.0,
+    };
+    let captured =
+        ac_view::capture::capture_into(&capture_client, &dir, 4, 0, settings).expect("capture");
+    // #702: live's settings are saved beside the capture, and read back.
+    assert_eq!(
+        ac_view::capture::read_settings(&captured.path),
+        Some(settings)
+    );
+    assert!(captured.run.ir.is_some(), "a stored run carries its IR");
 
     assert!(captured.path.starts_with(&dir));
     assert!(
@@ -62,6 +74,10 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
     assert!(loaded.opened);
     assert_eq!(loaded.slot, 7);
     assert_eq!(loaded.run.label, "slot 7");
+    // `F` reopens the slot with the settings it was stored with (#702).
+    assert_eq!(loaded.run.smoothing, settings.smoothing);
+    assert!(loaded.run.invert);
+    assert_eq!(loaded.run.offset_db, settings.offset_db);
     assert_eq!(
         loaded.run.derivation.h1.magnitude_db,
         captured.run.derivation.h1.magnitude_db

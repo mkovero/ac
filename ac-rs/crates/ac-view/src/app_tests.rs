@@ -632,6 +632,7 @@ fn arrows_move_the_selected_slot_not_live() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     app.handle_action(Action::CycleFocus, false); // slot 1
     app.rebuild_scenes(true, 0.0);
@@ -1295,6 +1296,7 @@ fn slots_replace_in_place_and_sit_in_order() {
             opened: false,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), t),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(5, "2026-09-26T14:00:00Z"));
@@ -1479,6 +1481,7 @@ fn a_bare_digit_toggles_its_slot() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot3.acsnap"),
         run: loaded_run("slot 3", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     let visible = |app: &AcViewApp| match &app.view {
         ViewKind::Transfer(t) => t.loaded[0].visible,
@@ -1533,6 +1536,7 @@ fn digits_reach_the_slots_through_dispatch() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot2.acsnap"),
         run: loaded_run("slot 2", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     let visible = |app: &AcViewApp| match &app.view {
         ViewKind::Transfer(t) => t.loaded[0].visible,
@@ -1626,6 +1630,7 @@ fn a_loaded_slot_says_where_it_came_from() {
         opened: true,
         path: std::path::PathBuf::from("/c/old.acsnap"),
         run: loaded_run("slot 4", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     assert_eq!(app.toast_text(), Some("slot 4 loaded from /c/old.acsnap"));
 }
@@ -1653,6 +1658,7 @@ fn c_writes_the_selected_trace_to_csv() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     app.handle_action(Action::CycleFocus, false);
     app.handle_action(Action::NudgeDelayLater, true);
@@ -1717,6 +1723,7 @@ fn a_recalled_slot_is_selected() {
             opened,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(2, false));
@@ -1750,6 +1757,7 @@ fn the_selection_never_rests_on_a_hidden_slot() {
             opened,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     let now = std::time::Instant::now();
@@ -1831,6 +1839,7 @@ fn m_averages_the_visible_slots() {
             opened: false,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(1));
@@ -2178,6 +2187,7 @@ fn captured(slot: u8) -> Result<crate::capture::Captured, String> {
         opened: false,
         path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
         run: loaded_run(&format!("slot {slot}"), "2026-09-28T00:00:00Z"),
+        warning: None,
     })
 }
 
@@ -2251,23 +2261,214 @@ fn j_applies_resets_and_refuses_an_offset() {
     assert!(app.offset_entry.is_none());
 }
 
-/// Storing over a slot keeps its invert and offset, as it keeps its
-/// smoothing: replacing the capture must not quietly change how it is drawn.
+/// #702: a stored slot is drawn as live was drawn at the `Ctrl`+digit
+/// press — its smoothing, invert and offset — not as live is when the
+/// capture arrives, and not as the run it replaces was. The rejected rule
+/// (keep the replaced slot's settings) is what `store_slot` did before.
 #[test]
-fn a_replaced_slot_keeps_its_invert_and_offset() {
+fn a_stored_slot_is_drawn_as_live_was_at_the_key_press() {
     let mut app = transfer_app();
     app.finish_capture_for_test(captured(2));
     app.with_transfer(|t| {
         t.select_slot(2);
-        t.toggle_invert();
-        t.set_offset(3.0);
+        t.toggle_invert(); // the old slot 2's own setting
+        t.focus = crate::view::Focus::Live;
+        t.smoothing = ac_scene::Smoothing::Oct6;
+        t.set_offset(-4.5);
     });
+    // The key press records live's settings; live changes while it stores.
+    app.capture_settings = match &app.view {
+        ViewKind::Transfer(t) => Some(t.live_settings()),
+        _ => unreachable!(),
+    };
+    app.with_transfer(|t| t.smoothing = ac_scene::Smoothing::Oct1);
     app.finish_capture_for_test(captured(2));
     app.with_transfer(|t| {
         let run = t.loaded.iter().find(|r| r.slot == Some(2)).unwrap();
-        assert!(run.invert);
-        assert_eq!(run.offset_db, 3.0);
+        assert_eq!(run.smoothing, ac_scene::Smoothing::Oct6);
+        assert!(!run.invert, "kept the replaced slot's invert");
+        assert_eq!(run.offset_db, -4.5);
     });
+    assert!(
+        app.capture_settings.is_none(),
+        "settings outlived their capture"
+    );
+}
+
+/// Codex recheck of #702: a capture whose settings file failed is kept —
+/// the measurement cannot be retaken — and the toast says `F` will reopen
+/// it at the defaults.
+#[test]
+fn a_settings_write_failure_keeps_the_slot_and_says_so() {
+    let mut app = transfer_app();
+    let mut c = captured(4).unwrap();
+    c.warning = Some("settings not saved (disk full)".into());
+    app.finish_capture_for_test(Ok(c));
+    app.with_transfer(|t| assert!(t.loaded.iter().any(|r| r.slot == Some(4))));
+    assert_eq!(
+        app.toast_text(),
+        Some("slot 4 stored \u{2014} /c/slot4.acsnap; settings not saved (disk full)")
+    );
+}
+
+/// #702: a slot opened from a file (`F`) keeps the settings it was saved
+/// with — live's current ones are not pressed onto it.
+#[test]
+fn an_opened_slot_keeps_its_saved_settings() {
+    let mut app = transfer_app();
+    app.with_transfer(|t| t.smoothing = ac_scene::Smoothing::Oct1);
+    let mut run = loaded_run("slot 3", "2026-09-28T00:00:00Z");
+    run.smoothing = ac_scene::Smoothing::Oct12;
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 3,
+        opened: true,
+        path: std::path::PathBuf::from("/c/slot3.acsnap"),
+        run,
+        warning: None,
+    }));
+    app.with_transfer(|t| {
+        let run = t.loaded.iter().find(|r| r.slot == Some(3)).unwrap();
+        assert_eq!(run.smoothing, ac_scene::Smoothing::Oct12);
+    });
+}
+
+/// #702: the settings file round-trips every smoothing step, and anything
+/// else — a missing field, an unknown band count, a non-finite offset —
+/// reads as no settings (the run opens at the defaults).
+#[test]
+fn slot_settings_round_trip_and_refuse_what_they_did_not_write() {
+    use crate::view::SlotSettings;
+    let mut s = ac_scene::Smoothing::Off;
+    loop {
+        let set = SlotSettings {
+            smoothing: s,
+            invert: true,
+            offset_db: -2.5,
+        };
+        assert_eq!(SlotSettings::from_json(&set.to_json()), Some(set));
+        s = s.next();
+        if s == ac_scene::Smoothing::Off {
+            break;
+        }
+    }
+    for bad in [
+        serde_json::json!({"invert": false, "offset_db": 0.0}),
+        serde_json::json!({"smoothing_bpo": 5, "invert": false, "offset_db": 0.0}),
+        serde_json::json!({"smoothing_bpo": null, "invert": false, "offset_db": "x"}),
+        serde_json::json!([]),
+    ] {
+        assert_eq!(SlotSettings::from_json(&bad), None, "{bad}");
+    }
+    let dir = std::env::temp_dir().join(format!("ac-slot-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("slot1-x.acsnap");
+    assert_eq!(crate::capture::read_settings(&capture), None);
+    let set = SlotSettings {
+        smoothing: ac_scene::Smoothing::Oct3,
+        invert: false,
+        offset_db: 6.0,
+    };
+    std::fs::write(
+        crate::capture::settings_path(&capture),
+        set.to_json().to_string(),
+    )
+    .unwrap();
+    assert_eq!(crate::capture::read_settings(&capture), Some(set));
+    assert_eq!(
+        crate::capture::settings_path(&capture).file_name().unwrap(),
+        "slot1-x.acsnap.view.json"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #702: the IR panel follows focus — a focused slot shows its own IR,
+/// named; live shows the sidecar, named; paused live shows none.
+#[test]
+fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
+    let mut app = ir_app();
+    app.ingest_ir_frame_for_test(ir_frame());
+    let mut run = loaded_run("slot 1", "2026-09-28T00:00:00Z");
+    run.ir = Some(ac_scene::IrInput::from_pair_derivation(
+        &run.derivation,
+        &run.channel_role,
+        run.sr,
+    ));
+    let slot_ir = ac_scene::IrScene::from_input(run.ir.as_ref().unwrap());
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 1,
+        opened: true,
+        path: std::path::PathBuf::from("/c/slot1.acsnap"),
+        run,
+        warning: None,
+    }));
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
+    // `F` selected the opened slot.
+    assert_eq!(label(&app).as_deref(), Some("slot 1"));
+    assert_eq!(app.current_ir_scene().unwrap().trace, slot_ir.trace);
+    app.with_transfer(|t| t.focus = crate::view::Focus::Live);
+    app.rebuild_ir_scene();
+    assert_eq!(label(&app).as_deref(), Some("live"));
+    app.handle_action(Action::StimulusFireOrPause, false); // pause
+    app.rebuild_ir_scene();
+    assert!(
+        app.current_ir_scene().is_none(),
+        "paused live still drew its IR"
+    );
+}
+
+/// Codex review of #702: a slot's `→` nudge moves its IR arrival marker by
+/// the nudged delay, as it moves its phase.
+#[test]
+fn a_nudged_slot_moves_its_ir_arrival_marker() {
+    let mut app = ir_app();
+    let mut run = loaded_run("slot 1", "2026-09-28T00:00:00Z");
+    run.ir = Some(ac_scene::IrInput::from_pair_derivation(
+        &run.derivation,
+        &run.channel_role,
+        run.sr,
+    ));
+    let sr = run.sr;
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 1,
+        opened: true,
+        path: std::path::PathBuf::from("/c/slot1.acsnap"),
+        run,
+        warning: None,
+    }));
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let arrival = |app: &AcViewApp| app.current_ir_scene().unwrap().arrival.text.clone();
+    let before = arrival(&app);
+    app.handle_action(Action::NudgeDelayLater, true); // ten samples
+    app.rebuild_ir_scene();
+    let ms = |t: &str| t.trim_end_matches(" ms").parse::<f64>().unwrap();
+    let moved = ms(&arrival(&app)) - ms(&before);
+    let want = 10.0 * 1000.0 / f64::from(sr);
+    assert!(
+        (moved - want).abs() < 0.006,
+        "moved {moved} ms, want {want}"
+    );
+}
+
+/// Codex review of #702: with several live pairs the IR panel names the
+/// selected one, as the legend does.
+#[test]
+fn the_live_ir_names_its_pair_when_there_are_several() {
+    let mut app = two_pair_app();
+    let mut ir = ir_frame();
+    ir.meas_channel = 4;
+    app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
+    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    app.ingest_ir_frame_for_test(ir);
+    app.handle_action(Action::CycleFocus, false); // the second pair
+    app.handle_action(Action::ToggleIrPanel, false);
+    app.rebuild_ir_scene();
+    assert_eq!(
+        app.current_ir_scene()
+            .and_then(|s| s.label.clone())
+            .as_deref(),
+        Some("live 4")
+    );
 }
 
 // ---- target curves ----
