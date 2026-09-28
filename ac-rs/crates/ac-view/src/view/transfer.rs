@@ -182,7 +182,7 @@ pub(super) fn draw_transfer(
                 match state.focus {
                     super::Focus::Stored(_) => "this run has no IR",
                     super::Focus::Live if state.paused => {
-                        "live is paused \u{2014} Tab to a slot for its IR, Enter resumes"
+                        "live is paused and no IR was held \u{2014} Enter resumes"
                     }
                     super::Focus::Live => "no IR frame yet",
                 },

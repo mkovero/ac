@@ -75,6 +75,11 @@ pub struct AcViewApp {
     /// at when they stored it, not what they changed to while it stored.
     capture_settings: Option<crate::view::SlotSettings>,
     ir_scene: Option<ac_scene::IrScene>,
+    /// Every pair's IRs as they were when live was paused — `(1 s,
+    /// arrival)` per pair. Pause freezes the IR panel on them (operator:
+    /// "leave trace there, so you could see what was happening" — unlike
+    /// the transfer trace, which pause hides to compare slots alone).
+    paused_ir: Option<Vec<IrPair>>,
 
     // --- stream health, backing the status line's `malformed` state ---
     /// Consecutive DATA frames since the last one that parsed into a
@@ -175,6 +180,7 @@ impl AcViewApp {
             loaded_scenes: Vec::new(),
             capture_settings: None,
             ir_scene: None,
+            paused_ir: None,
             frame_parse_failures: 0,
             first_malformed_since: None,
             version_refusal: None,
@@ -248,6 +254,8 @@ impl AcViewApp {
     fn set_pairs(&mut self, pairs: Vec<(u32, u32)>) {
         let n = pairs.len().max(1);
         self.live = (0..n).map(|_| LivePair::default()).collect();
+        // A new session: nothing held from the old one is its IR.
+        self.paused_ir = None;
         self.pairs = pairs;
         self.with_transfer(|t| t.set_live_count(n));
     }
@@ -395,6 +403,8 @@ impl AcViewApp {
             pair.ir_arrival = None;
             pair.scene = None;
         }
+        // Refused frames clear what is drawn, the held pause IR included.
+        self.paused_ir = None;
         self.scene = None;
         self.last_scene_ranges = None;
         self.ir_scene = None;
@@ -409,6 +419,10 @@ impl AcViewApp {
     /// live shows the selected pair's sidecar — and nothing while live is
     /// paused, since pause holds the live trace off the screen.
     fn rebuild_ir_scene(&mut self) {
+        // Held from the pause keypress (see its handler) until resume.
+        if !matches!(&self.view, ViewKind::Transfer(t) if t.paused) {
+            self.paused_ir = None;
+        }
         let ViewKind::Transfer(t) = &self.view else {
             self.ir_scene = None;
             return;
@@ -431,20 +445,36 @@ impl AcViewApp {
                         .labelled(format!("{} \u{b7} {}", run.label, IR_LONG_LABEL))
                 })
             }),
-            crate::view::Focus::Live if t.paused => None,
             crate::view::Focus::Live => {
                 // The arrival IR by default (#706); `S` picks the 1 s one.
                 // Until a pair has a delay there is no arrival IR, and the
-                // panel says it is showing the 1 s one instead.
+                // panel says it is showing the 1 s one instead. Paused, the
+                // IRs held at the pause.
+                let i = self.selected_pair();
                 let pair = self.live_selected();
-                let owner = self.pair_label(self.selected_pair());
-                let (frame, what) = match (t.ir_arrival, &pair.ir_arrival, &pair.ir) {
+                // Paused: only what was held — never a live frame, even when
+                // a relaunch or refusal dropped the held one (Codex recheck).
+                let (long, arrival) = if t.paused {
+                    self.paused_ir
+                        .as_ref()
+                        .and_then(|held| held.get(i))
+                        .map(|(l, a)| (l.as_ref(), a.as_ref()))
+                        .unwrap_or((None, None))
+                } else {
+                    (pair.ir.as_ref(), pair.ir_arrival.as_ref())
+                };
+                let owner = self.pair_label(i);
+                let owner = if t.paused {
+                    format!("{owner} \u{b7} PAUSED")
+                } else {
+                    owner
+                };
+                let (frame, what) = match (t.ir_arrival, arrival, long) {
                     (true, Some(a), _) => (Some(a), IR_ARRIVAL_LABEL.to_string()),
-                    (true, None, long) => (
-                        long.as_ref(),
-                        format!("{IR_LONG_LABEL} (no current arrival IR)"),
-                    ),
-                    (false, _, long) => (long.as_ref(), IR_LONG_LABEL.to_string()),
+                    (true, None, long) => {
+                        (long, format!("{IR_LONG_LABEL} (no current arrival IR)"))
+                    }
+                    (false, _, long) => (long, IR_LONG_LABEL.to_string()),
                 };
                 frame.map(|f| {
                     ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
@@ -962,6 +992,19 @@ impl AcViewApp {
     /// Enter while not armed (#256): hold the live trace, or let it roll.
     fn toggle_live_pause(&mut self) {
         self.with_transfer(|t| t.toggle_pause());
+        // The IR panel freezes on the IRs of the keypress itself — not of
+        // the next rebuild, by which a newer frame may have been drained
+        // (Codex review).
+        if self.transfer_paused() {
+            self.paused_ir = Some(
+                self.live
+                    .iter()
+                    .map(|p| (p.ir.clone(), p.ir_arrival.clone()))
+                    .collect(),
+            );
+        } else {
+            self.paused_ir = None;
+        }
     }
 
     /// `M` / `Shift+M` (#671): the slot average on or off, or its weighting;
@@ -2248,6 +2291,12 @@ fn connect_and_launch_view(
     app.integration = integration;
     Ok(app)
 }
+
+/// One pair's `(1 s, arrival)` IR frames.
+type IrPair = (
+    Option<ac_core::wire::IrFrame>,
+    Option<ac_core::wire::IrFrame>,
+);
 
 /// The IR panel's name for the arrival IR (#706).
 const IR_ARRIVAL_LABEL: &str = "arrival IR 250 ms";
