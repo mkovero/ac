@@ -383,9 +383,10 @@ fn draw_cursor(
     }
     // Right of the line if the measured label fits there, else left of
     // it; kept inside the pane either way (Codex review).
-    let galley = painter.layout_no_wrap(r.text.clone(), FontId::default(), color);
-    let w = galley.size().x;
     let (lo, hi) = (layout.mag.x + 2.0, layout.mag.x + layout.mag.width - 2.0);
+    // Wrapped to the pane when it is wider than the pane (Codex recheck).
+    let galley = painter.layout(r.text.clone(), FontId::default(), color, (hi - lo).max(1.0));
+    let w = galley.size().x;
     let left = if x + 6.0 + w <= hi {
         x + 6.0
     } else {

@@ -1601,10 +1601,13 @@ impl TransferScene {
                         .collect()
                 }
             };
+            // The drawing's own mask test (`split_on_mask`: a column is gapped
+            // when its coherence is below the mask — NaN is not), so the
+            // cursor and the panes cannot disagree (Codex recheck).
             let unmasked: Vec<bool> = input
                 .coherence
                 .iter()
-                .map(|&c| !c.is_nan() && c >= modes.coherence_mask)
+                .map(|&c| c.partial_cmp(&modes.coherence_mask) != Some(std::cmp::Ordering::Less))
                 .collect();
             // A lone unmasked column is a one-point segment, which no pane
             // draws (Codex review): the cursor must not report it as drawn.

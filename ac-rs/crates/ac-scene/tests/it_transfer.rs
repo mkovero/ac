@@ -767,3 +767,18 @@ fn the_cursor_reads_the_nearest_drawn_column_in_the_panes_unit() {
     let x = ac_scene::ticks::freq_to_x(1234.0, 20.0, 20_000.0);
     assert!((ac_scene::ticks::x_to_freq(x, 20.0, 20_000.0) - 1234.0).abs() < 1e-9);
 }
+
+/// Codex recheck of #718: the cursor uses the drawing's mask test — a NaN
+/// coherence is not below the mask, so a NaN column between two drawn ones
+/// leaves one continuous segment, and neither neighbour is "lone".
+#[test]
+fn a_nan_coherence_column_is_masked_exactly_as_the_panes_mask_it() {
+    let mut inp = input(vec![100.0, 200.0, 300.0], vec![0.0; 3], 0.0);
+    inp.coherence = vec![0.9, f64::NAN, 0.9];
+    let s = scene_view(&inp, PhaseView::Wrapped);
+    assert_eq!(s.magnitude.segments.len(), 1, "the panes gap it after all");
+    for f in [100.0, 300.0] {
+        let t = s.cursor_readout(f).unwrap().text;
+        assert!(!t.contains("lone") && !t.contains("masked"), "{t}");
+    }
+}

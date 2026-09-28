@@ -635,20 +635,24 @@ fn the_cursor_reads_only_what_is_drawn_and_stays_on_the_pane() {
     outside.cursor_pin = Some(5.0); // below the 20 Hz axis
     assert!(!readout(&paint(outside, 900.0)), "drew a pin off the axis");
 
-    let mut narrow = TransferViewState::new(-10.0, -30.0);
-    narrow.cursor_pin = Some(800.0); // the last fixture column
-    let shapes = paint(narrow, 320.0);
-    let label = shapes
-        .iter()
-        .find_map(|cs| match &cs.shape {
-            egui::Shape::Text(t) if t.galley.text().starts_with("800.0 Hz ") => {
-                Some(t.visual_bounding_rect())
-            }
-            _ => None,
-        })
-        .expect("the pinned readout");
-    assert!(
-        label.min.x >= 0.0 && label.max.x <= 320.0,
-        "label off the pane: {label:?}"
-    );
+    // 320 px fits the label beside the line; 140 px is narrower than the
+    // label itself, which then wraps (Codex recheck).
+    for width in [320.0, 140.0] {
+        let mut narrow = TransferViewState::new(-10.0, -30.0);
+        narrow.cursor_pin = Some(800.0); // the last fixture column
+        let shapes = paint(narrow, width);
+        let label = shapes
+            .iter()
+            .find_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) if t.galley.text().starts_with("800.0 Hz ") => {
+                    Some(t.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .expect("the pinned readout");
+        assert!(
+            label.min.x >= 0.0 && label.max.x <= width,
+            "{width} px: label off the pane: {label:?}"
+        );
+    }
 }
