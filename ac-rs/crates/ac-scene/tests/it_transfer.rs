@@ -593,7 +593,12 @@ fn an_isolated_unmasked_column_does_not_panic_either_phase_view() {
 
 // ─── motion easing (#716) ───────────────────────────────────────────
 
-use ac_scene::tween::{Tween, TWEEN_S};
+use ac_scene::tween::{Tween, TweenOptions, TWEEN_S};
+
+const EASE: TweenOptions = TweenOptions {
+    ease_phase: true,
+    coherence_mask: 0.3,
+};
 
 fn est(mag: f64, phase: f64, coh: f64, delay_ms: f64) -> TransferInput {
     let mut i = input(vec![100.0, 1000.0], vec![phase; 2], delay_ms);
@@ -609,17 +614,17 @@ fn est(mag: f64, phase: f64, coh: f64, delay_ms: f64) -> TransferInput {
 fn a_new_estimate_is_reached_over_the_tween_time() {
     let mut tw = Tween::default();
     assert_eq!(
-        tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0).magnitude_db[0],
+        tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, EASE).magnitude_db[0],
         0.0
     );
     let to = est(10.0, 40.0, 0.9, 1.0);
-    let mid = tw.sample(&to, 1.0 + 0.0);
+    let mid = tw.sample(&to, 1.0 + 0.0, EASE);
     assert_eq!(mid.magnitude_db[0], 0.0, "moved before any time passed");
-    let half = tw.sample(&to, 1.0 + TWEEN_S / 2.0);
+    let half = tw.sample(&to, 1.0 + TWEEN_S / 2.0, EASE);
     assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
     assert!((half.phase_deg[0] - 20.0).abs() < 1e-9);
     for t in [TWEEN_S, TWEEN_S * 3.0] {
-        let s = tw.sample(&to, 1.0 + t);
+        let s = tw.sample(&to, 1.0 + t, EASE);
         assert_eq!(s.magnitude_db, to.magnitude_db);
         assert_eq!(s.phase_deg, to.phase_deg);
     }
@@ -630,9 +635,9 @@ fn a_new_estimate_is_reached_over_the_tween_time() {
 #[test]
 fn phase_eases_along_the_shorter_arc() {
     let mut tw = Tween::default();
-    tw.sample(&est(0.0, 170.0, 0.9, 1.0), 0.0);
-    tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0); // arrives
-    let half = tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0);
+    tw.sample(&est(0.0, 170.0, 0.9, 1.0), 0.0, EASE);
+    tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0, EASE); // arrives
+    let half = tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0, EASE);
     let p = half.phase_deg[0];
     assert!((p.abs() - 180.0).abs() < 1e-9, "went the long way: {p}");
     let straight: f64 = (170.0 + -170.0) / 2.0;
@@ -644,13 +649,13 @@ fn phase_eases_along_the_shorter_arc() {
 #[test]
 fn an_estimate_mid_ease_starts_from_the_drawn_curve() {
     let mut tw = Tween::default();
-    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0);
-    tw.sample(&est(10.0, 0.0, 0.9, 1.0), 0.0);
+    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, EASE);
+    tw.sample(&est(10.0, 0.0, 0.9, 1.0), 0.0, EASE);
     let drawn = tw
-        .sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0)
+        .sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE)
         .magnitude_db[0];
     let next = tw
-        .sample(&est(20.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0)
+        .sample(&est(20.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE)
         .magnitude_db[0];
     assert!((drawn - 5.0).abs() < 1e-9);
     assert!((next - drawn).abs() < 1e-9, "jumped from {drawn} to {next}");
@@ -661,12 +666,45 @@ fn an_estimate_mid_ease_starts_from_the_drawn_curve() {
 #[test]
 fn a_changed_alignment_or_grid_snaps_and_coherence_is_never_eased() {
     let mut tw = Tween::default();
-    tw.sample(&est(0.0, 0.0, 0.2, 1.0), 0.0);
-    let s = tw.sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0);
+    tw.sample(&est(0.0, 0.0, 0.2, 1.0), 0.0, EASE);
+    let s = tw.sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE);
     assert_eq!(s.coherence, vec![0.9; 2], "coherence was eased");
-    let snapped = tw.sample(&est(30.0, 0.0, 0.9, 2.0), TWEEN_S / 2.0);
+    let snapped = tw.sample(&est(30.0, 0.0, 0.9, 2.0), TWEEN_S / 2.0, EASE);
     assert_eq!(snapped.magnitude_db[0], 30.0, "eased across a delay change");
     let mut other = est(40.0, 0.0, 0.9, 2.0);
     other.freqs = vec![100.0, 2000.0];
-    assert_eq!(tw.sample(&other, TWEEN_S / 2.0).magnitude_db[0], 40.0);
+    assert_eq!(tw.sample(&other, TWEEN_S / 2.0, EASE).magnitude_db[0], 40.0);
+}
+
+/// Codex review of #716: a column the previous estimate masked appears at
+/// its new value, not easing in from the rejected one; and with phase
+/// easing off (the unwrapped and group-delay views) phase is the latest
+/// while magnitude still eases.
+#[test]
+fn an_unmasked_column_appears_at_once_and_phase_can_be_left_uneased() {
+    let mut tw = Tween::default();
+    let mut first = est(-80.0, 0.0, 0.9, 1.0);
+    first.coherence = vec![0.9, 0.1]; // column 1 masked
+    first.magnitude_db = vec![0.0, -80.0];
+    tw.sample(&first, 0.0, EASE);
+    let mut next = est(10.0, 90.0, 0.9, 1.0);
+    next.magnitude_db = vec![10.0, 0.0];
+    tw.sample(&next, 1.0, EASE);
+    let half = tw.sample(&next, 1.0 + TWEEN_S / 2.0, EASE);
+    assert!(
+        (half.magnitude_db[0] - 5.0).abs() < 1e-9,
+        "drawn column eases"
+    );
+    assert_eq!(half.magnitude_db[1], 0.0, "masked column eased in from -80");
+
+    let no_phase = TweenOptions {
+        ease_phase: false,
+        ..EASE
+    };
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, no_phase);
+    tw.sample(&est(10.0, 90.0, 0.9, 1.0), 1.0, no_phase);
+    let half = tw.sample(&est(10.0, 90.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0, no_phase);
+    assert_eq!(half.phase_deg[0], 90.0);
+    assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
 }

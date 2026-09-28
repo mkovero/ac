@@ -555,7 +555,11 @@ impl AcViewApp {
                     // Eased toward the newest estimate (#716); readouts,
                     // meters and the mask are the frame's either way.
                     let input = if state.tween {
-                        pair.tween.sample(&input, now_s)
+                        let opts = ac_scene::tween::TweenOptions {
+                            ease_phase: state.phase_view == ac_scene::transfer::PhaseView::Wrapped,
+                            coherence_mask: state.coherence_mask,
+                        };
+                        pair.tween.sample(&input, now_s, opts)
                     } else {
                         pair.tween.reset();
                         input

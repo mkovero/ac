@@ -29,6 +29,21 @@ use crate::transfer::TransferInput;
 /// interval, so the curve is always at the newest estimate before the next.
 pub const TWEEN_S: f64 = 0.04;
 
+/// What the drawing about to use the eased curve needs from it.
+#[derive(Debug, Clone, Copy)]
+pub struct TweenOptions {
+    /// Ease phase too. Only for the wrapped phase view: unwrapped phase and
+    /// group delay are built across columns, and columns eased
+    /// independently can straddle a wrap mid-way — a ~50 ms group-delay
+    /// spike between two estimates that both read under 1 ms (Codex
+    /// review). Those views take the new phase at once.
+    pub ease_phase: bool,
+    /// The coherence mask the trace is drawn under. A column the previous
+    /// estimate had masked was not on screen: it appears at its new value
+    /// rather than easing in from the rejected one (Codex review).
+    pub coherence_mask: f64,
+}
+
 /// One live trace's easing state.
 #[derive(Debug, Default, Clone)]
 pub struct Tween {
@@ -43,15 +58,33 @@ pub struct Tween {
 impl Tween {
     /// The input to draw at `now_s`: `latest`, or on its way there from the
     /// previous estimate. Call once per paint with the newest estimate.
-    pub fn sample(&mut self, latest: &TransferInput, now_s: f64) -> TransferInput {
+    pub fn sample(
+        &mut self,
+        latest: &TransferInput,
+        now_s: f64,
+        opts: TweenOptions,
+    ) -> TransferInput {
         let is_new = self.to.as_ref().is_none_or(|to| {
             to.magnitude_db != latest.magnitude_db || to.phase_deg != latest.phase_deg
         });
         if is_new {
             let comparable = self.to.as_ref().is_some_and(|to| comparable(to, latest));
             if comparable {
-                // From wherever the curve is drawn now.
-                let (mag, phase) = self.at(now_s);
+                // From wherever the curve is drawn now — except a column the
+                // previous estimate masked, which was not drawn at all.
+                let (mut mag, mut phase) = self.at(now_s);
+                let prev_coh = self
+                    .to
+                    .as_ref()
+                    .map(|t| t.coherence.clone())
+                    .unwrap_or_default();
+                for i in 0..mag.len() {
+                    let was_drawn = prev_coh.get(i).is_some_and(|&c| c >= opts.coherence_mask);
+                    if !was_drawn {
+                        mag[i] = latest.magnitude_db[i];
+                        phase[i] = latest.phase_deg[i];
+                    }
+                }
                 self.from_mag = mag;
                 self.from_phase = phase;
             } else {
@@ -64,7 +97,9 @@ impl Tween {
         let (mag, phase) = self.at(now_s);
         let mut out = latest.clone();
         out.magnitude_db = mag;
-        out.phase_deg = phase;
+        if opts.ease_phase {
+            out.phase_deg = phase;
+        }
         out
     }
 
