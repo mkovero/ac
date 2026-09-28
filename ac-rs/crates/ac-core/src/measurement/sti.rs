@@ -134,19 +134,22 @@ pub fn sti_from_mtf(m: &Mtf) -> (f64, [f64; 7]) {
 }
 
 /// Clause 6's Schroeder MTF of one band's room window: `e` the squared
-/// band IR, summed from `from` to `t1` (samples at `fs`), plus the energy an
-/// exponential decay of time constant `tau_s` carries past `t1` —
+/// band IR, summed from `from` to `end` (samples at `fs`), plus the energy
+/// an exponential decay of time constant `tau_s` carries past `tail_at` —
 /// `tail` in the units of `e` summed — whose transform is
-/// `tail · e^{−jωt₁}/(1 + jωτ)`.
+/// `tail · e^{−jωt}/(1 + jωτ)` at `t = tail_at`. `tail_at` is the decay's
+/// truncation point, which a later echo can put before `end` (Codex
+/// recheck of #722: the correction belongs to the decay it continues).
 pub fn schroeder_mtf(
     e: &[f64],
     from: usize,
-    t1: usize,
+    end: usize,
     tail: f64,
+    tail_at: usize,
     tau_s: f64,
     fs: f64,
 ) -> [f64; 14] {
-    let t1 = t1.min(e.len().saturating_sub(1));
+    let t1 = end.min(e.len().saturating_sub(1));
     let from = from.min(t1);
     let total: f64 = e[from..=t1].iter().sum::<f64>() + tail;
     let mut out = [0.0; 14];
@@ -158,8 +161,8 @@ pub fn schroeder_mtf(
             re += v * (w * t).cos();
             im -= v * (w * t).sin();
         }
-        // Tail: tail · e^{−jωt₁} / (1 + jωτ).
-        let t1s = t1 as f64 / fs;
+        // Tail: tail · e^{−jωt} / (1 + jωτ), t the decay's truncation.
+        let t1s = tail_at as f64 / fs;
         let (c, s) = ((w * t1s).cos(), -(w * t1s).sin());
         let (dr, di) = (1.0, w * tau_s);
         let den = dr * dr + di * di;
@@ -256,7 +259,7 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
         // To the last point the band stands 10 dB over its background: a
         // strong echo after a quiet gap is part of the channel.
         let end = w.t1.max(w.last_above);
-        m[k] = schroeder_mtf(&w.e, w.band_start, end, w.correction, tau_s, fs);
+        m[k] = schroeder_mtf(&w.e, w.band_start, end, w.correction, w.t1, tau_s, fs);
         // The band's reverberation time from its late decay's rate.
         longest_rt = longest_rt.max(-60.0 / w.slope_db_s);
     }
@@ -406,7 +409,7 @@ mod tests {
         let tau = 1.0 / rate;
         let t1 = n - 1;
         let tail = e[t1] * tau * fs * (-rate / fs).exp(); // the energy past t1
-        let m = schroeder_mtf(&e, 0, t1, tail, tau, fs);
+        let m = schroeder_mtf(&e, 0, t1, tail, t1, tau, fs);
         for (f, &fm) in MOD_FREQS_HZ.iter().enumerate() {
             let want = 1.0 / (1.0 + (2.0 * std::f64::consts::PI * fm * t / 13.8).powi(2)).sqrt();
             assert!((m[f] - want).abs() < 0.01, "F {fm}: {} vs {want}", m[f]);
@@ -480,7 +483,7 @@ mod tests {
                 .iter()
                 .map(|v| v * v)
                 .collect();
-            whole[k] = schroeder_mtf(&e, 0, e.len() - 1, 0.0, 1.0, fs as f64);
+            whole[k] = schroeder_mtf(&e, 0, e.len() - 1, 0.0, e.len() - 1, 1.0, fs as f64);
         }
         let (rejected, _) = sti_from_mtf(&whole);
         // Measured: room window 0.635, whole capture 0.611, theory 0.639.
@@ -533,7 +536,7 @@ mod tests {
                 .iter()
                 .map(|v| v * v)
                 .collect();
-            m[k] = schroeder_mtf(&e, 0, e.len() - 1, 0.0, 1.0, fs as f64);
+            m[k] = schroeder_mtf(&e, 0, e.len() - 1, 0.0, e.len() - 1, 1.0, fs as f64);
         }
         sti_from_mtf(&m).0
     }
@@ -586,6 +589,58 @@ mod tests {
         assert!(
             long.refused.as_deref().is_some_and(|r| r.contains("half")),
             "{long:?}"
+        );
+    }
+
+    /// Codex recheck of #722: the tail correction continues the decay it
+    /// was fitted to, so it sits at that decay's truncation point even when
+    /// the window runs on to a later echo. Exact: a decay continuing under
+    /// the floor plus an echo. Modelled: the decay cut at t1, its lost part
+    /// as the tail. Placed at t1 the model matches the exact MTF; placed
+    /// after the echo (the rejected placement) it does not.
+    #[test]
+    fn the_tail_sits_at_the_decay_it_continues() {
+        let fs = 2000.0;
+        let n = (1.5 * fs) as usize;
+        let rate = 13.8 / 0.6; // T = 0.6 s
+        let t1 = (0.3 * fs) as usize;
+        let echo = (0.9 * fs) as usize;
+        let decay = |k: usize| (-rate * k as f64 / fs).exp();
+        let exact: Vec<f64> = (0..n)
+            .map(|k| {
+                decay(k)
+                    + if k >= echo {
+                        0.5 * decay(k - echo)
+                    } else {
+                        0.0
+                    }
+            })
+            .collect();
+        let cut: Vec<f64> = (0..n)
+            .map(|k| {
+                (if k <= t1 { decay(k) } else { 0.0 })
+                    + if k >= echo {
+                        0.5 * decay(k - echo)
+                    } else {
+                        0.0
+                    }
+            })
+            .collect();
+        let tau = 1.0 / rate;
+        let tail: f64 = (t1 + 1..n).map(decay).sum();
+        let want = schroeder_mtf(&exact, 0, n - 1, 0.0, n - 1, 1.0, fs);
+        let at_t1 = schroeder_mtf(&cut, 0, n - 1, tail, t1, tau, fs);
+        let at_end = schroeder_mtf(&cut, 0, n - 1, tail, n - 1, tau, fs);
+        let err = |m: &[f64; 14]| {
+            m.iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max)
+        };
+        assert!(err(&at_t1) < 0.01, "tail at t1 off by {}", err(&at_t1));
+        assert!(
+            err(&at_end) > 5.0 * err(&at_t1),
+            "placement made no difference"
         );
     }
 }
