@@ -74,13 +74,22 @@ pub fn etc_db(ir: &[f32]) -> Vec<f32> {
     to_db(&mag)
 }
 
-/// Downsample `db` by the maximum of each `stride`-long bucket, starting at
-/// 0 — the same bucket boundaries as `iter().step_by(stride)`, so element
-/// `i` covers the linear sample `i` of a stride-picked series.
+/// Downsample `db` by the maximum of each `stride`-long bucket **centred**
+/// on the sample a stride pick takes (`iter().step_by(stride)`): element
+/// `i` covers `[i·stride − stride/2, i·stride + stride − stride/2)`, so it
+/// is drawn at the time of stride-picked sample `i` and a peak lands
+/// within half a bucket of its true time. Buckets that start at the pick
+/// instead drew a peak just before it a whole bucket early (the rig: an
+/// arrival at −0.01 ms drawn at −0.5 ms).
 pub fn bucket_max(db: &[f32], stride: usize) -> Vec<f32> {
     let stride = stride.max(1);
-    db.chunks(stride)
-        .map(|c| c.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+    let half = stride / 2;
+    (0..db.len().div_ceil(stride))
+        .map(|i| {
+            let lo = (i * stride).saturating_sub(half);
+            let hi = (i * stride + stride - half).min(db.len());
+            db[lo..hi].iter().copied().fold(f32::NEG_INFINITY, f32::max)
+        })
         .collect()
 }
 
@@ -103,6 +112,18 @@ mod tests {
         assert_eq!(picked[50], FLOOR_DB, "the stride pick was meant to miss it");
         assert_eq!(kept[50], 0.0);
         assert!((kept[20] - -40.0).abs() < 1e-4);
+    }
+
+    /// A peak just before a pick is drawn at that pick, not a whole bucket
+    /// early: buckets are centred on the samples they are drawn at.
+    #[test]
+    fn a_peak_is_drawn_within_half_a_bucket_of_its_time() {
+        let mut db = vec![FLOOR_DB; 100];
+        db[49] = 0.0; // one sample before pick 5 (stride 10)
+        let kept = bucket_max(&db, 10);
+        assert_eq!(kept.len(), 10);
+        assert_eq!(kept[5], 0.0, "{kept:?}");
+        assert_eq!(kept[4], FLOOR_DB, "drawn a bucket early: {kept:?}");
     }
 
     /// A tone burst's ETC is its envelope: flat where the tone is, not the

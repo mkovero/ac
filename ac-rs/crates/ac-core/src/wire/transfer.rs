@@ -373,7 +373,7 @@ pub struct IrFrame {
     #[serde(default)]
     pub samples: Vec<f32>,
     /// `20·log10|h|`, dB re its peak, one per [`Self::samples`] entry: the
-    /// maximum over that entry's stride bucket of the full-resolution
+    /// maximum over the stride bucket centred on that entry of the full-resolution
     /// curve (`ac_core::visualize::ir_views`). Empty from a daemon that
     /// predates it.
     #[serde(default)]

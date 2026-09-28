@@ -3306,7 +3306,7 @@ toggled on/off in the UI without re-issuing the transfer command.
   "samples":       [<float>, ...],   // h(t) downsampled to ≤2000 samples
   "log_db":        [<float>, ...],   // additive — 20·log10|h| re its peak,
                                      // one per samples entry, the MAX over
-                                     // that entry's stride bucket
+                                     // the stride bucket centred on it
   "etc_db":        [<float>, ...],   // additive — ETC (envelope of the
                                      // analytic IR) re its peak, bucketed
                                      // like log_db
@@ -3338,8 +3338,9 @@ filters, not actual non-causality.
 
 **Log and ETC.** `log_db` and `etc_db` are computed from the
 full-resolution IR, then reduced to the `samples` grid by the maximum of
-each `stride` bucket — a stride pick would step over an arrival one
-sample wide. Both are 0 dB at their peak and floored at −150 dB. The ETC
+a `stride`-long bucket centred on each picked sample — a stride pick would
+step over an arrival one sample wide, and centring puts a peak within half
+a bucket (`dt_ms / 2`) of its time. Both are 0 dB at their peak and floored at −150 dB. The ETC
 is `|h + j·H{h}|`, the analytic signal's magnitude: the level each
 arrival reaches without its oscillation. Empty arrays from a daemon
 predating them.

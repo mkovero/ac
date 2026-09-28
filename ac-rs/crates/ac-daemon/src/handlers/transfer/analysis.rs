@@ -105,7 +105,7 @@ pub(super) struct PairAnalysis {
 pub(super) struct IrPayload {
     pub(super) samples: Vec<f32>,
     /// `20·log10|h|` and the ETC, dB re their peak, one per `samples`
-    /// entry: the maximum over that entry's stride bucket of the
+    /// entry: the maximum over the stride bucket centred on that entry of the
     /// full-resolution curve, so no arrival falls between picks.
     pub(super) log_db: Vec<f32>,
     pub(super) etc_db: Vec<f32>,
