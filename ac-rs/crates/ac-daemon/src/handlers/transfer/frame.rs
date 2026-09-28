@@ -367,6 +367,8 @@ pub(super) fn build_pair_messages(
         cmd: "transfer_stream".to_string(),
         wire_version: None,
         samples: ir.samples.clone(),
+        log_db: ir.log_db.clone(),
+        etc_db: ir.etc_db.clone(),
         sr,
         stride: ir.stride,
         dt_ms: ir.dt_ms,

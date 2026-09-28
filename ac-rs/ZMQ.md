@@ -3315,6 +3315,12 @@ toggled on/off in the UI without re-issuing the transfer command.
   "cmd":           "transfer_stream",
   "wire_version":  <int>,            // see DATA frame envelope
   "samples":       [<float>, ...],   // h(t) downsampled to ≤2000 samples
+  "log_db":        [<float>, ...],   // additive — 20·log10|h| re its peak,
+                                     // one per samples entry, the MAX over
+                                     // the stride bucket centred on it
+  "etc_db":        [<float>, ...],   // additive — ETC (envelope of the
+                                     // analytic IR) re its peak, bucketed
+                                     // like log_db
   "sr":            <int>,            // capture sample rate
   "stride":        <int>,            // downsample factor (ir_full / samples)
   "dt_ms":         <float>,          // ms per output sample (1000/sr * stride)
@@ -3340,6 +3346,17 @@ peak sits at the middle of the array. The first sample's time is
 half of the array are normal output of a delay-compensated H₁
 estimate — they capture phase wrap and pre-ringing of bandlimited
 filters, not actual non-causality.
+
+**Log and ETC.** `log_db` and `etc_db` are computed from the
+full-resolution IR, then reduced to the `samples` grid by the maximum of
+a `stride`-long bucket centred on each picked sample — a stride pick would
+step over an arrival one sample wide, and centring puts a peak within half
+a bucket (`dt_ms / 2`) of its time. The last bucket also holds the tail
+after the last pick, so a peak there (at the window's far end) is drawn
+up to one bucket early. Both are 0 dB at their peak and floored at −150 dB. The ETC
+is `|h + j·H{h}|`, the analytic signal's magnitude: the level each
+arrival reaches without its oscillation. Empty arrays from a daemon
+predating them.
 
 **No mic-curve correction.** The IR is computed from the raw
 ac-core `TransferResult.re` / `.im` (full resolution), which is NOT

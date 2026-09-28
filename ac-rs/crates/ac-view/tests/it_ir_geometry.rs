@@ -72,6 +72,8 @@ fn ir_scene() -> IrScene {
         channel_role: "meas_0".to_string(),
         source: Source::Live,
         sr: 48_000,
+        log_db: Vec::new(),
+        etc_db: Vec::new(),
     };
     IrScene::from_input(&input)
 }

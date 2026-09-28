@@ -743,5 +743,5 @@ fn live_transfer_frames_round_trip_through_the_shared_types() {
     }
     assert_lossless::<TransferFrame>(&settling, &[]);
     assert_lossless::<TransferFrame>(&with_ladder, &[]);
-    assert_lossless::<IrFrame>(&ir, &["samples"]);
+    assert_lossless::<IrFrame>(&ir, &["samples", "log_db", "etc_db"]);
 }

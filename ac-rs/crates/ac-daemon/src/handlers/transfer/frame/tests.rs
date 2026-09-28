@@ -413,6 +413,8 @@ const IR_KEYS: &[&str] = &[
     "delay_ms",
     "delay_samples",
     "dt_ms",
+    "etc_db",
+    "log_db",
     "meas_channel",
     "ref_channel",
     "samples",

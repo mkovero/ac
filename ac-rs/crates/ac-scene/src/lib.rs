@@ -42,7 +42,7 @@ pub mod ticks;
 pub mod transfer;
 
 pub use fault::{Fault, FaultInput, FaultState, Severity};
-pub use ir::{ArrivalMarker, IrInput, IrScene, IR_HEADER};
+pub use ir::{ArrivalMarker, IrInput, IrScene, IrView, IR_HEADER};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use sweep_ir::{SweepIrFault, SweepIrScene};
 pub use ticks::{Axis, Tick};
