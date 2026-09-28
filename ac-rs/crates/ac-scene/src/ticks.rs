@@ -71,6 +71,12 @@ pub fn freq_to_x(f_hz: f64, f_min: f64, f_max: f64) -> f64 {
     (f_hz / f_min).ln() / (f_max / f_min).ln()
 }
 
+/// The inverse of [`freq_to_x`]: the frequency at normalized `x` — where a
+/// pointer on the pane is (#718).
+pub fn x_to_freq(x: f64, f_min: f64, f_max: f64) -> f64 {
+    f_min * (f_max / f_min).powf(x)
+}
+
 /// dB axis: ticks every 20 dB within `[db_min, db_max]`, labelled as a
 /// bare integer (e.g. `"-60"`, `"-40"`) — the unit itself is an axis
 /// title, not part of each tick's label.

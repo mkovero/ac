@@ -3049,3 +3049,40 @@ fn the_live_trace_eases_and_shift_w_turns_it_off() {
     app.ingest_frame_for_test(shifted(20.0), 1.0);
     assert_eq!(y0(&app), after, "easing off still eased");
 }
+
+/// #718: a click on the panes pins the cursor at that frequency (held in
+/// Hz, so zoom keeps it there); a right-click clears it.
+#[test]
+fn a_click_pins_the_cursor_in_hz_and_a_right_click_clears_it() {
+    let mut app = transfer_app();
+    let (lo, hi) = match &app.view {
+        ViewKind::Transfer(t) => (t.freq_range.min(), t.freq_range.max()),
+        _ => unreachable!(),
+    };
+    app.apply_pointer(crate::view::TransferPointer {
+        hover_x: Some(0.5),
+        click_x: Some(0.5),
+        clear: false,
+    });
+    let pin = |app: &AcViewApp| match &app.view {
+        ViewKind::Transfer(t) => t.cursor_pin,
+        _ => None,
+    };
+    let want = (lo * hi).sqrt();
+    assert!((pin(&app).unwrap() - want).abs() < 1e-6 * want);
+    app.apply_pointer(crate::view::TransferPointer {
+        hover_x: Some(0.2),
+        click_x: None,
+        clear: false,
+    });
+    assert!(
+        (pin(&app).unwrap() - want).abs() < 1e-6 * want,
+        "hover moved the pin"
+    );
+    app.apply_pointer(crate::view::TransferPointer {
+        hover_x: None,
+        click_x: None,
+        clear: true,
+    });
+    assert_eq!(pin(&app), None);
+}

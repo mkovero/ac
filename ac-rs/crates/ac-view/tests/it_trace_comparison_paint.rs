@@ -558,3 +558,42 @@ fn an_off_scale_dashed_trace_paints_only_what_is_on_the_pane() {
         "{segments} dash segments for an off-scale trace"
     );
 }
+
+/// #718: the pinned cursor draws the focused trace's readout, and a
+/// pointer over the panes draws a second one at its column.
+#[test]
+fn the_cursor_draws_the_pinned_and_hovered_readouts() {
+    let live_scene = scene(Smoothing::Off);
+    let mut state = TransferViewState::new(-10.0, -30.0);
+    state.focus = Focus::Live;
+    state.cursor_pin = Some(100.0);
+    let view = ViewKind::Transfer(state);
+    let lives = [LiveTrace {
+        label: "live".to_string(),
+        pair: 0,
+        scene: &live_scene,
+        selected: true,
+    }];
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(900.0, 480.0));
+        draw_view(&view, ui, None, Some(&live_scene), &lives, &[], None, None);
+    });
+    harness.run();
+    let texts = extract_texts(&harness.output().shapes);
+    assert!(
+        texts.iter().any(|t| t.starts_with("100.0 Hz ")),
+        "no pinned readout: {texts:?}"
+    );
+    // Hover over the middle of the panes.
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(450.0, 200.0)));
+    harness.run();
+    let texts = extract_texts(&harness.output().shapes);
+    let readouts = texts
+        .iter()
+        .filter(|t| t.contains(" dB ") && t.contains("coh "))
+        .count();
+    assert!(readouts >= 2, "no hover readout beside the pin: {texts:?}");
+}

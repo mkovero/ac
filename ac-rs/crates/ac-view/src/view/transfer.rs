@@ -122,7 +122,7 @@ pub(super) fn draw_transfer(
     stored: &[StoredTrace<'_>],
     ir: Option<&ac_scene::IrScene>,
     target: Option<&TargetTrace>,
-) {
+) -> TransferPointer {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
 
@@ -157,7 +157,7 @@ pub(super) fn draw_transfer(
             "no session — transfer view",
             COLOR_STRUCTURAL,
         );
-        return;
+        return TransferPointer::default();
     }
 
     // Everything else lives below the banner's reserved band.
@@ -192,7 +192,7 @@ pub(super) fn draw_transfer(
         if let Some(scene) = scene {
             draw_input_meters(painter, content, scene);
         }
-        return;
+        return TransferPointer::default();
     }
 
     let layout = TransferLayout::new(
@@ -293,6 +293,98 @@ pub(super) fn draw_transfer(
     // Last, so the fault indicator is over the traces rather than under
     // them.
     draw_fault(painter, &layout, scene, live);
+
+    // The pointer cursor (#718): a line and the focused trace's values at
+    // the column nearest the pointer, and a pinned one where the operator
+    // clicked. ac-scene snaps and formats; this maps x and draws.
+    let focused_scene = match state.focus {
+        Focus::Stored(idx) => stored.get(idx).map(|r| r.scene),
+        Focus::Live => scene,
+    };
+    let (f_lo, f_hi) = (state.freq_range.min(), state.freq_range.max());
+    let pointer = pane_pointer(ui, &layout);
+    if let Some(s) = focused_scene {
+        if let Some(pin) = state.cursor_pin {
+            if let Some(r) = s.cursor_readout(pin) {
+                draw_cursor(painter, &layout, &r, 1, COLOR_SIGNAL);
+            }
+        }
+        if let Some(x) = pointer.hover_x {
+            let f = ac_scene::ticks::x_to_freq(x, f_lo, f_hi);
+            if let Some(r) = s.cursor_readout(f) {
+                draw_cursor(painter, &layout, &r, 0, COLOR_VALUE);
+            }
+        }
+    }
+    pointer
+}
+
+/// Where the pointer is over the panes this frame, as normalized x on the
+/// shared frequency axis, and whether it clicked there (#718).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct TransferPointer {
+    pub hover_x: Option<f64>,
+    /// Primary click: pin the cursor here.
+    pub click_x: Option<f64>,
+    /// Secondary click: clear the pin.
+    pub clear: bool,
+}
+
+fn pane_pointer(ui: &Ui, layout: &TransferLayout) -> TransferPointer {
+    let (pos, primary, secondary) = ui.input(|i| {
+        (
+            i.pointer.hover_pos(),
+            i.pointer.primary_clicked(),
+            i.pointer.secondary_clicked(),
+        )
+    });
+    let Some(p) = pos else {
+        return TransferPointer::default();
+    };
+    let inside = |vp: &Viewport| {
+        p.x >= vp.x && p.x <= vp.x + vp.width && p.y >= vp.y && p.y <= vp.y + vp.height
+    };
+    if !(inside(&layout.mag) || inside(&layout.phase)) || layout.mag.width <= 0.0 {
+        return TransferPointer::default();
+    }
+    let x = f64::from((p.x - layout.mag.x) / layout.mag.width);
+    TransferPointer {
+        hover_x: Some(x),
+        click_x: primary.then_some(x),
+        clear: secondary,
+    }
+}
+
+/// One cursor: a vertical line through both panes at the readout's column
+/// and its text at the top of the magnitude pane, on row `row` (the hover
+/// cursor 0, the pinned one 1), flipped left of the line near the right edge.
+fn draw_cursor(
+    painter: &Painter,
+    layout: &TransferLayout,
+    r: &ac_scene::transfer::CursorReadout,
+    row: usize,
+    color: egui::Color32,
+) {
+    let (x, _) = scene_to_screen((r.x, 0.0), layout.mag);
+    for vp in [layout.mag, layout.phase] {
+        painter.line_segment(
+            [egui::pos2(x, vp.y), egui::pos2(x, vp.y + vp.height)],
+            Stroke::new(1.0, color.gamma_multiply(0.6)),
+        );
+    }
+    let right_half = x > layout.mag.x + layout.mag.width * 0.6;
+    let (anchor, dx) = if right_half {
+        (Align2::RIGHT_TOP, -6.0)
+    } else {
+        (Align2::LEFT_TOP, 6.0)
+    };
+    text(
+        painter,
+        egui::pos2(x + dx, layout.mag.y + 4.0 + row as f32 * ROW_H),
+        anchor,
+        &r.text,
+        color,
+    );
 }
 
 /// The stimulus banner (safety UI) owns a reserved top band that nothing
