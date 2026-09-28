@@ -1842,30 +1842,29 @@ impl AcViewApp {
         let Some(session) = &mut self.session else {
             return false;
         };
-        let (drained, drained_ir) =
-            collect_drained(|| session.poll_frame(Duration::from_millis(0)));
-        self.ingest_drained(drained, drained_ir, Instant::now())
+        let drained = collect_drained(|| session.poll_frame(Duration::from_millis(0)));
+        self.ingest_drained(drained, Instant::now())
     }
 
     /// Feed one pass's collected frames through the ingest boundary, in
     /// arrival order, so the last of each kind is what stays held. Returns
     /// whether any `transfer_stream` frame was accepted.
-    fn ingest_drained(
-        &mut self,
-        drained: Vec<serde_json::Value>,
-        drained_ir: Vec<serde_json::Value>,
-        now: Instant,
-    ) -> bool {
+    ///
+    /// One ordered pass, not transfer frames then IR frames: an arrival IR
+    /// ages out by the transfer frames that follow it (#706), so an old one
+    /// replayed after the frames that expired it would come back (Codex
+    /// recheck).
+    fn ingest_drained(&mut self, drained: Vec<PolledFrame>, now: Instant) -> bool {
         let mut got_new_frame = false;
         for frame in drained {
-            if self.ingest_raw_frame(frame, now) {
-                got_new_frame = true;
+            match frame {
+                PolledFrame::Transfer(v) => {
+                    if self.ingest_raw_frame(v, now) {
+                        got_new_frame = true;
+                    }
+                }
+                PolledFrame::Ir(v) => self.ingest_raw_ir_frame(v),
             }
-        }
-        // Same "drain to the newest" discipline as the transfer frame
-        // above — the last one in the backlog wins.
-        for frame in drained_ir {
-            self.ingest_raw_ir_frame(frame);
         }
         got_new_frame
     }
@@ -2394,23 +2393,13 @@ fn draw_help(ctx: &egui::Context, view: crate::keys::ViewId) {
         });
 }
 
-/// Pull frames from `poll` until it reports empty, split by the tagged
-/// `PolledFrame` (#286) — a `transfer_stream` frame and its `visualize/ir`
-/// sidecar are independent JSON objects and go to independent ingest
-/// paths. The socket read is passed in so the drain test can inject a
+/// Pull frames from `poll` until it reports empty, in arrival order, each
+/// tagged `PolledFrame` (#286) — a `transfer_stream` frame and its
+/// `visualize/ir` sidecar are independent JSON objects and go to
+/// independent ingest paths, but in the order they came (#706). The socket read is passed in so the drain test can inject a
 /// queue instead (#219 Part B); `drain_frames` passes `Session::poll_frame`.
-fn collect_drained(
-    mut poll: impl FnMut() -> Option<PolledFrame>,
-) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-    let mut drained = Vec::new();
-    let mut drained_ir = Vec::new();
-    while let Some(frame) = poll() {
-        match frame {
-            PolledFrame::Transfer(v) => drained.push(v),
-            PolledFrame::Ir(v) => drained_ir.push(v),
-        }
-    }
-    (drained, drained_ir)
+fn collect_drained(poll: impl FnMut() -> Option<PolledFrame>) -> Vec<PolledFrame> {
+    std::iter::from_fn(poll).collect()
 }
 
 #[cfg(test)]

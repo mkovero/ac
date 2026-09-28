@@ -1235,7 +1235,7 @@ fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
 
     let mut app = ir_app();
     let mut malformed_counted = 0u64;
-    let (drained, drained_ir) = collect_drained(|| {
+    let drained = collect_drained(|| {
         crate::session::poll_next(
             || queue.pop_front().unwrap_or(crate::zmq_client::Recv::Empty),
             &mut malformed_counted,
@@ -1246,11 +1246,17 @@ fn one_drain_pass_over_a_mixed_backlog_keeps_the_newest_frames() {
         "drain left {} frames pending",
         queue.len()
     );
-    assert_eq!(drained.len(), DRAIN_BACKLOG as usize);
-    assert_eq!(drained_ir.len(), DRAIN_BACKLOG as usize);
+    let count = |ir: bool| {
+        drained
+            .iter()
+            .filter(|f| matches!(f, crate::session::PolledFrame::Ir(_)) == ir)
+            .count()
+    };
+    assert_eq!(count(false), DRAIN_BACKLOG as usize);
+    assert_eq!(count(true), DRAIN_BACKLOG as usize);
     assert_eq!(malformed_counted, malformed_injected);
 
-    let got_new_frame = app.ingest_drained(drained, drained_ir, std::time::Instant::now());
+    let got_new_frame = app.ingest_drained(drained, std::time::Instant::now());
     assert!(got_new_frame, "no injected transfer frame was accepted");
     let held = app.last_frame().expect("a transfer frame is held");
     assert_eq!(held.delay_samples, DRAIN_BACKLOG - 1);
