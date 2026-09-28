@@ -70,7 +70,17 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(12));
+                assert_eq!(v["report"]["schema_version"], json!(13));
+                // ISO 3382-1 room parameters (schema v13) need a decay:
+                // this 0.1 s tail is too short, so they are absent and the
+                // notes say why and what to change — never a silent gap.
+                assert!(v["report"].get("room_acoustics").is_none());
+                let notes = v["report"]["notes"].as_str().unwrap_or_default();
+                assert!(
+                    notes.contains("ISO 3382-1 room acoustic parameters not computed")
+                        && notes.contains("tail_s 0.10 s"),
+                    "{notes}"
+                );
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -1539,4 +1549,41 @@ fn plot_ir_and_transfer_find_the_same_delay() {
     assert_eq!(f["delay_samples"], json!(DELAY), "transfer Find: {f}");
     assert_eq!(f["delay_residual"], json!(0), "{f}");
     assert_eq!(f["delay_operator"], json!(false));
+}
+
+/// With a tail long enough for a decay, `plot_ir` carries ISO 3382-1
+/// parameters for each octave band inside the sweep (schema v13).
+#[test]
+fn plot_ir_with_a_long_tail_reports_room_acoustics() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "plot_ir",
+        "f1_hz": 100.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -20.0,
+        "tail_s": 0.6,
+        "window_len": 1024,
+        "n_harmonics": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let report = c
+        .wait_for_topic("measurement/report", std::time::Duration::from_secs(30))
+        .expect("report");
+    let bands = report["report"]["room_acoustics"]["bands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no room_acoustics: {}", report["report"]["notes"]));
+    let centres: Vec<f64> = bands
+        .iter()
+        .map(|b| b["centre_hz"].as_f64().unwrap())
+        .collect();
+    assert!(
+        centres.len() >= 4 && centres.iter().all(|&c| (100.0..5000.0).contains(&c)),
+        "{centres:?}"
+    );
+    assert_eq!(
+        report["report"]["room_acoustics"]["citation"]["standard"],
+        json!("ISO 3382-1:2009")
+    );
 }
