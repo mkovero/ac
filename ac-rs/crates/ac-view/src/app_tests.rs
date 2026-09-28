@@ -2948,3 +2948,50 @@ fn w_asks_for_the_next_speed_after_the_frames() {
         .collect();
     assert_eq!(asked, vec!["live", "follow"]);
 }
+
+/// Codex review of #714: two `W` presses before a frame reports the first
+/// advance twice; once the frame catches up it is the reference again.
+#[test]
+fn w_twice_before_a_frame_advances_twice() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0); // no preset: Detail
+    app.handle_action(Action::CycleSpeed, false);
+    app.handle_action(Action::CycleSpeed, false);
+    let mut f = found_frame();
+    let mut m = f.mtw.clone().unwrap_or_default();
+    m.speed = Some("follow".into());
+    f.mtw = Some(m);
+    app.ingest_frame_for_test(f, 0.1);
+    app.handle_action(Action::CycleSpeed, false);
+    let asked: Vec<&str> = app
+        .sent_speed
+        .iter()
+        .map(|r| r["speed"].as_str().unwrap())
+        .collect();
+    assert_eq!(asked, vec!["live", "follow", "detail"]);
+}
+
+/// Codex review of #714: a new preset on the frame drops the held arrival
+/// IR, which ran in the retired ladder.
+#[test]
+fn a_speed_change_drops_the_arrival_ir() {
+    let mut app = ir_app();
+    let with_speed = |s: &str| {
+        let mut f = found_frame();
+        let mut m = f.mtw.clone().unwrap_or_default();
+        m.speed = Some(s.into());
+        f.mtw = Some(m);
+        f
+    };
+    app.ingest_frame_for_test(with_speed("detail"), 0.0);
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = found_frame().delay_samples;
+    app.ingest_ir_frame_for_test(arrival);
+    assert!(app.live[0].ir_arrival.is_some());
+    app.ingest_frame_for_test(with_speed("live"), 0.05);
+    assert!(
+        app.live[0].ir_arrival.is_none(),
+        "kept the retired ladder's IR"
+    );
+}

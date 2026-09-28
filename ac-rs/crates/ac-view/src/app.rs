@@ -167,6 +167,9 @@ pub struct AcViewApp {
     /// `set_speed` requests sent (#714), for tests.
     #[cfg(test)]
     sent_speed: Vec<serde_json::Value>,
+    /// The preset last asked for with `W`, until a frame reports it (#714,
+    /// Codex review): two presses before the next frame must advance twice.
+    speed_pending: Option<ac_core::visualize::mtw::ladder::Speed>,
 }
 
 impl AcViewApp {
@@ -212,6 +215,7 @@ impl AcViewApp {
             sent_delay: Vec::new(),
             #[cfg(test)]
             sent_speed: Vec::new(),
+            speed_pending: None,
         }
     }
 
@@ -1385,15 +1389,22 @@ impl AcViewApp {
     /// starts at Detail) cannot leave the key a step out.
     fn cycle_speed(&mut self) {
         use ac_core::visualize::mtw::ladder::Speed;
-        let current = self
+        let reported = self
             .live_selected()
             .frame
             .as_ref()
             .and_then(|f| f.mtw.as_ref())
             .and_then(|m| m.speed.as_deref())
-            .and_then(Speed::from_tag)
-            .unwrap_or_default();
-        let request = serde_json::json!({"cmd": "set_speed", "speed": current.next().tag()});
+            .and_then(Speed::from_tag);
+        // A request the frames have not caught up with yet is the current
+        // one; once a frame reports it, the frame is.
+        if self.speed_pending.is_some() && self.speed_pending == reported {
+            self.speed_pending = None;
+        }
+        let current = self.speed_pending.or(reported).unwrap_or_default();
+        let next = current.next();
+        self.speed_pending = Some(next);
+        let request = serde_json::json!({"cmd": "set_speed", "speed": next.tag()});
         #[cfg(test)]
         self.sent_speed.push(request.clone());
         if let Some(session) = &self.session {
@@ -2385,6 +2396,14 @@ impl LivePair {
         });
         if stale {
             self.ir_arrival = None;
+        }
+        // A new speed preset retires the ladder the arrival IR ran in
+        // (#714, Codex review): drop it rather than let it age out.
+        let speed = |f: &ac_core::wire::TransferFrame| f.mtw.as_ref().and_then(|m| m.speed.clone());
+        if let (Some(old), Some(new)) = (self.frame.as_ref().and_then(speed), speed(&frame)) {
+            if old != new {
+                self.ir_arrival = None;
+            }
         }
         self.frame = Some(frame);
         self.frames_in += 1;
