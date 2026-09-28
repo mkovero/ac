@@ -3146,8 +3146,10 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "backend":         "jack" | "cpal" | "fake",
 
   // The three-stage transfer columns — the display's source. `null` until
-  // every ladder rung holds its full block count (2.43 s at the bottom rung),
-  // and on a settling frame. Recomputed every tick. Absent is not a reason
+  // the top rung holds its full block count (0.11 s at 96 kHz), and on a
+  // settling frame. Deeper rungs join as they fill (the bottom at 2.43 s);
+  // `settled_stages` says which have — a present `mtw` is not a settled
+  // ladder. Recomputed every tick. Absent is not a reason
   // to fall back to the Welch arrays above: they are a different
   // measurement. Column spacing is NOT uniform in log frequency — map each
   // column by its own `freqs[i]`, never by index. dB is applied daemon-side.

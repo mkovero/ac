@@ -22,9 +22,9 @@
 //! `(s0 − origin) mod L = 0` where `L = lcm(hop_i · decim_i)` and `origin`
 //! is the live ladder's first input sample, analyses the same blocks the live
 //! one did from the point its own warmup ends: every stage's grid is shifted
-//! by a whole number of hops. Its last N blocks per stage are then the live
-//! ladder's last N — bit for bit on identical `f32` input. `L` is 0.512 s at
-//! 48/96/192 kHz and 2.043 s at 44.1 kHz.
+//! by a whole number of hops. Its last blocks per stage are then the live
+//! ladder's last — bit for bit on identical `f32` input. `L` is 0.256 s at
+//! 48/96/192 kHz and 1.022 s at 44.1 kHz.
 //!
 //! The warmup skip is identical for a fresh ladder, so nothing compensates
 //! for it here.
@@ -32,11 +32,11 @@
 //! # What the stored ring must hold
 //!
 //! A full replay needs `L` (worst-case wait for a grid-aligned start) plus
-//! the decimator transient plus the deepest rung's settling `W + hop·(N−1)`
-//! plus `|offset|`: ≈ 3.1 s + |offset| at 48/96/192 kHz, ≈ 4.7 s + |offset|
-//! at 44.1 kHz. A shorter ring settles fewer rungs. That is reported through
-//! `settled_stages` exactly as a warming live frame reports it, and no rung
-//! is ever drawn over fewer than N blocks.
+//! the decimator transient plus the deepest rung's settling
+//! `W + hop·(blocks−1)` plus `|offset|`: ≈ 2.7 s + |offset| at 48/96/192 kHz,
+//! ≈ 3.6 s + |offset| at 44.1 kHz. A shorter ring settles fewer rungs. That
+//! is reported through `settled_stages` exactly as a warming live frame
+//! reports it, and no rung is ever drawn over fewer than its full count.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,10 @@ pub struct StageProvenance {
     /// [`MtwProvenance::hop`] for every stage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hop: Option<usize>,
+    /// Blocks the stage averaged. Absent from the same older snapshots,
+    /// which averaged [`MtwProvenance::n_blocks`] at every stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<usize>,
 }
 
 /// Everything the replay needs about one pair's live ladder, recorded at
@@ -112,6 +116,7 @@ impl MtwProvenance {
                     decim: s.decim,
                     rate: s.rate,
                     hop: Some(s.hop),
+                    blocks: Some(s.blocks(n_blocks)),
                 })
                 .collect(),
         })
@@ -121,6 +126,26 @@ impl MtwProvenance {
     /// running code builds at this rate cannot be replayed by it. The same
     /// rule as an unknown `format_version`.
     fn check_layout(&self, l: &Ladder) -> Result<()> {
+        // Malformed first: these describe no ladder at all, so they are
+        // errors in the file, never a layout an older `ac` built.
+        let malformed = self.nfft == 0
+            || self.hop == 0
+            || self.n_blocks == 0
+            || self.stages.is_empty()
+            || self
+                .stages
+                .iter()
+                .any(|p| p.decim == 0 || p.hop == Some(0) || p.blocks == Some(0));
+        if malformed {
+            return Err(anyhow!(
+                "mtw replay: stored provenance describes no ladder (nfft {}, hop {}, \
+                 n_blocks {}, {} stages)",
+                self.nfft,
+                self.hop,
+                self.n_blocks,
+                self.stages.len()
+            ));
+        }
         if self.nfft != NFFT || self.hop != HOP {
             return Err(layout_mismatch(format!(
                 "mtw replay: stored nfft/hop {}/{} differ from this reader's {NFFT}/{HOP}",
@@ -133,19 +158,24 @@ impl MtwProvenance {
                 // rate is compared to within the parser's last bit.
                 p.decim == s.decim && (p.rate - s.rate).abs() <= 1e-9 * s.rate.abs()
             });
-        // Per-stage hops: a snapshot from before the deeper stages hopped
-        // more often recorded one hop for all of them. Its ladder was a
-        // different estimate, so it is refused, not re-run at today's hops.
-        let stored_hops: Vec<usize> = self
+        // Per-stage hops and block counts: a snapshot from before the deeper
+        // stages hopped more often (#699) recorded one hop and one count for
+        // all of them. Its ladder was a different estimate, so it is
+        // refused, not re-run at today's.
+        let stored: Vec<(usize, usize)> = self
             .stages
             .iter()
-            .map(|p| p.hop.unwrap_or(self.hop))
+            .map(|p| (p.hop.unwrap_or(self.hop), p.blocks.unwrap_or(self.n_blocks)))
             .collect();
-        let current_hops: Vec<usize> = l.stages.iter().map(|s| s.hop).collect();
-        if same_stages && stored_hops != current_hops {
+        let current: Vec<(usize, usize)> = l
+            .stages
+            .iter()
+            .map(|s| (s.hop, s.blocks(self.n_blocks)))
+            .collect();
+        if same_stages && stored != current {
             return Err(layout_mismatch(format!(
-                "mtw replay: stored stage hops {stored_hops:?} differ from this reader's \
-                 {current_hops:?}"
+                "mtw replay: stored stage (hop, blocks) {stored:?} differ from this \
+                 reader's {current:?}"
             )));
         }
         if !same_stages {
@@ -156,9 +186,6 @@ impl MtwProvenance {
                  {current:?} at {} Hz",
                 l.sr
             )));
-        }
-        if self.n_blocks == 0 {
-            return Err(anyhow!("mtw replay: stored n_blocks is 0"));
         }
         Ok(())
     }
@@ -402,15 +429,51 @@ mod tests {
         old.hop = ladder::HOP;
         for st in &mut old.stages {
             st.hop = None;
+            st.blocks = None;
         }
-        let e = old
-            .check_layout(&ladder::layout(SR).unwrap())
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("stored stage hops [2048, 2048, 2048]"), "{e}");
+        let err = old.check_layout(&ladder::layout(SR).unwrap()).unwrap_err();
+        assert!(err.downcast_ref::<LayoutMismatch>().is_some());
+        let e = err.to_string();
+        assert!(e.contains("[(2048, 4), (2048, 4), (2048, 4)]"), "{e}");
         assert!(provenance(0)
             .check_layout(&ladder::layout(SR).unwrap())
             .is_ok());
+    }
+
+    /// Same hops, different block counts: a ladder that averaged the bottom
+    /// stage over 8 blocks is a different estimate from today's 12, and the
+    /// hops alone would not tell them apart.
+    #[test]
+    fn a_different_block_count_at_the_same_hops_is_refused() {
+        let mut other = provenance(0);
+        other.stages[2].blocks = Some(8);
+        let err = other
+            .check_layout(&ladder::layout(SR).unwrap())
+            .unwrap_err();
+        assert!(err.downcast_ref::<LayoutMismatch>().is_some(), "{err}");
+    }
+
+    /// Provenance that describes no ladder is an error in the file, not an
+    /// older layout: it must not reach a caller's Welch fallback.
+    #[test]
+    fn malformed_provenance_is_an_error_not_a_layout_mismatch() {
+        let l = ladder::layout(SR).unwrap();
+        let cases: [fn(&mut MtwProvenance); 5] = [
+            |p| p.stages.clear(),
+            |p| p.nfft = 0,
+            |p| p.n_blocks = 0,
+            |p| p.stages[1].decim = 0,
+            |p| p.stages[2].blocks = Some(0),
+        ];
+        for (i, f) in cases.iter().enumerate() {
+            let mut p = provenance(0);
+            f(&mut p);
+            let err = p.check_layout(&l).unwrap_err();
+            assert!(
+                err.downcast_ref::<LayoutMismatch>().is_none(),
+                "case {i} read as an older layout: {err}"
+            );
+        }
     }
 
     #[test]

@@ -103,9 +103,9 @@ Both entries are required; a reader must reject a file missing either one.
         "nfft": 4096,
         "hop": 2048,
         "stages": [
-          { "decim": 1, "rate": 48000.0, "hop": 2048 },
-          { "decim": 4, "rate": 12000.0, "hop": 1024 },
-          { "decim": 12, "rate": 4000.0, "hop": 512 }
+          { "decim": 1, "rate": 48000.0, "hop": 2048, "blocks": 4 },
+          { "decim": 4, "rate": 12000.0, "hop": 1024, "blocks": 6 },
+          { "decim": 12, "rate": 4000.0, "hop": 512, "blocks": 12 }
         ]
       }
     ]
@@ -131,7 +131,7 @@ Both entries are required; a reader must reject a file missing either one.
 | `session.pairs` | `[[int,int]]` | `(meas_input_channel, ref_input_channel)` per pair, session indices — not FLAC stream positions. |
 | `session.delay_samples` | `[int]` | Per-pair ref↔meas delay in samples, same order as `pairs`. |
 | `session.nperseg` | int | Welch segment length in effect. `h1_estimate_core` currently pins this to `sr` (`ac_core::visualize::transfer::h1_nperseg`), but it's recorded explicitly — a future estimator change can't silently break old snapshots. |
-| `session.mtw` | `[object｜null]` | **v3: required, one entry per `pairs` entry. v1/v2: must be absent.** Per pair, the live multi-time-window ladder's provenance, or `null` for a pair that had none (it never locked, or the rate has no ladder). `offset`: the alignment offset (signed full-rate samples) the ladder was built with. `origin`: the ladder's first input sample as a signed full-rate index relative to the first stored sample — negative when the ladder started before the ring's retained window. `n_blocks`, `ppo`, `f_min`/`f_max`: the averaging depth and column grid the live frame was assembled at. `nfft`, `hop`, `stages[{decim, rate, hop}]`: the ladder layout, which a reader must build identically to replay — see *Offline derivation*. Top-level `hop` is stage 0's; a stage's own `hop` (since #699; deeper stages overlap more) falls back to it when absent, which is how files written before #699 read. |
+| `session.mtw` | `[object｜null]` | **v3: required, one entry per `pairs` entry. v1/v2: must be absent.** Per pair, the live multi-time-window ladder's provenance, or `null` for a pair that had none (it never locked, or the rate has no ladder). `offset`: the alignment offset (signed full-rate samples) the ladder was built with. `origin`: the ladder's first input sample as a signed full-rate index relative to the first stored sample — negative when the ladder started before the ring's retained window. `n_blocks`, `ppo`, `f_min`/`f_max`: the averaging depth and column grid the live frame was assembled at. `nfft`, `hop`, `stages[{decim, rate, hop, blocks}]`: the ladder layout, which a reader must build identically to replay — see *Offline derivation*. Top-level `hop` is stage 0's and `n_blocks` the base count; a stage's own `hop` and `blocks` (since #699; deeper stages overlap more and average more) fall back to them when absent, which is how files written before #699 read. |
 | `captured_at_utc` | RFC3339 string | Wall-clock instant `snapshot` was triggered (the ring's *tail* — the ring's start is `ring_duration_s` seconds earlier). |
 | `daemon_version` | string | `ac-daemon`'s own version string. |
 | `ring_duration_s` | float | Actual captured duration in this file (≤ the session's configured `snapshot_ring_s` — shorter if the session hadn't run that long yet). |
@@ -245,15 +245,17 @@ stages of `hop · decim` in full-rate samples (0.256 s at 48/96/192 kHz,
 the live one did — bit for bit on identical samples.
 
 The ring must hold `L` + the decimator transient + the deepest rung's
-settling `W + hop·(blocks−1)` + `|offset|` for every rung to settle: ≈ 2.8 s +
+settling `W + hop·(blocks−1)` + `|offset|` for every rung to settle: ≈ 2.7 s +
 |offset| at 48/96/192 kHz, ≈ 3.6 s + |offset| at 44.1 kHz. The default
 30 s `snapshot_ring_s` clears it. A shorter ring settles fewer rungs,
 reported through `settled_stages` exactly as a warming live frame reports
 it; no rung is drawn over fewer than its full block count.
 
 A stored `nfft`/`hop`/`stages` that differs from what the running code
-builds at `sr` cannot be replayed: `replay` refuses it (a
-`LayoutMismatch`), never misreads it. `derive_pair` then derives that pair
+builds at `sr` — including a stage's hop or block count — cannot be
+replayed: `replay` refuses it (a `LayoutMismatch`), never misreads it.
+Provenance that describes no ladder at all (no stages, a zero count,
+hop or decimation) is an error in the file and `derive_pair` reports it. `derive_pair` then derives that pair
 Welch only, as for a pair without provenance, so the file still opens —
 labelled as not the live ladder. This is what happens to v3 files written
 before #699 changed the deeper stages' hops.

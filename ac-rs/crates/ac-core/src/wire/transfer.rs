@@ -327,8 +327,10 @@ pub struct TransferFrame {
     pub backend: String,
 
     // ---- three-stage transfer columns — the display's source ----
-    /// `None` until every ladder rung holds its full block count (2.43 s at the
-    /// bottom rung), and on any daemon predating the ladder.
+    /// `None` until the top rung holds its full block count (0.11 s at
+    /// 96 kHz), and on any daemon predating the ladder. Deeper rungs join as
+    /// they fill (the bottom at 2.43 s); [`MtwColumns::settled_stages`] says
+    /// which have, so a present value is not a settled ladder.
     ///
     /// Absent is **not** a reason to fall back to the Welch arrays above: the
     /// two are different measurements, and silently swapping between them

@@ -827,6 +827,28 @@ mod tests {
         assert!(format!("{err:#}").contains("stage decims"), "{err:#}");
     }
 
+    /// #699 Codex: an empty stage list is a malformed file, and derive_pair
+    /// reports it rather than quietly deriving Welch.
+    #[test]
+    fn derive_pair_reports_malformed_ladder_provenance() {
+        use crate::visualize::weighting_curves::WeightingCurve;
+        let snap = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must read");
+        let mut meta = snap.meta.clone();
+        meta.session.mtw.as_mut().unwrap()[0]
+            .as_mut()
+            .unwrap()
+            .stages
+            .clear();
+        let (bytes, _) = write_acsnap(&meta, &snap.channels).expect("write");
+        let broken = read_acsnap(&bytes).expect("stage list is not checked on read");
+        let err = match broken.derive_pair(0, WeightingCurve::Z, None) {
+            Ok(_) => panic!("malformed provenance derived as Welch"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("describes no ladder"), "{err}");
+    }
+
     /// Deterministic broadband source for the fixture, `[-1, 1)`. A
     /// plain LCG is enough here (this is fixture *content*, not a
     /// cross-verified stimulus — it doesn't need to match
