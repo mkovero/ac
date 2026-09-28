@@ -78,7 +78,10 @@ pub fn etc_db(ir: &[f32]) -> Vec<f32> {
 /// on the sample a stride pick takes (`iter().step_by(stride)`): element
 /// `i` covers `[i·stride − stride/2, i·stride + stride − stride/2)`, so it
 /// is drawn at the time of stride-picked sample `i` and a peak lands
-/// within half a bucket of its true time. Buckets that start at the pick
+/// within half a bucket of its true time — except in the tail after the
+/// last pick, which the last bucket also holds and draws up to one bucket
+/// early (the far +0.5 s edge of a live IR, Codex recheck). Buckets that
+/// start at the pick
 /// instead drew a peak just before it a whole bucket early (the rig: an
 /// arrival at −0.01 ms drawn at −0.5 ms).
 pub fn bucket_max(db: &[f32], stride: usize) -> Vec<f32> {

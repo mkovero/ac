@@ -3340,7 +3340,9 @@ filters, not actual non-causality.
 full-resolution IR, then reduced to the `samples` grid by the maximum of
 a `stride`-long bucket centred on each picked sample — a stride pick would
 step over an arrival one sample wide, and centring puts a peak within half
-a bucket (`dt_ms / 2`) of its time. Both are 0 dB at their peak and floored at −150 dB. The ETC
+a bucket (`dt_ms / 2`) of its time. The last bucket also holds the tail
+after the last pick, so a peak there (at the window's far end) is drawn
+up to one bucket early. Both are 0 dB at their peak and floored at −150 dB. The ETC
 is `|h + j·H{h}|`, the analytic signal's magnitude: the level each
 arrival reaches without its oscillation. Empty arrays from a daemon
 predating them.
