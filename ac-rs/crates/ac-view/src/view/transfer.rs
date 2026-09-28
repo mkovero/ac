@@ -222,7 +222,12 @@ pub(super) fn draw_transfer(
         );
     }
     draw_traces(painter, &layout, shown, stored);
-    draw_mag_annotations(painter, &layout, scene);
+    // The caption row follows focus (#707), as the delay readout does.
+    let focused_run = match state.focus {
+        Focus::Stored(idx) => stored.get(idx),
+        Focus::Live => None,
+    };
+    draw_mag_annotations(painter, &layout, scene, focused_run);
     draw_delay_readout(painter, &layout, state, scene, stored);
     draw_legend(painter, &layout, state, live, stored);
     // Row 4 (#670): the coherence mask when not the default, and what data
@@ -409,11 +414,50 @@ fn live_stroke(pair: usize) -> Stroke {
 /// with no rule or box: findable when sought, invisible when not.
 /// Live-only: band labels state what the analyser resolved on *this*
 /// (live) frame, so there is nothing to draw without one.
+///
+/// The caption row (smoothing, invert/offset) describes the **focused**
+/// trace, as the delay readout on the row below does (#707): with a stored
+/// run focused it is that run's, after its name, and the live trace's are
+/// not drawn — `N` edits the focused trace, so the caption must say what
+/// `N` just changed. The band labels stay live's; the calibration verdict,
+/// a statement about the live session, is not drawn over a stored run's
+/// captions.
 fn draw_mag_annotations(
     painter: &Painter,
     layout: &TransferLayout,
     scene: Option<&ac_scene::TransferScene>,
+    focused_run: Option<&StoredTrace<'_>>,
 ) {
+    let row1 = layout.content.left_top() + egui::vec2(0.0, ROW_H);
+    if let Some(run) = focused_run {
+        let captions = [
+            run.scene.estimator_readout.as_deref(),
+            run.scene.smoothing_readout,
+            run.scene.invert_offset_readout.as_deref(),
+        ];
+        let mut next = painter
+            .text(
+                row1,
+                Align2::LEFT_TOP,
+                format!("{} \u{b7}", short_owner(run.label)),
+                FontId::default(),
+                super::palette::compare_color(run.color_slot),
+            )
+            .right_top()
+            + egui::vec2(ROW_H / 2.0, 0.0);
+        for caption in captions.into_iter().flatten() {
+            next = painter
+                .text(
+                    next,
+                    Align2::LEFT_TOP,
+                    caption,
+                    FontId::default(),
+                    COLOR_LABEL,
+                )
+                .right_top()
+                + egui::vec2(ROW_H, 0.0);
+        }
+    }
     let Some(scene) = scene else { return };
     for band in &scene.band_labels {
         let (x, _) = scene_to_screen((band.position, 0.0), layout.mag);
@@ -426,9 +470,11 @@ fn draw_mag_annotations(
         );
     }
 
+    if focused_run.is_some() {
+        return;
+    }
     // Absent when smoothing is off — an unaltered trace is the resting
     // state and needs no caption. The string is ac-scene's.
-    let row1 = layout.content.left_top() + egui::vec2(0.0, ROW_H);
     let mut calibration_pos = row1;
     if let Some(label) = scene.smoothing_readout {
         let drawn = painter.text(
@@ -470,6 +516,19 @@ fn draw_mag_annotations(
             &readout.text,
             color,
         );
+    }
+}
+
+/// A trace's name as the caption row's owner tag: at most 24 characters,
+/// so a long file name cannot push the captions it owns off the row
+/// (Codex review of #707). The full name is on the run's legend row.
+fn short_owner(label: &str) -> String {
+    const MAX: usize = 24;
+    if label.chars().count() <= MAX {
+        label.to_string()
+    } else {
+        let head: String = label.chars().take(MAX - 1).collect();
+        format!("{head}\u{2026}")
     }
 }
 
@@ -609,30 +668,8 @@ fn draw_legend(
         }
     }
 
-    // A selected slot's captions after the strip; a file-opened run's stay
-    // on its own row below.
-    if let Some(run) = stored.iter().find(|r| r.focused && r.slot.is_some()) {
-        let mut next = egui::pos2(x + gap, legend_top + 2.0);
-        for caption in [
-            run.scene.estimator_readout.as_deref(),
-            run.scene.smoothing_readout,
-            run.scene.invert_offset_readout.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            next = painter
-                .text(
-                    next,
-                    Align2::LEFT_TOP,
-                    caption,
-                    FontId::default(),
-                    COLOR_LABEL,
-                )
-                .right_top()
-                + egui::vec2(ROW_H, 0.0);
-        }
-    }
+    // A selected slot's captions are on the caption row (#707); a
+    // file-opened run's stay on its own row below.
 
     // Runs opened from a file: a row each, in their colour — identity,
     // then how the trace was derived, then what was done to it (#221 UX),
@@ -734,5 +771,18 @@ fn draw_fault(
             FontId::proportional(14.0),
             COLOR_LABEL,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_owner;
+
+    #[test]
+    fn a_long_owner_is_cut_to_24_characters() {
+        assert_eq!(short_owner("slot 2"), "slot 2");
+        let cut = short_owner("a-very-long-capture-name-2026-09-28T12-00-00Z.acsnap");
+        assert_eq!(cut.chars().count(), 24);
+        assert!(cut.ends_with('\u{2026}'));
     }
 }
