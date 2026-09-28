@@ -254,11 +254,14 @@ it; no rung is drawn over fewer than its full block count.
 A stored `nfft`/`hop`/`stages` that differs from what the running code
 builds at `sr` — including a stage's hop or block count — cannot be
 replayed: `replay` refuses it (a `LayoutMismatch`), never misreads it.
-Provenance that describes no ladder at all (no stages, a zero count,
-hop or decimation) is an error in the file and `derive_pair` reports it. `derive_pair` then derives that pair
-Welch only, as for a pair without provenance, so the file still opens —
-labelled as not the live ladder. This is what happens to v3 files written
-before #699 changed the deeper stages' hops.
+`derive_pair` then derives that pair Welch only, as for a pair without
+provenance, so the file still opens — labelled as not the live ladder.
+This is what happens to v3 files written before #699 changed the deeper
+stages' hops.
+
+Provenance that describes no ladder at all (no stages, a zero count, hop
+or decimation) is not a layout mismatch but an error in the file:
+`derive_pair` returns it and derives nothing.
 
 A pair without ladder provenance — a v1/v2 file, a pair that never locked,
 a rate with no ladder — derives the Welch H₁ only. `ac-scene` labels such
