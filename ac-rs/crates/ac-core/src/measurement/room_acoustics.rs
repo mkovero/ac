@@ -31,7 +31,10 @@
 //!   the start, early interval `te`.
 //!
 //! Background noise is read as the mean squared band IR over the last
-//! [`NOISE_TAIL_FRACTION`] of the capture, and the line meeting it is
+//! [`NOISE_TAIL_FRACTION`] of the span given, which must be a flat noise
+//! floor: for a linear sweep deconvolution, end the span at most one sweep
+//! duration past the peak (ISO 18233 §B.5 — past that the floor decays and
+//! loses its highs, and would read as the room). The line meeting it is
 //! fitted from the band's peak down to 10 dB above it on the 10 ms-smoothed
 //! level: one pass of the §5.3.3 construction, not an iterative scheme.
 //!

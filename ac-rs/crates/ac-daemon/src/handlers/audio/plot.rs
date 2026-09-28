@@ -1447,13 +1447,19 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         };
 
         // ISO 3382-1 room acoustic parameters, from the linear IR and its
-        // captured tail — the same span the tail check reads — starting
-        // 10 ms before the linear peak so the direct sound is whole.
+        // captured tail, starting 10 ms before the linear peak so the direct
+        // sound is whole. The span ends one sweep duration past the peak at
+        // most (`noise_tail_start_s`): beyond it the linear deconvolution
+        // leaves only noise convolved with the reversed sweep, a floor that
+        // decays and loses its highs (ISO 18233 §B.5). Read as background,
+        // it put the high bands' truncation late on the rig.
         let room_acoustics = {
             let centre = params.n_samples().saturating_sub(1);
             let pre = (0.010 * sr as f64) as usize;
-            let tail_len =
-                ((tail_s * sr as f64).round() as usize).min(full.len().saturating_sub(centre));
+            let flat_noise = (noise_tail_start_s(&params) * sr as f64) as usize;
+            let tail_len = ((tail_s * sr as f64).round() as usize)
+                .min(flat_noise)
+                .min(full.len().saturating_sub(centre));
             let from = centre.saturating_sub(pre);
             let span = &full[from..(centre + tail_len).min(full.len())];
             match ac_core::measurement::room_acoustics::room_acoustics(span, sr, f1_hz, f2_hz) {
