@@ -51,6 +51,9 @@ pub(super) struct FrameStatics {
     pub(super) integration_tag: String,
     pub(super) mtw_ppo: f64,
     pub(super) mtw_n_blocks: usize,
+    /// The speed preset the ladders are built for (#714). Changed at run
+    /// time by `set_speed`, with [`Self::mtw_stages`].
+    pub(super) mtw_speed: ac_core::visualize::mtw::ladder::Speed,
     /// Ladder description, shipped whole with every frame so a consumer
     /// can interpret a column's `stage` without knowing the layout rules,
     /// and so a saved frame stays interpretable if those rules change.
@@ -312,6 +315,7 @@ pub(super) fn build_pair_messages(
             // blank low end is a fault.
             mtw_settled.get(pos).cloned().unwrap_or_default(),
             statics.mtw_stages.clone(),
+            statics.mtw_speed,
         )
     });
 

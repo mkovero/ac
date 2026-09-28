@@ -228,7 +228,7 @@ impl SessionState {
             .iter()
             .zip(self.ladder_origins.iter())
             .map(|(ladder, origin)| {
-                ladder.as_ref()?;
+                let speed = ladder.as_ref()?.ladder().speed;
                 let (offset, origin) = (*origin)?;
                 ac_core::visualize::mtw::replay::MtwProvenance::for_layout(
                     sr,
@@ -238,6 +238,7 @@ impl SessionState {
                     mtw_ppo,
                     spec_f_min,
                     spec_f_max,
+                    speed,
                 )
                 .ok()
             })
@@ -255,6 +256,10 @@ impl SessionState {
     /// it again.
     pub(super) fn apply_delay_cmd(&mut self, cmd: crate::workers::DelayCmd, engine_on: bool) {
         use crate::workers::DelayAction;
+        if let DelayAction::Speed(speed) = cmd.action {
+            self.set_speed(speed);
+            return;
+        }
         for (i, (st, ladder)) in self
             .pairs
             .iter_mut()
@@ -276,6 +281,7 @@ impl SessionState {
                     st.flush(ladder);
                     continue;
                 }
+                DelayAction::Speed(_) => unreachable!("handled above"),
                 DelayAction::Set(v) => v,
                 DelayAction::Step(k) => match held {
                     Some(h) => h.saturating_add(k),
@@ -292,6 +298,29 @@ impl SessionState {
             });
             st.next_attempt = None;
         }
+    }
+
+    /// Switch the speed preset (#714): every ladder is dropped and rebuilt
+    /// under the new layout on the next tick (a ladder cannot be re-laid
+    /// out in place), so the columns re-settle and the arrival IR restarts.
+    /// The stage table on the frame follows. The held delays are kept.
+    pub(super) fn set_speed(&mut self, speed: ac_core::visualize::mtw::ladder::Speed) {
+        if speed == self.statics.mtw_speed {
+            return;
+        }
+        let sr = self.statics.sr;
+        self.statics.mtw_speed = speed;
+        self.statics.mtw_stages = match ac_core::visualize::mtw::ladder::layout_for(sr, speed) {
+            Ok(l) => ac_core::visualize::mtw::wire_stages(&l, self.statics.mtw_n_blocks),
+            Err(_) => Vec::new(),
+        };
+        for i in 0..self.ladders.len() {
+            self.ladders[i] = None;
+            self.ladder_origins[i] = None;
+            self.held_columns[i] = None;
+            self.arrival_published[i] = 0;
+        }
+        self.ladder_failed = false;
     }
 
     /// The drive off→on edge (#226). A lock is stale by construction —
@@ -527,7 +556,12 @@ impl SessionState {
             let Some(delay) = st.delay.map(|l| l.samples) else {
                 continue;
             };
-            match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
+            match ac_core::visualize::mtw::MtwPair::new_for(
+                sr,
+                delay,
+                mtw_n_blocks,
+                self.statics.mtw_speed,
+            ) {
                 Ok(p) => {
                     // The arrival IR (#706) reads the ladder's aligned
                     // stream, so it is built — and rebuilt — with it.

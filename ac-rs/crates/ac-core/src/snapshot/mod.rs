@@ -994,6 +994,7 @@ mod tests {
             P_REF,
             crate::visualize::pair_derivation::SPEC_F_MIN_HZ,
             f64::from(sr) / 2.0,
+            crate::visualize::mtw::ladder::Speed::Detail,
         )
         .expect("48 kHz has a ladder")
     }

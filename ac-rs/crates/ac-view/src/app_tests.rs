@@ -2927,3 +2927,24 @@ fn a_hidden_run_does_not_set_the_shared_phase_range() {
     app.rebuild_scenes(true, 0.2);
     assert_eq!(app.shared_phase_range.map(|(_, r)| r), live_only);
 }
+
+/// #714: `W` asks for the preset after the one the frame says it runs —
+/// Detail when the frame names none — never a step held in the view.
+#[test]
+fn w_asks_for_the_next_speed_after_the_frames() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.handle_action(Action::CycleSpeed, false);
+    let mut f = found_frame();
+    let mut m = f.mtw.clone().unwrap_or_default();
+    m.speed = Some("live".into());
+    f.mtw = Some(m);
+    app.ingest_frame_for_test(f, 0.1);
+    app.handle_action(Action::CycleSpeed, false);
+    let asked: Vec<&str> = app
+        .sent_speed
+        .iter()
+        .map(|r| r["speed"].as_str().unwrap())
+        .collect();
+    assert_eq!(asked, vec!["live", "follow"]);
+}

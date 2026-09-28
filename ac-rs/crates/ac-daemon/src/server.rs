@@ -831,6 +831,7 @@ const COMMANDS: &[Command] = &[
             "meas_channel",
             "mtw_n_blocks",
             "mtw_ppo",
+            "mtw_speed",
             "pairs",
             "ref_channel",
             "weighting",
@@ -846,6 +847,11 @@ const COMMANDS: &[Command] = &[
         name: "set_delay",
         fields: &["pair", "samples", "step", "track"],
         run: handlers::set_delay,
+    },
+    Command {
+        name: "set_speed",
+        fields: &["speed"],
+        run: handlers::set_speed,
     },
     Command {
         name: "snapshot",

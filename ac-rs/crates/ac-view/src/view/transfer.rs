@@ -441,6 +441,7 @@ fn draw_mag_annotations(
     let row1 = layout.content.left_top() + egui::vec2(0.0, ROW_H);
     if let Some(run) = focused_run {
         let captions = [
+            run.scene.speed_readout.as_deref(),
             run.scene.estimator_readout.as_deref(),
             run.scene.smoothing_readout,
             run.scene.invert_offset_readout.as_deref(),
@@ -483,12 +484,24 @@ fn draw_mag_annotations(
     if focused_run.is_some() {
         return;
     }
+    // The speed preset and what it gives (#714), first: it is what the
+    // band labels above it follow. ac-scene's string.
+    let mut calibration_pos = row1;
+    if let Some(label) = &scene.speed_readout {
+        let drawn = painter.text(
+            calibration_pos,
+            Align2::LEFT_TOP,
+            label,
+            FontId::default(),
+            COLOR_LABEL,
+        );
+        calibration_pos = drawn.right_top() + egui::vec2(ROW_H, 0.0);
+    }
     // Absent when smoothing is off — an unaltered trace is the resting
     // state and needs no caption. The string is ac-scene's.
-    let mut calibration_pos = row1;
     if let Some(label) = scene.smoothing_readout {
         let drawn = painter.text(
-            row1,
+            calibration_pos,
             Align2::LEFT_TOP,
             label,
             FontId::default(),

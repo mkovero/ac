@@ -2924,8 +2924,12 @@ every other observable looking correct.
   "weighting":    "A" | "C" | "Z",     // optional, default "Z". Case-insensitive.
                                         // Strict 3-way — "off" is rejected
                                         // (unlike `set_band_weighting`'s 4-way enum).
-  "integration":  "fast" | "slow"      // optional, default "fast". Case-insensitive.
+  "integration":  "fast" | "slow",     // optional, default "fast". Case-insensitive.
                                         // "leq" is not implemented in M0 — rejected.
+  "mtw_speed":    "detail" | "live" | "follow"
+                                        // optional, default "detail" (#714): the
+                                        // ladder's speed preset — see `set_speed`.
+                                        // Anything else refuses the launch.
 }
 ```
 
@@ -3181,6 +3185,10 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
     "settled_stages": [<bool>, ...],     // which rungs have settled, shallowest
                                           // first: "more band coming" versus
                                           // "this is all there is"
+    "speed":          "detail" | "live" | "follow",
+                                          // the speed preset the ladder runs at
+                                          // (#714; see `set_speed`) — `stages`
+                                          // below is its layout
     "stages": [                          // the ladder, shallowest (full rate) first;
       {                                  // session-static, so a saved frame stays
                                           // interpretable without the layout rules
@@ -3542,6 +3550,39 @@ offset is applied before decimation).
 **What it does not touch.** `delay_attempts` keeps counting and never
 resets — a re-find is another attempt, not evidence the pair was never
 asked.
+
+---
+
+### `set_speed`
+
+Switches the running `transfer_stream` session's ladder speed preset
+(#714). Stage 0 (full rate, 4096-point FFT) is the same in all three; the
+deeper stages' FFT length is the preset's. Overlap and block counts are as
+always (75 / 87.5 %, 6 / 12 blocks at N = 4), so the coherence floor stays
+≈1/4 (measured per preset). At 96 kHz:
+
+| `speed` | deep FFT | LF Δf | middle / bottom update | middle / bottom settling | 1/48-oct down to |
+|---|---|---|---|---|---|
+| `detail` | 4096 | 0.98 Hz | 85 / 128 ms | 0.77 / 2.43 s | 68 Hz |
+| `live` | 2048 | 1.95 Hz | 43 / 64 ms | 0.38 / 1.22 s | 135 Hz |
+| `follow` | 1024 | 3.9 Hz | 21 / 32 ms | 0.19 / 0.61 s | 271 Hz |
+
+Every pair's ladder is rebuilt under the new layout: the columns re-settle
+and the arrival IR restarts; held delays are kept. `mtw.speed` and
+`mtw.stages` on the frame follow. Dispatched like `set_delay`.
+
+**CTRL**
+```json
+{ "cmd": "set_speed", "speed": "detail" | "live" | "follow" }
+```
+
+**Reply**
+```json
+{ "ok": true, "speed": "live" }
+```
+
+**Errors:** `'speed' must be "detail", "live" or "follow"`; `no
+transfer_stream session running`.
 
 ---
 

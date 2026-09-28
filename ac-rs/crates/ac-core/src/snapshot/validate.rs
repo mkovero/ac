@@ -768,7 +768,17 @@ mod tests {
     fn v3_round_trips_session_mtw() {
         use crate::visualize::mtw::replay::MtwProvenance;
         let mut meta = control_meta();
-        let prov = MtwProvenance::for_layout(SR, -120, -4_000, 4, 48.0, 20.0, 24_000.0).unwrap();
+        let prov = MtwProvenance::for_layout(
+            SR,
+            -120,
+            -4_000,
+            4,
+            48.0,
+            20.0,
+            24_000.0,
+            crate::visualize::mtw::ladder::Speed::Detail,
+        )
+        .unwrap();
         meta.session.mtw = Some(vec![Some(prov), None]);
         let (bytes, _) = write_acsnap(&meta, &short_audio(3)).expect("v3 with a ladder writes");
         let snap = read_acsnap(&bytes).expect("and reads");

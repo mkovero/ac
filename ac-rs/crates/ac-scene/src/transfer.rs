@@ -563,6 +563,28 @@ pub fn format_estimator_readout(sr: u32, nperseg: usize) -> String {
     )
 }
 
+/// The speed preset's trade, said on screen (#714): the preset, then what the
+/// deepest stage gives for it — `"Live · LF 1.95 Hz · updates 64 ms ·
+/// settles 1.22 s · 1/48 oct above 135 Hz"`. Read from the stage table on
+/// the frame (the deepest stage's FFT length names the preset), so a stored
+/// run replayed under its own preset says its own. `None` without a ladder.
+pub fn speed_readout(stages: &[MtwStage]) -> Option<String> {
+    use ac_core::visualize::mtw::ladder::Speed;
+    let deep = stages.last()?;
+    if !(deep.df > 0.0 && deep.rate > 0.0) {
+        return None;
+    }
+    let nfft = (deep.rate / deep.df).round() as usize;
+    let name = Speed::for_deep_nfft(nfft).map_or("custom", |s| s.label());
+    Some(format!(
+        "{name} \u{b7} LF {} Hz \u{b7} updates {:.0} ms \u{b7} settles {:.2} s \u{b7} 1/48 oct above {:.0} Hz",
+        band_figure(deep.df),
+        deep.hop_s * 1000.0,
+        deep.settling_s,
+        deep.f_valid
+    ))
+}
+
 /// The per-band labels for one ladder, over the caller's frequency axis.
 ///
 /// A stage serves from its own validity edge up to the shallower stage's:
@@ -757,6 +779,8 @@ pub struct TransferScene {
     /// The renderer places the two adjacently so they are read as one
     /// statement.
     pub band_labels: Vec<BandLabel>,
+    /// [`speed_readout`]: the ladder preset and what it gives (#714).
+    pub speed_readout: Option<String>,
     /// `"H₁ Welch 1.00 Hz flat — not the live ladder"` when this trace was
     /// derived by a different estimator than the live view (#221), `None`
     /// when it is the live ladder's. Keyed on [`TransferInput::estimator`],
@@ -1525,6 +1549,7 @@ impl TransferScene {
             // the same session yields the same labels on every frame, so
             // they sit still while the curve moves.
             band_labels: band_labels(&input.stages, f_min, f_max),
+            speed_readout: speed_readout(&input.stages),
             estimator_readout: match input.estimator {
                 Estimator::Ladder => None,
                 Estimator::Welch { nperseg } => Some(format_estimator_readout(input.sr, nperseg)),
@@ -1759,6 +1784,29 @@ mod tests {
                 settling_s: settling_seconds(s, 4),
             })
             .collect()
+    }
+
+    /// #714: the speed caption states each preset's trade from the stage
+    /// table alone — the name from the deepest stage's FFT length, the rest
+    /// from its own figures (96 kHz, N = 4, as ZMQ.md's table).
+    #[test]
+    fn the_speed_caption_states_each_presets_trade() {
+        use ac_core::visualize::mtw::ladder::{layout_for, Speed};
+        let stages =
+            |speed| ac_core::visualize::mtw::wire_stages(&layout_for(96_000, speed).unwrap(), 4);
+        assert_eq!(
+            speed_readout(&stages(Speed::Detail)).as_deref(),
+            Some("Detail \u{b7} LF 0.98 Hz \u{b7} updates 128 ms \u{b7} settles 2.43 s \u{b7} 1/48 oct above 68 Hz")
+        );
+        assert_eq!(
+            speed_readout(&stages(Speed::Live)).as_deref(),
+            Some("Live \u{b7} LF 1.95 Hz \u{b7} updates 64 ms \u{b7} settles 1.22 s \u{b7} 1/48 oct above 135 Hz")
+        );
+        assert_eq!(
+            speed_readout(&stages(Speed::Follow)).as_deref(),
+            Some("Follow \u{b7} LF 3.91 Hz \u{b7} updates 32 ms \u{b7} settles 0.61 s \u{b7} 1/48 oct above 271 Hz")
+        );
+        assert_eq!(speed_readout(&[]), None);
     }
 
     // The ratified figures, end to end: the three labels at 96 kHz and the
@@ -2431,6 +2479,7 @@ mod tests {
             n_blocks: 4,
             settled_stages: vec![true; 3],
             stages: wire_stages(48_000),
+            speed: None,
         }
     }
 

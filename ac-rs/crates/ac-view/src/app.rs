@@ -164,6 +164,9 @@ pub struct AcViewApp {
     /// `sent_drive`.
     #[cfg(test)]
     sent_delay: Vec<serde_json::Value>,
+    /// `set_speed` requests sent (#714), for tests.
+    #[cfg(test)]
+    sent_speed: Vec<serde_json::Value>,
 }
 
 impl AcViewApp {
@@ -207,6 +210,8 @@ impl AcViewApp {
             sent_drive: Vec::new(),
             #[cfg(test)]
             sent_delay: Vec::new(),
+            #[cfg(test)]
+            sent_speed: Vec::new(),
         }
     }
 
@@ -820,6 +825,7 @@ impl AcViewApp {
                     t.toggle_ir_panel();
                 }
             }),
+            Action::CycleSpeed => self.cycle_speed(),
             Action::ToggleIrSpan => self.with_transfer(|t| t.ir_arrival = !t.ir_arrival),
             Action::CycleFocus => self.with_transfer(|t| t.cycle_focus()),
             Action::CloseFocusedRun => self.with_transfer(|t| t.close_focused_stored_run()),
@@ -1374,6 +1380,27 @@ impl AcViewApp {
     ///
     /// Always names the selected pair (#685): without `pair` the daemon
     /// applies the change to every pair.
+    /// `W` (#714): ask the daemon for the preset after the one the frame
+    /// says it runs — the frame, not a copy held here, so a relaunch (which
+    /// starts at Detail) cannot leave the key a step out.
+    fn cycle_speed(&mut self) {
+        use ac_core::visualize::mtw::ladder::Speed;
+        let current = self
+            .live_selected()
+            .frame
+            .as_ref()
+            .and_then(|f| f.mtw.as_ref())
+            .and_then(|m| m.speed.as_deref())
+            .and_then(Speed::from_tag)
+            .unwrap_or_default();
+        let request = serde_json::json!({"cmd": "set_speed", "speed": current.next().tag()});
+        #[cfg(test)]
+        self.sent_speed.push(request.clone());
+        if let Some(session) = &self.session {
+            let _ = session.client().call(&request);
+        }
+    }
+
     fn send_delay(&mut self, mut request: serde_json::Value) {
         request["cmd"] = serde_json::json!("set_delay");
         request["pair"] = serde_json::json!(self.selected_pair());

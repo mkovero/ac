@@ -47,6 +47,7 @@ fn statics() -> FrameStatics {
         integration_tag: "fast".to_string(),
         mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
         mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
+        mtw_speed: ac_core::visualize::mtw::ladder::Speed::Detail,
         mtw_stages: Vec::new(),
     }
 }
@@ -1208,5 +1209,56 @@ fn an_arrival_ir_after_a_gap_is_built_from_after_it() {
         after >= 53 + 11,
         "published {} ticks after the gap",
         after - 53
+    );
+}
+
+/// #714: `set_speed` rebuilds every ladder under the new preset. The held
+/// delay is kept; the frame's `mtw.speed` and stage table follow, and the
+/// columns come back once the new ladder settles.
+#[test]
+fn set_speed_relays_the_ladder_and_keeps_the_delay() {
+    use ac_core::visualize::mtw::ladder::Speed;
+    let mut s = session();
+    let delay = 480usize;
+    let n = 120;
+    let x = noise(CHUNK * (n + 2) + delay, 0x5eed);
+    let t0 = std::time::Instant::now();
+    let mut last: Option<Value> = None;
+    let mut speeds = Vec::new();
+    for k in 0..n {
+        if k == 60 {
+            s.apply_delay_cmd(
+                crate::workers::DelayCmd {
+                    pair: None,
+                    action: crate::workers::DelayAction::Speed(Speed::Live),
+                },
+                true,
+            );
+        }
+        let r0 = delay + k * CHUNK;
+        let refb = x[r0..r0 + CHUNK].to_vec();
+        let meas = x[r0 - delay..r0 - delay + CHUNK].to_vec();
+        let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+        for m in s.tick(&[meas, refb], events(true), &drive_msg(true), now) {
+            if m["type"] == json!("transfer_stream") {
+                if let Some(sp) = m["mtw"]["speed"].as_str() {
+                    speeds.push((k, sp.to_string()));
+                }
+                last = Some(m);
+            }
+        }
+    }
+    assert!(speeds.iter().any(|(k, sp)| *k < 60 && sp == "detail"));
+    let last = last.unwrap();
+    assert_eq!(last["mtw"]["speed"], json!("live"));
+    assert_eq!(last["delay_samples"], json!(delay));
+    let bottom_df = last["mtw"]["stages"][2]["df"].as_f64().unwrap();
+    assert!(
+        (bottom_df - 4000.0 / 2048.0).abs() < 1e-9,
+        "bottom Δf {bottom_df}"
+    );
+    assert!(
+        speeds.iter().all(|(k, sp)| *k < 60 || sp == "live"),
+        "{speeds:?}"
     );
 }

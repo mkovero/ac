@@ -84,6 +84,11 @@ pub struct MtwProvenance {
     pub hop: usize,
     /// The ladder's rungs, shallowest first.
     pub stages: Vec<StageProvenance>,
+    /// The speed preset (#714) as its tag; absent for Detail, which is what
+    /// every file before #714 was. The stage hops above already differ by
+    /// preset, so a mismatch is caught there too; this names which to build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 impl MtwProvenance {
@@ -98,8 +103,9 @@ impl MtwProvenance {
         ppo: f64,
         f_min: f64,
         f_max: f64,
+        speed: ladder::Speed,
     ) -> Result<Self, ladder::LadderError> {
-        let l = ladder::layout(sr)?;
+        let l = ladder::layout_for(sr, speed)?;
         Ok(Self {
             offset,
             origin,
@@ -119,7 +125,16 @@ impl MtwProvenance {
                     blocks: Some(s.blocks(n_blocks)),
                 })
                 .collect(),
+            speed: (speed != ladder::Speed::Detail).then(|| speed.tag().to_string()),
         })
+    }
+
+    /// The stored preset; `None` for a tag this reader does not know.
+    pub fn speed(&self) -> Option<ladder::Speed> {
+        match &self.speed {
+            None => Some(ladder::Speed::Detail),
+            Some(tag) => ladder::Speed::from_tag(tag),
+        }
     }
 
     /// Refuse, don't misread: a file whose ladder differs from the one the
@@ -249,7 +264,10 @@ pub fn replay(
     sr: u32,
     prov: &MtwProvenance,
 ) -> Result<Option<MtwColumns>> {
-    let l = ladder::layout(sr).map_err(|e| anyhow!("mtw replay: {e}"))?;
+    let speed = prov
+        .speed()
+        .ok_or_else(|| anyhow!("mtw replay: unknown speed preset {:?}", prov.speed))?;
+    let l = ladder::layout_for(sr, speed).map_err(|e| anyhow!("mtw replay: {e}"))?;
     prov.check_layout(&l)?;
     if meas.len() != reference.len() {
         return Err(anyhow!(
@@ -259,8 +277,8 @@ pub fn replay(
         ));
     }
     let s0 = replay_start(prov.origin, grid_period(&l));
-    let mut p =
-        MtwPair::new(sr, prov.offset, prov.n_blocks).map_err(|e| anyhow!("mtw replay: {e}"))?;
+    let mut p = MtwPair::new_for(sr, prov.offset, prov.n_blocks, speed)
+        .map_err(|e| anyhow!("mtw replay: {e}"))?;
     // Chunked only to bound the ladder's scratch buffers; the fixed block
     // grid makes the result independent of the chunking.
     const CHUNK: usize = 1 << 16;
@@ -278,6 +296,7 @@ pub fn replay(
         prov.n_blocks,
         p.settled_stages(),
         wire_stages(p.ladder(), prov.n_blocks),
+        speed,
     )))
 }
 
@@ -349,11 +368,22 @@ mod tests {
             N_BLOCKS,
             p.settled_stages(),
             wire_stages(p.ladder(), N_BLOCKS),
+            p.ladder().speed,
         )
     }
 
     fn provenance(origin: i64) -> MtwProvenance {
-        MtwProvenance::for_layout(SR, OFFSET, origin, N_BLOCKS, PPO, F_MIN, F_MAX).unwrap()
+        MtwProvenance::for_layout(
+            SR,
+            OFFSET,
+            origin,
+            N_BLOCKS,
+            PPO,
+            F_MIN,
+            F_MAX,
+            ladder::Speed::Detail,
+        )
+        .unwrap()
     }
 
     fn channel(role: &str, input_channel: u32) -> ChannelMeta {
@@ -595,5 +625,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("nfft/hop"), "{err}");
+    }
+
+    /// #714: a ladder run under a preset records it and replays under it —
+    /// the replayed columns say the preset and have its bottom Δf; an
+    /// unknown preset tag is an error, not a Detail replay.
+    #[test]
+    fn a_preset_ladder_replays_under_its_preset() {
+        let speed = ladder::Speed::Follow;
+        let mut prov =
+            MtwProvenance::for_layout(SR, 0, 0, N_BLOCKS, PPO, F_MIN, F_MAX, speed).unwrap();
+        assert_eq!(prov.speed(), Some(speed));
+        let n = SR as usize * 4;
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i as f32 * 0.37).sin() + (i as f32 * 0.011).cos()) * 0.25)
+            .collect();
+        let cols = replay(&x, &x, SR, &prov).unwrap().expect("settled");
+        assert_eq!(cols.speed.as_deref(), Some("follow"));
+        let bottom = cols.stages.last().unwrap();
+        let want = ladder::layout_for(SR, speed).unwrap().deepest().df;
+        assert!((bottom.df - want).abs() < 1e-12);
+        prov.speed = Some("warp".into());
+        assert!(replay(&x, &x, SR, &prov).is_err());
     }
 }

@@ -83,6 +83,8 @@ pub(super) struct TransferParams {
     pub(super) fake_ring_period: usize,
     pub(super) mtw_ppo: f64,
     pub(super) mtw_n_blocks: usize,
+    /// The ladder's speed preset (#714), `mtw_speed`; Detail when absent.
+    pub(super) mtw_speed: ac_core::visualize::mtw::ladder::Speed,
     pub(super) pairs: Vec<(u32, u32)>,
     pub(super) weighting: ac_core::visualize::weighting_curves::WeightingCurve,
     /// Normalised (lower-cased) tag, echoed on every frame as
@@ -182,6 +184,16 @@ pub(super) fn parse_params(cmd: &Value) -> Result<TransferParams, String> {
         .filter(|v| *v >= 1 && *v <= 64)
         .map(|v| v as usize)
         .unwrap_or(ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS);
+    // The speed preset (#714). An unknown name is refused, not defaulted: a
+    // session silently at Detail when Follow was asked would read as slow
+    // for no stated reason.
+    let mtw_speed = match cmd.get("mtw_speed") {
+        None | Some(Value::Null) => ac_core::visualize::mtw::ladder::Speed::Detail,
+        Some(v) => v
+            .as_str()
+            .and_then(ac_core::visualize::mtw::ladder::Speed::from_tag)
+            .ok_or_else(|| "'mtw_speed' must be \"detail\", \"live\" or \"follow\"".to_string())?,
+    };
 
     let pairs = parse_transfer_pairs(cmd)?;
 
@@ -218,6 +230,7 @@ pub(super) fn parse_params(cmd: &Value) -> Result<TransferParams, String> {
         fake_ring_period,
         mtw_ppo,
         mtw_n_blocks,
+        mtw_speed,
         pairs,
         weighting,
         integration_tag,

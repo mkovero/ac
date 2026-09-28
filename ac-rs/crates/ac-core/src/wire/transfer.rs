@@ -158,6 +158,10 @@ pub struct MtwColumns {
     pub settled_stages: Vec<bool>,
     #[serde(default)]
     pub stages: Vec<MtwStage>,
+    /// The ladder's speed preset (#714): `"detail"`, `"live"` or
+    /// `"follow"`. Absent from daemons before it, which were all Detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 impl MtwColumns {
