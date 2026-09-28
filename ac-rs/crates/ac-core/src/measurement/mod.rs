@@ -12,6 +12,7 @@ pub mod report_html;
 pub mod report_layout;
 pub mod report_pdf;
 pub mod room_acoustics;
+pub mod sti;
 pub mod sweep;
 pub mod thd;
 pub mod weighting;

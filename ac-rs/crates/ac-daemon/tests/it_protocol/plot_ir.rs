@@ -70,7 +70,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(13));
+                assert_eq!(v["report"]["schema_version"], json!(14));
                 // ISO 3382-1 room parameters (schema v13) need a decay:
                 // this 0.1 s tail is too short, so they are absent and the
                 // notes say why and what to change — never a silent gap.

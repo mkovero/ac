@@ -169,7 +169,10 @@ pub use provenance::{
 ///   from the IR with its tail
 ///   ([`crate::measurement::room_acoustics`]). Absent on v1-v12 reports
 ///   and on producers that are not `plot_ir`.
-pub const SCHEMA_VERSION: u32 = 13;
+/// - v14: optional top-level `sti: Sti` on `plot_ir` reports — the IEC
+///   60268-16 speech transmission index from the IR (clause 6), noise-free
+///   ([`crate::measurement::sti`]), or why not. Absent on v1-v13 reports.
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /
 /// [`MeasurementReport::from_value`] still read (#429). Everything from
@@ -282,6 +285,10 @@ pub struct MeasurementReport {
     /// capture could not yield them (the reason is in `notes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_acoustics: Option<crate::measurement::room_acoustics::RoomAcoustics>,
+    /// IEC 60268-16 STI from the IR (v14), or the reason it was not
+    /// computed. `None` on older reports and other producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sti: Option<crate::measurement::sti::Sti>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -442,7 +449,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 13"));
+        assert!(json.contains("\"schema_version\": 14"));
     }
 
     #[test]
@@ -466,7 +473,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 13"));
+            assert!(json.contains("\"schema_version\": 14"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

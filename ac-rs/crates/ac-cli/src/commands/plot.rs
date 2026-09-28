@@ -1811,6 +1811,48 @@ fn print_ir_report(report: &MeasurementReport) {
             println!("{line}");
         }
     }
+    if let Some(sti) = &report.sti {
+        for line in sti_lines(sti) {
+            println!("{line}");
+        }
+    }
+}
+
+/// The IEC 60268-16 block: the STI and each band's MTI, or why there is
+/// none — and always what it does not include.
+fn sti_lines(s: &ac_core::measurement::sti::Sti) -> Vec<String> {
+    let mut lines = vec![
+        String::new(),
+        format!(
+            "  speech transmission index  ({}, from the IR)",
+            s.citation.standard
+        ),
+    ];
+    match s.sti {
+        Some(v) => {
+            lines.push(format!("      STI  {v:.2}"));
+            let bands = ac_core::measurement::sti::OCTAVES_HZ
+                .iter()
+                .zip(&s.mti)
+                .map(|(f, m)| {
+                    let f = if *f >= 1000.0 {
+                        format!("{}k", f / 1000.0)
+                    } else {
+                        format!("{f:.0}")
+                    };
+                    format!("{f} {m:.2}")
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            lines.push(format!("      MTI  {bands}"));
+        }
+        None => lines.push(format!(
+            "      STI  \u{2014}  {}",
+            s.refused.as_deref().unwrap_or("not computed")
+        )),
+    }
+    lines.push(format!("      note {}", s.note));
+    lines
 }
 
 /// The ISO 3382-1 block: one row per octave band, then the 500 Hz–1 kHz
@@ -2186,6 +2228,40 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// #722: the STI block prints the value and every band's MTI, or the
+    /// reason there is none — and always the note on what it leaves out.
+    #[test]
+    fn sti_block_prints_the_value_bands_and_note_or_the_reason() {
+        use ac_core::measurement::sti::{Sti, NOISE_FREE_NOTE};
+        let cite = ac_core::measurement::report::StandardsCitation {
+            standard: "IEC 60268-16:2011".into(),
+            clause: String::new(),
+            verified: true,
+        };
+        let ok = Sti {
+            sti: Some(0.6234),
+            mti: vec![0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
+            refused: None,
+            note: NOISE_FREE_NOTE.into(),
+            citation: cite.clone(),
+        };
+        let lines = super::sti_lines(&ok);
+        assert!(lines.iter().any(|l| l.trim() == "STI  0.62"), "{lines:?}");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("125 0.50") && l.contains("8k 0.80")));
+        assert!(lines.iter().any(|l| l.contains("not applied")));
+        let no = Sti {
+            sti: None,
+            mti: vec![],
+            refused: Some("impulse response 0.51 s long".into()),
+            note: NOISE_FREE_NOTE.into(),
+            citation: cite,
+        };
+        let lines = super::sti_lines(&no);
+        assert!(lines.iter().any(|l| l.contains("0.51 s long")), "{lines:?}");
+    }
 
     #[test]
     fn room_acoustics_block_prints_bands_means_and_reasons() {

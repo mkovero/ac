@@ -44,6 +44,7 @@ fn base_report() -> MeasurementReport {
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![],
         notes: None,
         processing_chain: ProcessingChain::default(),

@@ -541,6 +541,7 @@ mod tests {
             reference_stored_latency: None,
             inter_pair_offset: Some(InterPairOffset::NotConfigured),
             room_acoustics: None,
+            sti: None,
             data: vec![],
             notes: None,
             processing_chain: ProcessingChain::default(),

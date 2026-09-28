@@ -44,7 +44,8 @@
 //! iterative scheme. A band whose level starts less than [`MIN_DECAY_DB`]
 //! above its background has no decay, and every value is refused.
 //!
-//! STI (IEC 60268-16) is not computed: that standard is not held here.
+//! STI (IEC 60268-16) is [`crate::measurement::sti`]'s, from the same band
+//! windows ([`band_window`]).
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -122,15 +123,7 @@ pub fn room_acoustics(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64) -> Res
     // filter — when the sweep reaches far enough: ringing from the sweep's
     // lower band edge (60 Hz is a 16 ms period) crossed −20 dB 14 ms before
     // the direct sound on the rig and cut the early window short.
-    let hp_corner = crate::measurement::sweep::ARRIVAL_HIGH_PASS_CORNER_HZ;
-    let start = if crate::measurement::sweep::band_limit_available(sample_rate, f_hi, hp_corner) {
-        let hp = crate::measurement::sweep::zero_phase_high_pass(ir, sample_rate, hp_corner);
-        let e_hp: Vec<f64> = hp.iter().map(|v| v * v).collect();
-        let hp_max = e_hp.iter().copied().fold(0.0, f64::max);
-        e_hp.iter().position(|&v| v >= hp_max * 0.01).unwrap_or(0)
-    } else {
-        e.iter().position(|&v| v >= e_max * 0.01).unwrap_or(0)
-    };
+    let start = trigger(ir, sample_rate, f_hi);
 
     // Octave bands whose edges sit inside the measured range (the
     // filterbank keeps a band only when both half-band edges do).
@@ -174,6 +167,25 @@ pub fn room_acoustics(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64) -> Res
             verified: true,
         },
     })
+}
+
+/// The broadband trigger point (A.3.4), samples: the first within 20 dB of
+/// the maximum of the IR high-passed at 2 kHz (the #669 arrival filter)
+/// when the sweep reaches far enough, of the IR itself otherwise. Shared
+/// with the STI ([`crate::measurement::sti`]).
+pub(crate) fn trigger(ir: &[f64], sample_rate: u32, f_hi: f64) -> usize {
+    let hp_corner = crate::measurement::sweep::ARRIVAL_HIGH_PASS_CORNER_HZ;
+    let e: Vec<f64> =
+        if crate::measurement::sweep::band_limit_available(sample_rate, f_hi, hp_corner) {
+            crate::measurement::sweep::zero_phase_high_pass(ir, sample_rate, hp_corner)
+                .iter()
+                .map(|v| v * v)
+                .collect()
+        } else {
+            ir.iter().map(|v| v * v).collect()
+        };
+    let max = e.iter().copied().fold(0.0, f64::max);
+    e.iter().position(|&v| v >= max * 0.01).unwrap_or(0)
 }
 
 /// Least-squares slope, dB per second, of `level` (dB) at the samples where
@@ -261,18 +273,40 @@ fn filter_delay(fb: &Filterbank, i: usize, fs: f64) -> usize {
         .unwrap_or(0)
 }
 
-fn band_params(
+/// One band's squared response and the part of it that is the room
+/// (§5.3.3), shared by [`band_params`] and the STI (IEC 60268-16 clause 6,
+/// [`crate::measurement::sti`]) so both integrate the same window.
+pub(crate) struct BandWindow {
+    /// The band-filtered IR, squared.
+    pub e: Vec<f64>,
+    /// The band's own trigger (A.3.4).
+    pub band_start: usize,
+    /// §5.3.3's truncation point, samples.
+    pub t1: usize,
+    /// The energy an exponential decay at `slope_db_s` carries past `t1`
+    /// (the §5.3.3 correction), in the units of `e` summed over samples.
+    pub correction: f64,
+    /// The late decay's rate, dB/s (negative).
+    pub slope_db_s: f64,
+    /// Level the decay starts from over the band's background, dB.
+    pub peak_to_noise_db: f64,
+}
+
+/// Band `i` of `ir` filtered, and its decay window. `Err` carries the
+/// band's peak-to-noise and why it has no decay.
+pub(crate) fn band_window(
     fb: &Filterbank,
     i: usize,
-    fc: f64,
     ir: &[f64],
     start: usize,
     fs: f64,
-) -> BandParams {
+) -> std::result::Result<BandWindow, (f64, String)> {
     let y = fb.filter_band(i, ir).unwrap_or_default();
     let e: Vec<f64> = y.iter().map(|v| v * v).collect();
     let n = e.len();
-    let mut refused = Vec::new();
+    if n == 0 {
+        return Err((f64::NAN, "band filter produced nothing".to_string()));
+    }
 
     // Background noise: the mean over the capture's last tenth.
     let tail = ((n as f64 * NOISE_TAIL_FRACTION) as usize).max(1);
@@ -282,10 +316,7 @@ fn band_params(
             (start, 0.0),
             |acc, (k, &v)| if v > acc.1 { (k, v) } else { acc },
         );
-    let _ = peak;
 
-    // §5.3.3: t1 where a line through the decay meets the noise, and the
-    // exponential-tail correction C at that line's rate.
     let w = ((SMOOTH_S * fs) as usize).max(1);
     let smooth: Vec<f64> = (0..n)
         .step_by(w)
@@ -299,24 +330,54 @@ fn band_params(
     // §5.3.2 judges the level the decay starts from: the 10 ms level, not
     // one sample — a noise-like decay's single-sample peak sits ~10 dB
     // above it.
-    let start_blk = smooth[start / w..]
+    let start_blk = smooth[(start / w).min(smooth.len() - 1)..]
         .iter()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
     let peak_to_noise_db = start_blk - noise_db;
     // §5.3.3: t1 where a line through the late decay meets the background,
     // and the tail correction at that line's rate ([`truncation`]).
-    let (t1, correction) = match truncation(&smooth, peak_blk, noise_db, fs / w as f64) {
-        Some((t1_s, slope)) => {
-            let t1 = ((t1_s * fs) as usize).min(n - 1);
-            let c = noise * fs * 10.0 / (-slope * std::f64::consts::LN_10);
-            (t1, c)
-        }
-        None => {
-            // No decay: nothing here is the room. Every value is refused
-            // (Codex review: a steady noise's reverse integral fell 10 dB
-            // near the capture's end and read as an EDT).
-            refused.push("no decay found above the band's background".to_string());
+    let Some((t1_s, slope)) = truncation(&smooth, peak_blk, noise_db, fs / w as f64) else {
+        // No decay: nothing here is the room. Every value is refused
+        // (Codex review: a steady noise's reverse integral fell 10 dB
+        // near the capture's end and read as an EDT).
+        return Err((
+            peak_to_noise_db,
+            "no decay found above the band's background".to_string(),
+        ));
+    };
+    let t1 = ((t1_s * fs) as usize).min(n - 1);
+    let correction = noise * fs * 10.0 / (-slope * std::f64::consts::LN_10);
+
+    // The band's own trigger (A.3.4): its response within 20 dB of its
+    // maximum. The decay curve and its fits start there.
+    let band_start = e[start..]
+        .iter()
+        .position(|&v| v >= peak * 0.01)
+        .map_or(start, |k| k + start);
+    Ok(BandWindow {
+        e,
+        band_start,
+        t1,
+        correction,
+        slope_db_s: slope,
+        peak_to_noise_db,
+    })
+}
+
+fn band_params(
+    fb: &Filterbank,
+    i: usize,
+    fc: f64,
+    ir: &[f64],
+    start: usize,
+    fs: f64,
+) -> BandParams {
+    let mut refused = Vec::new();
+    let w = match band_window(fb, i, ir, start, fs) {
+        Ok(w) => w,
+        Err((peak_to_noise_db, reason)) => {
+            refused.push(reason);
             return BandParams {
                 centre_hz: fc,
                 t20_s: None,
@@ -330,14 +391,14 @@ fn band_params(
             };
         }
     };
-
-    // The band's own trigger (A.3.4): its response within 20 dB of its
-    // maximum. The decay curve and its fits start there.
-    let band_start = e[start..]
-        .iter()
-        .position(|&v| v >= peak * 0.01)
-        .map_or(start, |k| k + start);
-
+    let BandWindow {
+        e,
+        band_start,
+        t1,
+        correction,
+        peak_to_noise_db,
+        ..
+    } = w;
     // Backward-integrated decay curve, dB re its total from the band start.
     let mut sched = vec![0.0; t1 + 1];
     let mut acc = correction;

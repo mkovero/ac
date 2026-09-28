@@ -569,6 +569,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             reference_stored_latency: None,
             inter_pair_offset: None,
             room_acoustics: None,
+            sti: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -913,6 +914,7 @@ fn emit_spectrum_bands(
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -1453,7 +1455,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // leaves only noise convolved with the reversed sweep, a floor that
         // decays and loses its highs (ISO 18233 §B.5). Read as background,
         // it put the high bands' truncation late on the rig.
-        let room_acoustics = {
+        let (room_acoustics, sti) = {
             let centre = params.n_samples().saturating_sub(1);
             let pre = (0.010 * sr as f64) as usize;
             let flat_noise = (noise_tail_start_s(&params) * sr as f64) as usize;
@@ -1462,16 +1464,23 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 .min(full.len().saturating_sub(centre));
             let from = centre.saturating_sub(pre);
             let span = &full[from..(centre + tail_len).min(full.len())];
-            match ac_core::measurement::room_acoustics::room_acoustics(span, sr, f1_hz, f2_hz) {
+            let room = match ac_core::measurement::room_acoustics::room_acoustics(
+                span, sr, f1_hz, f2_hz,
+            ) {
                 Ok(r) => Some(r),
                 Err(e) => {
                     room_note = Some(format!(
                         "ISO 3382-1 room acoustic parameters not computed: {e} \
-                         (tail_s {tail_s:.2} s \u{2014} a longer tail_s gives the decay room)"
+                             (tail_s {tail_s:.2} s \u{2014} a longer tail_s gives the decay room)"
                     ));
                     None
                 }
-            }
+            };
+            // IEC 60268-16 STI from the same span and band windows, checked
+            // against half the room's mid-band reverberation time (§6.2 b).
+            let rt = room.as_ref().and_then(|r| r.t30_mid_s.or(r.t20_mid_s));
+            let sti = ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz, rt);
+            (room, Some(sti))
         };
         let mut notes = vec![decay_note];
         notes.extend(room_note);
@@ -1713,6 +1722,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             reference_stored_latency,
             inter_pair_offset,
             room_acoustics,
+            sti,
             data: vec![
                 MeasurementPayload {
                     data,
