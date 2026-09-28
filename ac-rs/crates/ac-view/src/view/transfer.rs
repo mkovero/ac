@@ -439,7 +439,7 @@ fn draw_mag_annotations(
             .text(
                 row1,
                 Align2::LEFT_TOP,
-                format!("{} \u{b7}", run.label),
+                format!("{} \u{b7}", short_owner(run.label)),
                 FontId::default(),
                 super::palette::compare_color(run.color_slot),
             )
@@ -516,6 +516,19 @@ fn draw_mag_annotations(
             &readout.text,
             color,
         );
+    }
+}
+
+/// A trace's name as the caption row's owner tag: at most 24 characters,
+/// so a long file name cannot push the captions it owns off the row
+/// (Codex review of #707). The full name is on the run's legend row.
+fn short_owner(label: &str) -> String {
+    const MAX: usize = 24;
+    if label.chars().count() <= MAX {
+        label.to_string()
+    } else {
+        let head: String = label.chars().take(MAX - 1).collect();
+        format!("{head}\u{2026}")
     }
 }
 
@@ -758,5 +771,18 @@ fn draw_fault(
             FontId::proportional(14.0),
             COLOR_LABEL,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_owner;
+
+    #[test]
+    fn a_long_owner_is_cut_to_24_characters() {
+        assert_eq!(short_owner("slot 2"), "slot 2");
+        let cut = short_owner("a-very-long-capture-name-2026-09-28T12-00-00Z.acsnap");
+        assert_eq!(cut.chars().count(), 24);
+        assert!(cut.ends_with('\u{2026}'));
     }
 }
