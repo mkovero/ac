@@ -20,6 +20,7 @@ below pointed at nothing. Keep the map and the rows in one file.
 | `sweep/mod.rs::citation()` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see document map (Annex B pending human cross-check, `verified: false`) |
 | `sweep/mod.rs::farina_citation()` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis (log sweep, inverse filter, harmonic offsets) | see document map; `verified: false` |
 | `sweep/mod.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) quasi-anechoic frequency response via time-gated impulse response | see document map; pending human cross-check, `verified: false` |
+| `sti.rs` | IEC 60268-16:2011 (BS EN 60268-16:2011) | clause 6 indirect method (Schroeder MTF); §6.2 b) c); A.2.2; A.3.2–A.3.4, Tables A.1–A.3 (male); A.5.3–A.5.6 | see document map; Annex M worked example (Table M.1) reproduced in `sti.rs` tests |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical
@@ -158,6 +159,7 @@ Source docs in `stddocs/` at (main) repo root. Read relevant standard before rev
 | ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
 | ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
 | ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
+| IEC 60268-16:2011 | `stddocs/BS EN 60268-16.pdf` (BS EN 60268-16:2011, identical text) | Speech transmission index: STI/STIPA, indirect method from the impulse response, auditory masking and reception threshold, weighting factors, level corrections (Annex M) |
 
 ### reference reading (non-normative)
 

@@ -62,6 +62,7 @@ pub(super) fn sample_report() -> MeasurementReport {
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::FrequencyResponse {
                 points: vec![
@@ -131,6 +132,7 @@ pub(super) fn sample_spectrum_bands_report() -> MeasurementReport {
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: 3,
@@ -177,6 +179,7 @@ pub(super) fn sample_impulse_response_report() -> MeasurementReport {
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::ImpulseResponse {
                 sample_rate_hz: 48_000,
@@ -445,6 +448,7 @@ pub(super) fn sample_noise_report() -> MeasurementReport {
         reference_stored_latency: None,
         inter_pair_offset: None,
         room_acoustics: None,
+        sti: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::NoiseResult {
                 sample_rate_hz: 48_000,
