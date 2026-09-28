@@ -7,17 +7,20 @@
 //! - **Bands** — IEC 61260-1 octave bands, 125 Hz to 4 kHz, the range
 //!   ISO 3382-1 §5.2.1 names, limited to the measured frequency range
 //!   ([`crate::measurement::filterbank`]).
-//! - **Start** (A.3.4) — the broadband trigger point, the first sample
-//!   within 20 dB of the IR's maximum, for C and D; for a band's decay
+//! - **Start** (A.3.4) — the trigger point, the first sample within 20 dB of
+//!   the maximum of the IR high-passed at 2 kHz (the #669 arrival filter),
+//!   so low-frequency ringing before the direct sound cannot fire it; for a band's decay
 //!   curve, the band's own trigger (its filtered response within 20 dB of
 //!   its maximum), which A.3.4 gives when filtering first — a regression
 //!   from the broadband start fits the filter's rise (EDT read 7 % long
 //!   at 125 Hz on a synthetic decay).
-//! - **C and D** (A.3.4's preferred approach) — the broadband IR is
-//!   windowed at the early limit *before* filtering; the early and late
-//!   parts are filtered separately and each part's energy counted with its
-//!   ringing. Filtering first and shifting the split by half the filter
-//!   delay (A.3.4's approximation) read C50 0.9 dB low at 250 Hz.
+//! - **C and D** (A.3.4, filtered first) — the band's early interval runs
+//!   from the start for `te` plus half the band's filter delay (the time
+//!   for half its impulse-response energy). A.3.4's other option, windowing
+//!   the broadband IR before filtering, leaked the step of a hard cut
+//!   through strong low frequencies into the high bands on the rig. A band
+//!   that reaches its background before the early limit gets no C / D:
+//!   its late energy would be the tail model alone.
 //! - **Decay curve** (§5.3.3) — backward integration of the band's squared
 //!   IR, truncated at `t1`, where a line through the decay meets the
 //!   band's background noise, plus the correction `C` for the energy an
@@ -107,7 +110,19 @@ pub fn room_acoustics(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64) -> Res
     if e_max <= 0.0 || e_max.is_nan() {
         bail!("impulse response is silent");
     }
-    let start = e.iter().position(|&v| v >= e_max * 0.01).unwrap_or(0);
+    // The trigger is read on the IR high-passed at 2 kHz — the #669 arrival
+    // filter — when the sweep reaches far enough: ringing from the sweep's
+    // lower band edge (60 Hz is a 16 ms period) crossed −20 dB 14 ms before
+    // the direct sound on the rig and cut the early window short.
+    let hp_corner = crate::measurement::sweep::ARRIVAL_HIGH_PASS_CORNER_HZ;
+    let start = if crate::measurement::sweep::band_limit_available(sample_rate, f_hi, hp_corner) {
+        let hp = crate::measurement::sweep::zero_phase_high_pass(ir, sample_rate, hp_corner);
+        let e_hp: Vec<f64> = hp.iter().map(|v| v * v).collect();
+        let hp_max = e_hp.iter().copied().fold(0.0, f64::max);
+        e_hp.iter().position(|&v| v >= hp_max * 0.01).unwrap_or(0)
+    } else {
+        e.iter().position(|&v| v >= e_max * 0.01).unwrap_or(0)
+    };
 
     // Octave bands whose edges sit inside the measured range (the
     // filterbank keeps a band only when both half-band edges do).
@@ -174,6 +189,23 @@ fn fit_slope(level: &[f64], from: usize, top: f64, bottom: f64, fs: f64) -> Opti
     }
     let den = n * sxx - sx * sx;
     (den > 0.0).then(|| (n * sxy - sx * sy) / den)
+}
+
+/// Time for half of band `i`'s impulse-response energy, samples (A.3.4's
+/// filter delay).
+fn filter_delay(fb: &Filterbank, i: usize, fs: f64) -> usize {
+    let n = (0.5 * fs) as usize;
+    let mut imp = vec![0.0; n];
+    imp[0] = 1.0;
+    let h = fb.filter_band(i, &imp).unwrap_or_default();
+    let total: f64 = h.iter().map(|v| v * v).sum();
+    let mut acc = 0.0;
+    h.iter()
+        .position(|v| {
+            acc += v * v;
+            acc >= total / 2.0
+        })
+        .unwrap_or(0)
 }
 
 fn band_params(
@@ -283,31 +315,47 @@ fn band_params(
     };
     let edt_s = rt(0.0, -10.0);
 
-    // A.2.3, windowed before filtering (A.3.4): the broadband IR split at
-    // `start + te`, each part filtered on its own, each part's energy
-    // counted with its ringing — the early part to `t1`, the late part to
-    // `t1` plus the tail correction.
-    let ratio = |te: f64| {
-        let split = (start + (te * fs) as usize).min(ir.len());
-        let mut early_in = vec![0.0; ir.len()];
-        early_in[start..split].copy_from_slice(&ir[start..split]);
-        let mut late_in = vec![0.0; ir.len()];
-        late_in[split..].copy_from_slice(&ir[split..]);
-        let band_energy = |x: &[f64]| -> f64 {
-            fb.filter_band(i, x)
-                .unwrap_or_default()
-                .iter()
-                .take(t1 + 1)
-                .map(|v| v * v)
-                .sum()
-        };
-        let early = band_energy(&early_in);
-        let late = band_energy(&late_in) + correction;
-        (early > 0.0 && late > 0.0).then_some((early, late))
+    // A.2.3 on the filtered band (A.3.4's filtered-first procedure): the
+    // early interval runs from the start for `te` plus half the band's
+    // filter delay, the late one from there to `t1` plus the tail
+    // correction. Windowing the broadband IR before filtering (A.3.4's
+    // other option) leaked the step of a hard cut through strong low
+    // frequencies into the high bands on the rig and pulled C toward 0 dB.
+    //
+    // A band that reaches its background before the early limit has no
+    // measured late energy — only the tail model — so C and D are refused
+    // for it rather than reported (the rig's 250 Hz C80 read +41 dB so).
+    let half_delay = filter_delay(fb, i, fs) / 2;
+    let ratio = |te: f64| -> Result<(f64, f64), String> {
+        let split = start + (te * fs) as usize + half_delay;
+        if split > t1 {
+            return Err(format!(
+                "reaches its background {:.0} ms after the start, before the {:.0} ms early limit: \
+                 no measured late energy",
+                t1.saturating_sub(start) as f64 / fs * 1000.0,
+                te * 1000.0
+            ));
+        }
+        let early: f64 = e[start..split].iter().sum();
+        let late: f64 = e[split..=t1].iter().sum::<f64>() + correction;
+        if early > 0.0 && late > 0.0 {
+            Ok((early, late))
+        } else {
+            Err("no energy".to_string())
+        }
     };
-    let c50_db = ratio(0.050).map(|(a, b)| 10.0 * (a / b).log10());
-    let c80_db = ratio(0.080).map(|(a, b)| 10.0 * (a / b).log10());
-    let d50 = ratio(0.050).map(|(a, b)| a / (a + b));
+    let mut keep = |name: &str, r: Result<(f64, f64), String>| match r {
+        Ok(v) => Some(v),
+        Err(why) => {
+            refused.push(format!("{name}: {why}"));
+            None
+        }
+    };
+    let r50 = keep("C50/D50", ratio(0.050));
+    let r80 = keep("C80", ratio(0.080));
+    let c50_db = r50.map(|(a, b)| 10.0 * (a / b).log10());
+    let c80_db = r80.map(|(a, b)| 10.0 * (a / b).log10());
+    let d50 = r50.map(|(a, b)| a / (a + b));
 
     BandParams {
         centre_hz: fc,
@@ -440,10 +488,12 @@ mod tests {
     /// C = 10·lg(e^{k·te} − 1) and D = 1 − e^{−k·te}. Averaged as D (a
     /// linear energy share) and only then taken to dB: a mean of dB values
     /// over ~9 degrees of freedom sits ~0.5 dB low (Jensen), which is the
-    /// average, not the method. One realisation's D50 at 250 Hz scatters
-    /// σ ≈ 0.11 (D(1−D)·√(2/9)); over 32 the mean's σ is 0.02, and the bar
-    /// is 2.5σ: 0.05 in D, 0.6 dB in C. From 250 Hz up (the 125 Hz octave's
-    /// own filter delay is a large share of 50 ms).
+    /// average, not the method. Over 32 realisations the mean's σ is 0.02
+    /// in D. The bars are ISO 3382-1 Table A.1's just-noticeable
+    /// differences — 0.05 in D50, 1 dB in C: the filtered-first
+    /// procedure's own bias on this abrupt synthetic onset (C50 0.6 dB low
+    /// at 250 Hz) stays under one. From 250 Hz up (the 125 Hz octave's own
+    /// filter delay is a large share of 50 ms).
     #[test]
     fn clarity_and_definition_of_an_exponential_decay() {
         let rt = 0.8;
@@ -464,8 +514,13 @@ mod tests {
                 "{fc:.0} Hz D50 {d50:.3}, want {:.3}",
                 d(0.05)
             );
+            eprintln!(
+                "{fc:.0} Hz D50 {d50:.3} C50 {:.2} want {:.2}",
+                c_of_d(d50),
+                c(0.05)
+            );
             assert!(
-                (c_of_d(d50) - c(0.05)).abs() < 0.6,
+                (c_of_d(d50) - c(0.05)).abs() < 1.0,
                 "{fc:.0} Hz C50 via D50"
             );
         }
@@ -474,7 +529,7 @@ mod tests {
             .filter(|(fc, _)| *fc >= 200.0)
         {
             assert!(
-                (c_of_d(d80) - c(0.08)).abs() < 0.6,
+                (c_of_d(d80) - c(0.08)).abs() < 1.0,
                 "{fc:.0} Hz C80 {:.2}, want {:.2}",
                 c_of_d(d80),
                 c(0.08)
@@ -545,6 +600,67 @@ mod tests {
             .refused
             .iter()
             .any(|s| s.starts_with("T30:") && s.contains("needs 45")));
+    }
+
+    /// Rig findings of #697. A short decay into a high background puts the
+    /// truncation before 80 ms: C80 must still not fall below C50 (moving
+    /// the early limit later cannot lose early energy). And low-frequency
+    /// ringing before the direct sound — a sweep's lower band edge rings
+    /// for its own period — must not fire the start: it is read on the
+    /// 2 kHz high-passed IR.
+    #[test]
+    fn c80_is_never_below_c50_and_low_ringing_does_not_move_the_start() {
+        let n = 48_000;
+        let rev = noise(n, 11);
+        let fl = noise(n, 13);
+        let arrival = 0.030;
+        let ir: Vec<f64> = (0..n)
+            .map(|k| {
+                let t = k as f64 / FS as f64;
+                let direct = if k == (arrival * FS as f64) as usize {
+                    20.0
+                } else {
+                    0.0
+                };
+                let ring = if (0.010..arrival).contains(&t) {
+                    3.0 * (2.0 * std::f64::consts::PI * 60.0 * t).sin()
+                } else {
+                    0.0
+                };
+                let tail = if t > arrival {
+                    rev[k] * 10f64.powf(-3.0 * (t - arrival) / 0.1)
+                } else {
+                    0.0
+                };
+                direct + ring + tail + 0.01 * fl[k]
+            })
+            .collect();
+        let r = room_acoustics(&ir, FS, 40.0, 16_000.0).unwrap();
+        assert!(
+            (r.start_s - arrival).abs() < 0.001,
+            "start {} s, direct at {arrival}",
+            r.start_s
+        );
+        for b in &r.bands {
+            // Measured both, or refused with the reason — never C80 < C50.
+            match (b.c50_db, b.c80_db) {
+                (Some(c50), Some(c80)) => {
+                    assert!(
+                        c80 >= c50,
+                        "{:.0} Hz C80 {c80:.2} < C50 {c50:.2}",
+                        b.centre_hz
+                    )
+                }
+                _ => assert!(
+                    b.refused
+                        .iter()
+                        .any(|r| r.contains("no measured late energy")),
+                    "{:.0} Hz: {:?}",
+                    b.centre_hz,
+                    b.refused
+                ),
+            }
+        }
     }
 
     #[test]
