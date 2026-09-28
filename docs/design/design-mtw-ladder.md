@@ -328,6 +328,30 @@ the measured bias on uncorrelated inputs lands near 0.31 rather than exactly
 0.25. The frame reports the nominal `N`, matching today's convention; the gap
 is criterion 5's tolerance, and it is a derived number rather than slop.
 
+### #699 — uniform floor, not uniform N
+
+Uniform N at 50 % overlap made the update interval proportional to the
+window: the bottom rung moved every 0.51 s, and the operator found live
+monitoring below ~250 Hz "completely unusable" (2026-09-28). The argument
+above is about the coherence *floor*, and N at 50 % overlap was only the
+means of keeping it uniform. #699 keeps the floor and changes the means:
+
+| stage (96 kHz) | overlap | hop | blocks at N = 4 | update | settling | measured floor |
+|---|---|---|---|---|---|---|
+| 0 | 50 % | 21.3 ms | 4 | 0.021 s | 0.107 s | 0.244 |
+| 1 | 75 % | 85.3 ms | 6 | 0.085 s | 0.768 s | 0.266 |
+| 2 | 87.5 % | 128 ms | 12 | 0.128 s | 2.432 s | 0.268 |
+
+(Update is the stage's hop; the published frame additionally quantises it
+to the drain tick.) Floors are single-bin, non-blend columns on
+uncorrelated inputs. Overlap without the extra blocks would have pushed the
+bottom floor well past 0.44 — the figure measured with 6 blocks at 87.5 %.
+Resolution is unchanged, and so, nearly, is settling: the settling-table
+reasoning above still holds, and "low frequency is not made slower" now
+also means it is not made less stable. Faster *settling* still costs a
+higher floor or a shorter bottom window; that trade was left to the
+operator.
+
 ---
 
 ## coherence depth — measured, not modelled

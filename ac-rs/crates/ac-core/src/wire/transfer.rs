@@ -145,6 +145,10 @@ pub struct MtwColumns {
     pub bins: Vec<usize>,
     #[serde(default)]
     pub ppo: f64,
+    /// The session's base block count `N`. Stage 0 averages `N` blocks; the
+    /// deeper stages, which overlap more, average a fixed multiple of it
+    /// (`ladder::STAGE_BLOCKS`: 4 / 6 / 12 at `N = 4`). A column's own count
+    /// is [`Self::n`].
     #[serde(default)]
     pub n_blocks: usize,
     /// Which rungs have settled, shallowest first. Distinguishes "still
@@ -323,7 +327,7 @@ pub struct TransferFrame {
     pub backend: String,
 
     // ---- three-stage transfer columns — the display's source ----
-    /// `None` until every ladder rung holds a full N blocks (2.56 s at the
+    /// `None` until every ladder rung holds its full block count (2.43 s at the
     /// bottom rung), and on any daemon predating the ladder.
     ///
     /// Absent is **not** a reason to fall back to the Welch arrays above: the

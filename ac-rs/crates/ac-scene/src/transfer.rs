@@ -326,16 +326,16 @@ pub struct BandLabel {
     /// span, mapped by [`freq_to_x`], the same mapping the traces and the
     /// frequency ticks use.
     pub position: f64,
-    /// `"0.98 Hz / 2.56 s"` — this band's bin width and settling time.
+    /// `"0.98 Hz / 2.43 s"` — this band's bin width and settling time.
     pub text: String,
 }
 
 /// `"{Δf} Hz / {settling} s"`, both figures to [`band_figure`]'s precision.
 ///
-/// The settling figure is the ladder's own `W + hop·(N−1)` (the wire's
+/// The settling figure is the ladder's own `W + hop·(blocks−1)` (the wire's
 /// `settling_s`), **not** the raw analysis window: at the bottom rung the
-/// window is 1.02 s while the average does not fill for 2.56 s, so a
-/// window-derived label would understate the wait by 2.5x — which is the
+/// window is 1.02 s while the average does not fill for 2.43 s, so a
+/// window-derived label would understate the wait by 2.4x — which is the
 /// one number an operator acts on after an EQ change.
 pub fn format_band_label(df_hz: f64, settling_s: f64) -> String {
     format!("{} Hz / {} s", band_figure(df_hz), band_figure(settling_s))
@@ -345,7 +345,7 @@ pub fn format_band_label(df_hz: f64, settling_s: f64) -> String {
 ///
 /// Fixed by the ratified label set rather than by a significant-figure
 /// rule: `0.98`, `2.56`, `2.93`, `0.85`, `23.4`, `0.11` are the strings the
-/// UX review drew, and a plain 2- or 3-significant-figure rule reproduces
+/// UX review drew (the settling figures are 2.43 and 0.77 since #699), and a plain 2- or 3-significant-figure rule reproduces
 /// neither the `23.4` nor the `0.98` end of that list. Both quantities are
 /// context for reading the curve, not readings themselves, so the display
 /// precision is capped here — the underlying `f64`s are untouched.
@@ -820,7 +820,7 @@ impl TransferInput {
         // re-segmentation, uniform density with interpolation below 69 Hz),
         // and falling back to them when the ladder is not yet warm would
         // change the display's resolution and settling mid-session without
-        // saying so. No trace is the honest state for the ~2.56 s the bottom
+        // saying so. No trace is the honest state for the ~2.43 s the bottom
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
         //
@@ -1396,8 +1396,8 @@ mod tests {
 
     /// The wire's stage list for `sr`, as the daemon builds it — the same
     /// `settling_seconds(stage, N)` it puts on the wire, with `N = 4`
-    /// (`mtw_n_blocks`, the ratified depth the 2.56 s bottom figure is
-    /// derived from).
+    /// (`mtw_n_blocks`, the base depth the 2.43 s bottom figure is derived
+    /// from; the deeper stages scale it, #699).
     fn wire_stages(sr: u32) -> Vec<MtwStage> {
         use ac_core::visualize::mtw::{ladder, settling_seconds};
         ladder::layout(sr)
@@ -1434,8 +1434,8 @@ mod tests {
         // band is the coarse-resolution/fast-settling one.
         assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!(got[0].1, "23.4 Hz / 0.11 s");
-        assert_eq!(got[1].1, "2.93 Hz / 0.85 s");
-        assert_eq!(got[2].1, "0.98 Hz / 2.56 s");
+        assert_eq!(got[1].1, "2.93 Hz / 0.77 s");
+        assert_eq!(got[2].1, "0.98 Hz / 2.43 s");
         for (got, want) in got.iter().zip([0.818, 0.486, 0.168]) {
             assert!(
                 (got.0 - want).abs() < 5e-4,
@@ -1447,8 +1447,8 @@ mod tests {
     }
 
     // The rejected implementation, computed inside the test: labelling the
-    // raw analysis window instead of `W + hop·(N−1)`. At the bottom rung
-    // the two differ by 2.5x, and the window is the one an operator would
+    // raw analysis window instead of `W + hop·(blocks−1)`. At the bottom
+    // rung the two differ by 2.4x, and the window is the one an operator would
     // wait out and conclude the instrument had stalled.
     #[test]
     fn settling_is_the_filled_average_not_the_analysis_window() {
@@ -1460,10 +1460,10 @@ mod tests {
         let labels = band_labels(&stages, 20.0, 20_000.0);
         let bottom_label = &labels.last().expect("three labels").text;
         assert_ne!(bottom_label, &window_label);
-        assert_eq!(bottom_label, "0.98 Hz / 2.56 s");
-        // And the gap is the 2.5x the issue names, not a rounding
+        assert_eq!(bottom_label, "0.98 Hz / 2.43 s");
+        // And the gap is the 2.4x the ladder settles in, not a rounding
         // difference.
-        assert!(bottom.settling_s / bottom.window_s > 2.4);
+        assert!(bottom.settling_s / bottom.window_s > 2.3);
     }
 
     // Three labels at every supported rate, all distinct — the claim the
@@ -1492,10 +1492,12 @@ mod tests {
                 );
             }
         }
-        // The 44.1 kHz deep rungs run 0.23% slow, which the labels round
-        // away at the bottom and show in the middle's settling figure.
+        // The 44.1 kHz bottom rung runs 0.23% slow, which its label rounds
+        // away; the middle rung runs at 11.025 kHz, so both of its figures
+        // differ from 96 kHz's.
         let at_44k = band_labels(&wire_stages(44_100), 20.0, 20_000.0);
-        assert_eq!(at_44k[2].text, "0.98 Hz / 2.55 s");
+        assert_eq!(at_44k[2].text, "0.98 Hz / 2.43 s");
+        assert_eq!(at_44k[1].text, "2.69 Hz / 0.84 s");
     }
 
     // The label content is a function of the ladder alone. Two frames of

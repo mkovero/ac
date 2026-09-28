@@ -19,7 +19,7 @@
 //!   `BlockAverage::mean` sums the last N blocks fresh, with no running total.
 //!
 //! So a fresh ladder started at full-rate index `s0`, with
-//! `(s0 − origin) mod L = 0` where `L = HOP · lcm(stage decims)` and `origin`
+//! `(s0 − origin) mod L = 0` where `L = lcm(hop_i · decim_i)` and `origin`
 //! is the live ladder's first input sample, analyses the same blocks the live
 //! one did from the point its own warmup ends: every stage's grid is shifted
 //! by a whole number of hops. Its last N blocks per stage are then the live
@@ -51,6 +51,11 @@ use crate::wire::MtwColumns;
 pub struct StageProvenance {
     pub decim: usize,
     pub rate: f64,
+    /// The stage's segment hop, decimated samples. Absent from snapshots
+    /// written before the stages hopped differently, which used
+    /// [`MtwProvenance::hop`] for every stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop: Option<usize>,
 }
 
 /// Everything the replay needs about one pair's live ladder, recorded at
@@ -106,6 +111,7 @@ impl MtwProvenance {
                 .map(|s| StageProvenance {
                     decim: s.decim,
                     rate: s.rate,
+                    hop: Some(s.hop),
                 })
                 .collect(),
         })
@@ -116,11 +122,10 @@ impl MtwProvenance {
     /// rule as an unknown `format_version`.
     fn check_layout(&self, l: &Ladder) -> Result<()> {
         if self.nfft != NFFT || self.hop != HOP {
-            return Err(anyhow!(
+            return Err(layout_mismatch(format!(
                 "mtw replay: stored nfft/hop {}/{} differ from this reader's {NFFT}/{HOP}",
-                self.nfft,
-                self.hop
-            ));
+                self.nfft, self.hop
+            )));
         }
         let same_stages = self.stages.len() == l.stages.len()
             && self.stages.iter().zip(l.stages.iter()).all(|(p, s)| {
@@ -128,20 +133,54 @@ impl MtwProvenance {
                 // rate is compared to within the parser's last bit.
                 p.decim == s.decim && (p.rate - s.rate).abs() <= 1e-9 * s.rate.abs()
             });
+        // Per-stage hops: a snapshot from before the deeper stages hopped
+        // more often recorded one hop for all of them. Its ladder was a
+        // different estimate, so it is refused, not re-run at today's hops.
+        let stored_hops: Vec<usize> = self
+            .stages
+            .iter()
+            .map(|p| p.hop.unwrap_or(self.hop))
+            .collect();
+        let current_hops: Vec<usize> = l.stages.iter().map(|s| s.hop).collect();
+        if same_stages && stored_hops != current_hops {
+            return Err(layout_mismatch(format!(
+                "mtw replay: stored stage hops {stored_hops:?} differ from this reader's \
+                 {current_hops:?}"
+            )));
+        }
         if !same_stages {
             let stored: Vec<usize> = self.stages.iter().map(|s| s.decim).collect();
             let current: Vec<usize> = l.stages.iter().map(|s| s.decim).collect();
-            return Err(anyhow!(
+            return Err(layout_mismatch(format!(
                 "mtw replay: stored stage decims {stored:?} differ from this reader's \
                  {current:?} at {} Hz",
                 l.sr
-            ));
+            )));
         }
         if self.n_blocks == 0 {
             return Err(anyhow!("mtw replay: stored n_blocks is 0"));
         }
         Ok(())
     }
+}
+
+/// The stored ladder is not the one this code builds: the snapshot is
+/// intact, but its live ladder cannot be re-run here. A caller can fall back
+/// to the Welch estimate, which needs no ladder
+/// ([`crate::snapshot::Snapshot::derive_pair`] does).
+#[derive(Debug)]
+pub struct LayoutMismatch(pub String);
+
+impl std::fmt::Display for LayoutMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LayoutMismatch {}
+
+fn layout_mismatch(msg: String) -> anyhow::Error {
+    anyhow::Error::new(LayoutMismatch(msg))
 }
 
 fn gcd(a: usize, b: usize) -> usize {
@@ -152,14 +191,14 @@ fn gcd(a: usize, b: usize) -> usize {
     }
 }
 
-/// `L = HOP · lcm(stage decims)`: the full-rate period after which every
-/// stage's block grid repeats.
+/// `L = lcm(hop_i · decim_i)`: the full-rate period after which every
+/// stage's block grid repeats — stage `i` starts a block every
+/// `hop_i · decim_i` full-rate samples.
 pub fn grid_period(l: &Ladder) -> usize {
-    let lcm = l
-        .stages
+    l.stages
         .iter()
-        .fold(1usize, |acc, s| acc / gcd(acc, s.decim) * s.decim);
-    HOP * lcm
+        .map(|s| s.hop * s.decim)
+        .fold(1usize, |acc, p| acc / gcd(acc, p) * p)
 }
 
 /// The smallest index `s0 ≥ max(0, origin)` with `(s0 − origin) mod period
@@ -354,16 +393,36 @@ mod tests {
         })
     }
 
+    /// A snapshot written before the deeper stages hopped more often
+    /// recorded one hop for every stage; its ladder was a different estimate
+    /// and is refused, by name, rather than re-run at today's hops.
+    #[test]
+    fn a_snapshot_with_the_old_uniform_hop_is_refused() {
+        let mut old = provenance(0);
+        old.hop = ladder::HOP;
+        for st in &mut old.stages {
+            st.hop = None;
+        }
+        let e = old
+            .check_layout(&ladder::layout(SR).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("stored stage hops [2048, 2048, 2048]"), "{e}");
+        assert!(provenance(0)
+            .check_layout(&ladder::layout(SR).unwrap())
+            .is_ok());
+    }
+
     #[test]
     fn grid_period_is_the_documented_figure() {
-        for (sr, secs) in [(48_000u32, 0.512), (96_000, 0.512), (192_000, 0.512)] {
+        for (sr, secs) in [(48_000u32, 0.256), (96_000, 0.256), (192_000, 0.256)] {
             let l = ladder::layout(sr).unwrap();
             let got = grid_period(&l) as f64 / f64::from(sr);
             assert!((got - secs).abs() < 1e-9, "{sr}: {got} s");
         }
         let l = ladder::layout(44_100).unwrap();
         let got = grid_period(&l) as f64 / 44_100.0;
-        assert!((got - 2.043).abs() < 1e-3, "44.1k: {got} s");
+        assert!((got - 1.0217).abs() < 1e-3, "44.1k: {got} s");
     }
 
     #[test]
@@ -442,9 +501,17 @@ mod tests {
             "a 1.5 s ring settled every rung: {:?}",
             got.settled_stages
         );
+        // Each column averages its own stage's count (`Stage::blocks`): 4
+        // at the top, 6 in the middle, 12 at the bottom — never fewer.
+        let allowed: Vec<usize> = ladder::layout(SR)
+            .unwrap()
+            .stages
+            .iter()
+            .map(|s| s.blocks(N_BLOCKS))
+            .collect();
         assert!(
-            got.n.iter().all(|&n| n == N_BLOCKS),
-            "a column was drawn over fewer than {N_BLOCKS} blocks: {:?}",
+            got.n.iter().all(|n| allowed.contains(n)),
+            "a column was drawn over a count no stage uses ({allowed:?}): {:?}",
             got.n
         );
     }
