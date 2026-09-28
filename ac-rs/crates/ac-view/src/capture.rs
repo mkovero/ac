@@ -43,6 +43,15 @@ pub fn captures_dir() -> PathBuf {
         .join("captures")
 }
 
+/// `~/.local/share/ac/targets` — where `Z` looks for target curves
+/// (`.txt`, `.frd`, `.csv`: `<freq_hz> <gain_db>` per line).
+pub fn targets_dir() -> PathBuf {
+    captures_dir().with_file_name("targets")
+}
+
+/// The target-curve file extensions `Z` lists.
+pub const TARGET_EXTENSIONS: [&str; 3] = ["txt", "frd", "csv"];
+
 /// The file name for slot `slot` captured at `captured_at_utc` (RFC3339):
 /// colons are not portable in file names, so they become `-`.
 ///

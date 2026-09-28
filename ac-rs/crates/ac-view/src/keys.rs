@@ -84,6 +84,9 @@ pub enum Action {
     NudgeDelayLater,
     /// Open the typed-delay entry (#669): digits in samples, `T` again to
     /// apply.
+    /// `Z`: list target curves to draw over the magnitude pane (`Z`
+    /// loads the selected one); `Shift+Z` clears it.
+    OpenTargets,
     TypeDelay,
     /// Show or hide the focused trace (#256). Shift: show every trace.
     ToggleTraceVisible,
@@ -301,6 +304,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::TypeDelay,
         scope: Scope::Transfer,
         description: "Type a delay in samples (T again to apply)",
+    },
+    Binding {
+        key: Key::Z,
+        action: Action::OpenTargets,
+        scope: Scope::Transfer,
+        description: "Target curves: list, Z loads (Shift: clear)",
     },
     Binding {
         key: Key::H,

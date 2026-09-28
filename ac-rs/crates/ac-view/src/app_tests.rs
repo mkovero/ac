@@ -2081,3 +2081,46 @@ fn meas_lists_parse_or_are_refused() {
         Err("channel 4 is listed twice".to_string())
     );
 }
+
+// ---- target curves ----
+
+/// `Z` lists the targets folder; `Z` in the list draws the selected curve
+/// with its caption; `Shift+Z` clears it; a file that does not parse is
+/// refused with the reason.
+#[test]
+fn z_loads_draws_clears_and_refuses_target_curves() {
+    let dir = std::env::temp_dir().join(format!("ac-target-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("house.txt"), "20 6\n1000 0\n20000 -3\n").unwrap();
+    let mut app = transfer_app();
+    app.targets_dir = dir.clone();
+
+    app.handle_action(Action::OpenTargets, false);
+    assert!(app.target_list.is_some());
+    app.load_selected_target(Instant::now());
+    app.rebuild_scenes(true, 0.0);
+    let t = app.target_trace.as_ref().expect("target drawn");
+    assert_eq!(t.caption, "target: house.txt");
+    assert_eq!(t.trace.segments[0].len(), 3);
+
+    app.handle_action(Action::OpenTargets, true);
+    app.rebuild_scenes(true, 0.1);
+    assert!(app.target_trace.is_none(), "Shift+Z did not clear");
+
+    std::fs::remove_file(dir.join("house.txt")).unwrap();
+    std::fs::write(dir.join("bad.txt"), "1000 0\n").unwrap();
+    app.handle_action(Action::OpenTargets, false);
+    app.load_selected_target(Instant::now());
+    assert!(app.target.is_none());
+    assert_eq!(
+        app.toast_text(),
+        Some("target bad.txt not loaded \u{2014} target curve too sparse: got 1 points, need ≥ 2")
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+    app.handle_action(Action::OpenTargets, false);
+    assert!(app.target_list.is_none());
+    assert!(app
+        .toast_text()
+        .is_some_and(|t| t.starts_with("no target curves in")));
+}

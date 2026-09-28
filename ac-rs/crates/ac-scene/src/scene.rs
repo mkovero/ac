@@ -16,6 +16,9 @@ use ac_core::wire::TransferFrame;
 pub enum Source {
     Live,
     Snapshot,
+    /// A target curve read from a file — a desired response, not a
+    /// measurement.
+    Target,
 }
 
 /// Provenance carried by every trace — which session channel, from
