@@ -571,3 +571,22 @@ fn an_inverted_trace_keeps_the_measured_trace_gaps() {
     assert_eq!(lens(&flipped), lens(&plain));
     assert_eq!(lens(&plain), vec![1, 1]);
 }
+
+/// The `Shift+P` crash (operator, 2026-09-28: "index out of bounds: the
+/// len is 0 but the index is 0" at the phase-view span): a column the
+/// coherence mask leaves standing alone is a one-point run, which has no
+/// slope. Group delay returned nothing for it and the span loop indexed
+/// it. Both views, an isolated column, a run of two and a longer run.
+#[test]
+fn an_isolated_unmasked_column_does_not_panic_either_phase_view() {
+    let freqs: Vec<f64> = (1..=12).map(|k| 100.0 * k as f64).collect();
+    let phase: Vec<f64> = freqs.iter().map(|f| -0.36 * f).collect();
+    let mut inp = input(freqs, phase, 0.0);
+    // Kept: 0 (alone), 2–3 (a pair), 6–11 (a run). Masked: the rest.
+    inp.coherence = vec![0.9, 0.1, 0.9, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9];
+    for view in [PhaseView::Unwrapped, PhaseView::GroupDelay] {
+        let s = scene_view(&inp, view);
+        assert!(!s.phase.segments.is_empty(), "{view:?} drew nothing");
+        assert!(s.phase_span.is_some(), "{view:?} fitted no range");
+    }
+}

@@ -289,11 +289,14 @@ fn unwrap_deg(deg: &mut [f64]) {
 /// Inside the run the slope is the three-point derivative for **uneven**
 /// spacing (the ladder grid is not uniform): the secant between the two
 /// neighbours is the slope at their midpoint, not at the column (Codex
-/// review). One-sided at the run's ends. A run of one point has no slope.
+/// review). One-sided at the run's ends. A run of one point has no slope:
+/// its value is NaN (drawn as nothing), one per input as always — an empty
+/// result for a one-column run was indexed by the caller and panicked the
+/// view (the `Shift+P` crash, operator 2026-09-28).
 fn group_delay_ms(freqs: &[f64], deg: &[f64]) -> Vec<f64> {
     let n = deg.len();
     if n < 2 {
-        return Vec::new();
+        return vec![f64::NAN; n];
     }
     let slope = |i: usize| -> f64 {
         if i == 0 || i == n - 1 {
@@ -1429,7 +1432,9 @@ impl TransferScene {
                     let in_view = |f: f64| (f_min..=f_max).contains(&f);
                     let mut all: Vec<f64> = Vec::new();
                     for (idx, v) in &runs {
-                        for k in 0..idx.len() {
+                        // One value per column by contract; bounded here
+                        // too, so a short one cannot take the view down.
+                        for k in 0..idx.len().min(v.len()) {
                             let f = input.freqs[idx[k]];
                             let crosses_next = idx
                                 .get(k + 1)
