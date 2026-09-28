@@ -199,6 +199,93 @@ pub struct DisplayModes {
     /// Columns below this coherence are not drawn (#670). Display policy
     /// only — the fault indicator keeps [`COHERENCE_THRESHOLD`].
     pub coherence_mask: f64,
+    /// What the phase pane shows (#695): wrapped phase, unwrapped phase,
+    /// or group delay.
+    pub phase_view: PhaseView,
+    /// A fixed range for the unwrapped / group-delay pane, so traces drawn
+    /// together share one scale. `None` fits the range to this trace.
+    pub phase_range: Option<(f64, f64)>,
+}
+
+/// The phase pane's view (#695, Smaart's phase / unwrapped / group
+/// delay), cycled by `Shift+P`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseView {
+    /// Degrees in (−180, +180], the fixed ±180° pane.
+    #[default]
+    Wrapped,
+    /// Degrees unwrapped along each unmasked run, on an axis fitted to the
+    /// data.
+    Unwrapped,
+    /// `−dφ/df / 360`, ms, on an axis fitted to the data.
+    GroupDelay,
+}
+
+impl PhaseView {
+    pub fn next(self) -> PhaseView {
+        match self {
+            PhaseView::Wrapped => PhaseView::Unwrapped,
+            PhaseView::Unwrapped => PhaseView::GroupDelay,
+            PhaseView::GroupDelay => PhaseView::Wrapped,
+        }
+    }
+
+    /// The caption the pane carries: `None` for the resting wrapped view.
+    /// Both others follow the phase reference (the de-rotation), and a gap
+    /// in the mask restarts the unwrapping, so they say so.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            PhaseView::Wrapped => None,
+            PhaseView::Unwrapped => {
+                Some("phase unwrapped \u{b7} each unmasked run from its own start")
+            }
+            PhaseView::GroupDelay => Some("group delay \u{b7} relative to the phase reference"),
+        }
+    }
+}
+
+/// The share of drawn values the unwrapped and group-delay axes cover, from
+/// each end: 2 % either side, so one noisy spike does not flatten the
+/// curve. What falls outside runs off the pane, which is honest.
+const PHASE_VIEW_RANGE_TRIM: f64 = 0.02;
+
+/// Unwrap `deg` in place: add or remove 360 wherever a step exceeds 180.
+fn unwrap_deg(deg: &mut [f64]) {
+    let mut offset = 0.0;
+    for i in 1..deg.len() {
+        let prev = deg[i - 1];
+        let mut cur = deg[i] + offset;
+        while cur - prev > 180.0 {
+            cur -= 360.0;
+            offset -= 360.0;
+        }
+        while cur - prev <= -180.0 {
+            cur += 360.0;
+            offset += 360.0;
+        }
+        deg[i] = cur;
+    }
+}
+
+/// Group delay, ms, of unwrapped `deg` over `freqs`: `−dφ/df / 360`, a
+/// central difference inside the run, one-sided at its ends. A run of one
+/// point has no slope and gives none.
+fn group_delay_ms(freqs: &[f64], deg: &[f64]) -> Vec<f64> {
+    let n = deg.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(1), (i + 1).min(n - 1));
+            let df = freqs[b] - freqs[a];
+            if df > 0.0 {
+                -(deg[b] - deg[a]) / (360.0 * df) * 1000.0
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
 }
 
 impl DisplayModes {
@@ -209,6 +296,8 @@ impl DisplayModes {
             derot,
             smoothing,
             coherence_mask: COHERENCE_THRESHOLD,
+            phase_view: PhaseView::Wrapped,
+            phase_range: None,
         }
     }
 }
@@ -225,6 +314,20 @@ impl DisplayModes {
     pub fn with_coherence_mask(self, coherence_mask: f64) -> DisplayModes {
         DisplayModes {
             coherence_mask,
+            ..self
+        }
+    }
+
+    /// The same modes with a different phase-pane view (#695).
+    pub fn with_phase_view(self, phase_view: PhaseView) -> DisplayModes {
+        DisplayModes { phase_view, ..self }
+    }
+
+    /// The same modes with the unwrapped / group-delay pane held to
+    /// `range`, shared by every trace drawn together.
+    pub fn with_phase_range(self, range: (f64, f64)) -> DisplayModes {
+        DisplayModes {
+            phase_range: Some(range),
             ..self
         }
     }
@@ -516,6 +619,13 @@ pub struct TransferScene {
     /// Degrees gridlines for the phase pane — `{+180, +90, 0, −90}`, with
     /// no −180 line (matches the trace's `(−180, +180]` wrap boundary).
     pub phase_axis: crate::ticks::Axis,
+    /// [`PhaseView::label`]: which view the phase pane is (#695).
+    pub phase_view_readout: Option<&'static str>,
+    /// The span of this trace's drawn values in the unwrapped / group-delay
+    /// view (2–98 %), before rounding to the axis: what a caller unions
+    /// across traces for [`DisplayModes::with_phase_range`]. `None` in the
+    /// wrapped view or with nothing drawn.
+    pub phase_span: Option<(f64, f64)>,
     /// `"2.50 ms"` — τ_sess, milliseconds only (#391).
     pub delay_readout: String,
     /// [`DelayControl::readout`] on a live frame with a delay; `None`
@@ -1116,6 +1226,8 @@ impl TransferScene {
             && input.freqs.len() == input.phase_deg.len()
             && input.freqs.len() == input.coherence.len();
 
+        let mut phase_axis = crate::ticks::phase_axis();
+        let mut phase_span = None;
         let (mag_segments, phase_segments) = if lengths_agree {
             // De-rotate first, then smooth. The two orders do not commute,
             // and this one is right for a reason, not by accident:
@@ -1177,9 +1289,77 @@ impl TransferScene {
                 // (the AC3 shared-mapping law, extended to the phase pane).
                 (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
+            let phase_segments = match modes.phase_view {
+                PhaseView::Wrapped => {
+                    split_on_mask(&input.coherence, modes.coherence_mask, phase_points)
+                }
+                view => {
+                    // Per unmasked run: the jump across a masked gap is not
+                    // knowable, so each run unwraps from its own start.
+                    let index_runs =
+                        split_on_mask(&input.coherence, modes.coherence_mask, |i| (i as f64, 0.0));
+                    let runs: Vec<(Vec<usize>, Vec<f64>)> = index_runs
+                        .iter()
+                        .map(|run| {
+                            let idx: Vec<usize> = run.iter().map(|p| p.0 as usize).collect();
+                            let mut deg: Vec<f64> = idx.iter().map(|&i| phase_deg[i]).collect();
+                            unwrap_deg(&mut deg);
+                            let values = if view == PhaseView::GroupDelay {
+                                let f: Vec<f64> = idx.iter().map(|&i| input.freqs[i]).collect();
+                                group_delay_ms(&f, &deg)
+                            } else {
+                                deg
+                            };
+                            (idx, values)
+                        })
+                        .collect();
+                    let mut all: Vec<f64> = runs
+                        .iter()
+                        .flat_map(|(_, v)| v.iter().copied())
+                        .filter(|v| v.is_finite())
+                        .collect();
+                    all.sort_by(f64::total_cmp);
+                    let pick = |q: f64| {
+                        all.get(((all.len() as f64 - 1.0) * q).round() as usize)
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    let unit = if view == PhaseView::GroupDelay {
+                        "ms"
+                    } else {
+                        "\u{b0}"
+                    };
+                    let span = (
+                        pick(PHASE_VIEW_RANGE_TRIM),
+                        pick(1.0 - PHASE_VIEW_RANGE_TRIM),
+                    );
+                    if span.0.is_finite() && span.1.is_finite() {
+                        phase_span = Some(span);
+                    }
+                    let (lo_in, hi_in) = modes.phase_range.unwrap_or(span);
+                    let (axis, (lo, hi)) = crate::ticks::linear_axis(lo_in, hi_in, unit);
+                    phase_axis = axis;
+                    runs.into_iter()
+                        .filter(|(idx, _)| !idx.is_empty())
+                        .map(|(idx, values)| {
+                            idx.iter()
+                                .zip(values)
+                                .filter(|(_, v)| v.is_finite())
+                                .map(|(&i, v)| {
+                                    (
+                                        freq_to_x(input.freqs[i], f_min, f_max),
+                                        crate::ticks::linear_to_y(v, lo, hi),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|seg| !seg.is_empty())
+                        .collect()
+                }
+            };
             (
                 split_on_mask(&input.coherence, modes.coherence_mask, mag_points),
-                split_on_mask(&input.coherence, modes.coherence_mask, phase_points),
+                phase_segments,
             )
         } else {
             (Vec::new(), Vec::new())
@@ -1198,7 +1378,9 @@ impl TransferScene {
             },
             freq_axis: crate::ticks::freq_axis(f_min, f_max),
             mag_axis: crate::ticks::db_axis(db_min, db_max),
-            phase_axis: crate::ticks::phase_axis(),
+            phase_axis,
+            phase_view_readout: modes.phase_view.label(),
+            phase_span,
             delay_readout: delay.delay_readout,
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
             delay_samples: input.delay_control.map(|c| c.samples),

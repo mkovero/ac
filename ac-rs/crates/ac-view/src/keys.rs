@@ -234,7 +234,8 @@ pub const BINDINGS: &[Binding] = &[
         key: Key::P,
         action: Action::ToggleRawPhase,
         scope: Scope::Transfer,
-        description: "Toggle raw (measured) phase vs de-rotated",
+        description:
+            "Toggle raw (measured) phase vs de-rotated (Shift: wrapped / unwrapped / group delay)",
     },
     Binding {
         key: Key::R,

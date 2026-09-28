@@ -180,6 +180,51 @@ pub fn time_axis(t_min_ms: f64, t_max_ms: f64) -> Axis {
     Axis { ticks }
 }
 
+/// A linear axis fitted to `[lo, hi]` with round steps (1, 2 or 5 × 10ᵏ,
+/// four to ten ticks), for panes whose range follows the data (#695:
+/// unwrapped phase, group delay). Returns the axis and the range it maps,
+/// widened to whole steps so a gridline sits on each end. `unit` follows
+/// every label. A flat or empty input is widened to ±1.
+pub fn linear_axis(lo: f64, hi: f64, unit: &str) -> (Axis, (f64, f64)) {
+    let (lo, hi) = if lo.is_finite() && hi.is_finite() && hi > lo {
+        (lo, hi)
+    } else if lo.is_finite() {
+        (lo - 1.0, lo + 1.0)
+    } else {
+        (-1.0, 1.0)
+    };
+    let raw = (hi - lo) / 5.0;
+    let mag = 10f64.powf(raw.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|m| m * mag)
+        .find(|s| (hi - lo) / s <= 10.0)
+        .unwrap_or(10.0 * mag);
+    let lo_r = (lo / step).floor() * step;
+    let hi_r = (hi / step).ceil() * step;
+    let n = ((hi_r - lo_r) / step).round() as i64;
+    let decimals = if step >= 1.0 {
+        0
+    } else {
+        (-step.log10().floor()) as usize
+    };
+    let ticks = (0..=n)
+        .map(|k| {
+            let v = lo_r + k as f64 * step;
+            Tick {
+                position: linear_to_y(v, lo_r, hi_r),
+                label: format!("{v:.decimals$} {unit}"),
+            }
+        })
+        .collect();
+    (Axis { ticks }, (lo_r, hi_r))
+}
+
+/// Normalized y of `v` within `[lo, hi]`.
+pub fn linear_to_y(v: f64, lo: f64, hi: f64) -> f64 {
+    (v - lo) / (hi - lo)
+}
+
 fn time_label(t_ms: f64) -> String {
     if t_ms == 0.0 {
         "0".to_string()
@@ -191,6 +236,24 @@ fn time_label(t_ms: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round steps, a gridline on each end, the unit on every label.
+    #[test]
+    fn linear_axis_fits_round_steps_to_the_data() {
+        let (axis, range) = linear_axis(-3.2, 7.9, "ms");
+        assert_eq!(range, (-4.0, 8.0));
+        let labels: Vec<&str> = axis.ticks.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["-4 ms", "-2 ms", "0 ms", "2 ms", "4 ms", "6 ms", "8 ms"]
+        );
+        assert_eq!(axis.ticks[0].position, 0.0);
+        assert_eq!(axis.ticks.last().unwrap().position, 1.0);
+        let (small, _) = linear_axis(0.02, 0.09, "ms");
+        assert_eq!(small.ticks[1].label, "0.03 ms");
+        let (_, flat) = linear_axis(5.0, 5.0, "°");
+        assert_eq!(flat, (4.0, 6.0));
+    }
 
     #[test]
     fn phase_axis_positions_and_labels_are_exact() {
