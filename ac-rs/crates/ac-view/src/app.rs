@@ -437,7 +437,7 @@ impl AcViewApp {
                     (true, Some(a), _) => (Some(a), IR_ARRIVAL_LABEL.to_string()),
                     (true, None, long) => (
                         long.as_ref(),
-                        format!("{IR_LONG_LABEL} (no arrival IR until a delay is held)"),
+                        format!("{IR_LONG_LABEL} (no current arrival IR)"),
                     ),
                     (false, _, long) => (long.as_ref(), IR_LONG_LABEL.to_string()),
                 };
@@ -2231,6 +2231,9 @@ fn connect_and_launch_view(
 const IR_ARRIVAL_LABEL: &str = "arrival IR 250 ms";
 /// The IR panel's name for the 1 s Welch IR.
 const IR_LONG_LABEL: &str = "IR 1 s";
+/// Transfer frames (50 ms each) without a new arrival IR after which the
+/// held one is dropped as stale: 200 ms, three missed 62.5 ms answers.
+const ARRIVAL_STALE_FRAMES: u32 = 4;
 
 /// One measured pair's live state (#685). The meters and the fault state
 /// carry time from one frame to the next — ballistics, the refusal clock —
@@ -2248,6 +2251,8 @@ struct LivePair {
     /// The last arrival IR (#706, `span: "arrival"`): 250 ms, a new one
     /// every 62.5 ms once the pair has a delay.
     ir_arrival: Option<ac_core::wire::IrFrame>,
+    /// Transfer frames since the last arrival IR (#706).
+    frames_since_arrival: u32,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     /// The fault indicator's cross-frame state (#228).
     fault: ac_scene::FaultState,
@@ -2267,9 +2272,18 @@ impl LivePair {
     /// `set_delay`, a re-find or a lost lock the daemon sends nothing until
     /// the new ladder settles, and the old IR would sit on screen centred
     /// on the old delay. The panel falls back to the 1 s IR and says so.
+    ///
+    /// A delay check alone cannot see a re-find or a restart at the same
+    /// delay (Codex recheck), so an arrival IR is also dropped once
+    /// [`ARRIVAL_STALE_FRAMES`] transfer frames pass without a new one: it
+    /// normally comes every 62.5 ms, and its absence means the daemon is
+    /// rebuilding it.
     fn hold_frame(&mut self, frame: ac_core::wire::TransferFrame) {
+        self.frames_since_arrival = self.frames_since_arrival.saturating_add(1);
         let stale = self.ir_arrival.as_ref().is_some_and(|a| {
-            frame.delay_locked != Some(true) || a.delay_samples != frame.delay_samples
+            frame.delay_locked != Some(true)
+                || a.delay_samples != frame.delay_samples
+                || self.frames_since_arrival > ARRIVAL_STALE_FRAMES
         });
         if stale {
             self.ir_arrival = None;
@@ -2281,6 +2295,7 @@ impl LivePair {
     /// Hold an IR sidecar frame in the place its `span` names (#706).
     fn hold_ir(&mut self, frame: ac_core::wire::IrFrame) {
         if frame.span.as_deref() == Some(ac_core::wire::IR_SPAN_ARRIVAL) {
+            self.frames_since_arrival = 0;
             self.ir_arrival = Some(frame);
         } else {
             self.ir = Some(frame);

@@ -2410,7 +2410,7 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
     app.rebuild_ir_scene();
     assert_eq!(
         label(&app).as_deref(),
-        Some("live \u{b7} IR 1 s (no arrival IR until a delay is held)")
+        Some("live \u{b7} IR 1 s (no current arrival IR)")
     );
     app.handle_action(Action::StimulusFireOrPause, false); // pause
     app.rebuild_ir_scene();
@@ -2479,7 +2479,55 @@ fn an_arrival_ir_at_an_old_delay_is_dropped() {
     app.rebuild_ir_scene();
     assert_eq!(
         label(&app).as_deref(),
-        Some("live \u{b7} IR 1 s (no arrival IR until a delay is held)")
+        Some("live \u{b7} IR 1 s (no current arrival IR)")
+    );
+}
+
+/// Codex recheck of #706: a re-find or restart at the same delay is
+/// invisible to the delay check, so an arrival IR not renewed within four
+/// transfer frames (200 ms, against one per 62.5 ms) is dropped.
+#[test]
+fn an_arrival_ir_not_renewed_is_dropped() {
+    let mut app = ir_app();
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = 326;
+    app.ingest_ir_frame_for_test(ir_frame());
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
+    let held = || {
+        let mut f = pair_frame(0, 326, -20.0);
+        f.delay_locked = Some(true);
+        f
+    };
+    // Renewed every other frame: kept throughout.
+    for k in 0..10 {
+        if k % 2 == 0 {
+            app.ingest_ir_frame_for_test(arrival.clone());
+        }
+        app.ingest_frame_for_test(held(), k as f64 * 0.05);
+    }
+    app.rebuild_ir_scene();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} arrival IR 250 ms")
+    );
+    // Then renewed once more and not again: kept for four frames, dropped
+    // on the fifth.
+    app.ingest_ir_frame_for_test(arrival.clone());
+    for k in 0..4 {
+        app.ingest_frame_for_test(held(), 1.0 + k as f64 * 0.05);
+    }
+    app.rebuild_ir_scene();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} arrival IR 250 ms")
+    );
+    app.ingest_frame_for_test(held(), 1.3);
+    app.rebuild_ir_scene();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("live \u{b7} IR 1 s (no current arrival IR)")
     );
 }
 
@@ -2533,7 +2581,7 @@ fn the_live_ir_names_its_pair_when_there_are_several() {
         app.current_ir_scene()
             .and_then(|s| s.label.clone())
             .as_deref(),
-        Some("live 4 \u{b7} IR 1 s (no arrival IR until a delay is held)")
+        Some("live 4 \u{b7} IR 1 s (no current arrival IR)")
     );
 }
 

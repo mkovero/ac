@@ -40,6 +40,10 @@ pub struct LiveIr {
     avg: BlockAverage,
     /// Blocks analysed since this was built; a new IR exists when it moves.
     blocks: u64,
+    /// Aligned samples still to discard: after a gap, the aligner's queue
+    /// pairs up to `|delay|` samples from before it with samples after it
+    /// (Codex recheck of #706).
+    skip: usize,
 }
 
 impl LiveIr {
@@ -54,6 +58,15 @@ impl LiveIr {
             buf_ref: Vec::with_capacity(nperseg * 2),
             avg: BlockAverage::new(nperseg / 2 + 1, BLOCKS),
             blocks: 0,
+            skip: 0,
+        }
+    }
+
+    /// As [`Self::new`], discarding the first `skip` aligned samples pushed.
+    pub fn after_gap(sr: u32, skip: usize) -> Self {
+        Self {
+            skip,
+            ..Self::new(sr)
         }
     }
 
@@ -61,6 +74,9 @@ impl LiveIr {
     /// equal lengths. Blocks sit on a fixed grid from the first sample
     /// pushed, as the ladder's do.
     pub fn push(&mut self, meas: &[f32], reference: &[f32]) {
+        let drop = self.skip.min(meas.len());
+        self.skip -= drop;
+        let (meas, reference) = (&meas[drop..], &reference[drop..]);
         self.buf_meas.extend(meas.iter().map(|&v| f64::from(v)));
         self.buf_ref.extend(reference.iter().map(|&v| f64::from(v)));
         let mut pos = 0;
@@ -247,5 +263,20 @@ mod tests {
         );
         assert!((hop_s(SR) - 0.0625).abs() < 1e-12);
         assert!((span_s(SR) - 0.5625).abs() < 1e-12);
+    }
+
+    /// Codex recheck of #706: restarted after a gap, the arrival IR discards
+    /// the aligner's backlog — the first `skip` samples — before its first
+    /// segment, so no block pairs audio from both sides of the gap.
+    #[test]
+    fn after_a_gap_the_aligner_backlog_is_discarded() {
+        let n = segment_len(SR);
+        let skip = 480;
+        let x = noise(n + skip, 5);
+        let mut ir = LiveIr::after_gap(SR, skip);
+        ir.push(&x[..n + skip - 1], &x[..n + skip - 1]);
+        assert_eq!(ir.blocks(), 0, "a block took backlog samples");
+        ir.push(&x[n + skip - 1..], &x[n + skip - 1..]);
+        assert_eq!(ir.blocks(), 1);
     }
 }
