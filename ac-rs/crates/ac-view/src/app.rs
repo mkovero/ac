@@ -1902,10 +1902,7 @@ impl AcViewApp {
     /// crate formats no measurement value of its own.
     fn draw_overlays(&self, ctx: &egui::Context) {
         if self.help_open {
-            let help = crate::keys::help_text(self.view.id());
-            egui::Window::new("help").show(ctx, |ui| {
-                ui.label(help);
-            });
+            draw_help(ctx, self.view.id());
         }
 
         if let Some(overlay) = &self.settings {
@@ -2265,6 +2262,69 @@ fn version_detail(error: &ac_core::wire::WireVersionError) -> String {
         error.found_label(),
         ac_core::wire::WireVersionError::supported_label()
     )
+}
+
+/// The help overlay (`/`): the view's keys in labelled sections, each an
+/// aligned key / action grid, split over two columns so the whole table
+/// usually fits; a short window scrolls it. Every string is [`crate::keys::help_sections`]'s.
+fn draw_help(ctx: &egui::Context, view: crate::keys::ViewId) {
+    let sections = crate::keys::help_sections(view);
+    // Split where the running row count passes half, so the columns are
+    // about the same height; a section is never split.
+    let total: usize = sections.iter().map(|(_, rows)| rows.len() + 2).sum();
+    let mut acc = 0;
+    let split = sections
+        .iter()
+        .position(|(_, rows)| {
+            acc += rows.len() + 2;
+            acc * 2 >= total
+        })
+        .map_or(sections.len(), |i| i + 1);
+    let title = match view {
+        crate::keys::ViewId::Transfer => "keys \u{2014} transfer view",
+        crate::keys::ViewId::Spectrum => "keys \u{2014} spectrum view",
+    };
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            // Scrolls when the window is shorter than the table (the
+            // transfer view's left column alone is ~600 pt; the app opens at
+            // 800×600 — Codex review).
+            let max_h = (ctx.content_rect().height() - 90.0).max(120.0);
+            egui::ScrollArea::vertical()
+                .max_height(max_h)
+                .show(ui, |ui| {
+                    ui.columns(2, |cols| {
+                        for (col, part) in cols
+                            .iter_mut()
+                            .zip([&sections[..split], &sections[split..]])
+                        {
+                            for (group, rows) in part {
+                                col.label(egui::RichText::new(group.title()).strong());
+                                egui::Grid::new(("help", group.title()))
+                                    .num_columns(2)
+                                    .spacing([14.0, 3.0])
+                                    .show(col, |g| {
+                                        for r in rows {
+                                            g.label(
+                                                egui::RichText::new(&r.keys)
+                                                    .monospace()
+                                                    .color(crate::view::palette::COLOR_VALUE),
+                                            );
+                                            g.label(r.text);
+                                            g.end_row();
+                                        }
+                                    });
+                                col.add_space(8.0);
+                            }
+                        }
+                    });
+                });
+            ui.separator();
+            ui.label("/ closes this help");
+        });
 }
 
 /// Pull frames from `poll` until it reports empty, split by the tagged
