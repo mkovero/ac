@@ -96,12 +96,13 @@ pub use crate::stimulus::StimState;
 /// (never mutated in place), the same "rebuild from held state" discipline
 /// `last_frame` → `transfer_scene` already follows for zoom/pan.
 ///
-/// Always drawn self-compensated (`DerotMode::Session`, τ_derot 0) — a
-/// stored run has no notion of "this session's" delay to de-rotate
-/// against, and `transfer.rs`'s own module doc states this is the correct
-/// reading for a stored capture. There is deliberately no per-run derot
-/// field: only the live trace's phase reference is a choice the operator
-/// makes.
+/// Drawn against its own recorded delay (`DerotMode::Session`, τ_derot 0)
+/// — a stored run has no notion of "this session's" delay to de-rotate
+/// against — or raw ([`LoadedRun::raw_phase`]). Operator, 2026-09-28: a
+/// slot keeps the raw/de-rotated choice live had when it was stored, and
+/// `P`/`R` switch it with focus on the slot; live's third choice (the
+/// selected slot's delay) is a statement about live and has no stored
+/// equivalent.
 pub struct LoadedRun {
     /// Attribution (acceptance criterion 1) — the file's own name, never
     /// a friendlier fabricated one; the operator can go check it on disk.
@@ -122,6 +123,10 @@ pub struct LoadedRun {
     /// its smoothing. Display only.
     pub invert: bool,
     pub offset_db: f64,
+    /// Phase drawn raw (measured) rather than de-rotated by the run's own
+    /// delay — this run's own, like its smoothing: set from live's at
+    /// store, `P`/`R` with focus on it switch it.
+    pub raw_phase: bool,
     /// Drawn or hidden (#256, `V`). Hidden runs keep their legend row, so
     /// nothing leaves the comparison without the operator removing it.
     pub visible: bool,
@@ -150,6 +155,8 @@ pub struct SlotSettings {
     pub smoothing: ac_scene::Smoothing,
     pub invert: bool,
     pub offset_db: f64,
+    /// Live was showing raw phase (`P`/`R`) when the slot was stored.
+    pub raw_phase: bool,
 }
 
 impl SlotSettings {
@@ -158,6 +165,7 @@ impl SlotSettings {
             "smoothing_bpo": self.smoothing.bpo(),
             "invert": self.invert,
             "offset_db": self.offset_db,
+            "raw_phase": self.raw_phase,
         })
     }
 
@@ -182,6 +190,12 @@ impl SlotSettings {
             smoothing,
             invert: v.get("invert")?.as_bool()?,
             offset_db: v.get("offset_db")?.as_f64().filter(|o| o.is_finite())?,
+            // Absent from files written before it was stored: de-rotated,
+            // which is what those slots were drawn with.
+            raw_phase: match v.get("raw_phase") {
+                None => false,
+                Some(b) => b.as_bool()?,
+            },
         })
     }
 
@@ -189,6 +203,7 @@ impl SlotSettings {
         run.smoothing = self.smoothing;
         run.invert = self.invert;
         run.offset_db = self.offset_db;
+        run.raw_phase = self.raw_phase;
     }
 }
 
@@ -209,6 +224,7 @@ impl LoadedRun {
             smoothing: ac_scene::Smoothing::Off,
             invert: false,
             offset_db: 0.0,
+            raw_phase: false,
             visible: true,
             color_slot: 0,
             slot: None,
@@ -371,6 +387,10 @@ impl TransferViewState {
             smoothing: self.smoothing,
             invert: self.invert,
             offset_db: self.offset_db,
+            // A stored run is drawn raw or against its own delay; live's
+            // snapshot-delay reference is about live, and stores as the
+            // run's own.
+            raw_phase: self.derot == DerotChoice::Raw,
         }
     }
 
@@ -469,7 +489,16 @@ impl TransferViewState {
         }
     }
 
+    ///
+    /// With a stored run focused, `R` switches that run between raw and its
+    /// own delay — the only two references a stored run has.
     pub fn cycle_derot(&mut self) {
+        if let Focus::Stored(i) = self.focus {
+            if let Some(run) = self.loaded.get_mut(i) {
+                run.raw_phase = !run.raw_phase;
+            }
+            return;
+        }
         self.derot = self.derot.next();
     }
 
@@ -587,6 +616,13 @@ impl TransferViewState {
 
     /// `P`: force raw phase, or restore the previous non-raw choice.
     pub fn toggle_raw_phase(&mut self) {
+        // A focused stored run's own setting (it is drawn as stored).
+        if let Focus::Stored(i) = self.focus {
+            if let Some(run) = self.loaded.get_mut(i) {
+                run.raw_phase = !run.raw_phase;
+            }
+            return;
+        }
         if self.derot == DerotChoice::Raw {
             self.derot = self.prev_derot;
         } else {

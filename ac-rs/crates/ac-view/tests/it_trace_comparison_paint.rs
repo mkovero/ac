@@ -422,3 +422,139 @@ fn a_target_curve_paints_dashed_with_its_caption() {
         "no dashed segment in the value colour"
     );
 }
+
+/// #707: the caption row follows focus. With a slot focused it names the
+/// slot and shows the slot's smoothing — and live's smoothing is not drawn,
+/// which is what the operator saw: `N` changed the slot while the caption
+/// kept reading live's setting. With live focused, live's caption returns.
+#[test]
+fn the_smoothing_caption_follows_the_focused_trace() {
+    let live = scene(Smoothing::Oct6);
+    let slot = scene(Smoothing::Oct3);
+    let paint = |focus: Focus| {
+        let mut state = TransferViewState::new(-10.0, -30.0);
+        state.focus = focus;
+        let view = ViewKind::Transfer(state);
+        let stored = vec![StoredTrace {
+            label: "slot 2",
+            captured_at_utc: "2026-09-28T00:00:00Z",
+            scene: &slot,
+            focused: matches!(focus, Focus::Stored(0)),
+            visible: true,
+            color_slot: 1,
+            slot: Some(2),
+        }];
+        let lives = [LiveTrace {
+            label: "live".to_string(),
+            pair: 0,
+            scene: &live,
+            selected: matches!(focus, Focus::Live),
+        }];
+        let mut harness = Harness::new_ui(|ui| {
+            ui.set_min_size(egui::vec2(900.0, 480.0));
+            draw_view(&view, ui, None, Some(&live), &lives, &stored, None, None);
+        });
+        harness.run();
+        extract_texts(&harness.output().shapes)
+    };
+
+    let on_slot = paint(Focus::Stored(0));
+    assert!(
+        on_slot.iter().any(|t| t == "slot 2 \u{b7}"),
+        "no owner tag: {on_slot:?}"
+    );
+    assert!(on_slot.iter().any(|t| t == "smoothing 1/3 octave"));
+    assert!(
+        !on_slot.iter().any(|t| t == "smoothing 1/6 octave"),
+        "live's smoothing drawn while the slot is focused: {on_slot:?}"
+    );
+
+    let on_live = paint(Focus::Live);
+    assert!(on_live.iter().any(|t| t == "smoothing 1/6 octave"));
+    assert!(!on_live.iter().any(|t| t == "slot 2 \u{b7}"));
+}
+
+/// The `Shift+P` crash: in the unwrapped and group-delay views the pane's
+/// range is fitted to the bulk of the data (2 % trimmed), so a spike — a
+/// group-delay peak at a null, a mask edge — runs thousands of pane
+/// heights off it. A stored run is dashed, and dashing asks egui for one
+/// shape every few pixels of the whole line, visible or not: on real data
+/// that ran the view out of memory. Here a trace sits ~150 pane heights
+/// off-scale; clipped to the pane first, it paints a handful of shapes.
+#[test]
+fn an_off_scale_dashed_trace_paints_only_what_is_on_the_pane() {
+    let inp = TransferInput {
+        freqs: freqs(),
+        magnitude_db: vec![0.0; N],
+        phase_deg: (0..N)
+            .map(|i| if i % 2 == 0 { 170.0 } else { -170.0 })
+            .collect(),
+        coherence: vec![0.9; N],
+        delay_ms: 0.0,
+        delay_locked: Some(true),
+        delay_control: None,
+        delay_tracking: false,
+        meas_channel: 0,
+        ref_channel: 1,
+        meas_peak_dbfs: None,
+        ref_peak_dbfs: None,
+        channel_role: "meas_0".to_string(),
+        source: Source::Snapshot,
+        sr: 48_000,
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
+        stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Welch {
+            nperseg: ac_core::visualize::transfer::h1_nperseg(48_000),
+        },
+        fault: None,
+        calibration: None,
+    };
+    let mut meters = (MeterState::default(), MeterState::default());
+    let spiky = TransferScene::from_input(
+        &inp,
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off)
+            .with_phase_view(ac_scene::transfer::PhaseView::Unwrapped)
+            .with_phase_range((0.0, 1.0)),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    let far = spiky
+        .phase
+        .segments
+        .iter()
+        .flatten()
+        .map(|p| p.1.abs())
+        .fold(0.0, f64::max);
+    assert!(far > 100.0, "fixture not off-scale: {far}");
+    let view = ViewKind::Transfer(TransferViewState::new(-10.0, -30.0));
+    let stored = vec![StoredTrace {
+        label: "spiky.acsnap",
+        captured_at_utc: "2026-09-28T00:00:00Z",
+        scene: &spiky,
+        focused: false,
+        visible: true,
+        color_slot: 0,
+        slot: None,
+    }];
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(640.0, 360.0));
+        draw_view(&view, ui, None, None, &[], &stored, None, None);
+    });
+    harness.run();
+    let segments = harness
+        .output()
+        .shapes
+        .iter()
+        .filter(|cs| matches!(&cs.shape, egui::Shape::LineSegment { .. }))
+        .count();
+    assert!(
+        segments < 2_000,
+        "{segments} dash segments for an off-scale trace"
+    );
+}

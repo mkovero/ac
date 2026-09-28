@@ -32,6 +32,7 @@ fn a_capture_is_written_and_reopens_as_the_same_run() {
         smoothing: ac_scene::Smoothing::Oct6,
         invert: true,
         offset_db: 3.0,
+        raw_phase: true,
     };
     let captured =
         ac_view::capture::capture_into(&capture_client, &dir, 4, 0, settings).expect("capture");

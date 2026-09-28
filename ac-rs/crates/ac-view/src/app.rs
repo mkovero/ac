@@ -49,7 +49,12 @@ pub struct AcViewApp {
     /// drawn trace's span on the previous pass, so all share one scale. A
     /// pass behind by design: fitting it within the pass would build each
     /// live scene twice, feeding its meters and fault clock twice.
-    shared_phase_range: Option<(f64, f64)>,
+    ///
+    /// Held with the view it was fitted in: on the first pass after
+    /// `Shift+P` the previous view's range is in another unit (degrees
+    /// against milliseconds), and applying it squeezed or stretched the
+    /// traces for a frame. A range from another view is not used.
+    shared_phase_range: Option<(ac_scene::transfer::PhaseView, (f64, f64))>,
     /// The ranges the current `scene` was last built with, so a
     /// range change alone (no new frame) is detected and triggers a
     /// rebuild from the first pair's held frame.
@@ -518,7 +523,11 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
-                let phase = (state.phase_view, self.shared_phase_range);
+                let range = self
+                    .shared_phase_range
+                    .filter(|(view, _)| *view == state.phase_view)
+                    .map(|(_, r)| r);
+                let phase = (state.phase_view, range);
                 let modes = with_phase(
                     ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
                         .with_coherence_mask(state.coherence_mask)
@@ -600,7 +609,8 @@ impl AcViewApp {
                     )
                     .chain(self.average_scene.iter().map(|(s, _)| s))
                     .filter_map(|s| s.phase_span)
-                    .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+                    .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+                    .map(|r| (state.phase_view, r));
                 self.scene = None;
                 self.target_trace = self.target.as_ref().map(|t| crate::view::TargetTrace {
                     trace: t.trace(freq_range, db_range),
@@ -1468,7 +1478,11 @@ impl AcViewApp {
         let live = state != crate::stimulus::StimState::Idle;
         // Enter belongs to the stimulus only while armed — it fires. While
         // driving it pauses the live trace (#256); Space and Esc stop.
-        let enter = enter && state == crate::stimulus::StimState::Armed;
+        // With a typed entry open (`J`, `T`) Enter applies the entry: firing
+        // is a start, not a stop, and an operator finishing a number did
+        // not ask to emit (Codex review of #710). Space and Esc still stop.
+        let entry_open = self.offset_entry.is_some() || self.delay_entry.is_some();
+        let enter = enter && state == crate::stimulus::StimState::Armed && !entry_open;
         if !live || !(space || enter || esc) {
             return false;
         }
@@ -1687,7 +1701,9 @@ impl AcViewApp {
                 (
                     chars,
                     i.key_pressed(Key::Backspace),
-                    i.key_pressed(Key::J),
+                    // Enter applies, as it would anywhere else; `J`
+                    // again still does.
+                    i.key_pressed(Key::Enter) || i.key_pressed(Key::J),
                     i.key_pressed(Key::Escape),
                 )
             });
@@ -1713,7 +1729,7 @@ impl AcViewApp {
                 (
                     chars,
                     i.key_pressed(Key::Backspace),
-                    i.key_pressed(Key::T),
+                    i.key_pressed(Key::Enter) || i.key_pressed(Key::T),
                     i.key_pressed(Key::Escape),
                 )
             });
@@ -2041,7 +2057,7 @@ impl AcViewApp {
                 .show(ctx, |ui| {
                     ui.label(format!("offset (dB):  {}\u{258f}", entry.text()));
                     ui.separator();
-                    ui.label("digits, -, .   Backspace   J apply (empty: none)   Esc cancel");
+                    ui.label("digits, -, .   Backspace   Enter apply (empty: none)   Esc cancel");
                 });
         }
 
@@ -2051,7 +2067,7 @@ impl AcViewApp {
                 .show(ctx, |ui| {
                     ui.label(format!("delay (samples):  {}▏", entry.text()));
                     ui.separator();
-                    ui.label("digits, -   Backspace   T apply   Esc cancel");
+                    ui.label("digits, -   Backspace   Enter apply   Esc cancel");
                 });
         }
     }
@@ -2139,9 +2155,16 @@ fn rebuild_loaded_scenes(
                 run.sr,
                 run.delay_offset_samples,
                 with_phase(
-                    ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
-                        .with_coherence_mask(state.coherence_mask)
-                        .with_invert_offset(run.invert, run.offset_db),
+                    ac_scene::DisplayModes::new(
+                        if run.raw_phase {
+                            ac_scene::DerotMode::Raw
+                        } else {
+                            ac_scene::DerotMode::Session
+                        },
+                        run.smoothing,
+                    )
+                    .with_coherence_mask(state.coherence_mask)
+                    .with_invert_offset(run.invert, run.offset_db),
                     phase,
                 ),
                 freq_range,
