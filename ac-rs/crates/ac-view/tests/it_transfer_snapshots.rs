@@ -122,6 +122,7 @@ fn transfer_scene_from(estimator: ac_scene::transfer::Estimator) -> TransferScen
         // adapter after this change.
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-6.0),

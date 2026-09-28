@@ -283,6 +283,9 @@ pub struct DelayControl {
     pub residual: Option<i64>,
     /// Whether [`Self::samples`] was set by the operator (`delay_operator`).
     pub operator: bool,
+    /// Delay tracking is on (`delay_tracking`, #687): the daemon moves
+    /// [`Self::samples`] by the residual once independent windows agree.
+    pub tracking: bool,
 }
 
 impl DelayControl {
@@ -291,6 +294,7 @@ impl DelayControl {
             samples: frame.delay_samples,
             residual: frame.delay_residual,
             operator: frame.delay_operator,
+            tracking: frame.delay_tracking,
         })
     }
 
@@ -300,9 +304,16 @@ impl DelayControl {
     }
 
     /// `"set · find +12 smp (+0.25 ms)"` — where the delay came from, and
-    /// what Find reads against it right now.
+    /// what Find reads against it right now. `tracking` replaces the source
+    /// while tracking is on (#687): the delay is then the daemon's to move.
     pub fn readout(&self, sr: u32) -> String {
-        let source = if self.operator { "set" } else { "found" };
+        let source = if self.tracking {
+            "tracking"
+        } else if self.operator {
+            "set"
+        } else {
+            "found"
+        };
         match self.residual {
             Some(r) if sr > 0 => {
                 let ms = r as f64 * 1000.0 / sr as f64;
@@ -526,6 +537,8 @@ pub struct TransferScene {
     pub delay_samples: Option<i64>,
     /// What "Insert" sends ([`DelayControl::insert_samples`]).
     pub delay_insert_samples: Option<i64>,
+    /// Delay tracking is on for this pair (#687), held delay or not.
+    pub delay_tracking: bool,
     /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
     /// (#229).
     ///
@@ -680,6 +693,10 @@ pub struct TransferInput {
     pub delay_locked: Option<bool>,
     /// The operator's delay control (#669); `None` off the live path.
     pub delay_control: Option<DelayControl>,
+    /// Delay tracking is on for this pair (#687), whether or not it holds
+    /// a delay yet — a pair switched on while silent must still read as on
+    /// (Codex review: `Y` would otherwise send `track: true` again).
+    pub delay_tracking: bool,
     /// This pair's channel numbers — distinct from [`Self::channel_role`],
     /// which is a display label, not a wire identity.
     pub meas_channel: i64,
@@ -845,6 +862,7 @@ impl TransferInput {
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
             delay_control: DelayControl::from_wire_frame(frame),
+            delay_tracking: frame.delay_tracking,
             meas_channel: frame.meas_channel,
             ref_channel: frame.ref_channel,
             meas_peak_dbfs: frame.meas_peak_dbfs,
@@ -929,6 +947,7 @@ impl TransferInput {
             delay_ms: f64::NAN,
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             meas_channel: -1,
             ref_channel: -1,
             meas_peak_dbfs: None,
@@ -1045,6 +1064,7 @@ impl TransferInput {
             // claim about whether it was a measured lock.
             delay_locked: None,
             delay_control: None,
+            delay_tracking: false,
             // `PairDerivation` carries no wire channel identity — a
             // `channel_role` label is all the caller has (see above). `-1`
             // is never a real channel number.
@@ -1203,6 +1223,7 @@ impl TransferScene {
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
             delay_samples: input.delay_control.map(|c| c.samples),
             delay_insert_samples: input.delay_control.and_then(|c| c.insert_samples()),
+            delay_tracking: input.delay_tracking,
             smoothing_readout: modes.smoothing.label(),
             coherence_mask_readout: (modes.coherence_mask != COHERENCE_THRESHOLD)
                 .then(|| format!("coherence mask {:.2}", modes.coherence_mask)),
@@ -1517,6 +1538,7 @@ mod tests {
                 delay_ms: 0.0,
                 delay_locked: Some(true),
                 delay_control: None,
+                delay_tracking: false,
                 meas_channel: 0,
                 ref_channel: 1,
                 meas_peak_dbfs: Some(-20.0),
@@ -1613,6 +1635,7 @@ mod tests {
             samples: 470,
             residual: Some(12),
             operator: true,
+            tracking: false,
         };
         assert_eq!(c.readout(48_000), "set · find +12 smp (+0.25 ms)");
         assert_eq!(c.insert_samples(), Some(482));
@@ -1628,6 +1651,14 @@ mod tests {
         };
         assert_eq!(none.readout(48_000), "set · find —");
         assert_eq!(none.insert_samples(), None);
+        let tracking = DelayControl {
+            tracking: true,
+            ..c
+        };
+        assert_eq!(
+            tracking.readout(48_000),
+            "tracking · find +12 smp (+0.25 ms)"
+        );
     }
 
     /// Nothing to insert or nudge on a pair without a delay.
@@ -1648,7 +1679,8 @@ mod tests {
             Some(DelayControl {
                 samples: 400,
                 residual: Some(0),
-                operator: false
+                operator: false,
+                tracking: false,
             })
         );
     }
@@ -1784,6 +1816,7 @@ mod tests {
             delay_ms: 3.3958,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1918,6 +1951,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,
@@ -1972,6 +2006,7 @@ mod tests {
             delay_ms: 0.0,
             delay_locked: Some(true),
             delay_control: None,
+            delay_tracking: false,
             meas_channel: 0,
             ref_channel: 1,
             meas_peak_dbfs: None,

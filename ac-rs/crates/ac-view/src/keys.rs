@@ -97,6 +97,9 @@ pub enum Action {
     /// stored run in a production build — loading one is #256's file
     /// picker, still a stub — but wired and tested now, same pattern
     /// `Action::OpenSnapshot` already documents.
+    /// `Y` (#687): delay tracking on or off for the selected live pair —
+    /// the daemon then follows the arrival as the mic moves.
+    ToggleDelayTracking,
     CycleFocus,
     /// Close the focused stored run (#321). A no-op while focus is on
     /// the live trace.
@@ -259,6 +262,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::InsertDelay,
         scope: Scope::Transfer,
         description: "Insert found delay (Shift: find again)",
+    },
+    Binding {
+        key: Key::Y,
+        action: Action::ToggleDelayTracking,
+        scope: Scope::Transfer,
+        description: "Delay tracking on/off for the selected live pair",
     },
     Binding {
         key: Key::ArrowLeft,

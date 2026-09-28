@@ -126,6 +126,9 @@ pub enum DelayAction {
     /// Discard the held delay so the session finds it again from the
     /// unaligned live IR — what `relock` (#226) did.
     Find,
+    /// Switch delay tracking on or off (#687): the held delay follows the
+    /// live IR's residual once two independent windows agree on it.
+    Track(bool),
 }
 
 /// `set_delay` requests waiting for a running `transfer_stream` worker

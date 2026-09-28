@@ -42,6 +42,7 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         // de-rotation cases meaningful.
         delay_locked: Some(true),
         delay_control: None,
+        delay_tracking: false,
         meas_channel: 0,
         ref_channel: 1,
         meas_peak_dbfs: Some(-6.0206),
