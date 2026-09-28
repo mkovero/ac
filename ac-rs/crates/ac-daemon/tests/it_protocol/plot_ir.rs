@@ -70,11 +70,19 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(12));
+                assert_eq!(v["report"]["schema_version"], json!(13));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
                 assert!(notes.contains("18233"), "notes: {notes:?}");
+                // #398: schema v13 also carries the verdict as data. Either
+                // state is accepted; absence is the failure this pins.
+                let state = &v["report"]["tail_decay"]["state"];
+                assert!(
+                    *state == json!("checked") || *state == json!("not_evaluated"),
+                    "tail_decay: {}",
+                    v["report"]["tail_decay"]
+                );
                 got_report = true;
             }
             Some((t, _)) if t == "done" => break,

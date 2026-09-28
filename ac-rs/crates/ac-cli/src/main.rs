@@ -67,6 +67,14 @@ fn main() {
             commands::report::run(path, *format);
             return;
         }
+        CommandKind::ReportVerify {
+            paths,
+            mic_curve,
+            format,
+        } => {
+            commands::report_verify::run(paths, mic_curve.as_deref(), *format);
+            return;
+        }
         _ => {}
     }
 

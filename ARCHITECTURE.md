@@ -59,17 +59,24 @@ ac-core/src/
       gated.rs             #   time-gated quasi-anechoic response
     noise.rs               # AES17 idle-channel noise measurement
     report.rs              # MeasurementReport type, serialization
+    verification/          # multi-run set statistics (#398) — numbers only
+      set.rs               #   validity refusals, drive order, run status, mic provenance
+      stats.rs             #   1/6-octave grid, per-band medians, gain/tonal/flatness, harmonic slope
     report_layout/         # what each section says — shared by both renderers
       sections.rs          #   header, method, stimulus, calibration, environment
       payload.rs           #   per-payload rows, table columns, plot series
-      axis.rs              #   log-f / dB domains, gridline steps, tick labels
+      axis.rs              #   log-f / dB / linear domains, gridline steps, tick labels
+      chart.rs             #   multi-series XY chart model both painters draw
+      verification.rs      #   verification text: header, run table, verdicts, refusals
     report_html/           # self-contained HTML renderer (inline CSS + SVG)
-      plot.rs              #   one SVG plot: magnitude and phase
+      plot.rs              #   one SVG plot: magnitude and phase; multi-series chart
       emit.rs              #   <dl> and <table> emission, escaping
+      verification.rs      #   verification page from the shared layout
     report_pdf/            # pure-Rust printpdf renderer, paginated A4
       cursor.rs            #   page geometry, pt->mm, pagination
       metrics.rs           #   core-font advance widths; wrap in the drawing face
-      plot.rs              #   plot frame, grids, trace
+      plot.rs              #   plot frame, grids, trace; multi-series chart
+      verification.rs      #   verification document from the shared layout
 
   visualize/               # Tier 2
     mod.rs

@@ -162,6 +162,94 @@ fn clamp01(v: f64) -> f64 {
     }
 }
 
+/// Linear domain over `values`, padded by 5 % of their span each side and
+/// widened, about its centre, to at least `min_span` — a flat series
+/// otherwise renders pinned to the frame. Non-finite values are ignored;
+/// nothing usable falls back to `±min_span / 2` about zero. Used for the
+/// drive axis of a verification chart and for any fine dB axis, where
+/// [`db_domain`]'s whole-decibel padding would swamp a ±0.2 dB deviation.
+pub fn linear_domain(values: impl IntoIterator<Item = f64>, min_span: f64) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in values {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    let min_span = if min_span.is_finite() && min_span > 0.0 {
+        min_span
+    } else {
+        1.0
+    };
+    if !lo.is_finite() || !hi.is_finite() {
+        return (-min_span / 2.0, min_span / 2.0);
+    }
+    let pad = (hi - lo) * 0.05;
+    let (mut lo, mut hi) = (lo - pad, hi + pad);
+    if hi - lo < min_span {
+        let mid = (lo + hi) / 2.0;
+        lo = mid - min_span / 2.0;
+        hi = mid + min_span / 2.0;
+    }
+    (lo, hi)
+}
+
+/// A 1-2-5 step giving roughly four to eight gridlines over `span`.
+pub fn linear_step(span: f64) -> f64 {
+    if !span.is_finite() || span <= 0.0 {
+        return 1.0;
+    }
+    let raw = span / 6.0;
+    let mag = 10f64.powf(raw.log10().floor());
+    let norm = raw / mag;
+    let m = if norm <= 1.0 {
+        1.0
+    } else if norm <= 2.0 {
+        2.0
+    } else if norm <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    m * mag
+}
+
+/// Gridline values inside `[min, max]` on a [`linear_step`] ladder,
+/// ascending. Each value is computed as `index × step` rather than by
+/// accumulation, so a long axis does not drift off its round numbers.
+pub fn linear_ticks(min: f64, max: f64) -> Vec<f64> {
+    if !min.is_finite() || !max.is_finite() || max <= min {
+        return Vec::new();
+    }
+    let step = linear_step(max - min);
+    let first = (min / step).ceil() as i64;
+    let last = (max / step).floor() as i64;
+    (first..=last)
+        .take(64)
+        .map(|i| {
+            let v = i as f64 * step;
+            // `-0.0` prints as `-0`.
+            if v == 0.0 {
+                0.0
+            } else {
+                v
+            }
+        })
+        .collect()
+}
+
+/// A linear tick label with as many decimals as `step` needs.
+pub fn format_linear(v: f64, step: f64) -> String {
+    let decimals = if step >= 1.0 {
+        0
+    } else if step >= 0.1 {
+        1
+    } else {
+        2
+    };
+    format!("{v:.decimals$}")
+}
+
 /// Decade tick label: `100`, `1k`, `10k`.
 pub fn format_freq(f: f64) -> String {
     if f >= 1000.0 {
@@ -246,6 +334,27 @@ mod tests {
         assert!(!lines.is_empty());
         assert!(lines.iter().all(|v| *v >= min && *v <= max), "{lines:?}");
         assert!(lines.len() < 100);
+    }
+
+    #[test]
+    fn linear_domain_widens_a_flat_series_and_falls_back_on_nothing() {
+        assert_eq!(linear_domain([0.0, 0.0], 1.0), (-0.5, 0.5));
+        assert_eq!(linear_domain([f64::NAN], 2.0), (-1.0, 1.0));
+        let (lo, hi) = linear_domain([-40.0, -30.0], 1.0);
+        assert!(lo < -40.0 && hi > -30.0);
+    }
+
+    #[test]
+    fn linear_ticks_land_on_round_numbers_inside_the_domain() {
+        let ticks = linear_ticks(-40.5, -29.5);
+        assert_eq!(ticks, vec![-40.0, -38.0, -36.0, -34.0, -32.0, -30.0]);
+        let fine = linear_ticks(-0.3, 0.3);
+        assert!(fine.contains(&0.0), "{fine:?}");
+        assert!(fine.iter().all(|v| *v >= -0.3 && *v <= 0.3));
+        assert!(linear_ticks(1.0, 1.0).is_empty());
+        assert!(linear_ticks(f64::NAN, 1.0).is_empty());
+        assert_eq!(format_linear(-0.2, 0.1), "-0.2");
+        assert_eq!(format_linear(-30.0, 2.0), "-30");
     }
 
     #[test]

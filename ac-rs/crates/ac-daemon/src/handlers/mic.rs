@@ -33,11 +33,12 @@ pub(crate) fn apply_mic_curve_db_f32(curve: &MicResponse, freqs: &[f32], mags: &
 /// transfer `magnitude_db` and gated-response paths. Not for linear
 /// amplitudes (monitor columns, `AnalysisResult.spectrum`,
 /// `harmonic_levels`): those take [`apply_mic_curve_linear_f64`].
+///
+/// Delegates to [`MicResponse::corrected_db`], the sign rule `ac report
+/// verify` also applies post-hoc (#398).
 pub(crate) fn apply_mic_curve_db_f64(curve: &MicResponse, freqs: &[f64], mags: &mut [f64]) {
     for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
-        if m.is_finite() {
-            *m -= curve.correction_at(f as f32) as f64;
-        }
+        *m = curve.corrected_db(f, *m);
     }
 }
 

@@ -14,7 +14,7 @@ use ac_core::measurement::report::{
     InterPairOffset, InterfaceLatency, MeasuredInterPairOffset, MeasuredLatency,
     MeasuredReferenceLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
     MeasurementReport, PositionSnapshot, ProcessingChain, ReferenceLatency, StimulusParams,
-    SCHEMA_VERSION,
+    TailDecayRecord, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
@@ -568,6 +568,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             reference_latency: None,
             reference_stored_latency: None,
             inter_pair_offset: None,
+            tail_decay: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -911,6 +912,7 @@ fn emit_spectrum_bands(
         reference_latency: None,
         reference_stored_latency: None,
         inter_pair_offset: None,
+        tail_decay: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -1438,10 +1440,19 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // the tail past the linear-IR peak is exactly what the criterion
         // asks about and `extract_irs` below discards everything outside
         // `window_len`.
-        let decay_note = match check_tail_decay(&full, &params, tail_s) {
-            Ok(check) => check.note(),
-            Err(e) => format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
+        // The same verdict is kept twice: as the `notes` sentence, and as
+        // the structured `tail_decay` field (schema v13, #398) a
+        // multi-run verification reads to exclude a failed run.
+        let (decay_note, tail_decay) = match check_tail_decay(&full, &params, tail_s) {
+            Ok(check) => (check.note(), TailDecayRecord::Checked(check)),
+            Err(e) => (
+                format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
+                TailDecayRecord::NotEvaluated {
+                    reason: e.to_string(),
+                },
+            ),
         };
+        let tail_decay = Some(tail_decay);
         let mut notes = vec![decay_note];
 
         let irs = match extract_irs(&full, &params, n_harmonics.max(1), window_len) {
@@ -1680,6 +1691,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             reference_latency,
             reference_stored_latency,
             inter_pair_offset,
+            tail_decay,
             data: vec![
                 MeasurementPayload {
                     data,

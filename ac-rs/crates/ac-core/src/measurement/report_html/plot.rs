@@ -10,6 +10,7 @@
 use std::fmt::Write as _;
 
 use crate::measurement::report_layout::axis;
+use crate::measurement::report_layout::chart::{plottable, Chart, XScale};
 
 const WIDTH: f64 = 900.0;
 const PAD_L: f64 = 60.0;
@@ -157,6 +158,172 @@ impl Plot<'_> {
     }
 }
 
+/// Series colours, cycled. Colour is a convenience only: every series
+/// also carries its label at the right-hand end of its line and in the
+/// legend, so a greyscale print still names each line.
+const PALETTE: [&str; 6] = [
+    "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#8c564b",
+];
+
+/// Render a [`Chart`] — any number of labelled series on a log-frequency
+/// or linear x axis — as a standalone `<svg>`, with a legend under the
+/// plot box. Every domain, tick and label comes from the chart; an
+/// upper-bound series draws dashed. An empty chart yields an empty
+/// string.
+pub(super) fn chart(chart: &Chart) -> String {
+    if chart.is_empty() {
+        return String::new();
+    }
+    let pad_t = 28.0;
+    let plot_h = 260.0;
+    let legend_row = 16.0;
+    let height = pad_t + plot_h + PAD_B + 8.0 + legend_row * chart.series.len() as f64;
+    let plot_w = WIDTH - PAD_L - PAD_R;
+    let x = |v: f64| PAD_L + chart.x_frac(v) * plot_w;
+    let y = |v: f64| pad_t + (1.0 - chart.y_frac(v)) * plot_h;
+
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" \
+         width=\"{w}\" height=\"{h}\" role=\"img\" aria-label=\"{aria}\">",
+        w = WIDTH as i64,
+        h = height as i64,
+        aria = super::html_escape(&chart.title),
+    );
+    let _ = writeln!(
+        s,
+        "<text x=\"{PAD_L}\" y=\"16\" class=\"title\">{}</text>",
+        super::html_escape(&chart.title)
+    );
+    for t in &chart.x_ticks {
+        let xp = x(t.value);
+        let _ = writeln!(
+            s,
+            "<line class=\"grid\" x1=\"{xp:.1}\" y1=\"{pad_t}\" x2=\"{xp:.1}\" y2=\"{y1}\" />",
+            y1 = pad_t + plot_h,
+        );
+        let _ = writeln!(
+            s,
+            "<text x=\"{xp:.1}\" y=\"{ty:.1}\" text-anchor=\"middle\">{}</text>",
+            super::html_escape(&t.label),
+            ty = pad_t + plot_h + 14.0,
+        );
+    }
+    for t in &chart.y_ticks {
+        let yp = y(t.value);
+        let _ = writeln!(
+            s,
+            "<line class=\"grid\" x1=\"{PAD_L}\" y1=\"{yp:.1}\" x2=\"{x1}\" y2=\"{yp:.1}\" />",
+            x1 = WIDTH - PAD_R,
+        );
+        let _ = writeln!(
+            s,
+            "<text x=\"{tx:.1}\" y=\"{ty:.1}\" text-anchor=\"end\">{}</text>",
+            super::html_escape(&t.label),
+            tx = PAD_L - 6.0,
+            ty = yp + 3.5,
+        );
+    }
+    for b in &chart.bands {
+        for edge in [b.lo, b.hi] {
+            let xp = x(edge);
+            let _ = writeln!(
+                s,
+                "<line class=\"band\" x1=\"{xp:.1}\" y1=\"{pad_t}\" x2=\"{xp:.1}\" y2=\"{y1}\" />",
+                y1 = pad_t + plot_h,
+            );
+        }
+        let mid = match chart.x_scale {
+            XScale::LogFrequency => (b.lo * b.hi).sqrt(),
+            XScale::Linear => (b.lo + b.hi) / 2.0,
+        };
+        let _ = writeln!(
+            s,
+            "<text class=\"band\" x=\"{xp:.1}\" y=\"{ty:.1}\" text-anchor=\"middle\">{}</text>",
+            super::html_escape(&b.label),
+            xp = x(mid),
+            ty = pad_t + 12.0,
+        );
+    }
+    let _ = writeln!(
+        s,
+        "<rect class=\"axis\" x=\"{PAD_L}\" y=\"{pad_t}\" width=\"{plot_w}\" height=\"{plot_h}\" />"
+    );
+    let _ = writeln!(
+        s,
+        "<text x=\"{tx:.1}\" y=\"{ty:.1}\" text-anchor=\"end\">{}</text>",
+        super::html_escape(&chart.x_label),
+        tx = WIDTH - PAD_R,
+        ty = pad_t + plot_h + 28.0,
+    );
+    let _ = writeln!(
+        s,
+        "<text x=\"{PAD_L}\" y=\"{ty:.1}\">{}</text>",
+        super::html_escape(&chart.y_label),
+        ty = pad_t - 4.0,
+    );
+
+    for (i, series) in chart.series.iter().enumerate() {
+        let colour = PALETTE[i % PALETTE.len()];
+        let dash = if series.upper_bound {
+            " stroke-dasharray=\"6 4\""
+        } else {
+            ""
+        };
+        let mut d = String::new();
+        let mut pen_down = false;
+        let mut last = None;
+        for p in &series.points {
+            if !plottable(chart.x_scale, *p) {
+                pen_down = false;
+                continue;
+            }
+            let (xp, yp) = (x(p.0), y(p.1));
+            let _ = write!(d, "{}{xp:.2} {yp:.2} ", if pen_down { 'L' } else { 'M' });
+            pen_down = true;
+            last = Some((xp, yp));
+            if chart.point_markers {
+                let _ = writeln!(
+                    s,
+                    "<circle cx=\"{xp:.2}\" cy=\"{yp:.2}\" r=\"3\" fill=\"{colour}\" />"
+                );
+            }
+        }
+        if !d.is_empty() {
+            let _ = writeln!(
+                s,
+                "<path class=\"series\" stroke=\"{colour}\"{dash} d=\"{}\" />",
+                d.trim_end()
+            );
+        }
+        if let Some((xp, yp)) = last {
+            let _ = writeln!(
+                s,
+                "<text x=\"{tx:.1}\" y=\"{ty:.1}\" text-anchor=\"end\" fill=\"{colour}\">{}</text>",
+                super::html_escape(&series.label),
+                tx = xp - 4.0,
+                ty = yp - 5.0,
+            );
+        }
+        let ly = pad_t + plot_h + PAD_B + 8.0 + legend_row * i as f64;
+        let _ = writeln!(
+            s,
+            "<line x1=\"{PAD_L}\" y1=\"{ly:.1}\" x2=\"{x2}\" y2=\"{ly:.1}\" stroke=\"{colour}\" stroke-width=\"1.6\"{dash} />",
+            x2 = PAD_L + 30.0,
+        );
+        let _ = writeln!(
+            s,
+            "<text x=\"{tx}\" y=\"{ty:.1}\">{}</text>",
+            super::html_escape(&series.label),
+            tx = PAD_L + 38.0,
+            ty = ly + 3.5,
+        );
+    }
+    let _ = writeln!(s, "</svg>");
+    s
+}
+
 pub(super) fn magnitude(aria: &str, height: f64, series: &[(f64, f64)]) -> String {
     Plot {
         height,
@@ -228,6 +395,49 @@ mod tests {
         let narrow = phase(&[(100.0, 1.0), (1_000.0, 2.0)]);
         assert!(narrow.contains("+180"), "{narrow}");
         assert!(narrow.contains("-180"), "{narrow}");
+    }
+
+    fn two_series_chart(upper_bound: bool) -> Chart {
+        use crate::measurement::report_layout::chart::Series;
+        let mut floor = Series::new(
+            "H4 \u{2264} floor-limited",
+            vec![(-40.0, -80.0), (-30.0, -80.0)],
+        );
+        floor.upper_bound = upper_bound;
+        Chart::new(
+            "Harmonic <level>",
+            "drive, dBFS",
+            "dB",
+            XScale::Linear,
+            vec![
+                Series::new(
+                    "H2 tracks drive",
+                    vec![(-40.0, -70.0), (-30.0, f64::NAN), (-20.0, -50.0)],
+                ),
+                floor,
+            ],
+            vec![],
+            6.0,
+        )
+    }
+
+    #[test]
+    fn chart_draws_every_series_with_its_label_and_dashes_an_upper_bound() {
+        let svg = chart(&two_series_chart(true));
+        assert_eq!(svg.matches("class=\"series\"").count(), 2, "{svg}");
+        assert!(svg.contains("H2 tracks drive"));
+        assert!(svg.contains("H4 \u{2264} floor-limited"));
+        assert!(svg.contains("Harmonic &lt;level&gt;"));
+        // One dashed path and one dashed legend swatch.
+        assert_eq!(svg.matches("stroke-dasharray").count(), 2, "{svg}");
+        assert!(!chart(&two_series_chart(false)).contains("stroke-dasharray"));
+        assert!(!svg.contains("NaN"), "{svg}");
+    }
+
+    #[test]
+    fn an_empty_chart_draws_nothing() {
+        let empty = Chart::new("t", "x", "y", XScale::Linear, vec![], vec![], 1.0);
+        assert!(chart(&empty).is_empty());
     }
 
     #[test]

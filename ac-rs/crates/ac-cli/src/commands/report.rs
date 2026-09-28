@@ -50,8 +50,9 @@ pub fn run(path: &str, format: ReportFormat) {
 
 /// The refusal block for a report whose `schema_version` this build does
 /// not read (#429): names compatibility, not syntax, as the fault, and
-/// says no HTML/PDF was produced.
-fn unsupported_schema_lines(
+/// says no HTML/PDF was produced. `ac report verify` prints the same block
+/// for any one of its inputs.
+pub(crate) fn unsupported_schema_lines(
     path: &str,
     found: u64,
     supported: &RangeInclusive<u32>,
