@@ -415,13 +415,18 @@ impl AcViewApp {
         self.ir_scene = match t.focus {
             crate::view::Focus::Stored(i) => t.loaded.get(i).and_then(|run| {
                 run.ir.as_ref().map(|ir| {
-                    ac_scene::IrScene::from_input_view(ir, view).labelled(run.label.clone())
+                    // The run's `←`/`→` nudge moves its arrival marker as it
+                    // moves its phase (Codex review): the marker is the
+                    // delay the trace is drawn against.
+                    let mut ir = ir.clone();
+                    ir.delay_ms += run.delay_offset_samples as f64 * 1000.0 / f64::from(run.sr);
+                    ac_scene::IrScene::from_input_view(&ir, view).labelled(run.label.clone())
                 })
             }),
             crate::view::Focus::Live if t.paused => None,
             crate::view::Focus::Live => self.live_selected().ir.as_ref().map(|f| {
                 ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
-                    .labelled("live")
+                    .labelled(self.pair_label(self.selected_pair()))
             }),
         };
     }

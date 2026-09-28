@@ -188,9 +188,14 @@ pub fn capture_into(
         &file_name(slot, pair, &snap.meta.captured_at_utc),
         &bytes,
     )?;
+    // A capture whose settings could not be saved is removed again: left
+    // in the `F` list it would reopen at the defaults, silently unlike the
+    // slot the operator stored (Codex review).
     let settings_file = settings_path(&path);
-    std::fs::write(&settings_file, settings.to_json().to_string())
-        .with_context(|| format!("write {}", settings_file.display()))?;
+    if let Err(e) = std::fs::write(&settings_file, settings.to_json().to_string()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e).with_context(|| format!("write {}", settings_file.display()));
+    }
     let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, pair, format!("slot {slot}"))?;
     Ok(Captured {
         slot,

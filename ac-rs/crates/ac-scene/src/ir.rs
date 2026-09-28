@@ -46,6 +46,7 @@ const IR_MAX_SAMPLES: usize = 2000;
 
 /// The canonical intermediate both a live `visualize/ir` wire frame and
 /// a `.acsnap`-derived [`PairDerivation`] funnel through.
+#[derive(Debug, Clone)]
 pub struct IrInput {
     /// h(t), `fftshift`-centred.
     pub samples: Vec<f32>,

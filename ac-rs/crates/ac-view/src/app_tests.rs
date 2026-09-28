@@ -2389,6 +2389,59 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
     );
 }
 
+/// Codex review of #702: a slot's `→` nudge moves its IR arrival marker by
+/// the nudged delay, as it moves its phase.
+#[test]
+fn a_nudged_slot_moves_its_ir_arrival_marker() {
+    let mut app = ir_app();
+    let mut run = loaded_run("slot 1", "2026-09-28T00:00:00Z");
+    run.ir = Some(ac_scene::IrInput::from_pair_derivation(
+        &run.derivation,
+        &run.channel_role,
+        run.sr,
+    ));
+    let sr = run.sr;
+    app.finish_capture_for_test(Ok(crate::capture::Captured {
+        slot: 1,
+        opened: true,
+        path: std::path::PathBuf::from("/c/slot1.acsnap"),
+        run,
+    }));
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let arrival = |app: &AcViewApp| app.current_ir_scene().unwrap().arrival.text.clone();
+    let before = arrival(&app);
+    app.handle_action(Action::NudgeDelayLater, true); // ten samples
+    app.rebuild_ir_scene();
+    let ms = |t: &str| t.trim_end_matches(" ms").parse::<f64>().unwrap();
+    let moved = ms(&arrival(&app)) - ms(&before);
+    let want = 10.0 * 1000.0 / f64::from(sr);
+    assert!(
+        (moved - want).abs() < 0.006,
+        "moved {moved} ms, want {want}"
+    );
+}
+
+/// Codex review of #702: with several live pairs the IR panel names the
+/// selected one, as the legend does.
+#[test]
+fn the_live_ir_names_its_pair_when_there_are_several() {
+    let mut app = two_pair_app();
+    let mut ir = ir_frame();
+    ir.meas_channel = 4;
+    app.ingest_frame_for_test(pair_frame(0, 326, -20.0), 0.0);
+    app.ingest_frame_for_test(pair_frame(4, 0, -50.0), 0.0);
+    app.ingest_ir_frame_for_test(ir);
+    app.handle_action(Action::CycleFocus, false); // the second pair
+    app.handle_action(Action::ToggleIrPanel, false);
+    app.rebuild_ir_scene();
+    assert_eq!(
+        app.current_ir_scene()
+            .and_then(|s| s.label.clone())
+            .as_deref(),
+        Some("live 4")
+    );
+}
+
 // ---- target curves ----
 
 /// `Z` lists the targets folder; `Z` in the list draws the selected curve
