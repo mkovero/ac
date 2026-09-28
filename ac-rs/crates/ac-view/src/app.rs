@@ -263,8 +263,10 @@ impl AcViewApp {
     fn set_pairs(&mut self, pairs: Vec<(u32, u32)>) {
         let n = pairs.len().max(1);
         self.live = (0..n).map(|_| LivePair::default()).collect();
-        // A new session: nothing held from the old one is its IR.
+        // A new session: nothing held from the old one is its IR, and a
+        // preset asked of the old one is not pending in it.
         self.paused_ir = None;
+        self.speed_pending = None;
         self.pairs = pairs;
         self.with_transfer(|t| t.set_live_count(n));
     }
@@ -2397,13 +2399,17 @@ impl LivePair {
         if stale {
             self.ir_arrival = None;
         }
-        // A new speed preset retires the ladder the arrival IR ran in
-        // (#714, Codex review): drop it rather than let it age out.
+        // The arrival IR is the ladder's (#706): a frame with no ladder
+        // columns (rebuilt — a delay or preset change — or not yet settled)
+        // has none to show, and a new preset retired the one it ran in
+        // (#714, Codex review). Dropped rather than left to age out.
         let speed = |f: &ac_core::wire::TransferFrame| f.mtw.as_ref().and_then(|m| m.speed.clone());
-        if let (Some(old), Some(new)) = (self.frame.as_ref().and_then(speed), speed(&frame)) {
-            if old != new {
-                self.ir_arrival = None;
-            }
+        let preset_changed = matches!(
+            (self.frame.as_ref().and_then(speed), speed(&frame)),
+            (Some(old), Some(new)) if old != new
+        );
+        if frame.mtw.is_none() || preset_changed {
+            self.ir_arrival = None;
         }
         self.frame = Some(frame);
         self.frames_in += 1;

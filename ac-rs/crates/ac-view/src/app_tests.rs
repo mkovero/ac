@@ -2994,4 +2994,28 @@ fn a_speed_change_drops_the_arrival_ir() {
         app.live[0].ir_arrival.is_none(),
         "kept the retired ladder's IR"
     );
+    // A settling frame of a rebuilt ladder carries no columns at all.
+    let mut arrival = ir_frame();
+    arrival.span = Some(ac_core::wire::IR_SPAN_ARRIVAL.to_string());
+    arrival.delay_samples = found_frame().delay_samples;
+    app.ingest_ir_frame_for_test(arrival);
+    assert!(app.live[0].ir_arrival.is_some());
+    let mut settling = found_frame();
+    settling.mtw = None;
+    app.ingest_frame_for_test(settling, 0.1);
+    assert!(
+        app.live[0].ir_arrival.is_none(),
+        "kept an IR with no ladder"
+    );
+}
+
+/// Codex recheck of #714: a relaunch drops a pending preset request.
+#[test]
+fn a_relaunch_forgets_a_pending_speed() {
+    let mut app = transfer_app();
+    app.handle_action(Action::CycleSpeed, false); // asks live
+    app.set_pairs(vec![(0, 1)]);
+    app.ingest_frame_for_test(found_frame(), 0.0); // new session: Detail
+    app.handle_action(Action::CycleSpeed, false);
+    assert_eq!(app.sent_speed.last().unwrap()["speed"], "live");
 }
