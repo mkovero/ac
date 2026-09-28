@@ -2448,7 +2448,10 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
     app.set_pairs(vec![(0, 1)]);
     app.rebuild_ir_scene();
     assert!(app.current_ir_scene().is_none(), "old session's IR shown");
+    // Still paused: the new session's IR does not start drawing (Codex
+    // recheck) until Enter resumes.
     app.ingest_ir_frame_for_test(later.clone());
+    assert!(app.current_ir_scene().is_none(), "paused panel went live");
     app.handle_action(Action::StimulusFireOrPause, false); // resume
     app.rebuild_ir_scene();
     assert_eq!(

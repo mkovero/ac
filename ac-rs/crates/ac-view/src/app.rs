@@ -447,15 +447,19 @@ impl AcViewApp {
                 // IRs held at the pause.
                 let i = self.selected_pair();
                 let pair = self.live_selected();
-                let (long, arrival) = match &self.paused_ir {
-                    Some(held) => held
-                        .get(i)
+                // Paused: only what was held — never a live frame, even when
+                // a relaunch or refusal dropped the held one (Codex recheck).
+                let (long, arrival) = if t.paused {
+                    self.paused_ir
+                        .as_ref()
+                        .and_then(|held| held.get(i))
                         .map(|(l, a)| (l.as_ref(), a.as_ref()))
-                        .unwrap_or((None, None)),
-                    None => (pair.ir.as_ref(), pair.ir_arrival.as_ref()),
+                        .unwrap_or((None, None))
+                } else {
+                    (pair.ir.as_ref(), pair.ir_arrival.as_ref())
                 };
                 let owner = self.pair_label(i);
-                let owner = if self.paused_ir.is_some() {
+                let owner = if t.paused {
                     format!("{owner} \u{b7} PAUSED")
                 } else {
                     owner
