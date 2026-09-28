@@ -70,6 +70,11 @@ pub struct AcViewApp {
     /// at when they stored it, not what they changed to while it stored.
     capture_settings: Option<crate::view::SlotSettings>,
     ir_scene: Option<ac_scene::IrScene>,
+    /// Every pair's IRs as they were when live was paused — `(1 s,
+    /// arrival)` per pair. Pause freezes the IR panel on them (operator:
+    /// "leave trace there, so you could see what was happening" — unlike
+    /// the transfer trace, which pause hides to compare slots alone).
+    paused_ir: Option<Vec<IrPair>>,
 
     // --- stream health, backing the status line's `malformed` state ---
     /// Consecutive DATA frames since the last one that parsed into a
@@ -170,6 +175,7 @@ impl AcViewApp {
             loaded_scenes: Vec::new(),
             capture_settings: None,
             ir_scene: None,
+            paused_ir: None,
             frame_parse_failures: 0,
             first_malformed_since: None,
             version_refusal: None,
@@ -404,6 +410,20 @@ impl AcViewApp {
     /// live shows the selected pair's sidecar — and nothing while live is
     /// paused, since pause holds the live trace off the screen.
     fn rebuild_ir_scene(&mut self) {
+        // Freeze on the pause edge, thaw on resume — held whether or not
+        // the panel is open, so opening it while paused shows the moment
+        // of the pause.
+        let paused = matches!(&self.view, ViewKind::Transfer(t) if t.paused);
+        if !paused {
+            self.paused_ir = None;
+        } else if self.paused_ir.is_none() {
+            self.paused_ir = Some(
+                self.live
+                    .iter()
+                    .map(|p| (p.ir.clone(), p.ir_arrival.clone()))
+                    .collect(),
+            );
+        }
         let ViewKind::Transfer(t) = &self.view else {
             self.ir_scene = None;
             return;
@@ -426,20 +446,32 @@ impl AcViewApp {
                         .labelled(format!("{} \u{b7} {}", run.label, IR_LONG_LABEL))
                 })
             }),
-            crate::view::Focus::Live if t.paused => None,
             crate::view::Focus::Live => {
                 // The arrival IR by default (#706); `S` picks the 1 s one.
                 // Until a pair has a delay there is no arrival IR, and the
-                // panel says it is showing the 1 s one instead.
+                // panel says it is showing the 1 s one instead. Paused, the
+                // IRs held at the pause.
+                let i = self.selected_pair();
                 let pair = self.live_selected();
-                let owner = self.pair_label(self.selected_pair());
-                let (frame, what) = match (t.ir_arrival, &pair.ir_arrival, &pair.ir) {
+                let (long, arrival) = match &self.paused_ir {
+                    Some(held) => held
+                        .get(i)
+                        .map(|(l, a)| (l.as_ref(), a.as_ref()))
+                        .unwrap_or((None, None)),
+                    None => (pair.ir.as_ref(), pair.ir_arrival.as_ref()),
+                };
+                let owner = self.pair_label(i);
+                let owner = if self.paused_ir.is_some() {
+                    format!("{owner} \u{b7} PAUSED")
+                } else {
+                    owner
+                };
+                let (frame, what) = match (t.ir_arrival, arrival, long) {
                     (true, Some(a), _) => (Some(a), IR_ARRIVAL_LABEL.to_string()),
-                    (true, None, long) => (
-                        long.as_ref(),
-                        format!("{IR_LONG_LABEL} (no current arrival IR)"),
-                    ),
-                    (false, _, long) => (long.as_ref(), IR_LONG_LABEL.to_string()),
+                    (true, None, long) => {
+                        (long, format!("{IR_LONG_LABEL} (no current arrival IR)"))
+                    }
+                    (false, _, long) => (long, IR_LONG_LABEL.to_string()),
                 };
                 frame.map(|f| {
                     ac_scene::IrScene::from_input_view(&ac_scene::IrInput::from_wire_frame(f), view)
@@ -2225,6 +2257,12 @@ fn connect_and_launch_view(
     app.integration = integration;
     Ok(app)
 }
+
+/// One pair's `(1 s, arrival)` IR frames.
+type IrPair = (
+    Option<ac_core::wire::IrFrame>,
+    Option<ac_core::wire::IrFrame>,
+);
 
 /// The IR panel's name for the arrival IR (#706).
 const IR_ARRIVAL_LABEL: &str = "arrival IR 250 ms";
