@@ -65,7 +65,9 @@ impl Tween {
         opts: TweenOptions,
     ) -> TransferInput {
         let is_new = self.to.as_ref().is_none_or(|to| {
-            to.magnitude_db != latest.magnitude_db || to.phase_deg != latest.phase_deg
+            to.magnitude_db != latest.magnitude_db
+                || to.phase_deg != latest.phase_deg
+                || to.coherence != latest.coherence
         });
         if is_new {
             let comparable = self.to.as_ref().is_some_and(|to| comparable(to, latest));
@@ -78,11 +80,11 @@ impl Tween {
                     .as_ref()
                     .map(|t| t.coherence.clone())
                     .unwrap_or_default();
-                for i in 0..mag.len() {
+                for (i, (m, p)) in mag.iter_mut().zip(phase.iter_mut()).enumerate() {
                     let was_drawn = prev_coh.get(i).is_some_and(|&c| c >= opts.coherence_mask);
                     if !was_drawn {
-                        mag[i] = latest.magnitude_db[i];
-                        phase[i] = latest.phase_deg[i];
+                        *m = latest.magnitude_db.get(i).copied().unwrap_or(f64::NAN);
+                        *p = latest.phase_deg.get(i).copied().unwrap_or(f64::NAN);
                     }
                 }
                 self.from_mag = mag;
@@ -147,10 +149,12 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 
 /// Two estimates of the same columns under the same alignment and ladder,
 /// so that easing one into the other means something.
+/// A malformed estimate (arrays of different lengths) is never comparable:
+/// it snaps, and the scene handles it as it would unseen.
 fn comparable(a: &TransferInput, b: &TransferInput) -> bool {
-    a.freqs == b.freqs
-        && a.delay_ms == b.delay_ms
-        && a.stages == b.stages
-        && a.magnitude_db.len() == b.magnitude_db.len()
-        && a.phase_deg.len() == b.phase_deg.len()
+    let whole = |t: &TransferInput| {
+        let n = t.freqs.len();
+        t.magnitude_db.len() == n && t.phase_deg.len() == n && t.coherence.len() == n
+    };
+    whole(a) && whole(b) && a.freqs == b.freqs && a.delay_ms == b.delay_ms && a.stages == b.stages
 }

@@ -708,3 +708,28 @@ fn an_unmasked_column_appears_at_once_and_phase_can_be_left_uneased() {
     assert_eq!(half.phase_deg[0], 90.0);
     assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
 }
+
+/// Codex recheck of #716: a column unmasked by coherence alone, mid-ease,
+/// appears at the latest value; a length-mismatched estimate snaps rather
+/// than panicking.
+#[test]
+fn a_coherence_only_unmask_appears_at_once_and_a_malformed_estimate_snaps() {
+    let mut tw = Tween::default();
+    let mut a = est(0.0, 0.0, 0.9, 1.0);
+    a.magnitude_db = vec![0.0, 0.0];
+    tw.sample(&a, 0.0, EASE);
+    let mut b = a.clone();
+    b.magnitude_db = vec![0.0, -80.0];
+    b.coherence = vec![0.9, 0.1]; // column 1 now masked
+    tw.sample(&b, 1.0, EASE);
+    let mut c = b.clone();
+    c.coherence = vec![0.9, 0.9]; // unmasked, same values
+    let s = tw.sample(&c, 1.0 + TWEEN_S / 2.0, EASE);
+    assert_eq!(s.magnitude_db[1], -80.0, "unmasked column shown mid-ease");
+
+    let mut bad = c.clone();
+    bad.magnitude_db = vec![5.0, 5.0];
+    bad.phase_deg = vec![0.0];
+    let s = tw.sample(&bad, 2.0, EASE);
+    assert_eq!(s.magnitude_db, vec![5.0, 5.0]);
+}
