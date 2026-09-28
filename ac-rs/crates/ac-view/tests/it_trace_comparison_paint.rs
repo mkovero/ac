@@ -656,3 +656,149 @@ fn the_cursor_reads_only_what_is_drawn_and_stays_on_the_pane() {
         );
     }
 }
+
+/// #720: with live paused (so not drawn), the cursor reads the first
+/// visible stored trace and names it, rather than reading nothing.
+#[test]
+fn with_live_paused_the_cursor_reads_the_visible_slot_and_names_it() {
+    let live_scene = scene(Smoothing::Off);
+    let slot_scene = scene(Smoothing::Oct3);
+    let mut state = TransferViewState::new(-10.0, -30.0);
+    state.focus = Focus::Live;
+    state.paused = true;
+    state.cursor_pin = Some(100.0);
+    let view = ViewKind::Transfer(state);
+    let lives = [LiveTrace {
+        label: "live".to_string(),
+        pair: 0,
+        scene: &live_scene,
+        selected: true,
+    }];
+    let stored = vec![StoredTrace {
+        label: "slot 2",
+        captured_at_utc: "2026-09-28T00:00:00Z",
+        scene: &slot_scene,
+        focused: false,
+        visible: true,
+        color_slot: 1,
+        slot: Some(2),
+    }];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 480.0))
+        .build_ui(|ui| {
+            draw_view(
+                &view,
+                ui,
+                None,
+                Some(&live_scene),
+                &lives,
+                &stored,
+                None,
+                None,
+            );
+        });
+    harness.run();
+    let texts = extract_texts(&harness.output().shapes);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("slot 2 \u{b7} 100.0 Hz ")),
+        "no slot readout while paused: {texts:?}"
+    );
+}
+
+/// #720 (Codex review): the paused-live fallback skips a visible run with
+/// nothing in the zoomed range and reads the next one that has.
+#[test]
+fn the_paused_fallback_skips_a_run_with_nothing_in_range() {
+    let live_scene = scene(Smoothing::Off);
+    let slot_scene = scene(Smoothing::Off);
+    let mut low = TransferInput {
+        freqs: vec![5.0, 10.0],
+        magnitude_db: vec![0.0; 2],
+        phase_deg: vec![0.0; 2],
+        coherence: vec![0.9; 2],
+        delay_ms: 1.5,
+        delay_locked: Some(true),
+        delay_control: None,
+        delay_tracking: false,
+        meas_channel: 0,
+        ref_channel: 1,
+        meas_peak_dbfs: None,
+        ref_peak_dbfs: None,
+        channel_role: "meas_0".to_string(),
+        source: Source::Snapshot,
+        sr: 48_000,
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
+        stages: Vec::new(),
+        estimator: ac_scene::transfer::Estimator::Welch { nperseg: 48_000 },
+        fault: None,
+        calibration: None,
+    };
+    low.coherence = vec![0.9; 2];
+    let mut meters = (MeterState::default(), MeterState::default());
+    let low_scene = TransferScene::from_input(
+        &low,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    let mut state = TransferViewState::new(-10.0, -30.0);
+    state.paused = true;
+    state.cursor_pin = Some(100.0);
+    let view = ViewKind::Transfer(state);
+    let lives = [LiveTrace {
+        label: "live".to_string(),
+        pair: 0,
+        scene: &live_scene,
+        selected: true,
+    }];
+    let stored = vec![
+        StoredTrace {
+            label: "slot 1",
+            captured_at_utc: "2026-09-28T00:00:00Z",
+            scene: &low_scene,
+            focused: false,
+            visible: true,
+            color_slot: 0,
+            slot: Some(1),
+        },
+        StoredTrace {
+            label: "slot 2",
+            captured_at_utc: "2026-09-28T00:00:00Z",
+            scene: &slot_scene,
+            focused: false,
+            visible: true,
+            color_slot: 1,
+            slot: Some(2),
+        },
+    ];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 480.0))
+        .build_ui(|ui| {
+            draw_view(
+                &view,
+                ui,
+                None,
+                Some(&live_scene),
+                &lives,
+                &stored,
+                None,
+                None,
+            );
+        });
+    harness.run();
+    let texts = extract_texts(&harness.output().shapes);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("slot 2 \u{b7} 100.0 Hz ")),
+        "fallback stuck on the out-of-range run: {texts:?}"
+    );
+}

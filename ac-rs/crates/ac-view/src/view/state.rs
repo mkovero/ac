@@ -291,6 +291,8 @@ pub struct TransferViewState {
     /// it, a right-click clears it. Held in Hz so zoom and pan keep it on
     /// its frequency.
     pub cursor_pin: Option<f64>,
+    /// The IR panel's pinned cursor, ms (#720).
+    pub ir_cursor_pin: Option<f64>,
     /// What the phase pane shows (#695), for every trace: wrapped phase,
     /// unwrapped phase or group delay (`Shift+P`).
     pub phase_view: ac_scene::transfer::PhaseView,
@@ -350,6 +352,7 @@ impl TransferViewState {
             ir_arrival: true,
             tween: true,
             cursor_pin: None,
+            ir_cursor_pin: None,
             phase_view: ac_scene::transfer::PhaseView::Wrapped,
             loaded: Vec::new(),
             focus: Focus::Live,

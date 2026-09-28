@@ -192,7 +192,37 @@ pub(super) fn draw_transfer(
         if let Some(scene) = scene {
             draw_input_meters(painter, content, scene);
         }
-        return TransferPointer::default();
+        // The time cursor (#720): hover and a pinned one, on the IR as
+        // drawn; ac-scene snaps to the sample and formats.
+        let vp = Viewport::from(content);
+        // A view with nothing drawn (log/ETC from a daemon that sends none)
+        // has no time to read or pin (Codex review).
+        let drawn = ir.filter(|s| !s.trace.segments.is_empty());
+        // It still takes a right-click, which clears (Codex recheck).
+        let mut pointer = pane_pointer(ui, &[vp], vp, true);
+        if drawn.is_none() {
+            pointer.hover_x = None;
+            pointer.click_x = None;
+        }
+        // Labels below the panel's header and view rows (Codex review).
+        let label_vp = Viewport {
+            y: vp.y + 2.0 * ROW_H,
+            height: (vp.height - 2.0 * ROW_H).max(0.0),
+            ..vp
+        };
+        if let Some(s) = drawn {
+            let (t_lo, t_hi) = s.t_range;
+            if let Some(r) = state.ir_cursor_pin.and_then(|t| s.cursor_readout(t)) {
+                draw_cursor(painter, &[vp], label_vp, r.x, &r.text, 1, COLOR_SIGNAL);
+            }
+            if let Some(x) = pointer.hover_x {
+                let t = ac_scene::ticks::x_to_time(x, t_lo, t_hi);
+                if let Some(r) = s.cursor_readout(t) {
+                    draw_cursor(painter, &[vp], label_vp, r.x, &r.text, 0, COLOR_VALUE);
+                }
+            }
+        }
+        return pointer;
     }
 
     let layout = TransferLayout::new(
@@ -299,24 +329,66 @@ pub(super) fn draw_transfer(
     // clicked. ac-scene snaps and formats; this maps x and draws.
     // Only a trace that is drawn is read: live hidden (`V`) or paused
     // (Enter), or a hidden run, has nothing on screen to read (Codex review).
-    let focused_scene = match state.focus {
-        Focus::Stored(idx) => stored.get(idx).filter(|r| r.visible).map(|r| r.scene),
-        Focus::Live => scene.filter(|_| state.live_trace_shown()),
+    // Then the cursor reads the first visible stored trace instead, and
+    // names it (operator: the cursor "works, except when live is paused").
+    let focused = match state.focus {
+        Focus::Stored(idx) => stored
+            .get(idx)
+            .filter(|r| r.visible)
+            .map(|r| (r.scene, None)),
+        Focus::Live => scene
+            .filter(|_| state.live_trace_shown())
+            .map(|s| (s, None)),
     };
+    let focused = focused.or_else(|| {
+        // The first visible one with columns in the zoomed range: one that
+        // ends below it has nothing on screen to read (Codex review).
+        stored
+            .iter()
+            .find(|r| {
+                r.visible
+                    && r.scene
+                        .cursor_columns
+                        .iter()
+                        .any(|c| (0.0..=1.0).contains(&c.x))
+            })
+            .map(|r| (r.scene, Some(short_owner(r.label))))
+    });
     let (f_lo, f_hi) = (state.freq_range.min(), state.freq_range.max());
-    let pointer = pane_pointer(ui, &layout);
-    if let Some(s) = focused_scene {
+    let pointer = pane_pointer(ui, &[layout.mag, layout.phase], layout.mag, false);
+    if let Some((s, owner)) = focused {
+        let named = |t: &str| match &owner {
+            Some(o) => format!("{o} \u{b7} {t}"),
+            None => t.to_string(),
+        };
+        let panes = [layout.mag, layout.phase];
         // A pin outside the zoomed range is off screen, not moved to the
         // nearest column that is (Codex review).
         if let Some(pin) = state.cursor_pin.filter(|p| (f_lo..=f_hi).contains(p)) {
             if let Some(r) = s.cursor_readout(pin) {
-                draw_cursor(painter, &layout, &r, 1, COLOR_SIGNAL);
+                draw_cursor(
+                    painter,
+                    &panes,
+                    layout.mag,
+                    r.x,
+                    &named(&r.text),
+                    1,
+                    COLOR_SIGNAL,
+                );
             }
         }
         if let Some(x) = pointer.hover_x {
             let f = ac_scene::ticks::x_to_freq(x, f_lo, f_hi);
             if let Some(r) = s.cursor_readout(f) {
-                draw_cursor(painter, &layout, &r, 0, COLOR_VALUE);
+                draw_cursor(
+                    painter,
+                    &panes,
+                    layout.mag,
+                    r.x,
+                    &named(&r.text),
+                    0,
+                    COLOR_VALUE,
+                );
             }
         }
     }
@@ -324,7 +396,7 @@ pub(super) fn draw_transfer(
 }
 
 /// Where the pointer is over the panes this frame, as normalized x on the
-/// shared frequency axis, and whether it clicked there (#718).
+/// shared axis, and whether it clicked there (#718, #720).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct TransferPointer {
     pub hover_x: Option<f64>,
@@ -332,9 +404,13 @@ pub struct TransferPointer {
     pub click_x: Option<f64>,
     /// Secondary click: clear the pin.
     pub clear: bool,
+    /// Over the IR panel (a time axis) rather than the frequency panes.
+    pub ir: bool,
 }
 
-fn pane_pointer(ui: &Ui, layout: &TransferLayout) -> TransferPointer {
+/// The pointer over any of `panes`, as normalized x in `axis` (the pane
+/// whose x the others share).
+fn pane_pointer(ui: &Ui, panes: &[Viewport], axis: Viewport, ir: bool) -> TransferPointer {
     let (pos, primary, secondary) = ui.input(|i| {
         (
             i.pointer.hover_pos(),
@@ -353,39 +429,45 @@ fn pane_pointer(ui: &Ui, layout: &TransferLayout) -> TransferPointer {
     let inside = |vp: &Viewport| {
         p.x >= vp.x && p.x <= vp.x + vp.width && p.y >= vp.y && p.y <= vp.y + vp.height
     };
-    if !(inside(&layout.mag) || inside(&layout.phase)) || layout.mag.width <= 0.0 {
+    if !panes.iter().any(inside) || axis.width <= 0.0 {
         return TransferPointer::default();
     }
-    let x = f64::from((p.x - layout.mag.x) / layout.mag.width);
+    let x = f64::from((p.x - axis.x) / axis.width);
     TransferPointer {
         hover_x: Some(x),
         click_x: primary.then_some(x),
         clear: secondary,
+        ir,
     }
 }
 
-/// One cursor: a vertical line through both panes at the readout's column
-/// and its text at the top of the magnitude pane, on row `row` (the hover
-/// cursor 0, the pinned one 1), flipped left of the line near the right edge.
+/// One cursor: a vertical line through `panes` at normalized `x` (of
+/// `label_pane`'s axis) and its text at the top of `label_pane`, on row
+/// `row` (hover 0, pinned 1). The label is measured: right of the line if
+/// it fits, else left, kept inside the pane, wrapped when wider than it.
 fn draw_cursor(
     painter: &Painter,
-    layout: &TransferLayout,
-    r: &ac_scene::transfer::CursorReadout,
+    panes: &[Viewport],
+    label_pane: Viewport,
+    x: f64,
+    label: &str,
     row: usize,
     color: egui::Color32,
 ) {
-    let (x, _) = scene_to_screen((r.x, 0.0), layout.mag);
-    for vp in [layout.mag, layout.phase] {
+    let (x, _) = scene_to_screen((x, 0.0), label_pane);
+    for vp in panes {
         painter.line_segment(
             [egui::pos2(x, vp.y), egui::pos2(x, vp.y + vp.height)],
             Stroke::new(1.0, color.gamma_multiply(0.6)),
         );
     }
-    // Right of the line if the measured label fits there, else left of
-    // it; kept inside the pane either way (Codex review).
-    let (lo, hi) = (layout.mag.x + 2.0, layout.mag.x + layout.mag.width - 2.0);
-    // Wrapped to the pane when it is wider than the pane (Codex recheck).
-    let galley = painter.layout(r.text.clone(), FontId::default(), color, (hi - lo).max(1.0));
+    let (lo, hi) = (label_pane.x + 2.0, label_pane.x + label_pane.width - 2.0);
+    let galley = painter.layout(
+        label.to_string(),
+        FontId::default(),
+        color,
+        (hi - lo).max(1.0),
+    );
     let w = galley.size().x;
     let left = if x + 6.0 + w <= hi {
         x + 6.0
@@ -394,7 +476,7 @@ fn draw_cursor(
     };
     let left = left.clamp(lo, (hi - w).max(lo));
     painter.galley(
-        egui::pos2(left, layout.mag.y + 4.0 + row as f32 * ROW_H),
+        egui::pos2(left, label_pane.y + 4.0 + row as f32 * ROW_H),
         galley,
         color,
     );

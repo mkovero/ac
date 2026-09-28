@@ -3063,6 +3063,7 @@ fn a_click_pins_the_cursor_in_hz_and_a_right_click_clears_it() {
         hover_x: Some(0.5),
         click_x: Some(0.5),
         clear: false,
+        ir: false,
     });
     let pin = |app: &AcViewApp| match &app.view {
         ViewKind::Transfer(t) => t.cursor_pin,
@@ -3074,6 +3075,7 @@ fn a_click_pins_the_cursor_in_hz_and_a_right_click_clears_it() {
         hover_x: Some(0.2),
         click_x: None,
         clear: false,
+        ir: false,
     });
     assert!(
         (pin(&app).unwrap() - want).abs() < 1e-6 * want,
@@ -3083,6 +3085,37 @@ fn a_click_pins_the_cursor_in_hz_and_a_right_click_clears_it() {
         hover_x: None,
         click_x: None,
         clear: true,
+        ir: false,
     });
     assert_eq!(pin(&app), None);
+}
+
+/// #720: a click on the IR panel pins its time cursor in ms on the IR's
+/// own axis; a right-click there clears it. The frequency pin is untouched.
+#[test]
+fn a_click_on_the_ir_panel_pins_a_time() {
+    let mut app = ir_app();
+    app.ingest_ir_frame_for_test(ir_frame());
+    app.press_for_test(Action::ToggleIrPanel, 0.0);
+    let (lo, hi) = app.current_ir_scene().unwrap().t_range;
+    app.apply_pointer(crate::view::TransferPointer {
+        hover_x: Some(0.75),
+        click_x: Some(0.75),
+        clear: false,
+        ir: true,
+    });
+    let pins = |app: &AcViewApp| match &app.view {
+        ViewKind::Transfer(t) => (t.ir_cursor_pin, t.cursor_pin),
+        _ => (None, None),
+    };
+    let (ir_pin, f_pin) = pins(&app);
+    assert!((ir_pin.unwrap() - (lo + 0.75 * (hi - lo))).abs() < 1e-9);
+    assert_eq!(f_pin, None);
+    app.apply_pointer(crate::view::TransferPointer {
+        hover_x: None,
+        click_x: None,
+        clear: true,
+        ir: true,
+    });
+    assert_eq!(pins(&app).0, None);
 }

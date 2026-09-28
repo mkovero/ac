@@ -151,6 +151,11 @@ pub fn time_to_x(t_ms: f64, t_min_ms: f64, t_max_ms: f64) -> f64 {
     (t_ms - t_min_ms) / (t_max_ms - t_min_ms)
 }
 
+/// The inverse of [`time_to_x`]: the time at normalized `x` (#720).
+pub fn x_to_time(x: f64, t_min_ms: f64, t_max_ms: f64) -> f64 {
+    t_min_ms + x * (t_max_ms - t_min_ms)
+}
+
 /// The IR panel's time axis (#286): ticks at both endpoints plus `0 ms`
 /// when it falls inside the range (a live sidecar always straddles it —
 /// `t_origin_ms` is negative by construction — but the guard keeps this
