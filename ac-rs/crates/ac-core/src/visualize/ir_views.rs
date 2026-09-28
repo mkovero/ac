@@ -84,10 +84,18 @@ pub fn etc_db(ir: &[f32]) -> Vec<f32> {
 pub fn bucket_max(db: &[f32], stride: usize) -> Vec<f32> {
     let stride = stride.max(1);
     let half = stride / 2;
-    (0..db.len().div_ceil(stride))
+    let n_out = db.len().div_ceil(stride);
+    (0..n_out)
         .map(|i| {
             let lo = (i * stride).saturating_sub(half);
-            let hi = (i * stride + stride - half).min(db.len());
+            // The last bucket runs to the end: the samples after the last
+            // pick belong to it, or an arrival there would vanish (Codex
+            // review).
+            let hi = if i + 1 == n_out {
+                db.len()
+            } else {
+                (i * stride + stride - half).min(db.len())
+            };
             db[lo..hi].iter().copied().fold(f32::NEG_INFINITY, f32::max)
         })
         .collect()
@@ -112,6 +120,28 @@ mod tests {
         assert_eq!(picked[50], FLOOR_DB, "the stride pick was meant to miss it");
         assert_eq!(kept[50], 0.0);
         assert!((kept[20] - -40.0).abs() < 1e-4);
+    }
+
+    /// Every sample is in exactly one bucket, whatever the length and stride:
+    /// a peak anywhere survives, the last half bucket included.
+    #[test]
+    fn every_sample_is_in_exactly_one_bucket() {
+        for n in [1usize, 3, 4, 11, 12, 13, 48_000, 96_001] {
+            for stride in [1usize, 2, 4, 5, 24, 48] {
+                let picks = (0..n).step_by(stride).count();
+                for p in [0, n / 2, n - 1] {
+                    let mut db = vec![FLOOR_DB; n];
+                    db[p] = 0.0;
+                    let kept = bucket_max(&db, stride);
+                    assert_eq!(kept.len(), picks, "n {n} stride {stride}");
+                    assert_eq!(
+                        kept.iter().filter(|&&v| v == 0.0).count(),
+                        1,
+                        "n {n} stride {stride} peak {p}: {kept:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A peak just before a pick is drawn at that pick, not a whole bucket
