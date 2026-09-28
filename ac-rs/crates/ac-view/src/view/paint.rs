@@ -48,6 +48,18 @@ fn segment_points(segment: &[(f64, f64)], vp: Viewport) -> Vec<Pos2> {
 /// This guard used to exist only in the transfer view's copy of this
 /// loop; unifying it is the point of having one copy.
 fn polyline(painter: &Painter, points: Vec<Pos2>, stroke: Stroke, dashed: bool) {
+    // Cut to the visible area first. egui clips what it draws, not what it
+    // is asked to draw: a point far off the pane (a trace on a range meant
+    // for another unit, a group-delay spike) is a segment millions of
+    // pixels long, and dashing it asks for one shape every few pixels —
+    // the `Shift+P` out-of-memory crash. Clipped, it costs what is seen.
+    let area = painter.clip_rect().expand(8.0);
+    for run in clip_polyline(&points, area) {
+        stroke_run(painter, run, stroke, dashed);
+    }
+}
+
+fn stroke_run(painter: &Painter, points: Vec<Pos2>, stroke: Stroke, dashed: bool) {
     if points.len() < 2 {
         return;
     }
@@ -58,6 +70,77 @@ fn polyline(painter: &Painter, points: Vec<Pos2>, stroke: Stroke, dashed: bool) 
     } else {
         painter.add(egui::Shape::line(points, stroke));
     }
+}
+
+/// Split `points` into the runs that lie inside `area`, each segment cut at
+/// the edge it crosses (Liang–Barsky). Segments wholly outside vanish; a
+/// segment crossing the area keeps just its inside part.
+pub(crate) fn clip_polyline(points: &[Pos2], area: egui::Rect) -> Vec<Vec<Pos2>> {
+    let mut runs: Vec<Vec<Pos2>> = Vec::new();
+    let mut current: Vec<Pos2> = Vec::new();
+    for pair in points.windows(2) {
+        match clip_segment(pair[0], pair[1], area) {
+            Some((a, b)) => {
+                if current.last() != Some(&a) {
+                    if current.len() > 1 {
+                        runs.push(std::mem::take(&mut current));
+                    }
+                    current.clear();
+                    current.push(a);
+                }
+                current.push(b);
+                // Leaving the area ends the run.
+                if b != pair[1] {
+                    runs.push(std::mem::take(&mut current));
+                }
+            }
+            None => {
+                if current.len() > 1 {
+                    runs.push(std::mem::take(&mut current));
+                }
+                current.clear();
+            }
+        }
+    }
+    if current.len() > 1 {
+        runs.push(current);
+    }
+    runs
+}
+
+fn clip_segment(a: Pos2, b: Pos2, r: egui::Rect) -> Option<(Pos2, Pos2)> {
+    if !(a.x.is_finite() && a.y.is_finite() && b.x.is_finite() && b.y.is_finite()) {
+        return None;
+    }
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [
+        (-dx, a.x - r.min.x),
+        (dx, r.max.x - a.x),
+        (-dy, a.y - r.min.y),
+        (dy, r.max.y - a.y),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+            if t0 > t1 {
+                return None;
+            }
+        }
+    }
+    let at = |t: f32| egui::pos2(a.x + t * dx, a.y + t * dy);
+    Some((
+        if t0 > 0.0 { at(t0) } else { a },
+        if t1 < 1.0 { at(t1) } else { b },
+    ))
 }
 
 /// Draw one trace's segments in a pane — one polyline per segment, so a
@@ -168,4 +251,48 @@ fn draw_meter(
 pub fn draw_input_meters(painter: &Painter, rect: egui::Rect, scene: &ac_scene::TransferScene) {
     draw_meter(painter, rect, 0, &scene.ref_meter, "R");
     draw_meter(painter, rect, 1, &scene.meas_meter, "M");
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    fn area() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0))
+    }
+
+    #[test]
+    fn inside_points_pass_unchanged() {
+        let pts = vec![
+            egui::pos2(10.0, 10.0),
+            egui::pos2(50.0, 50.0),
+            egui::pos2(90.0, 20.0),
+        ];
+        assert_eq!(clip_polyline(&pts, area()), vec![pts]);
+    }
+
+    /// The crash's shape: a point a million pixels off the pane. Clipped,
+    /// the run ends at the edge, so a dashed stroke costs the visible part.
+    #[test]
+    fn a_far_point_is_cut_at_the_edge() {
+        let pts = vec![
+            egui::pos2(10.0, 50.0),
+            egui::pos2(20.0, -1.0e6),
+            egui::pos2(30.0, 50.0),
+        ];
+        let runs = clip_polyline(&pts, area());
+        assert_eq!(runs.len(), 2);
+        for run in &runs {
+            let len: f32 = run.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+            assert!(len < 150.0, "clipped run still {len} px long");
+        }
+    }
+
+    #[test]
+    fn a_segment_wholly_outside_draws_nothing() {
+        let pts = vec![egui::pos2(-50.0, -50.0), egui::pos2(-10.0, -500.0)];
+        assert!(clip_polyline(&pts, area()).is_empty());
+        let nan = vec![egui::pos2(10.0, f32::NAN), egui::pos2(20.0, 20.0)];
+        assert!(clip_polyline(&nan, area()).is_empty());
+    }
 }

@@ -175,7 +175,19 @@ pub fn average_input(
         .iter()
         // Slots only: a run opened from a file is not part of "the slots".
         .filter(|r| r.visible && r.slot.is_some())
-        .map(run_input)
+        .map(|r| {
+            // The slots as drawn: nudged delay (in `run_input`), invert and
+            // dB offset — an average of curves other than those on screen
+            // would not be the average the operator asked for.
+            let mut input = run_input(r);
+            ac_scene::transfer::apply_invert_offset(
+                &mut input.magnitude_db,
+                &mut input.phase_deg,
+                r.invert,
+                r.offset_db,
+            );
+            input
+        })
         .collect();
     let refs: Vec<&ac_scene::TransferInput> = inputs.iter().collect();
     let avg = ac_scene::TransferInput::average(&refs, weighted)?;
@@ -193,9 +205,10 @@ pub fn average_input(
 /// Build (or rebuild) a stored run's [`TransferScene`] from its held
 /// [`PairDerivation`] under `modes` — the transfer-view analogue of
 /// [`rederive_scene`], called again every time the operator changes that
-/// run's smoothing (#321). A stored run is always drawn self-compensated
+/// run's smoothing (#321). A stored run is drawn against its own delay
 /// (`DerotMode::Session`, τ_derot 0), per `transfer.rs`'s own module doc
-/// and deliverable 3 (#229) — callers pass that mode explicitly rather
+/// and deliverable 3 (#229), or raw when its `raw_phase` says so — callers
+/// pass that mode explicitly rather
 /// than this function assuming it, so the one rule lives at the one call
 /// site that decides it (`TransferViewState::derot`-style state never
 /// touches a stored run).

@@ -98,6 +98,18 @@ pub enum DerotMode {
 }
 
 impl DerotMode {
+    /// What the phase pane is referenced to, said on the pane — `R` and `P`
+    /// change it, and a phase curve means nothing without it.
+    pub fn label(&self) -> String {
+        match *self {
+            DerotMode::Session => "phase ref: this trace's delay".to_string(),
+            DerotMode::Raw => "phase ref: none (raw, measured)".to_string(),
+            DerotMode::Snapshot { snapshot_delay_ms } => {
+                format!("phase ref: selected slot's delay, {snapshot_delay_ms:.2} ms")
+            }
+        }
+    }
+
     /// τ_derot in ms, to be applied on top of `session_delay_ms`
     /// (τ_sess) — the frame's own `delay_ms`.
     pub fn tau_derot_ms(&self, session_delay_ms: f64) -> f64 {
@@ -367,6 +379,27 @@ impl DisplayModes {
         DisplayModes {
             phase_range: Some(range),
             ..self
+        }
+    }
+}
+
+/// Smaart's trace controls on a curve: inverted, magnitude (dB) and phase
+/// are negated; then `offset_db` is added. The one definition — the drawn
+/// trace and the slot average (#671, which averages the slots as drawn)
+/// both use it.
+pub fn apply_invert_offset(
+    magnitude_db: &mut [f64],
+    phase_deg: &mut [f64],
+    invert: bool,
+    offset_db: f64,
+) {
+    let sign = if invert { -1.0 } else { 1.0 };
+    for m in magnitude_db.iter_mut() {
+        *m = sign * *m + offset_db;
+    }
+    if invert {
+        for p in phase_deg.iter_mut() {
+            *p = wrap_deg(-*p);
         }
     }
 }
@@ -670,6 +703,8 @@ pub struct TransferScene {
     pub phase_axis: crate::ticks::Axis,
     /// [`PhaseView::label`]: which view the phase pane is (#695).
     pub phase_view_readout: Option<&'static str>,
+    /// [`DerotMode::label`]: what the phase is referenced to.
+    pub phase_ref_readout: String,
     /// The span of this trace's drawn values in the unwrapped / group-delay
     /// view (2–98 %), before rounding to the axis: what a caller unions
     /// across traces for [`DisplayModes::with_phase_range`]. `None` in the
@@ -1333,16 +1368,13 @@ impl TransferScene {
             // Invert and offset last (Smaart's trace controls): a display
             // transform of the finished curve, so smoothing and masking are
             // exactly what they are for the measured one.
-            let sign = if modes.invert { -1.0 } else { 1.0 };
-            let magnitude_db: Vec<f64> = magnitude_db
-                .iter()
-                .map(|m| sign * m + modes.offset_db)
-                .collect();
-            let phase_deg: Vec<f64> = if modes.invert {
-                phase_deg.iter().map(|p| wrap_deg(-p)).collect()
-            } else {
-                phase_deg
-            };
+            let (mut magnitude_db, mut phase_deg) = (magnitude_db, phase_deg);
+            apply_invert_offset(
+                &mut magnitude_db,
+                &mut phase_deg,
+                modes.invert,
+                modes.offset_db,
+            );
             let mag_points = |i: usize| {
                 // db_to_y is the crate's one dB→y mapping — do not
                 // re-implement it, and do not clamp: an over-range
@@ -1471,6 +1503,7 @@ impl TransferScene {
             mag_axis: crate::ticks::db_axis(db_min, db_max),
             phase_axis,
             phase_view_readout: modes.phase_view.label(),
+            phase_ref_readout: modes.derot.label(),
             phase_span,
             delay_readout: delay.delay_readout,
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),

@@ -2350,6 +2350,7 @@ fn slot_settings_round_trip_and_refuse_what_they_did_not_write() {
             smoothing: s,
             invert: true,
             offset_db: -2.5,
+            raw_phase: true,
         };
         assert_eq!(SlotSettings::from_json(&set.to_json()), Some(set));
         s = s.next();
@@ -2373,6 +2374,7 @@ fn slot_settings_round_trip_and_refuse_what_they_did_not_write() {
         smoothing: ac_scene::Smoothing::Oct3,
         invert: false,
         offset_db: 6.0,
+        raw_phase: true,
     };
     std::fs::write(
         crate::capture::settings_path(&capture),
@@ -2763,6 +2765,101 @@ fn shift_p_cycles_the_phase_view_and_traces_share_its_axis() {
     assert_eq!(view(&app), None, "back to wrapped");
 }
 
+/// The slot average (#671) is of the slots as drawn: a slot's dB offset
+/// and invert reach it. The rejected behaviour — averaging the raw
+/// captures — is what the operator saw: an offset slot averaged as if it
+/// had none.
+#[test]
+fn the_slot_average_takes_each_slots_offset_and_invert() {
+    let mut app = transfer_app();
+    app.finish_capture_for_test(captured(1));
+    app.finish_capture_for_test(captured(2));
+    let avg_mag = |app: &AcViewApp| -> Vec<f64> {
+        match &app.view {
+            ViewKind::Transfer(t) => {
+                crate::snapshot_flow::average_input(t)
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .magnitude_db
+            }
+            _ => unreachable!(),
+        }
+    };
+    app.with_transfer(|t| t.average = Some(false));
+    let raw = avg_mag(&app);
+    app.with_transfer(|t| {
+        t.loaded.iter_mut().for_each(|r| r.offset_db = 6.0);
+    });
+    let offset = avg_mag(&app);
+    for (r, o) in raw.iter().zip(&offset) {
+        if r.is_finite() {
+            assert!(
+                (o - r - 6.0).abs() < 1e-9,
+                "raw {r}, with both at +6 dB {o}"
+            );
+        }
+    }
+    app.with_transfer(|t| {
+        t.loaded.iter_mut().for_each(|r| {
+            r.offset_db = 0.0;
+            r.invert = true;
+        });
+    });
+    let inverted = avg_mag(&app);
+    for (r, i) in raw.iter().zip(&inverted) {
+        if r.is_finite() {
+            assert!((i + r).abs() < 1e-9, "raw {r}, both inverted {i}");
+        }
+    }
+}
+
+/// Operator, 2026-09-28: a slot stores live's raw/de-rotated phase choice
+/// with the rest of its settings, and `P`/`R` with the slot focused switch
+/// that slot only. The phase pane says which reference each trace uses.
+#[test]
+fn a_slot_keeps_lives_phase_reference_and_switches_on_its_own() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    let live_ref = |app: &AcViewApp| {
+        app.current_transfer_scene()
+            .unwrap()
+            .phase_ref_readout
+            .clone()
+    };
+    assert_eq!(live_ref(&app), "phase ref: this trace's delay");
+    app.handle_action(Action::ToggleRawPhase, false); // live raw
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(live_ref(&app), "phase ref: none (raw, measured)");
+    // Stored now: raw, like live.
+    app.capture_settings = match &app.view {
+        ViewKind::Transfer(t) => Some(t.live_settings()),
+        _ => unreachable!(),
+    };
+    app.finish_capture_for_test(captured(1));
+    let slot_ref = |app: &AcViewApp| app.loaded_scenes[0].phase_ref_readout.clone();
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(slot_ref(&app), "phase ref: none (raw, measured)");
+    // `P` with the slot focused: the slot changes, live does not.
+    app.with_transfer(|t| t.select_slot(1));
+    app.handle_action(Action::ToggleRawPhase, false);
+    app.rebuild_scenes(true, 0.3);
+    assert_eq!(slot_ref(&app), "phase ref: this trace's delay");
+    assert_eq!(live_ref(&app), "phase ref: none (raw, measured)");
+    // `R` with the slot focused switches it back.
+    app.handle_action(Action::CycleDerotReference, false);
+    app.rebuild_scenes(true, 0.4);
+    assert_eq!(slot_ref(&app), "phase ref: none (raw, measured)");
+    assert_eq!(live_ref(&app), "phase ref: none (raw, measured)");
+    // A settings file from before this opens de-rotated.
+    let old = serde_json::json!({"smoothing_bpo": null, "invert": false, "offset_db": 0.0});
+    assert!(
+        !crate::view::SlotSettings::from_json(&old)
+            .unwrap()
+            .raw_phase
+    );
+}
+
 /// Codex review of #695: a hidden run does not widen the shared phase
 /// range — only what is on screen sets the scale.
 #[test]
@@ -2775,5 +2872,5 @@ fn a_hidden_run_does_not_set_the_shared_phase_range() {
     let live_only = app.current_transfer_scene().unwrap().phase_span;
     app.with_transfer(|t| t.loaded[0].visible = false);
     app.rebuild_scenes(true, 0.2);
-    assert_eq!(app.shared_phase_range, live_only);
+    assert_eq!(app.shared_phase_range.map(|(_, r)| r), live_only);
 }
