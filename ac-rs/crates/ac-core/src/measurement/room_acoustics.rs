@@ -290,6 +290,11 @@ pub(crate) struct BandWindow {
     pub slope_db_s: f64,
     /// Level the decay starts from over the band's background, dB.
     pub peak_to_noise_db: f64,
+    /// The last sample of the last 10 ms block standing 10 dB over the
+    /// background — past `t1` when a strong echo follows a quiet gap. The
+    /// STI integrates to here (Codex review of #722: clause 6's Schroeder
+    /// integral includes such an echo; §5.3.3's first crossing did not).
+    pub last_above: usize,
 }
 
 /// Band `i` of `ir` filtered, and its decay window. `Err` carries the
@@ -348,6 +353,10 @@ pub(crate) fn band_window(
     };
     let t1 = ((t1_s * fs) as usize).min(n - 1);
     let correction = noise * fs * 10.0 / (-slope * std::f64::consts::LN_10);
+    let last_above = smooth
+        .iter()
+        .rposition(|&l| l >= noise_db + 10.0)
+        .map_or(t1, |b| ((b + 1) * w).min(n) - 1);
 
     // The band's own trigger (A.3.4): its response within 20 dB of its
     // maximum. The decay curve and its fits start there.
@@ -362,6 +371,7 @@ pub(crate) fn band_window(
         correction,
         slope_db_s: slope,
         peak_to_noise_db,
+        last_above,
     })
 }
 

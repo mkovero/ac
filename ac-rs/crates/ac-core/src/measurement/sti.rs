@@ -232,6 +232,7 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
     };
     let centres = fb.centres_hz();
     let mut m: Mtf = [[0.0; 14]; 7];
+    let mut longest_rt: f64 = rt_s.unwrap_or(0.0);
     let start = crate::measurement::room_acoustics::trigger(ir, sample_rate, f_hi);
     for (k, &oct) in OCTAVES_HZ.iter().enumerate() {
         let Some(i) = centres.iter().position(|&c| (c / oct - 1.0).abs() < 0.05) else {
@@ -252,7 +253,21 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
             ));
         }
         let tau_s = 10.0 / (-w.slope_db_s * std::f64::consts::LN_10);
-        m[k] = schroeder_mtf(&w.e, w.band_start, w.t1, w.correction, tau_s, fs);
+        // To the last point the band stands 10 dB over its background: a
+        // strong echo after a quiet gap is part of the channel.
+        let end = w.t1.max(w.last_above);
+        m[k] = schroeder_mtf(&w.e, w.band_start, end, w.correction, tau_s, fs);
+        // The band's reverberation time from its late decay's rate.
+        longest_rt = longest_rt.max(-60.0 / w.slope_db_s);
+    }
+    // §6.2 b) against the longest band decay found, not only a caller's
+    // RT: a room whose T20/T30 could not be read still has one (Codex
+    // review of #722).
+    if len_s < longest_rt / 2.0 {
+        return refuse(format!(
+            "impulse response {len_s:.2} s long, under half the reverberation time \
+             ({longest_rt:.2} s; \u{a7}6.2 b)"
+        ));
     }
     let (sti, mti) = sti_from_mtf(&m);
     Sti {
@@ -499,5 +514,78 @@ mod tests {
             "{long_rt:?}"
         );
         assert_eq!(short.note, NOISE_FREE_NOTE);
+    }
+
+    /// The band STIs of a noise-free IR integrated whole — the clause 6
+    /// integral with nothing to exclude.
+    fn whole_sti(ir: &[f64], fs: u32) -> f64 {
+        let fb = Filterbank::new(fs, 1, 88.0, 11_400.0).unwrap();
+        let mut m: Mtf = [[0.0; 14]; 7];
+        for (k, &oct) in OCTAVES_HZ.iter().enumerate() {
+            let i = fb
+                .centres_hz()
+                .iter()
+                .position(|&c| (c / oct - 1.0).abs() < 0.05)
+                .unwrap();
+            let e: Vec<f64> = fb
+                .filter_band(i, ir)
+                .unwrap()
+                .iter()
+                .map(|v| v * v)
+                .collect();
+            m[k] = schroeder_mtf(&e, 0, e.len() - 1, 0.0, 1.0, fs as f64);
+        }
+        sti_from_mtf(&m).0
+    }
+
+    /// Codex review of #722: a strong echo after a quiet gap is part of the
+    /// channel. The STI counts it — matching the noise-free IR integrated
+    /// whole — where the rejected window (§5.3.3's first crossing into the
+    /// background, before the echo) reads the channel as if it had none.
+    #[test]
+    fn an_echo_after_a_quiet_gap_is_counted() {
+        let fs = 48_000u32;
+        let n = (2.0 * fs as f64) as usize;
+        let decay = noise(n, 3);
+        let floor = noise(n, 9);
+        let echo_at = (0.5 * fs as f64) as usize;
+        let shaped = |floor_gain: f64, with_echo: bool| -> Vec<f64> {
+            (0..n)
+                .map(|k| {
+                    let t = k as f64 / fs as f64;
+                    let mut v = decay[k] * (-6.9 * t / 0.15).exp();
+                    if with_echo && k >= echo_at {
+                        let te = (k - echo_at) as f64 / fs as f64;
+                        v += 0.7 * decay[k - echo_at] * (-6.9 * te / 0.15).exp();
+                    }
+                    v + floor_gain * floor[k]
+                })
+                .collect()
+        };
+        let got = sti_from_ir(&shaped(1e-3, true), fs, 20.0, 20_000.0, None);
+        let sti = got.sti.unwrap_or_else(|| panic!("{:?}", got.refused));
+        let want = whole_sti(&shaped(0.0, true), fs);
+        let without = whole_sti(&shaped(0.0, false), fs);
+        assert!(
+            (sti - want).abs() < 0.02,
+            "STI {sti}, the echo's channel {want}"
+        );
+        assert!(
+            without - want > 0.05,
+            "the echo does not matter: {without} vs {want}"
+        );
+    }
+
+    /// Codex review of #722: §6.2 b) is checked against the band decays
+    /// themselves, so a long reverberation refuses an IR shorter than half
+    /// of it even when the caller has no RT to pass.
+    #[test]
+    fn half_the_reverberation_time_is_checked_without_a_caller_rt() {
+        let fs = 48_000u32;
+        let long = sti_from_ir(&room(4.0, -40.0, 1.7, fs), fs, 20.0, 20_000.0, None);
+        assert!(
+            long.refused.as_deref().is_some_and(|r| r.contains("half")),
+            "{long:?}"
+        );
     }
 }
