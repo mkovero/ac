@@ -733,3 +733,52 @@ fn a_coherence_only_unmask_appears_at_once_and_a_malformed_estimate_snaps() {
     let s = tw.sample(&bad, 2.0, EASE);
     assert_eq!(s.magnitude_db, vec![5.0, 5.0]);
 }
+
+// ─── pointer cursor (#718) ──────────────────────────────────────────
+
+/// The readout snaps to the nearest drawn column (on the log axis) and
+/// says what the panes show there: dB, phase in the pane's unit (group
+/// delay in ms), coherence; a masked column says so instead of a number.
+#[test]
+fn the_cursor_reads_the_nearest_drawn_column_in_the_panes_unit() {
+    let freqs = vec![100.0, 200.0, 1000.0, 10_000.0];
+    let mut inp = input(freqs, vec![10.0, 12.0, 20.0, 30.0], 0.0);
+    inp.magnitude_db = vec![-3.0, -2.0, 0.0, 6.0];
+    // 100–200 Hz a drawn run; 1 kHz masked; 10 kHz alone between a masked
+    // column and the end, so a one-point segment no pane draws.
+    inp.coherence = vec![0.95, 0.95, 0.1, 0.9];
+    let s = scene_view(&inp, PhaseView::Wrapped);
+    let r = s.cursor_readout(110.0).expect("a column in view");
+    assert_eq!(r.text, "100.0 Hz  -3.0 dB  +10\u{b0}  coh 0.95");
+    assert!((r.x - ac_scene::ticks::freq_to_x(100.0, 20.0, 20_000.0)).abs() < 1e-12);
+    assert_eq!(
+        s.cursor_readout(900.0).unwrap().text,
+        "1.00 kHz  masked (coh 0.10)"
+    );
+    assert_eq!(
+        s.cursor_readout(11_000.0).unwrap().text,
+        "10.00 kHz  not drawn: a lone column (coh 0.90)"
+    );
+    assert!(s.cursor_readout(0.0).is_none());
+    inp.coherence = vec![0.95; 4];
+    let gd = scene_view(&inp, PhaseView::GroupDelay);
+    let text = gd.cursor_readout(11_000.0).unwrap().text;
+    assert!(text.contains(" ms  coh 0.95"), "{text}");
+    let x = ac_scene::ticks::freq_to_x(1234.0, 20.0, 20_000.0);
+    assert!((ac_scene::ticks::x_to_freq(x, 20.0, 20_000.0) - 1234.0).abs() < 1e-9);
+}
+
+/// Codex recheck of #718: the cursor uses the drawing's mask test — a NaN
+/// coherence is not below the mask, so a NaN column between two drawn ones
+/// leaves one continuous segment, and neither neighbour is "lone".
+#[test]
+fn a_nan_coherence_column_is_masked_exactly_as_the_panes_mask_it() {
+    let mut inp = input(vec![100.0, 200.0, 300.0], vec![0.0; 3], 0.0);
+    inp.coherence = vec![0.9, f64::NAN, 0.9];
+    let s = scene_view(&inp, PhaseView::Wrapped);
+    assert_eq!(s.magnitude.segments.len(), 1, "the panes gap it after all");
+    for f in [100.0, 300.0] {
+        let t = s.cursor_readout(f).unwrap().text;
+        assert!(!t.contains("lone") && !t.contains("masked"), "{t}");
+    }
+}

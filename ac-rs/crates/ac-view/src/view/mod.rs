@@ -33,7 +33,7 @@ pub use ir::draw_sweep_ir_panel;
 pub use state::{
     DerotChoice, Focus, LoadedRun, SlotSettings, SpectrumViewState, StimState, TransferViewState,
 };
-pub use transfer::{LiveTrace, StoredTrace, TargetTrace};
+pub use transfer::{LiveTrace, StoredTrace, TargetTrace, TransferPointer};
 
 use palette::COLOR_LABEL;
 
@@ -51,12 +51,7 @@ impl ViewKind {
     }
 }
 
-/// One dispatch function every future view (M4+) extends by adding a
-/// match arm — never by the shell inlining a new drawing call. The two
-/// scene options are mutually exclusive in practice: the app builds only
-/// the one matching the active view (the other stays `None`).
-// One argument per layer the transfer view draws (live, stored, IR,
-// target); a bundle struct would only rename the list.
+/// [`draw_view_pointer`] for callers that only draw.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_view(
     kind: &ViewKind,
@@ -68,6 +63,37 @@ pub fn draw_view(
     ir_scene: Option<&ac_scene::IrScene>,
     target: Option<&TargetTrace>,
 ) {
+    draw_view_pointer(
+        kind,
+        ui,
+        scene,
+        transfer_scene,
+        live,
+        stored,
+        ir_scene,
+        target,
+    );
+}
+
+/// One dispatch function every future view (M4+) extends by adding a
+/// match arm — never by the shell inlining a new drawing call. The two
+/// scene options are mutually exclusive in practice: the app builds only
+/// the one matching the active view (the other stays `None`). In the
+/// transfer view it also reports where the pointer is over the panes
+/// (#718).
+// One argument per layer the transfer view draws (live, stored, IR,
+// target); a bundle struct would only rename the list.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_view_pointer(
+    kind: &ViewKind,
+    ui: &mut Ui,
+    scene: Option<&Scene>,
+    transfer_scene: Option<&ac_scene::TransferScene>,
+    live: &[LiveTrace<'_>],
+    stored: &[StoredTrace<'_>],
+    ir_scene: Option<&ac_scene::IrScene>,
+    target: Option<&TargetTrace>,
+) -> Option<transfer::TransferPointer> {
     // Reserve the half line the top y-axis tick label hangs into (#245).
     // Every pane's tick labels are drawn vertically centred on their
     // gridline, so the topmost one — the tick sitting exactly on the pane's
@@ -90,9 +116,18 @@ pub fn draw_view(
         .y;
     ui.add_space(tick_line_h / 2.0);
     match kind {
-        ViewKind::Spectrum(state) => spectrum::draw_spectrum(state, ui, scene),
-        ViewKind::Transfer(state) => {
-            transfer::draw_transfer(state, ui, transfer_scene, live, stored, ir_scene, target)
+        ViewKind::Spectrum(state) => {
+            spectrum::draw_spectrum(state, ui, scene);
+            None
         }
+        ViewKind::Transfer(state) => Some(transfer::draw_transfer(
+            state,
+            ui,
+            transfer_scene,
+            live,
+            stored,
+            ir_scene,
+            target,
+        )),
     }
 }

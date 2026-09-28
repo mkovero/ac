@@ -10,7 +10,7 @@ use ac_scene::Scene;
 
 use crate::keys::{bindings_for, Action};
 use crate::session::{ConnectionState, PolledFrame, Session};
-use crate::view::{draw_view, SpectrumViewState, StoredTrace, TransferViewState, ViewKind};
+use crate::view::{draw_view_pointer, SpectrumViewState, StoredTrace, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
 
 /// Grace window a run of `TransferFrame`-parse failures must clear before the
@@ -1405,6 +1405,22 @@ impl AcViewApp {
     ///
     /// Always names the selected pair (#685): without `pair` the daemon
     /// applies the change to every pair.
+    /// A click on the panes pins the cursor at that frequency; a
+    /// right-click clears it (#718).
+    pub(crate) fn apply_pointer(&mut self, p: crate::view::TransferPointer) {
+        self.with_transfer(|t| {
+            if p.clear {
+                t.cursor_pin = None;
+            } else if let Some(x) = p.click_x {
+                t.cursor_pin = Some(ac_scene::ticks::x_to_freq(
+                    x,
+                    t.freq_range.min(),
+                    t.freq_range.max(),
+                ));
+            }
+        });
+    }
+
     /// `W` (#714): ask the daemon for the preset after the one the frame
     /// says it runs — the frame, not a copy held here, so a relaunch (which
     /// starts at Detail) cannot leave the key a step out.
@@ -2172,7 +2188,7 @@ impl eframe::App for AcViewApp {
         ui.label(status);
         let stored_refs = self.stored_run_refs();
         let live_traces = self.live_traces();
-        draw_view(
+        let pointer = draw_view_pointer(
             &self.view,
             ui,
             self.scene.as_ref(),
@@ -2182,6 +2198,11 @@ impl eframe::App for AcViewApp {
             self.ir_scene.as_ref(),
             self.target_trace.as_ref(),
         );
+        drop(live_traces);
+        drop(stored_refs);
+        if let Some(p) = pointer {
+            self.apply_pointer(p);
+        }
 
         self.draw_overlays(&ctx);
         if self.quit_requested {

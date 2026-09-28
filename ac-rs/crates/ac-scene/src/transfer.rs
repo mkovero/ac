@@ -563,6 +563,78 @@ pub fn format_estimator_readout(sr: u32, nperseg: usize) -> String {
     )
 }
 
+/// One column as the panes draw it (#718): magnitude after smoothing,
+/// invert and offset; phase in the pane's unit (wrapped °, unwrapped °, or
+/// group delay ms); its coherence and whether the mask hides it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorColumn {
+    pub freq: f64,
+    /// Normalized x on the frequency axis.
+    pub x: f64,
+    pub magnitude_db: f64,
+    pub phase: f64,
+    pub coherence: f64,
+    pub masked: bool,
+    /// Unmasked but alone between masked neighbours: a one-point segment,
+    /// not drawn.
+    pub lone: bool,
+}
+
+/// The pointer readout at one frequency (#718): where to draw its line and
+/// what it says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorReadout {
+    /// Normalized x of the column it snapped to.
+    pub x: f64,
+    pub text: String,
+}
+
+impl TransferScene {
+    /// The readout at `freq_hz`, snapped to the nearest drawn column — the
+    /// values the panes show there, never an interpolation between columns
+    /// (#718). A masked column says so instead of a number. `None` with no
+    /// columns in view.
+    pub fn cursor_readout(&self, freq_hz: f64) -> Option<CursorReadout> {
+        if freq_hz.is_nan() || freq_hz <= 0.0 {
+            return None;
+        }
+        let c = self
+            .cursor_columns
+            .iter()
+            .filter(|c| (0.0..=1.0).contains(&c.x) && c.freq > 0.0)
+            .min_by(|a, b| {
+                (a.freq / freq_hz)
+                    .ln()
+                    .abs()
+                    .total_cmp(&(b.freq / freq_hz).ln().abs())
+            })?;
+        let f = if c.freq >= 1000.0 {
+            format!("{:.2} kHz", c.freq / 1000.0)
+        } else {
+            format!("{:.1} Hz", c.freq)
+        };
+        let text = if c.masked {
+            format!("{f}  masked (coh {:.2})", c.coherence)
+        } else if c.lone {
+            format!("{f}  not drawn: a lone column (coh {:.2})", c.coherence)
+        } else {
+            let phase = if !c.phase.is_finite() {
+                "phase \u{2014}".to_string()
+            } else {
+                match self.phase_view {
+                    PhaseView::GroupDelay => format!("{:+.2} ms", c.phase),
+                    _ => format!("{:+.0}\u{b0}", c.phase),
+                }
+            };
+            format!(
+                "{f}  {:+.1} dB  {phase}  coh {:.2}",
+                c.magnitude_db, c.coherence
+            )
+        };
+        Some(CursorReadout { x: c.x, text })
+    }
+}
+
 /// The speed preset's trade, said on screen (#714): the preset, then what the
 /// deepest stage gives for it — `"Live · LF 1.95 Hz · updates 64 ms ·
 /// settles 1.22 s · 1/48 oct above 135 Hz"`. Read from the stage table on
@@ -781,6 +853,10 @@ pub struct TransferScene {
     pub band_labels: Vec<BandLabel>,
     /// [`speed_readout`]: the ladder preset and what it gives (#714).
     pub speed_readout: Option<String>,
+    /// Every column as drawn, for the pointer readout (#718).
+    pub cursor_columns: Vec<CursorColumn>,
+    /// The phase pane's view, which names the cursor's phase unit.
+    pub phase_view: PhaseView,
     /// `"H₁ Welch 1.00 Hz flat — not the live ladder"` when this trace was
     /// derived by a different estimator than the live view (#221), `None`
     /// when it is the live ladder's. Keyed on [`TransferInput::estimator`],
@@ -1352,6 +1428,7 @@ impl TransferScene {
 
         let mut phase_axis = crate::ticks::phase_axis();
         let mut phase_span = None;
+        let mut cursor_columns: Vec<CursorColumn> = Vec::new();
         let (mag_segments, phase_segments) = if lengths_agree {
             // De-rotate first, then smooth. The two orders do not commute,
             // and this one is right for a reason, not by accident:
@@ -1423,6 +1500,13 @@ impl TransferScene {
                 // (the AC3 shared-mapping law, extended to the phase pane).
                 (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
+            // What each column's phase reads in the pane's own unit, for the
+            // cursor (#718): wrapped degrees, or the run's unwrapped degrees
+            // or group delay; NaN where the pane draws nothing.
+            let mut phase_view_vals: Vec<f64> = match modes.phase_view {
+                PhaseView::Wrapped => phase_deg.clone(),
+                _ => vec![f64::NAN; input.freqs.len()],
+            };
             let phase_segments = match modes.phase_view {
                 PhaseView::Wrapped => {
                     split_on_mask(&input.coherence, modes.coherence_mask, phase_points)
@@ -1447,6 +1531,13 @@ impl TransferScene {
                             (idx, values)
                         })
                         .collect();
+                    for (idx, values) in &runs {
+                        for (&i, &v) in idx.iter().zip(values) {
+                            if let Some(slot) = phase_view_vals.get_mut(i) {
+                                *slot = v;
+                            }
+                        }
+                    }
                     // Only what is on screen sets the scale: a column outside
                     // the frequency view would compress the part being
                     // looked at (Codex review).
@@ -1510,6 +1601,32 @@ impl TransferScene {
                         .collect()
                 }
             };
+            // The drawing's own mask test (`split_on_mask`: a column is gapped
+            // when its coherence is below the mask — NaN is not), so the
+            // cursor and the panes cannot disagree (Codex recheck).
+            let unmasked: Vec<bool> = input
+                .coherence
+                .iter()
+                .map(|&c| c.partial_cmp(&modes.coherence_mask) != Some(std::cmp::Ordering::Less))
+                .collect();
+            // A lone unmasked column is a one-point segment, which no pane
+            // draws (Codex review): the cursor must not report it as drawn.
+            let lone = |i: usize| {
+                unmasked[i]
+                    && !(i > 0 && unmasked[i - 1])
+                    && !unmasked.get(i + 1).copied().unwrap_or(false)
+            };
+            cursor_columns = (0..input.freqs.len())
+                .map(|i| CursorColumn {
+                    freq: input.freqs[i],
+                    x: freq_to_x(input.freqs[i], f_min, f_max),
+                    magnitude_db: magnitude_db[i],
+                    phase: phase_view_vals[i],
+                    coherence: input.coherence[i],
+                    masked: !unmasked[i],
+                    lone: lone(i),
+                })
+                .collect();
             (
                 split_on_mask(&input.coherence, modes.coherence_mask, mag_points),
                 phase_segments,
@@ -1551,6 +1668,8 @@ impl TransferScene {
             // they sit still while the curve moves.
             band_labels: band_labels(&input.stages, f_min, f_max),
             speed_readout: speed_readout(&input.stages),
+            cursor_columns,
+            phase_view: modes.phase_view,
             estimator_readout: match input.estimator {
                 Estimator::Ladder => None,
                 Estimator::Welch { nperseg } => Some(format_estimator_readout(input.sr, nperseg)),

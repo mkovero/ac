@@ -612,6 +612,12 @@ pub fn help_sections(view: ViewId) -> Vec<(HelpGroup, Vec<HelpRow>)> {
                     text: SLOT_HELP,
                 });
             }
+            if view == ViewId::Transfer && group == HelpGroup::Display {
+                rows.push(HelpRow {
+                    keys: "Mouse".to_string(),
+                    text: MOUSE_HELP,
+                });
+            }
             (!rows.is_empty()).then_some((group, rows))
         })
         .collect()
@@ -649,6 +655,10 @@ pub const SLOT_KEYS: [Key; 9] = [
     Key::Num8,
     Key::Num9,
 ];
+
+/// The help line for the pointer cursor (#718).
+pub const MOUSE_HELP: &str =
+    "Hover reads the selected trace; click pins a cursor, right-click clears it";
 
 /// The help line for a bare slot digit.
 pub const SLOT_TOGGLE_HELP: &str = "Show / hide that slot";
