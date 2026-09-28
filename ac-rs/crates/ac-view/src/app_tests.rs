@@ -632,6 +632,7 @@ fn arrows_move_the_selected_slot_not_live() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     app.handle_action(Action::CycleFocus, false); // slot 1
     app.rebuild_scenes(true, 0.0);
@@ -1295,6 +1296,7 @@ fn slots_replace_in_place_and_sit_in_order() {
             opened: false,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), t),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(5, "2026-09-26T14:00:00Z"));
@@ -1479,6 +1481,7 @@ fn a_bare_digit_toggles_its_slot() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot3.acsnap"),
         run: loaded_run("slot 3", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     let visible = |app: &AcViewApp| match &app.view {
         ViewKind::Transfer(t) => t.loaded[0].visible,
@@ -1533,6 +1536,7 @@ fn digits_reach_the_slots_through_dispatch() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot2.acsnap"),
         run: loaded_run("slot 2", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     let visible = |app: &AcViewApp| match &app.view {
         ViewKind::Transfer(t) => t.loaded[0].visible,
@@ -1626,6 +1630,7 @@ fn a_loaded_slot_says_where_it_came_from() {
         opened: true,
         path: std::path::PathBuf::from("/c/old.acsnap"),
         run: loaded_run("slot 4", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     assert_eq!(app.toast_text(), Some("slot 4 loaded from /c/old.acsnap"));
 }
@@ -1653,6 +1658,7 @@ fn c_writes_the_selected_trace_to_csv() {
         opened: false,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run: loaded_run("slot 1", "2026-09-26T14:00:00Z"),
+        warning: None,
     }));
     app.handle_action(Action::CycleFocus, false);
     app.handle_action(Action::NudgeDelayLater, true);
@@ -1717,6 +1723,7 @@ fn a_recalled_slot_is_selected() {
             opened,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(2, false));
@@ -1750,6 +1757,7 @@ fn the_selection_never_rests_on_a_hidden_slot() {
             opened,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     let now = std::time::Instant::now();
@@ -1831,6 +1839,7 @@ fn m_averages_the_visible_slots() {
             opened: false,
             path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
             run: loaded_run(&format!("slot {slot}"), "2026-09-26T14:00:00Z"),
+            warning: None,
         })
     };
     app.finish_capture_for_test(captured(1));
@@ -2178,6 +2187,7 @@ fn captured(slot: u8) -> Result<crate::capture::Captured, String> {
         opened: false,
         path: std::path::PathBuf::from(format!("/c/slot{slot}.acsnap")),
         run: loaded_run(&format!("slot {slot}"), "2026-09-28T00:00:00Z"),
+        warning: None,
     })
 }
 
@@ -2285,6 +2295,22 @@ fn a_stored_slot_is_drawn_as_live_was_at_the_key_press() {
     );
 }
 
+/// Codex recheck of #702: a capture whose settings file failed is kept —
+/// the measurement cannot be retaken — and the toast says `F` will reopen
+/// it at the defaults.
+#[test]
+fn a_settings_write_failure_keeps_the_slot_and_says_so() {
+    let mut app = transfer_app();
+    let mut c = captured(4).unwrap();
+    c.warning = Some("settings not saved (disk full)".into());
+    app.finish_capture_for_test(Ok(c));
+    app.with_transfer(|t| assert!(t.loaded.iter().any(|r| r.slot == Some(4))));
+    assert_eq!(
+        app.toast_text(),
+        Some("slot 4 stored \u{2014} /c/slot4.acsnap; settings not saved (disk full)")
+    );
+}
+
 /// #702: a slot opened from a file (`F`) keeps the settings it was saved
 /// with — live's current ones are not pressed onto it.
 #[test]
@@ -2298,6 +2324,7 @@ fn an_opened_slot_keeps_its_saved_settings() {
         opened: true,
         path: std::path::PathBuf::from("/c/slot3.acsnap"),
         run,
+        warning: None,
     }));
     app.with_transfer(|t| {
         let run = t.loaded.iter().find(|r| r.slot == Some(3)).unwrap();
@@ -2372,6 +2399,7 @@ fn the_ir_panel_follows_focus_and_names_whose_ir_it_is() {
         opened: true,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run,
+        warning: None,
     }));
     app.press_for_test(Action::ToggleIrPanel, 0.0);
     let label = |app: &AcViewApp| app.current_ir_scene().and_then(|s| s.label.clone());
@@ -2406,6 +2434,7 @@ fn a_nudged_slot_moves_its_ir_arrival_marker() {
         opened: true,
         path: std::path::PathBuf::from("/c/slot1.acsnap"),
         run,
+        warning: None,
     }));
     app.press_for_test(Action::ToggleIrPanel, 0.0);
     let arrival = |app: &AcViewApp| app.current_ir_scene().unwrap().arrival.text.clone();

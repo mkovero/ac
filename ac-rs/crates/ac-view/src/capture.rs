@@ -29,6 +29,10 @@ pub struct Captured {
     pub path: PathBuf,
     /// The stored pair of the snapshot, ready to overlay.
     pub run: LoadedRun,
+    /// Something the operator must be told although the store succeeded:
+    /// the settings file could not be written (#702), so `F` will reopen
+    /// this capture at the defaults.
+    pub warning: Option<String>,
 }
 
 /// `~/.local/share/ac/captures` — the client's own copy of every slot
@@ -188,20 +192,22 @@ pub fn capture_into(
         &file_name(slot, pair, &snap.meta.captured_at_utc),
         &bytes,
     )?;
-    // A capture whose settings could not be saved is removed again: left
-    // in the `F` list it would reopen at the defaults, silently unlike the
-    // slot the operator stored (Codex review).
+    // Settings that cannot be saved do not cost the capture — the
+    // measurement is the part that cannot be retaken — but the operator is
+    // told `F` will reopen it at the defaults (Codex review).
     let settings_file = settings_path(&path);
-    if let Err(e) = std::fs::write(&settings_file, settings.to_json().to_string()) {
-        let _ = std::fs::remove_file(&path);
-        return Err(e).with_context(|| format!("write {}", settings_file.display()));
-    }
+    let warning = std::fs::write(&settings_file, settings.to_json().to_string())
+        .err()
+        .map(|e| {
+            format!("settings not saved ({e}) \u{2014} F will reopen it unsmoothed, uninverted")
+        });
     let run = crate::snapshot_flow::stored_run_from_snapshot(&snap, pair, format!("slot {slot}"))?;
     Ok(Captured {
         slot,
         path,
         run,
         opened: false,
+        warning,
     })
 }
 
@@ -241,6 +247,7 @@ pub fn spawn_open(path: PathBuf, slot: u8) -> Receiver<Result<Captured, String>>
                     path,
                     run,
                     opened: true,
+                    warning: None,
                 }
             })
             .map_err(|e| format!("{e:#}"));

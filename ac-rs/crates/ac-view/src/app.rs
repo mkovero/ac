@@ -1270,7 +1270,12 @@ impl AcViewApp {
                 } else {
                     "stored \u{2014}"
                 };
-                self.set_toast(format!("slot {n} {verb} {path}"), now, Some(5.0));
+                match &captured.warning {
+                    None => self.set_toast(format!("slot {n} {verb} {path}"), now, Some(5.0)),
+                    Some(w) => {
+                        self.set_toast(format!("slot {n} {verb} {path}; {w}"), now, Some(10.0))
+                    }
+                }
             }
             Err(e) => {
                 self.capture_settings = None;
