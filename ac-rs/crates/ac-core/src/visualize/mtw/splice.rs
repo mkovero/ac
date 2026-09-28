@@ -392,7 +392,7 @@ mod tests {
     }
 
     /// The display fills downward as rungs settle. Only the bottom rung takes
-    /// the full 2.56 s; withholding everything until it does would hide a live
+    /// the full 2.43 s; withholding everything until it does would hide a live
     /// top band for most of that.
     #[test]
     fn unsettled_rungs_drop_their_columns_instead_of_blanking_the_display() {

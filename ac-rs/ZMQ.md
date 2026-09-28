@@ -3146,8 +3146,10 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "backend":         "jack" | "cpal" | "fake",
 
   // The three-stage transfer columns — the display's source. `null` until
-  // every ladder rung holds a full `n_blocks` (2.56 s at the bottom rung),
-  // and on a settling frame. Recomputed every tick. Absent is not a reason
+  // the top rung holds its full block count (0.11 s at 96 kHz), and on a
+  // pre-analysis frame (`n_averages: 0`). Deeper rungs join as they fill
+  // (the bottom at 2.43 s); `settled_stages` says which have — a present
+  // `mtw` is not a settled ladder. Recomputed every tick. Absent is not a reason
   // to fall back to the Welch arrays above: they are a different
   // measurement. Column spacing is NOT uniform in log frequency — map each
   // column by its own `freqs[i]`, never by index. dB is applied daemon-side.
@@ -3167,7 +3169,9 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // a crossover
     "bins":           [<int>, ...],      // source bins behind each column; never 0
     "ppo":            <float>,           // requested columns per octave
-    "n_blocks":       <int>,             // blocks each rung averages once settled
+    "n_blocks":       <int>,             // base block count N: stage 0 averages N,
+                                          // deeper stages a fixed multiple (4/6/12
+                                          // at N = 4; they overlap 75/87.5 %)
     "settled_stages": [<bool>, ...],     // which rungs have settled, shallowest
                                           // first: "more band coming" versus
                                           // "this is all there is"
@@ -3182,7 +3186,7 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
         "f_valid":    <float>,           // validity edge, Hz
         "f_top":      <float>,           // where it hands over to the rung above, Hz
         "blend_top":  <float>,           // top of the blend region, Hz
-        "settling_s": <float>            // W + hop·(N−1): time to fill its average
+        "settling_s": <float>            // W + hop·(blocks−1): time to fill its average
       }
     ]
   }
@@ -3430,7 +3434,7 @@ UI-driven session goes through `set_drive`, so the UI is always covered.
 
 An `on: false → true` transition discards a per-pair delay **that the
 daemon found while the drive was off** — a Find against silence — and finds
-it again, flushing that pair's averages and re-settling (2.56 s at the
+it again, flushing that pair's averages and re-settling (2.43 s at the
 bottom stage). A delay found while driving is kept, so the dead-man
 expiring and the client resuming does not disturb a running measurement,
 and a delay set with `set_delay` is never discarded (#669). `on: true →

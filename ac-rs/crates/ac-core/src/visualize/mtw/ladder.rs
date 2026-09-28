@@ -27,9 +27,35 @@ use std::fmt;
 /// and window are determined entirely by its decimated rate.
 pub const NFFT: usize = 4096;
 
-/// Segment hop in samples — 50% overlap, matching the Hann window the
-/// estimator uses.
+/// Stage 0's segment hop in samples — 50% overlap, matching the Hann window
+/// the estimator uses. The deeper stages hop more often ([`HOP_DIVISORS`]).
 pub const HOP: usize = NFFT / 2;
+
+/// `NFFT / hop` per stage, shallowest first: 50 %, 75 % and 87.5 % overlap.
+///
+/// A deeper stage's window is longer, and at 50 % overlap it moved only once
+/// per half window: the bottom rung (1.024 s) every 0.51 s and settled a
+/// change in 2.56 s — the operator's "completely unusable" for live
+/// monitoring below ~250 Hz (rig, 2026-09-28). Overlap buys update rate
+/// without touching resolution: the bottom now moves every 0.128 s, the
+/// middle every 0.085 s (#699). Overlapping blocks share samples, so the
+/// deeper stages average more of them ([`STAGE_BLOCKS`]).
+pub const HOP_DIVISORS: [usize; 3] = [2, 4, 8];
+
+/// Blocks each stage averages, as a multiple `num/den` of the session's
+/// base `N`, shallowest first: 4, 6 and 12 blocks at `N = 4`.
+///
+/// Overlap alone would have shortened what a deeper stage averages over,
+/// and a coherence estimate is only as good as its distinct data: at 87.5 %
+/// overlap and 4 blocks, two unrelated signals read 0.68 on average. These
+/// counts keep the floor where 50 % × 4 put it — measured 0.244, 0.266,
+/// 0.268 on uncorrelated inputs, against 0.44 at the bottom with half the
+/// blocks (`each_stage_keeps_the_uniform_ladders_coherence_floor`) — so the
+/// deeper stages move more often without their coherence meaning less.
+/// Settling is then about as before: 0.768 s in the middle, 2.432 s at the
+/// bottom. Settling faster needs fewer blocks (a higher floor) or a shorter
+/// bottom window (coarser resolution); neither is taken here.
+pub const STAGE_BLOCKS: [(usize, usize); 3] = [(1, 1), (3, 2), (3, 1)];
 
 /// The density the ladder is **built** to support, in points per octave.
 ///
@@ -53,7 +79,8 @@ pub const P_REF: f64 = 48.0;
 ///
 /// The bottom rung is 4 kHz, giving 0.98 Hz resolution honest to 67.6 Hz — the
 /// same reach the full-rate estimator has today. Going deeper is bench mode's
-/// job: at 4 kHz the bottom settles in 2.56 s, matching today, and every step
+/// job: at 4 kHz the bottom settles in 2.56 s at 50 % overlap (2.43 s since
+/// #699), matching today, and every step
 /// finer costs settling time in the one mode that cannot afford it.
 pub const TARGET_RATES: [f64; 2] = [12_000.0, 4_000.0];
 
@@ -95,7 +122,12 @@ pub struct Stage {
     pub df: f64,
     /// Analysis window length in seconds, `NFFT / rate`.
     pub window_s: f64,
-    /// Segment hop in seconds, `HOP / rate`.
+    /// Segment hop in samples at this stage's rate, `NFFT / HOP_DIVISORS[i]`.
+    pub hop: usize,
+    /// [`STAGE_BLOCKS`] for this stage: its block count is
+    /// `ceil(N · num / den)` for the session's base `N`.
+    pub blocks_factor: (usize, usize),
+    /// Segment hop in seconds, `hop / rate`.
     pub hop_s: f64,
     /// Lowest frequency at which this stage supports [`P_REF`] points per
     /// octave — its **validity edge**. Below this its columns are wider than
@@ -109,6 +141,14 @@ pub struct Stage {
     /// `f_top · 2^BLEND_OCTAVES`, and the highest frequency this stage is ever
     /// read at.
     pub blend_top: f64,
+}
+
+impl Stage {
+    /// Blocks this stage averages for the session's base `n_blocks`.
+    pub fn blocks(&self, n_blocks: usize) -> usize {
+        let (num, den) = self.blocks_factor;
+        (n_blocks.max(1) * num).div_ceil(den)
+    }
 }
 
 /// The full stage list for one sample rate, shallowest (full rate) first.
@@ -209,12 +249,16 @@ pub fn layout(sr: u32) -> Result<Ladder, LadderError> {
             let top = stages[i - 1].f_valid;
             (top, top * blend_ratio)
         };
+        let depth = i.min(HOP_DIVISORS.len() - 1);
+        let hop = NFFT / HOP_DIVISORS[depth];
         stages.push(Stage {
             decim: m,
             rate,
             df,
             window_s: NFFT as f64 / rate,
-            hop_s: HOP as f64 / rate,
+            hop,
+            blocks_factor: STAGE_BLOCKS[depth],
+            hop_s: hop as f64 / rate,
             f_valid,
             f_top,
             blend_top,

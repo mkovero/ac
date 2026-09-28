@@ -1046,7 +1046,7 @@ fn snapshot_replays_the_live_ladder_columns_under_a_two_source_stimulus() {
         "drive": true, "level_dbfs": -40.0,
     }));
     assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
-    // Lock ~1 s, then the deepest rung's 2.56 s settling, plus margin.
+    // Lock ~1 s, then the deepest rung's 2.43 s settling, plus margin.
     thread::sleep(Duration::from_secs(6));
 
     let mut frames = collect_mtw_frames(&c, 5_000, 30);

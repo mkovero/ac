@@ -25,8 +25,11 @@
 //! stage, because the stages complete blocks at very different cadences: 47,
 //! 5.9 and 1.5 at 96 kHz. Since `E[γ̂²] ≈ γ² + (1−γ²)/N`, that is a coherence
 //! bias of 0.02 / 0.17 / 0.68 and so a ~0.5 step at a fixed frequency, which
-//! reads as a property of the DUT rather than of the analyser. Uniform `N = 4`
-//! puts the block contribution to the bias at 0.25 everywhere.
+//! reads as a property of the DUT rather than of the analyser. `N = 4` at
+//! 50 % overlap puts the block contribution to the bias at 0.25 everywhere.
+//! Since #699 the deeper stages overlap more (75 %, 87.5 %) and average
+//! proportionally more blocks (6, 12) so that their floor stays at ≈0.25:
+//! what is uniform is the floor, not the count ([`super::ladder::STAGE_BLOCKS`]).
 //!
 //! That is the *block* contribution only. A display column sums several FFT
 //! bins, which averages further, and the bin count per column changes at a
@@ -36,13 +39,12 @@
 //!
 //! # What N costs
 //!
-//! Settling is `W + hop·(N−1)` per stage. At 96 kHz with `N = 4`: 0.11 s at
-//! the top, 0.85 s in the middle, **2.56 s** at the bottom. Today's bottom is
-//! 2.5 s, so low frequency is unchanged and the top improves roughly
-//! twelvefold. Lowering `N` would speed the bottom up (2.05 s at 3, 1.54 s at
-//! 2) but `N` is uniform, so it raises the coherence floor across the *whole*
-//! display — 0.33 and 0.50 respectively, and at 0.50 a coherence reading has
-//! stopped meaning anything.
+//! Settling is `W + hop·(blocks−1)` per stage. At 96 kHz with `N = 4`: 0.11 s
+//! at the top, 0.77 s in the middle, **2.43 s** at the bottom (2.56 s before
+//! #699, which bought update rate, not settling). Lowering `N` would speed
+//! every stage up but raises the coherence floor across the *whole* display —
+//! ≈0.33 at 3, ≈0.50 at 2, and at 0.50 a coherence reading has stopped
+//! meaning anything.
 
 use std::collections::VecDeque;
 

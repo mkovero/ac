@@ -205,13 +205,25 @@ impl Snapshot {
             .and_then(|m| m.get(pair_idx))
             .and_then(Option::as_ref);
         if let (None, Some(prov)) = (&sample_range, provenance) {
-            d.mtw = crate::visualize::mtw::replay::replay(
+            // A ladder this code does not build (an older `ac`, before the
+            // deeper stages hopped more often) is not an error in the
+            // snapshot: the pair derives Welch only, which the display
+            // labels "not the live ladder". Anything else is.
+            match crate::visualize::mtw::replay::replay(
                 meas_samples,
                 ref_samples,
                 self.meta.sr,
                 prov,
-            )
-            .with_context(|| format!("derive_pair: pair {pair_idx}"))?;
+            ) {
+                Ok(m) => d.mtw = m,
+                Err(e)
+                    if e.downcast_ref::<crate::visualize::mtw::replay::LayoutMismatch>()
+                        .is_some() =>
+                {
+                    d.mtw = None
+                }
+                Err(e) => return Err(e.context(format!("derive_pair: pair {pair_idx}"))),
+            }
         }
         Ok(d)
     }
@@ -760,7 +772,12 @@ mod tests {
         let m = whole.mtw.expect("whole-ring derivation replays the ladder");
         assert!(!m.freqs.is_empty() && m.lengths_agree());
         assert!(m.settled_stages.iter().any(|&s| s));
-        assert!(m.n.iter().all(|&n| n == m.n_blocks));
+        let l = crate::visualize::mtw::ladder::layout(snap.meta.sr).unwrap();
+        assert!(m
+            .n
+            .iter()
+            .zip(&m.stage)
+            .all(|(&n, &s)| n == l.stages[s].blocks(m.n_blocks)));
         assert_eq!(whole.welch_nperseg, snap.meta.sr as usize);
 
         let n = snap.channels[0].len();
@@ -774,7 +791,7 @@ mod tests {
     /// #221: a stored ladder the running code does not build at this rate is
     /// refused by `derive_pair`, not replayed on the wrong layout.
     #[test]
-    fn derive_pair_refuses_a_stored_layout_that_differs_from_the_readers() {
+    fn derive_pair_falls_back_to_welch_on_a_stored_layout_it_does_not_build() {
         use crate::visualize::weighting_curves::WeightingCurve;
         let snap = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
             .expect("v3 fixture must read");
@@ -783,11 +800,53 @@ mod tests {
         prov.stages[2].decim += 1;
         let (bytes, _) = write_acsnap(&meta, &snap.channels).expect("write");
         let tampered = read_acsnap(&bytes).expect("layout is not a structural rule");
-        let err = match tampered.derive_pair(0, WeightingCurve::Z, None) {
-            Ok(_) => panic!("derive_pair replayed a ladder this reader does not build"),
+        // A snapshot from an `ac` whose ladder differs (e.g. before the
+        // deeper stages hopped more often) still opens: Welch, no ladder.
+        let d = tampered
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("a foreign ladder layout must not stop the snapshot opening");
+        assert!(
+            d.mtw.is_none(),
+            "replayed a ladder this reader does not build"
+        );
+        let clean = snap
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("derive");
+        assert!(clean.mtw.is_some(), "untampered fixture must still replay");
+        assert_eq!(d.welch_nperseg, clean.welch_nperseg);
+        // The mismatch itself is still an error to replay's own callers.
+        let err = crate::visualize::mtw::replay::replay(
+            &tampered.channels[0],
+            &tampered.channels[1],
+            tampered.meta.sr,
+            tampered.meta.session.mtw.as_ref().unwrap()[0]
+                .as_ref()
+                .unwrap(),
+        )
+        .expect_err("replay must refuse the foreign layout");
+        assert!(format!("{err:#}").contains("stage decims"), "{err:#}");
+    }
+
+    /// #699 Codex: an empty stage list is a malformed file, and derive_pair
+    /// reports it rather than quietly deriving Welch.
+    #[test]
+    fn derive_pair_reports_malformed_ladder_provenance() {
+        use crate::visualize::weighting_curves::WeightingCurve;
+        let snap = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must read");
+        let mut meta = snap.meta.clone();
+        meta.session.mtw.as_mut().unwrap()[0]
+            .as_mut()
+            .unwrap()
+            .stages
+            .clear();
+        let (bytes, _) = write_acsnap(&meta, &snap.channels).expect("write");
+        let broken = read_acsnap(&bytes).expect("stage list is not checked on read");
+        let err = match broken.derive_pair(0, WeightingCurve::Z, None) {
+            Ok(_) => panic!("malformed provenance derived as Welch"),
             Err(e) => format!("{e:#}"),
         };
-        assert!(err.contains("stage decims"), "{err}");
+        assert!(err.contains("describes no ladder"), "{err}");
     }
 
     /// Deterministic broadband source for the fixture, `[-1, 1)`. A

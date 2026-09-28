@@ -281,11 +281,11 @@ pub(super) fn build_pair_messages(
         mc_enabled,
     );
 
-    // Multi-time-window columns (additive; `null` until every rung holds a
-    // full N blocks — 2.56 s at the bottom, the design's stated settling
-    // time. Gating on the full N is what makes the reported N
-    // unambiguous: every column is the mean of the same number of
-    // blocks). Unlike the Welch arrays above, these are recomputed every
+    // Multi-time-window columns (additive; `null` until the top rung holds
+    // its full block count, deeper rungs joining as they fill — 2.43 s at
+    // the bottom. Gating each rung on its full count is what makes the
+    // reported n unambiguous: every column of a rung is the mean of that
+    // rung's fixed number of blocks, 4 / 6 / 12 at N = 4). Unlike the Welch arrays above, these are recomputed every
     // tick: the ladder is a push pipeline fed the fresh capture buffers,
     // so its columns really do move at the frame rate.
     //

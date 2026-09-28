@@ -67,7 +67,7 @@ use realfft::RealFftPlanner;
 use align::PairAligner;
 use average::BlockAverage;
 use decimate::PairDecimator;
-use ladder::{Ladder, Stage, HOP, NFFT};
+use ladder::{Ladder, Stage, NFFT};
 use splice::{Column, StageSpectra};
 
 /// Periodic Hann window of length `n`.
@@ -79,6 +79,8 @@ fn hann(n: usize) -> Vec<f64> {
 
 /// One rung's running state: decimator, segment buffer, accumulator.
 struct Band {
+    /// This stage's segment hop, decimated samples ([`Stage::hop`]).
+    hop: usize,
     decim: PairDecimator,
     /// Decimated samples not yet consumed by a segment.
     buf_meas: Vec<f64>,
@@ -118,10 +120,11 @@ impl MtwPair {
                 let decim = PairDecimator::for_stage(srf, s);
                 let warmup = decim.transient_samples() / s.decim;
                 Band {
+                    hop: s.hop,
                     decim,
                     buf_meas: Vec::with_capacity(NFFT * 2),
                     buf_ref: Vec::with_capacity(NFFT * 2),
-                    avg: BlockAverage::new(bins, n_blocks),
+                    avg: BlockAverage::new(bins, s.blocks(n_blocks)),
                     warmup,
                 }
             })
@@ -203,7 +206,7 @@ impl MtwPair {
                     &band.buf_ref[pos..pos + NFFT],
                     &mut band.avg,
                 );
-                pos += HOP;
+                pos += band.hop;
             }
             if pos > 0 {
                 band.buf_meas.drain(..pos);
@@ -212,24 +215,25 @@ impl MtwPair {
         }
     }
 
-    /// Assemble display columns. `None` until every stage holds a full `N`
-    /// blocks.
+    /// Assemble display columns. `None` until the top stage holds its full
+    /// block count; deeper stages join as they fill.
     ///
-    /// Gating on the full `N` rather than on the first block is what makes the
-    /// reported `N` unambiguous — every column, at every frequency, is the
-    /// mean of the same number of blocks. The wait is the settling time the
-    /// design already states: `W + hop·(N−1)`, 2.56 s at the bottom stage.
+    /// Gating each stage on its full count rather than on the first block is
+    /// what makes the reported `n` unambiguous — every column of a stage is
+    /// the mean of that stage's fixed number of blocks
+    /// ([`Stage::blocks`], #699). The wait is the settling time
+    /// `W + hop·(blocks−1)`, 2.43 s at the bottom stage.
     pub fn columns(&self, f_min: f64, f_max: f64, ppo: f64) -> Option<Vec<Column>> {
         // The display fills downward as the rungs settle rather than staying
         // blank until the deepest one does. Only the bottom rung takes the
-        // full 2.56 s; the top is ready in 0.11 s at 96 kHz, and that is the
+        // full 2.43 s; the top is ready in 0.11 s at 96 kHz, and that is the
         // band a rattle is hunted in. Waiting for all three would hide a live
         // top band behind a settling bottom one for 2.4 s of every session.
         //
-        // A stage that has not completed its `N` blocks contributes nothing —
+        // A stage that has not completed its blocks contributes nothing —
         // it is not drawn at a shallower average. Every emitted column is
-        // therefore backed by the same `N`, which is what keeps the coherence
-        // bias equal either side of a crossover; an under-averaged column
+        // therefore backed by its stage's full count, which is what keeps the
+        // coherence bias equal either side of a crossover; an under-averaged column
         // would reintroduce that step at a frequency that drifts as the
         // ladder warms.
         if self.bands.iter().all(|b| !b.avg.settled()) {
@@ -330,7 +334,7 @@ fn analyse_block(
 /// Exposed so a viewer can say how long a band takes to settle without
 /// reverse-engineering it from the frame rate.
 pub fn settling_seconds(stage: &Stage, n_blocks: usize) -> f64 {
-    stage.window_s + stage.hop_s * (n_blocks.max(1) - 1) as f64
+    stage.window_s + stage.hop_s * (stage.blocks(n_blocks) - 1) as f64
 }
 
 /// The wire description of `ladder`'s rungs, shallowest first, for a ladder
@@ -625,16 +629,23 @@ mod tests {
         }
     }
 
-    /// Settling is `W + hop·(N−1)` per stage. The ratified figures at 96 kHz:
-    /// 0.11 s at the top, 0.85 s in the middle, 2.56 s at the bottom — the
-    /// last matching today's 2.5 s, so low frequency is not made slower.
+    /// Settling is `W + hop·(N_stage−1)` per stage. The figures at 96 kHz
+    /// with the per-stage hops and block counts: 0.11 s at the top, 0.77 s
+    /// in the middle, 2.43 s at the bottom — none slower than the 50 %-overlap
+    /// ladder's 0.11 / 0.85 / 2.56 s. The deeper stages now *update* every
+    /// 0.085 s and 0.128 s (were 0.17 s and 0.51 s).
     #[test]
     fn settling_matches_the_ratified_figures() {
         let l = ladder::layout(96_000).unwrap();
         let s: Vec<f64> = l.stages.iter().map(|st| settling_seconds(st, 4)).collect();
         assert!((s[0] - 0.106_667).abs() < 1e-4, "top {}", s[0]);
-        assert!((s[1] - 0.853_333).abs() < 1e-4, "middle {}", s[1]);
-        assert!((s[2] - 2.560_000).abs() < 1e-4, "bottom {}", s[2]);
+        assert!((s[1] - 0.768_000).abs() < 1e-4, "middle {}", s[1]);
+        assert!((s[2] - 2.432_000).abs() < 1e-4, "bottom {}", s[2]);
+        let hops: Vec<f64> = l.stages.iter().map(|st| st.hop_s).collect();
+        assert!(
+            (hops[1] - 0.085_333).abs() < 1e-4 && (hops[2] - 0.128).abs() < 1e-4,
+            "{hops:?}"
+        );
         assert!(
             s[2] <= 2.6,
             "the bottom must not get slower than today's 2.5 s: {}",
@@ -702,8 +713,9 @@ mod tests {
         assert_eq!(p.settled_stages(), vec![true, true, true]);
     }
 
-    /// Criterion 5c. Every emitted column reports the configured `N`, at every
-    /// point in warmup — not only once every rung has settled.
+    /// Criterion 5c. Every emitted column reports its stage's configured
+    /// block count (`Stage::blocks`), at every point in warmup — not only
+    /// once every rung has settled.
     ///
     /// Drives the real pipeline rather than a fixture, because the property
     /// depends on the `settled()` gate actually filtering: an under-averaged
@@ -727,13 +739,15 @@ mod tests {
                 continue;
             };
             sampled += 1;
-            let depths: std::collections::BTreeSet<usize> = cols.iter().map(|c| c.n).collect();
-            assert_eq!(
-                depths,
-                std::collections::BTreeSet::from([n_target]),
-                "tick {tick}: emitted columns average over {depths:?} blocks, \
-                 configured {n_target} — an under-averaged column reached the display"
-            );
+            for c in &cols {
+                let want = p.ladder().stages[c.stage].blocks(n_target);
+                assert_eq!(
+                    c.n, want,
+                    "tick {tick}: a stage-{} column averages over {} blocks, configured {want} \
+                     — an under-averaged column reached the display",
+                    c.stage, c.n
+                );
+            }
         }
         assert!(sampled > 20, "warmup barely sampled: {sampled} frames");
     }
@@ -788,6 +802,59 @@ mod tests {
             mean < 0.29,
             "floor {mean:.4} is at the 1/3.2 = 0.3125 an overlap correction \
              would predict — that correction does not apply to coherence bias"
+        );
+    }
+
+    /// The deeper stages hop more often (#699) and average more blocks to
+    /// keep their coherence floor where the uniform 50 % × `N` ladder put it.
+    /// Measured per stage, single-bin non-blend columns, uncorrelated inputs.
+    ///
+    /// The rejected alternative — overlap without the extra blocks — is
+    /// bounded by running `N = 2` alongside: the bottom stage then averages 6
+    /// blocks, still more than overlap alone would have left it (4). Its
+    /// floor must sit clearly above the shipped one (measured 0.44 against
+    /// 0.27), or the extra blocks buy nothing and should go.
+    #[test]
+    fn each_stage_keeps_the_uniform_ladders_coherence_floor() {
+        fn floors(n: usize) -> Vec<f64> {
+            let sr = 96_000u32;
+            let mut acc: Vec<Vec<f64>> = vec![Vec::new(); 3];
+            for run in 0..8u64 {
+                let mut p = MtwPair::new(sr, 0, n).unwrap();
+                let blk = 4_800usize;
+                for t in 0..90i64 {
+                    let i = t * blk as i64;
+                    let m: Vec<f32> = (0..blk)
+                        .map(|k| source_seeded(0xBBB0 + run, i + k as i64))
+                        .collect();
+                    let r: Vec<f32> = (0..blk)
+                        .map(|k| source_seeded(0x6660 + run, i + k as i64))
+                        .collect();
+                    p.push(&m, &r);
+                }
+                let cols = p.columns(20.0, 48_000.0, 48.0).expect("settled");
+                for c in cols.iter().filter(|c| c.bins == 1 && c.blend == 0.0) {
+                    acc[c.stage].push(c.coherence);
+                }
+            }
+            acc.iter()
+                .map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64)
+                .collect()
+        }
+        let shipped = floors(4);
+        let thin = floors(2);
+        eprintln!("floors N=4 {shipped:?}  N=2 {thin:?}");
+        for (i, f) in shipped.iter().enumerate() {
+            assert!(
+                (0.2..0.3).contains(f),
+                "stage {i} floor {f:.4} left the uniform ladder's ≈1/4"
+            );
+        }
+        assert!(
+            thin[2] > shipped[2] + 0.05,
+            "bottom floor with fewer blocks {:.4} is not above the shipped {:.4}",
+            thin[2],
+            shipped[2]
         );
     }
 
