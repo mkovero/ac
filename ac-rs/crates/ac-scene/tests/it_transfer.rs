@@ -590,3 +590,146 @@ fn an_isolated_unmasked_column_does_not_panic_either_phase_view() {
         assert!(s.phase_span.is_some(), "{view:?} fitted no range");
     }
 }
+
+// ─── motion easing (#716) ───────────────────────────────────────────
+
+use ac_scene::tween::{Tween, TweenOptions, TWEEN_S};
+
+const EASE: TweenOptions = TweenOptions {
+    ease_phase: true,
+    coherence_mask: 0.3,
+};
+
+fn est(mag: f64, phase: f64, coh: f64, delay_ms: f64) -> TransferInput {
+    let mut i = input(vec![100.0, 1000.0], vec![phase; 2], delay_ms);
+    i.magnitude_db = vec![mag; 2];
+    i.coherence = vec![coh; 2];
+    i
+}
+
+/// The curve eases from the drawn estimate to the new one over TWEEN_S,
+/// passing through the midpoint, and is exactly the new one from then on.
+/// The first estimate is drawn as is.
+#[test]
+fn a_new_estimate_is_reached_over_the_tween_time() {
+    let mut tw = Tween::default();
+    assert_eq!(
+        tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, EASE).magnitude_db[0],
+        0.0
+    );
+    let to = est(10.0, 40.0, 0.9, 1.0);
+    let mid = tw.sample(&to, 1.0 + 0.0, EASE);
+    assert_eq!(mid.magnitude_db[0], 0.0, "moved before any time passed");
+    let half = tw.sample(&to, 1.0 + TWEEN_S / 2.0, EASE);
+    assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
+    assert!((half.phase_deg[0] - 20.0).abs() < 1e-9);
+    for t in [TWEEN_S, TWEEN_S * 3.0] {
+        let s = tw.sample(&to, 1.0 + t, EASE);
+        assert_eq!(s.magnitude_db, to.magnitude_db);
+        assert_eq!(s.phase_deg, to.phase_deg);
+    }
+}
+
+/// Phase takes the shorter arc: 170° to −170° passes through 180°, not 0°
+/// — the rejected straight interpolation (computed) would sweep the pane.
+#[test]
+fn phase_eases_along_the_shorter_arc() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 170.0, 0.9, 1.0), 0.0, EASE);
+    tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0, EASE); // arrives
+    let half = tw.sample(&est(0.0, -170.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0, EASE);
+    let p = half.phase_deg[0];
+    assert!((p.abs() - 180.0).abs() < 1e-9, "went the long way: {p}");
+    let straight: f64 = (170.0 + -170.0) / 2.0;
+    assert!(straight.abs() < 1e-9, "the rejected path's midpoint is 0°");
+}
+
+/// A new estimate arriving mid-ease starts from where the curve is drawn,
+/// not from the old target: no jump.
+#[test]
+fn an_estimate_mid_ease_starts_from_the_drawn_curve() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, EASE);
+    tw.sample(&est(10.0, 0.0, 0.9, 1.0), 0.0, EASE);
+    let drawn = tw
+        .sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE)
+        .magnitude_db[0];
+    let next = tw
+        .sample(&est(20.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE)
+        .magnitude_db[0];
+    assert!((drawn - 5.0).abs() < 1e-9);
+    assert!((next - drawn).abs() < 1e-9, "jumped from {drawn} to {next}");
+}
+
+/// Incomparable estimates snap: a new delay, or a new column set.
+/// Coherence is never eased — the mask is the latest estimate's.
+#[test]
+fn a_changed_alignment_or_grid_snaps_and_coherence_is_never_eased() {
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.2, 1.0), 0.0, EASE);
+    let s = tw.sample(&est(10.0, 0.0, 0.9, 1.0), TWEEN_S / 2.0, EASE);
+    assert_eq!(s.coherence, vec![0.9; 2], "coherence was eased");
+    let snapped = tw.sample(&est(30.0, 0.0, 0.9, 2.0), TWEEN_S / 2.0, EASE);
+    assert_eq!(snapped.magnitude_db[0], 30.0, "eased across a delay change");
+    let mut other = est(40.0, 0.0, 0.9, 2.0);
+    other.freqs = vec![100.0, 2000.0];
+    assert_eq!(tw.sample(&other, TWEEN_S / 2.0, EASE).magnitude_db[0], 40.0);
+}
+
+/// Codex review of #716: a column the previous estimate masked appears at
+/// its new value, not easing in from the rejected one; and with phase
+/// easing off (the unwrapped and group-delay views) phase is the latest
+/// while magnitude still eases.
+#[test]
+fn an_unmasked_column_appears_at_once_and_phase_can_be_left_uneased() {
+    let mut tw = Tween::default();
+    let mut first = est(-80.0, 0.0, 0.9, 1.0);
+    first.coherence = vec![0.9, 0.1]; // column 1 masked
+    first.magnitude_db = vec![0.0, -80.0];
+    tw.sample(&first, 0.0, EASE);
+    let mut next = est(10.0, 90.0, 0.9, 1.0);
+    next.magnitude_db = vec![10.0, 0.0];
+    tw.sample(&next, 1.0, EASE);
+    let half = tw.sample(&next, 1.0 + TWEEN_S / 2.0, EASE);
+    assert!(
+        (half.magnitude_db[0] - 5.0).abs() < 1e-9,
+        "drawn column eases"
+    );
+    assert_eq!(half.magnitude_db[1], 0.0, "masked column eased in from -80");
+
+    let no_phase = TweenOptions {
+        ease_phase: false,
+        ..EASE
+    };
+    let mut tw = Tween::default();
+    tw.sample(&est(0.0, 0.0, 0.9, 1.0), 0.0, no_phase);
+    tw.sample(&est(10.0, 90.0, 0.9, 1.0), 1.0, no_phase);
+    let half = tw.sample(&est(10.0, 90.0, 0.9, 1.0), 1.0 + TWEEN_S / 2.0, no_phase);
+    assert_eq!(half.phase_deg[0], 90.0);
+    assert!((half.magnitude_db[0] - 5.0).abs() < 1e-9);
+}
+
+/// Codex recheck of #716: a column unmasked by coherence alone, mid-ease,
+/// appears at the latest value; a length-mismatched estimate snaps rather
+/// than panicking.
+#[test]
+fn a_coherence_only_unmask_appears_at_once_and_a_malformed_estimate_snaps() {
+    let mut tw = Tween::default();
+    let mut a = est(0.0, 0.0, 0.9, 1.0);
+    a.magnitude_db = vec![0.0, 0.0];
+    tw.sample(&a, 0.0, EASE);
+    let mut b = a.clone();
+    b.magnitude_db = vec![0.0, -80.0];
+    b.coherence = vec![0.9, 0.1]; // column 1 now masked
+    tw.sample(&b, 1.0, EASE);
+    let mut c = b.clone();
+    c.coherence = vec![0.9, 0.9]; // unmasked, same values
+    let s = tw.sample(&c, 1.0 + TWEEN_S / 2.0, EASE);
+    assert_eq!(s.magnitude_db[1], -80.0, "unmasked column shown mid-ease");
+
+    let mut bad = c.clone();
+    bad.magnitude_db = vec![5.0, 5.0];
+    bad.phase_deg = vec![0.0];
+    let s = tw.sample(&bad, 2.0, EASE);
+    assert_eq!(s.magnitude_db, vec![5.0, 5.0]);
+}

@@ -892,6 +892,7 @@ pub enum Estimator {
 /// The transfer-view analogue of [`crate::scene::SceneInput`]: the
 /// canonical intermediate both a live frame and a snapshot derivation
 /// funnel through, so the two paths cannot drift.
+#[derive(Debug, Clone)]
 pub struct TransferInput {
     pub freqs: Vec<f64>,
     pub magnitude_db: Vec<f64>,

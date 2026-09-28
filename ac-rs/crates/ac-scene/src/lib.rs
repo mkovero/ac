@@ -40,6 +40,7 @@ pub mod sweep_ir;
 pub mod target;
 pub mod ticks;
 pub mod transfer;
+pub mod tween;
 
 pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use ir::{ArrivalMarker, IrInput, IrScene, IrView, IR_HEADER, IR_HEADER_ARRIVAL};

@@ -394,7 +394,7 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::CycleSpeed,
         scope: Scope::Transfer,
         description: "Speed: Detail / Live / Follow (LF resolution vs update rate)",
-        shift: None,
+        shift: Some("Ease the live trace between estimates (40 ms) on / off"),
     },
     Binding {
         key: Key::Tab,
