@@ -198,11 +198,12 @@ pub(super) fn draw_transfer(
         // A view with nothing drawn (log/ETC from a daemon that sends none)
         // has no time to read or pin (Codex review).
         let drawn = ir.filter(|s| !s.trace.segments.is_empty());
-        let pointer = if drawn.is_some() {
-            pane_pointer(ui, &[vp], vp, true)
-        } else {
-            TransferPointer::default()
-        };
+        // It still takes a right-click, which clears (Codex recheck).
+        let mut pointer = pane_pointer(ui, &[vp], vp, true);
+        if drawn.is_none() {
+            pointer.hover_x = None;
+            pointer.click_x = None;
+        }
         // Labels below the panel's header and view rows (Codex review).
         let label_vp = Viewport {
             y: vp.y + 2.0 * ROW_H,
