@@ -439,3 +439,37 @@ fn a_shared_phase_range_holds_the_axis() {
         "the span is the trace's own"
     );
 }
+
+/// Codex review: columns outside the frequency view do not set the span.
+#[test]
+fn off_screen_columns_do_not_set_the_phase_span() {
+    let freqs: Vec<f64> = vec![100.0, 200.0, 1000.0, 1500.0, 2000.0, 9000.0];
+    // Flat 1 ms group delay in view; huge slopes only outside it.
+    let phase: Vec<f64> = freqs
+        .iter()
+        .map(|&f| {
+            if (1000.0..=2000.0).contains(&f) {
+                -0.36 * f
+            } else {
+                -50.0 * f
+            }
+        })
+        .collect();
+    let mut meters = (MeterState::default(), MeterState::default());
+    let s = TransferScene::from_input(
+        &input(freqs, phase, 0.0),
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off).with_phase_view(PhaseView::Unwrapped),
+        (900.0, 2100.0),
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    // In view the phase falls 0.36°/Hz over 1 kHz: a 360° span. Counting
+    // the off-screen columns (50°/Hz over 9 kHz) would make it ~450 000°.
+    let (lo, hi) = s.phase_span.unwrap();
+    assert!(
+        hi - lo <= 400.0,
+        "span {lo}..{hi} set by off-screen columns"
+    );
+}

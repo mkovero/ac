@@ -267,25 +267,34 @@ fn unwrap_deg(deg: &mut [f64]) {
     }
 }
 
-/// Group delay, ms, of unwrapped `deg` over `freqs`: `−dφ/df / 360`, a
-/// central difference inside the run, one-sided at its ends. A run of one
-/// point has no slope and gives none.
+/// Group delay, ms, of unwrapped `deg` over `freqs`: `−dφ/df / 360`.
+/// Inside the run the slope is the three-point derivative for **uneven**
+/// spacing (the ladder grid is not uniform): the secant between the two
+/// neighbours is the slope at their midpoint, not at the column (Codex
+/// review). One-sided at the run's ends. A run of one point has no slope.
 fn group_delay_ms(freqs: &[f64], deg: &[f64]) -> Vec<f64> {
     let n = deg.len();
     if n < 2 {
         return Vec::new();
     }
-    (0..n)
-        .map(|i| {
-            let (a, b) = (i.saturating_sub(1), (i + 1).min(n - 1));
+    let slope = |i: usize| -> f64 {
+        if i == 0 || i == n - 1 {
+            let (a, b) = if i == 0 { (0, 1) } else { (n - 2, n - 1) };
             let df = freqs[b] - freqs[a];
-            if df > 0.0 {
-                -(deg[b] - deg[a]) / (360.0 * df) * 1000.0
+            return if df > 0.0 {
+                (deg[b] - deg[a]) / df
             } else {
                 f64::NAN
-            }
-        })
-        .collect()
+            };
+        }
+        let (h1, h2) = (freqs[i] - freqs[i - 1], freqs[i + 1] - freqs[i]);
+        if !(h1 > 0.0 && h2 > 0.0) {
+            return f64::NAN;
+        }
+        (h1 * h1 * deg[i + 1] - h2 * h2 * deg[i - 1] + (h2 * h2 - h1 * h1) * deg[i])
+            / (h1 * h2 * (h1 + h2))
+    };
+    (0..n).map(|i| -slope(i) / 360.0 * 1000.0).collect()
 }
 
 impl DisplayModes {
@@ -1313,10 +1322,16 @@ impl TransferScene {
                             (idx, values)
                         })
                         .collect();
+                    // Only what is on screen sets the scale: a column outside
+                    // the frequency view would compress the part being
+                    // looked at (Codex review).
                     let mut all: Vec<f64> = runs
                         .iter()
-                        .flat_map(|(_, v)| v.iter().copied())
-                        .filter(|v| v.is_finite())
+                        .flat_map(|(idx, v)| idx.iter().zip(v.iter()))
+                        .filter(|(&i, v)| {
+                            v.is_finite() && (f_min..=f_max).contains(&input.freqs[i])
+                        })
+                        .map(|(_, &v)| v)
                         .collect();
                     all.sort_by(f64::total_cmp);
                     let pick = |q: f64| {
@@ -1450,6 +1465,36 @@ fn split_on_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex review of #695: on an uneven grid the slope at a column is
+    /// the three-point derivative. For a quadratic phase φ = −a·f² it is
+    /// exact (−2a·f); the rejected neighbours' secant is not.
+    #[test]
+    fn group_delay_is_exact_for_a_quadratic_phase_on_an_uneven_grid() {
+        let freqs = [100.0, 110.0, 200.0, 260.0];
+        let a = 0.001;
+        let deg: Vec<f64> = freqs.iter().map(|f| -a * f * f).collect();
+        let gd = group_delay_ms(&freqs, &deg);
+        let exact = |f: f64| 2.0 * a * f / 360.0 * 1000.0;
+        for i in 1..3 {
+            assert!(
+                (gd[i] - exact(freqs[i])).abs() < 1e-9,
+                "{i}: {} vs {}",
+                gd[i],
+                exact(freqs[i])
+            );
+        }
+        let secant = -(deg[2] - deg[0]) / (freqs[2] - freqs[0]) / 360.0 * 1000.0;
+        assert!(
+            (secant - exact(110.0)).abs() > 0.1,
+            "the secant was meant to miss"
+        );
+        // A pure delay: 1 ms at every column, ends included.
+        let delay: Vec<f64> = freqs.iter().map(|f| -360.0 * f * 0.001).collect();
+        assert!(group_delay_ms(&freqs, &delay)
+            .iter()
+            .all(|g| (g - 1.0).abs() < 1e-9));
+    }
 
     #[test]
     fn wrap_interval_is_open_at_minus_180_closed_at_plus_180() {

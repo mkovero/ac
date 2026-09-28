@@ -186,10 +186,13 @@ pub fn time_axis(t_min_ms: f64, t_max_ms: f64) -> Axis {
 /// widened to whole steps so a gridline sits on each end. `unit` follows
 /// every label. A flat or empty input is widened to ±1.
 pub fn linear_axis(lo: f64, hi: f64, unit: &str) -> (Axis, (f64, f64)) {
+    // A flat input is widened by 1 or, for a large value, by a part in a
+    // thousand of it: ±1 on 1e16 rounds back to 1e16 (Codex review).
+    let pad = |v: f64| 1.0_f64.max(v.abs() * 1e-3);
     let (lo, hi) = if lo.is_finite() && hi.is_finite() && hi > lo {
         (lo, hi)
     } else if lo.is_finite() {
-        (lo - 1.0, lo + 1.0)
+        (lo - pad(lo), lo + pad(lo))
     } else {
         (-1.0, 1.0)
     };
@@ -202,6 +205,11 @@ pub fn linear_axis(lo: f64, hi: f64, unit: &str) -> (Axis, (f64, f64)) {
         .unwrap_or(10.0 * mag);
     let lo_r = (lo / step).floor() * step;
     let hi_r = (hi / step).ceil() * step;
+    // Anything the arithmetic could not represent (a span near f64::MAX)
+    // draws no gridlines over a plain ±1 rather than NaN positions.
+    if !(step.is_finite() && step > 0.0 && lo_r.is_finite() && hi_r.is_finite() && hi_r > lo_r) {
+        return (Axis { ticks: Vec::new() }, (-1.0, 1.0));
+    }
     let n = ((hi_r - lo_r) / step).round() as i64;
     let decimals = if step >= 1.0 {
         0
@@ -253,6 +261,22 @@ mod tests {
         assert_eq!(small.ticks[1].label, "0.03 ms");
         let (_, flat) = linear_axis(5.0, 5.0, "°");
         assert_eq!(flat, (4.0, 6.0));
+    }
+
+    /// Codex review: extreme inputs give a finite axis, never NaN.
+    #[test]
+    fn linear_axis_never_returns_nan() {
+        for (lo, hi) in [(1e16, 1e16), (-1e308, 1e308), (f64::NAN, 1.0), (3.0, 3.0)] {
+            let (axis, (a, b)) = linear_axis(lo, hi, "ms");
+            assert!(
+                a.is_finite() && b.is_finite() && b > a,
+                "{lo}..{hi} -> {a}..{b}"
+            );
+            assert!(
+                axis.ticks.iter().all(|t| t.position.is_finite()),
+                "{lo}..{hi}"
+            );
+        }
     }
 
     #[test]

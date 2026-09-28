@@ -481,11 +481,21 @@ impl AcViewApp {
                     });
                 // The range the next pass draws every trace on: the union
                 // of this pass's spans.
+                // Only traces on screen count: a hidden run's span would
+                // flatten the ones being looked at (Codex review).
+                let live_shown = state.live_trace_shown();
                 self.shared_phase_range = self
                     .live
                     .iter()
+                    .filter(|_| live_shown)
                     .filter_map(|p| p.scene.as_ref())
-                    .chain(self.loaded_scenes.iter())
+                    .chain(
+                        self.loaded_scenes
+                            .iter()
+                            .zip(state.loaded.iter())
+                            .filter(|(_, run)| run.visible)
+                            .map(|(s, _)| s),
+                    )
                     .chain(self.average_scene.iter().map(|(s, _)| s))
                     .filter_map(|s| s.phase_span)
                     .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));

@@ -2111,3 +2111,18 @@ fn shift_p_cycles_the_phase_view_and_traces_share_its_axis() {
     app.rebuild_scenes(true, 0.4);
     assert_eq!(view(&app), None, "back to wrapped");
 }
+
+/// Codex review of #695: a hidden run does not widen the shared phase
+/// range — only what is on screen sets the scale.
+#[test]
+fn a_hidden_run_does_not_set_the_shared_phase_range() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("a.acsnap", "2026-09-28T00:00:00Z")));
+    app.handle_action(Action::ToggleRawPhase, true); // unwrapped
+    app.rebuild_scenes(true, 0.1);
+    let live_only = app.current_transfer_scene().unwrap().phase_span;
+    app.with_transfer(|t| t.loaded[0].visible = false);
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(app.shared_phase_range, live_only);
+}
