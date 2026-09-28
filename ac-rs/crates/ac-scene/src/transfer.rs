@@ -1325,14 +1325,25 @@ impl TransferScene {
                     // Only what is on screen sets the scale: a column outside
                     // the frequency view would compress the part being
                     // looked at (Codex review).
-                    let mut all: Vec<f64> = runs
-                        .iter()
-                        .flat_map(|(idx, v)| idx.iter().zip(v.iter()))
-                        .filter(|(&i, v)| {
-                            v.is_finite() && (f_min..=f_max).contains(&input.freqs[i])
-                        })
-                        .map(|(_, &v)| v)
-                        .collect();
+                    // A column counts when it is in view, or when the
+                    // segment from it to its run neighbour crosses a view
+                    // edge — a segment can cross the whole view with
+                    // neither end inside (Codex recheck).
+                    let in_view = |f: f64| (f_min..=f_max).contains(&f);
+                    let mut all: Vec<f64> = Vec::new();
+                    for (idx, v) in &runs {
+                        for k in 0..idx.len() {
+                            let f = input.freqs[idx[k]];
+                            let crosses_next = idx
+                                .get(k + 1)
+                                .is_some_and(|&j| f < f_min && input.freqs[j] >= f_min);
+                            let crosses_prev =
+                                k > 0 && f > f_max && input.freqs[idx[k - 1]] <= f_max;
+                            if v[k].is_finite() && (in_view(f) || crosses_next || crosses_prev) {
+                                all.push(v[k]);
+                            }
+                        }
+                    }
                     all.sort_by(f64::total_cmp);
                     let pick = |q: f64| {
                         all.get(((all.len() as f64 - 1.0) * q).round() as usize)

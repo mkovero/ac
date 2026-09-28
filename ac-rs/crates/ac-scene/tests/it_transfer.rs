@@ -473,3 +473,20 @@ fn off_screen_columns_do_not_set_the_phase_span() {
         "span {lo}..{hi} set by off-screen columns"
     );
 }
+
+/// Codex recheck: a segment crossing the whole view with neither end in it
+/// still sets the span, so the visible part is not clipped to ±1.
+#[test]
+fn a_segment_spanning_the_view_sets_the_span() {
+    let mut meters = (MeterState::default(), MeterState::default());
+    let s = TransferScene::from_input(
+        &input(vec![100.0, 1000.0], vec![0.0, -90.0], 0.0),
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off).with_phase_view(PhaseView::Unwrapped),
+        (300.0, 500.0),
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    assert_eq!(s.phase_span, Some((-90.0, 0.0)));
+}

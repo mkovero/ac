@@ -207,10 +207,21 @@ pub fn linear_axis(lo: f64, hi: f64, unit: &str) -> (Axis, (f64, f64)) {
     let hi_r = (hi / step).ceil() * step;
     // Anything the arithmetic could not represent (a span near f64::MAX)
     // draws no gridlines over a plain ±1 rather than NaN positions.
-    if !(step.is_finite() && step > 0.0 && lo_r.is_finite() && hi_r.is_finite() && hi_r > lo_r) {
+    // The width too: two finite ends can be an infinite span apart, and a
+    // tick count past 100 means the steps are not what the fit meant
+    // (Codex recheck).
+    let n_steps = (hi_r - lo_r) / step;
+    if !(step.is_finite()
+        && step > 0.0
+        && lo_r.is_finite()
+        && hi_r.is_finite()
+        && hi_r > lo_r
+        && n_steps.is_finite()
+        && n_steps <= 100.0)
+    {
         return (Axis { ticks: Vec::new() }, (-1.0, 1.0));
     }
-    let n = ((hi_r - lo_r) / step).round() as i64;
+    let n = n_steps.round() as i64;
     let decimals = if step >= 1.0 {
         0
     } else {
@@ -266,7 +277,13 @@ mod tests {
     /// Codex review: extreme inputs give a finite axis, never NaN.
     #[test]
     fn linear_axis_never_returns_nan() {
-        for (lo, hi) in [(1e16, 1e16), (-1e308, 1e308), (f64::NAN, 1.0), (3.0, 3.0)] {
+        for (lo, hi) in [
+            (1e16, 1e16),
+            (-1e308, 1e308),
+            (-1e308, 7e307),
+            (f64::NAN, 1.0),
+            (3.0, 3.0),
+        ] {
             let (axis, (a, b)) = linear_axis(lo, hi, "ms");
             assert!(
                 a.is_finite() && b.is_finite() && b > a,
