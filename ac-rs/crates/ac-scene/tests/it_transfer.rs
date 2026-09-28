@@ -313,6 +313,185 @@ fn f4_absent_and_null_peaks_are_indistinguishable() {
     );
 }
 
+// ─── phase views: unwrapped and group delay (#695) ──────────────────
+
+use ac_scene::transfer::PhaseView;
+
+fn scene_view(inp: &TransferInput, view: PhaseView) -> TransferScene {
+    let mut meters = (MeterState::default(), MeterState::default());
+    TransferScene::from_input(
+        inp,
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off).with_phase_view(view),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    )
+}
+
+/// A pure 1 ms delay: phase −360·f·τ, wrapped on the wire. Its group delay
+/// is 1 ms at every frequency. The rejected implementation — a difference
+/// of the wrapped phase — is computed here too: it spikes at each wrap.
+#[test]
+fn group_delay_of_a_pure_delay_is_flat_where_the_wrapped_difference_spikes() {
+    let freqs: Vec<f64> = (1..=60).map(|k| 100.0 * k as f64).collect();
+    let wrapped: Vec<f64> = freqs
+        .iter()
+        .map(|&f| {
+            let p = phi_raw(f, 1.0);
+            let r = (p + 180.0).rem_euclid(360.0) - 180.0;
+            if r == -180.0 {
+                180.0
+            } else {
+                r
+            }
+        })
+        .collect();
+    let inp = input(freqs.clone(), wrapped.clone(), 0.0);
+
+    let naive: Vec<f64> = (1..freqs.len())
+        .map(|i| -(wrapped[i] - wrapped[i - 1]) / (360.0 * (freqs[i] - freqs[i - 1])) * 1000.0)
+        .collect();
+    assert!(
+        naive.iter().any(|g| (g - 1.0).abs() > 1.0),
+        "the wrapped difference was meant to spike"
+    );
+
+    let gd = scene_view(&inp, PhaseView::GroupDelay);
+    let (lo, hi) = gd.phase_span.expect("a span");
+    assert!(
+        (lo - 1.0).abs() < 1e-9 && (hi - 1.0).abs() < 1e-9,
+        "span {lo}..{hi}"
+    );
+    // A flat curve: every point on one y, and the axis labels it 1 ms.
+    let ys: Vec<f64> = gd.phase.segments[0].iter().map(|p| p.1).collect();
+    assert!(ys.iter().all(|y| (y - ys[0]).abs() < 1e-9), "{ys:?}");
+    assert!(gd.phase_axis.ticks.iter().any(|t| t.label == "1.0 ms"));
+    assert_eq!(
+        gd.phase_view_readout,
+        Some("group delay \u{b7} relative to the phase reference")
+    );
+}
+
+/// Unwrapped phase of the same delay falls monotonically, with no jump.
+#[test]
+fn unwrapped_phase_has_no_wraps() {
+    let freqs: Vec<f64> = (1..=60).map(|k| 100.0 * k as f64).collect();
+    let wrapped: Vec<f64> = freqs
+        .iter()
+        .map(|&f| (phi_raw(f, 1.0) + 180.0).rem_euclid(360.0) - 180.0)
+        .collect();
+    let s = scene_view(&input(freqs, wrapped, 0.0), PhaseView::Unwrapped);
+    let ys: Vec<f64> = s.phase.segments[0].iter().map(|p| p.1).collect();
+    assert!(ys.windows(2).all(|w| w[1] < w[0]), "not monotonic: {ys:?}");
+    let (lo, hi) = s.phase_span.unwrap();
+    assert!(hi - lo > 5.0 * 360.0, "span {lo}..{hi} still wrapped");
+}
+
+/// A masked gap restarts the unwrapping: the run after it starts from its
+/// own wrapped value, not from one extrapolated across the gap.
+#[test]
+fn a_masked_gap_restarts_the_unwrapping() {
+    let freqs: Vec<f64> = (1..=8).map(|k| 1000.0 * k as f64).collect();
+    let phase = vec![0.0, -90.0, 180.0, 90.0, 0.0, -90.0, 180.0, 90.0];
+    let mut inp = input(freqs, phase, 0.0);
+    inp.coherence = vec![0.9, 0.9, 0.9, 0.1, 0.9, 0.9, 0.9, 0.9];
+    let s = scene_view(&inp, PhaseView::Unwrapped);
+    assert_eq!(s.phase.segments.len(), 2);
+    // Run 1: 0, −90, −180; run 2 starts again at 0: 0, −90, −180, −270.
+    let axis = &s.phase_axis;
+    assert!(!axis.ticks.is_empty());
+    let first_y = |seg: usize| s.phase.segments[seg][0].1;
+    assert!(
+        (first_y(0) - first_y(1)).abs() < 1e-9,
+        "run 2 did not restart at its own start"
+    );
+}
+
+/// A shared range fixes the axis whatever the trace spans.
+#[test]
+fn a_shared_phase_range_holds_the_axis() {
+    let freqs: Vec<f64> = (1..=10).map(|k| 1000.0 * k as f64).collect();
+    let inp = input(freqs, vec![0.0; 10], 0.0);
+    let mut meters = (MeterState::default(), MeterState::default());
+    let s = TransferScene::from_input(
+        &inp,
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off)
+            .with_phase_view(PhaseView::GroupDelay)
+            .with_phase_range((-2.0, 6.0)),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    let labels: Vec<&str> = s
+        .phase_axis
+        .ticks
+        .iter()
+        .map(|t| t.label.as_str())
+        .collect();
+    assert_eq!(labels.first(), Some(&"-2 ms"));
+    assert_eq!(labels.last(), Some(&"6 ms"));
+    assert_eq!(
+        s.phase_span,
+        Some((0.0, 0.0)),
+        "the span is the trace's own"
+    );
+}
+
+/// Codex review: columns outside the frequency view do not set the span.
+#[test]
+fn off_screen_columns_do_not_set_the_phase_span() {
+    let freqs: Vec<f64> = vec![100.0, 200.0, 1000.0, 1500.0, 2000.0, 9000.0];
+    // Flat 1 ms group delay in view; huge slopes only outside it.
+    let phase: Vec<f64> = freqs
+        .iter()
+        .map(|&f| {
+            if (1000.0..=2000.0).contains(&f) {
+                -0.36 * f
+            } else {
+                -50.0 * f
+            }
+        })
+        .collect();
+    let mut meters = (MeterState::default(), MeterState::default());
+    let s = TransferScene::from_input(
+        &input(freqs, phase, 0.0),
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off).with_phase_view(PhaseView::Unwrapped),
+        (900.0, 2100.0),
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    // In view the phase falls 0.36°/Hz over 1 kHz: a 360° span. Counting
+    // the off-screen columns (50°/Hz over 9 kHz) would make it ~450 000°.
+    let (lo, hi) = s.phase_span.unwrap();
+    assert!(
+        hi - lo <= 400.0,
+        "span {lo}..{hi} set by off-screen columns"
+    );
+}
+
+/// Codex recheck: a segment crossing the whole view with neither end in it
+/// still sets the span, so the visible part is not clipped to ±1.
+#[test]
+fn a_segment_spanning_the_view_sets_the_span() {
+    let mut meters = (MeterState::default(), MeterState::default());
+    let s = TransferScene::from_input(
+        &input(vec![100.0, 1000.0], vec![0.0, -90.0], 0.0),
+        DisplayModes::new(DerotMode::Raw, Smoothing::Off).with_phase_view(PhaseView::Unwrapped),
+        (300.0, 500.0),
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    );
+    assert_eq!(s.phase_span, Some((-90.0, 0.0)));
+}
+
 // ─── invert and offset (Smaart's trace controls) ─────────────────────
 
 fn scene_with(inp: &TransferInput, invert: bool, offset_db: f64) -> TransferScene {

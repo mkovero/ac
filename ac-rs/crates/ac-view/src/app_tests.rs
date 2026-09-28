@@ -2411,3 +2411,48 @@ fn shift_h_cycles_the_ir_view_and_the_scene_follows() {
     app.rebuild_ir_scene();
     assert!(app.current_ir_scene().is_none());
 }
+
+// ---- phase views (#695) ----
+
+/// `Shift+P` walks wrapped → unwrapped → group delay → wrapped; outside
+/// the wrapped view the live trace and a stored run are drawn on one
+/// shared axis (fitted on the previous pass), whatever their own spans.
+#[test]
+fn shift_p_cycles_the_phase_view_and_traces_share_its_axis() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("a.acsnap", "2026-09-28T00:00:00Z")));
+    let view = |app: &AcViewApp| app.current_transfer_scene().unwrap().phase_view_readout;
+
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.1);
+    assert_eq!(
+        view(&app),
+        Some("phase unwrapped \u{b7} each unmasked run from its own start")
+    );
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.2); // fits the shared range
+    app.rebuild_scenes(true, 0.3); // draws on it
+    let live_axis = app.current_transfer_scene().unwrap().phase_axis.clone();
+    assert!(live_axis.ticks.iter().all(|t| t.label.ends_with(" ms")));
+    assert_eq!(app.current_loaded_scenes()[0].phase_axis, live_axis);
+
+    app.handle_action(Action::ToggleRawPhase, true);
+    app.rebuild_scenes(true, 0.4);
+    assert_eq!(view(&app), None, "back to wrapped");
+}
+
+/// Codex review of #695: a hidden run does not widen the shared phase
+/// range — only what is on screen sets the scale.
+#[test]
+fn a_hidden_run_does_not_set_the_shared_phase_range() {
+    let mut app = transfer_app();
+    app.ingest_frame_for_test(found_frame(), 0.0);
+    app.with_transfer(|t| t.add_loaded_run(loaded_run("a.acsnap", "2026-09-28T00:00:00Z")));
+    app.handle_action(Action::ToggleRawPhase, true); // unwrapped
+    app.rebuild_scenes(true, 0.1);
+    let live_only = app.current_transfer_scene().unwrap().phase_span;
+    app.with_transfer(|t| t.loaded[0].visible = false);
+    app.rebuild_scenes(true, 0.2);
+    assert_eq!(app.shared_phase_range, live_only);
+}

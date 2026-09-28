@@ -252,6 +252,22 @@ pub(super) fn draw_transfer(
         draw_input_meters(painter, content, scene);
     }
 
+    // The phase pane's view when it is not the wrapped one (#695) —
+    // unwrapped phase and group delay follow the phase reference and a
+    // mask gap, which the caption says. ac-scene's string.
+    if let Some(label) = scene
+        .or_else(|| stored.first().map(|r| r.scene))
+        .and_then(|s| s.phase_view_readout)
+    {
+        text(
+            painter,
+            egui::pos2(layout.phase.x + 4.0, layout.phase.y + 2.0),
+            Align2::LEFT_TOP,
+            label,
+            COLOR_VALUE,
+        );
+    }
+
     // Last, so the fault indicator is over the traces rather than under
     // them.
     draw_fault(painter, &layout, scene, live);

@@ -209,6 +209,9 @@ pub struct TransferViewState {
     ir_panel_open: bool,
     /// Which view the IR panel draws: linear, log or ETC (`Shift+H`).
     pub ir_view: ac_scene::IrView,
+    /// What the phase pane shows (#695), for every trace: wrapped phase,
+    /// unwrapped phase or group delay (`Shift+P`).
+    pub phase_view: ac_scene::transfer::PhaseView,
     /// Stored runs loaded for comparison (#321), in load order. Unbounded
     /// on purpose — triage and the architect both left the comparison-set
     /// size open as a later UX-driven constraint, not an architectural one.
@@ -262,6 +265,7 @@ impl TransferViewState {
             offset_db: 0.0,
             ir_panel_open: false,
             ir_view: ac_scene::IrView::Linear,
+            phase_view: ac_scene::transfer::PhaseView::Wrapped,
             loaded: Vec::new(),
             focus: Focus::Live,
             live_count: 1,

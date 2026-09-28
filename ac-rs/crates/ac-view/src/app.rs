@@ -45,6 +45,11 @@ pub struct AcViewApp {
     /// always at least one, so a frame reaching an app built without a
     /// session still has somewhere to go.
     live: Vec<LivePair>,
+    /// The unwrapped / group-delay pane's range (#695): the union of every
+    /// drawn trace's span on the previous pass, so all share one scale. A
+    /// pass behind by design: fitting it within the pass would build each
+    /// live scene twice, feeding its meters and fault clock twice.
+    shared_phase_range: Option<(f64, f64)>,
     /// The ranges the current `scene` was last built with, so a
     /// range change alone (no new frame) is detected and triggers a
     /// rebuild from the first pair's held frame.
@@ -156,6 +161,7 @@ impl AcViewApp {
             scene: None,
             pairs: Vec::new(),
             live: vec![LivePair::default()],
+            shared_phase_range: None,
             last_scene_ranges: None,
             loaded_scenes: Vec::new(),
             ir_scene: None,
@@ -439,9 +445,13 @@ impl AcViewApp {
                 // phase pane is a fixed ±180° band inside ac-scene.
                 let db_range = (-80.0, 20.0);
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
-                let modes = ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
-                    .with_coherence_mask(state.coherence_mask)
-                    .with_invert_offset(state.invert, state.offset_db);
+                let phase = (state.phase_view, self.shared_phase_range);
+                let modes = with_phase(
+                    ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing)
+                        .with_coherence_mask(state.coherence_mask)
+                        .with_invert_offset(state.invert, state.offset_db),
+                    phase,
+                );
                 // Every pair every pass, each through its own meter and
                 // fault state (#685): both carry time between frames.
                 for pair in &mut self.live {
@@ -473,7 +483,7 @@ impl AcViewApp {
                 // Every loaded run rebuilt every pass too (#321) — a
                 // zoom/pan or an `N` press on a stored run must reach its
                 // curve exactly as reliably as the live one's.
-                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range);
+                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range, phase);
                 // The slot average (#671), drawn like a stored run in its
                 // own colour, unsmoothed, under the same mask.
                 self.average_scene = crate::snapshot_flow::average_input(state)
@@ -482,11 +492,14 @@ impl AcViewApp {
                     .map(|(input, label)| {
                         let scene = ac_scene::TransferScene::from_input(
                             &input,
-                            ac_scene::DisplayModes::new(
-                                ac_scene::DerotMode::Session,
-                                Default::default(),
-                            )
-                            .with_coherence_mask(state.coherence_mask),
+                            with_phase(
+                                ac_scene::DisplayModes::new(
+                                    ac_scene::DerotMode::Session,
+                                    Default::default(),
+                                )
+                                .with_coherence_mask(state.coherence_mask),
+                                phase,
+                            ),
                             freq_range,
                             db_range,
                             &mut Default::default(),
@@ -495,6 +508,26 @@ impl AcViewApp {
                         );
                         (scene, label)
                     });
+                // The range the next pass draws every trace on: the union
+                // of this pass's spans.
+                // Only traces on screen count: a hidden run's span would
+                // flatten the ones being looked at (Codex review).
+                let live_shown = state.live_trace_shown();
+                self.shared_phase_range = self
+                    .live
+                    .iter()
+                    .filter(|_| live_shown)
+                    .filter_map(|p| p.scene.as_ref())
+                    .chain(
+                        self.loaded_scenes
+                            .iter()
+                            .zip(state.loaded.iter())
+                            .filter(|(_, run)| run.visible)
+                            .map(|(s, _)| s),
+                    )
+                    .chain(self.average_scene.iter().map(|(s, _)| s))
+                    .filter_map(|s| s.phase_span)
+                    .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
                 self.scene = None;
                 self.target_trace = self.target.as_ref().map(|t| crate::view::TargetTrace {
                     trace: t.trace(freq_range, db_range),
@@ -688,7 +721,14 @@ impl AcViewApp {
                 self.with_spectrum(|s| s.ref_trace_visible = !s.ref_trace_visible)
             }
             // -- transfer view: toggles --
-            Action::ToggleRawPhase => self.with_transfer(|t| t.toggle_raw_phase()),
+            Action::ToggleRawPhase => self.with_transfer(|t| {
+                if shift {
+                    // `Shift+P` (#695): wrapped → unwrapped → group delay.
+                    t.phase_view = t.phase_view.next();
+                } else {
+                    t.toggle_raw_phase();
+                }
+            }),
             Action::CycleDerotReference => self.with_transfer(|t| t.cycle_derot()),
             Action::CycleSmoothing => self.with_transfer(|t| t.cycle_smoothing()),
             Action::OpenSettings => self.open_settings(),
@@ -1980,6 +2020,7 @@ fn rebuild_loaded_scenes(
     state: &crate::view::TransferViewState,
     freq_range: (f64, f64),
     db_range: (f64, f64),
+    phase: (ac_scene::transfer::PhaseView, Option<(f64, f64)>),
 ) -> Vec<ac_scene::TransferScene> {
     state
         .loaded
@@ -1990,14 +2031,30 @@ fn rebuild_loaded_scenes(
                 &run.channel_role,
                 run.sr,
                 run.delay_offset_samples,
-                ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
-                    .with_coherence_mask(state.coherence_mask)
-                    .with_invert_offset(run.invert, run.offset_db),
+                with_phase(
+                    ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing)
+                        .with_coherence_mask(state.coherence_mask)
+                        .with_invert_offset(run.invert, run.offset_db),
+                    phase,
+                ),
                 freq_range,
                 db_range,
             )
         })
         .collect()
+}
+
+/// `modes` with the phase pane's view and, outside the wrapped view, the
+/// shared range (#695).
+fn with_phase(
+    modes: ac_scene::DisplayModes,
+    (view, range): (ac_scene::transfer::PhaseView, Option<(f64, f64)>),
+) -> ac_scene::DisplayModes {
+    let modes = modes.with_phase_view(view);
+    match range {
+        Some(r) if view != ac_scene::transfer::PhaseView::Wrapped => modes.with_phase_range(r),
+        _ => modes,
+    }
 }
 
 /// `--meas 0,4` (#685): one or more measurement channels, comma

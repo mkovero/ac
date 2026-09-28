@@ -180,6 +180,70 @@ pub fn time_axis(t_min_ms: f64, t_max_ms: f64) -> Axis {
     Axis { ticks }
 }
 
+/// A linear axis fitted to `[lo, hi]` with round steps (1, 2 or 5 × 10ᵏ,
+/// four to ten ticks), for panes whose range follows the data (#695:
+/// unwrapped phase, group delay). Returns the axis and the range it maps,
+/// widened to whole steps so a gridline sits on each end. `unit` follows
+/// every label. A flat or empty input is widened to ±1.
+pub fn linear_axis(lo: f64, hi: f64, unit: &str) -> (Axis, (f64, f64)) {
+    // A flat input is widened by 1 or, for a large value, by a part in a
+    // thousand of it: ±1 on 1e16 rounds back to 1e16 (Codex review).
+    let pad = |v: f64| 1.0_f64.max(v.abs() * 1e-3);
+    let (lo, hi) = if lo.is_finite() && hi.is_finite() && hi > lo {
+        (lo, hi)
+    } else if lo.is_finite() {
+        (lo - pad(lo), lo + pad(lo))
+    } else {
+        (-1.0, 1.0)
+    };
+    let raw = (hi - lo) / 5.0;
+    let mag = 10f64.powf(raw.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|m| m * mag)
+        .find(|s| (hi - lo) / s <= 10.0)
+        .unwrap_or(10.0 * mag);
+    let lo_r = (lo / step).floor() * step;
+    let hi_r = (hi / step).ceil() * step;
+    // Anything the arithmetic could not represent (a span near f64::MAX)
+    // draws no gridlines over a plain ±1 rather than NaN positions.
+    // The width too: two finite ends can be an infinite span apart, and a
+    // tick count past 100 means the steps are not what the fit meant
+    // (Codex recheck).
+    let n_steps = (hi_r - lo_r) / step;
+    if !(step.is_finite()
+        && step > 0.0
+        && lo_r.is_finite()
+        && hi_r.is_finite()
+        && hi_r > lo_r
+        && n_steps.is_finite()
+        && n_steps <= 100.0)
+    {
+        return (Axis { ticks: Vec::new() }, (-1.0, 1.0));
+    }
+    let n = n_steps.round() as i64;
+    let decimals = if step >= 1.0 {
+        0
+    } else {
+        (-step.log10().floor()) as usize
+    };
+    let ticks = (0..=n)
+        .map(|k| {
+            let v = lo_r + k as f64 * step;
+            Tick {
+                position: linear_to_y(v, lo_r, hi_r),
+                label: format!("{v:.decimals$} {unit}"),
+            }
+        })
+        .collect();
+    (Axis { ticks }, (lo_r, hi_r))
+}
+
+/// Normalized y of `v` within `[lo, hi]`.
+pub fn linear_to_y(v: f64, lo: f64, hi: f64) -> f64 {
+    (v - lo) / (hi - lo)
+}
+
 fn time_label(t_ms: f64) -> String {
     if t_ms == 0.0 {
         "0".to_string()
@@ -191,6 +255,46 @@ fn time_label(t_ms: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round steps, a gridline on each end, the unit on every label.
+    #[test]
+    fn linear_axis_fits_round_steps_to_the_data() {
+        let (axis, range) = linear_axis(-3.2, 7.9, "ms");
+        assert_eq!(range, (-4.0, 8.0));
+        let labels: Vec<&str> = axis.ticks.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["-4 ms", "-2 ms", "0 ms", "2 ms", "4 ms", "6 ms", "8 ms"]
+        );
+        assert_eq!(axis.ticks[0].position, 0.0);
+        assert_eq!(axis.ticks.last().unwrap().position, 1.0);
+        let (small, _) = linear_axis(0.02, 0.09, "ms");
+        assert_eq!(small.ticks[1].label, "0.03 ms");
+        let (_, flat) = linear_axis(5.0, 5.0, "°");
+        assert_eq!(flat, (4.0, 6.0));
+    }
+
+    /// Codex review: extreme inputs give a finite axis, never NaN.
+    #[test]
+    fn linear_axis_never_returns_nan() {
+        for (lo, hi) in [
+            (1e16, 1e16),
+            (-1e308, 1e308),
+            (-1e308, 7e307),
+            (f64::NAN, 1.0),
+            (3.0, 3.0),
+        ] {
+            let (axis, (a, b)) = linear_axis(lo, hi, "ms");
+            assert!(
+                a.is_finite() && b.is_finite() && b > a,
+                "{lo}..{hi} -> {a}..{b}"
+            );
+            assert!(
+                axis.ticks.iter().all(|t| t.position.is_finite()),
+                "{lo}..{hi}"
+            );
+        }
+    }
 
     #[test]
     fn phase_axis_positions_and_labels_are_exact() {

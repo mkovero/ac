@@ -205,6 +205,102 @@ pub struct DisplayModes {
     /// dB added to the drawn magnitude (Smaart's trace offset), after the
     /// inversion. Display only.
     pub offset_db: f64,
+    /// What the phase pane shows (#695): wrapped phase, unwrapped phase,
+    /// or group delay.
+    pub phase_view: PhaseView,
+    /// A fixed range for the unwrapped / group-delay pane, so traces drawn
+    /// together share one scale. `None` fits the range to this trace.
+    pub phase_range: Option<(f64, f64)>,
+}
+
+/// The phase pane's view (#695, Smaart's phase / unwrapped / group
+/// delay), cycled by `Shift+P`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseView {
+    /// Degrees in (−180, +180], the fixed ±180° pane.
+    #[default]
+    Wrapped,
+    /// Degrees unwrapped along each unmasked run, on an axis fitted to the
+    /// data.
+    Unwrapped,
+    /// `−dφ/df / 360`, ms, on an axis fitted to the data.
+    GroupDelay,
+}
+
+impl PhaseView {
+    pub fn next(self) -> PhaseView {
+        match self {
+            PhaseView::Wrapped => PhaseView::Unwrapped,
+            PhaseView::Unwrapped => PhaseView::GroupDelay,
+            PhaseView::GroupDelay => PhaseView::Wrapped,
+        }
+    }
+
+    /// The caption the pane carries: `None` for the resting wrapped view.
+    /// Both others follow the phase reference (the de-rotation), and a gap
+    /// in the mask restarts the unwrapping, so they say so.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            PhaseView::Wrapped => None,
+            PhaseView::Unwrapped => {
+                Some("phase unwrapped \u{b7} each unmasked run from its own start")
+            }
+            PhaseView::GroupDelay => Some("group delay \u{b7} relative to the phase reference"),
+        }
+    }
+}
+
+/// The share of drawn values the unwrapped and group-delay axes cover, from
+/// each end: 2 % either side, so one noisy spike does not flatten the
+/// curve. What falls outside runs off the pane, which is honest.
+const PHASE_VIEW_RANGE_TRIM: f64 = 0.02;
+
+/// Unwrap `deg` in place: add or remove 360 wherever a step exceeds 180.
+fn unwrap_deg(deg: &mut [f64]) {
+    let mut offset = 0.0;
+    for i in 1..deg.len() {
+        let prev = deg[i - 1];
+        let mut cur = deg[i] + offset;
+        while cur - prev > 180.0 {
+            cur -= 360.0;
+            offset -= 360.0;
+        }
+        while cur - prev <= -180.0 {
+            cur += 360.0;
+            offset += 360.0;
+        }
+        deg[i] = cur;
+    }
+}
+
+/// Group delay, ms, of unwrapped `deg` over `freqs`: `−dφ/df / 360`.
+/// Inside the run the slope is the three-point derivative for **uneven**
+/// spacing (the ladder grid is not uniform): the secant between the two
+/// neighbours is the slope at their midpoint, not at the column (Codex
+/// review). One-sided at the run's ends. A run of one point has no slope.
+fn group_delay_ms(freqs: &[f64], deg: &[f64]) -> Vec<f64> {
+    let n = deg.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let slope = |i: usize| -> f64 {
+        if i == 0 || i == n - 1 {
+            let (a, b) = if i == 0 { (0, 1) } else { (n - 2, n - 1) };
+            let df = freqs[b] - freqs[a];
+            return if df > 0.0 {
+                (deg[b] - deg[a]) / df
+            } else {
+                f64::NAN
+            };
+        }
+        let (h1, h2) = (freqs[i] - freqs[i - 1], freqs[i + 1] - freqs[i]);
+        if !(h1 > 0.0 && h2 > 0.0) {
+            return f64::NAN;
+        }
+        (h1 * h1 * deg[i + 1] - h2 * h2 * deg[i - 1] + (h2 * h2 - h1 * h1) * deg[i])
+            / (h1 * h2 * (h1 + h2))
+    };
+    (0..n).map(|i| -slope(i) / 360.0 * 1000.0).collect()
 }
 
 impl DisplayModes {
@@ -217,6 +313,8 @@ impl DisplayModes {
             coherence_mask: COHERENCE_THRESHOLD,
             invert: false,
             offset_db: 0.0,
+            phase_view: PhaseView::Wrapped,
+            phase_range: None,
         }
     }
 }
@@ -256,6 +354,19 @@ impl DisplayModes {
             (true, None) => Some("inverted".to_string()),
             (false, Some(o)) => Some(format!("offset {o}")),
             (true, Some(o)) => Some(format!("inverted \u{b7} offset {o}")),
+        }
+    }
+    /// The same modes with a different phase-pane view (#695).
+    pub fn with_phase_view(self, phase_view: PhaseView) -> DisplayModes {
+        DisplayModes { phase_view, ..self }
+    }
+
+    /// The same modes with the unwrapped / group-delay pane held to
+    /// `range`, shared by every trace drawn together.
+    pub fn with_phase_range(self, range: (f64, f64)) -> DisplayModes {
+        DisplayModes {
+            phase_range: Some(range),
+            ..self
         }
     }
 }
@@ -557,6 +668,13 @@ pub struct TransferScene {
     /// Degrees gridlines for the phase pane — `{+180, +90, 0, −90}`, with
     /// no −180 line (matches the trace's `(−180, +180]` wrap boundary).
     pub phase_axis: crate::ticks::Axis,
+    /// [`PhaseView::label`]: which view the phase pane is (#695).
+    pub phase_view_readout: Option<&'static str>,
+    /// The span of this trace's drawn values in the unwrapped / group-delay
+    /// view (2–98 %), before rounding to the axis: what a caller unions
+    /// across traces for [`DisplayModes::with_phase_range`]. `None` in the
+    /// wrapped view or with nothing drawn.
+    pub phase_span: Option<(f64, f64)>,
     /// `"2.50 ms"` — τ_sess, milliseconds only (#391).
     pub delay_readout: String,
     /// [`DelayControl::readout`] on a live frame with a delay; `None`
@@ -1169,6 +1287,8 @@ impl TransferScene {
             && input.freqs.len() == input.phase_deg.len()
             && input.freqs.len() == input.coherence.len();
 
+        let mut phase_axis = crate::ticks::phase_axis();
+        let mut phase_span = None;
         let (mag_segments, phase_segments) = if lengths_agree {
             // De-rotate first, then smooth. The two orders do not commute,
             // and this one is right for a reason, not by accident:
@@ -1243,9 +1363,94 @@ impl TransferScene {
                 // (the AC3 shared-mapping law, extended to the phase pane).
                 (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
+            let phase_segments = match modes.phase_view {
+                PhaseView::Wrapped => {
+                    split_on_mask(&input.coherence, modes.coherence_mask, phase_points)
+                }
+                view => {
+                    // Per unmasked run: the jump across a masked gap is not
+                    // knowable, so each run unwraps from its own start.
+                    let index_runs =
+                        split_on_mask(&input.coherence, modes.coherence_mask, |i| (i as f64, 0.0));
+                    let runs: Vec<(Vec<usize>, Vec<f64>)> = index_runs
+                        .iter()
+                        .map(|run| {
+                            let idx: Vec<usize> = run.iter().map(|p| p.0 as usize).collect();
+                            let mut deg: Vec<f64> = idx.iter().map(|&i| phase_deg[i]).collect();
+                            unwrap_deg(&mut deg);
+                            let values = if view == PhaseView::GroupDelay {
+                                let f: Vec<f64> = idx.iter().map(|&i| input.freqs[i]).collect();
+                                group_delay_ms(&f, &deg)
+                            } else {
+                                deg
+                            };
+                            (idx, values)
+                        })
+                        .collect();
+                    // Only what is on screen sets the scale: a column outside
+                    // the frequency view would compress the part being
+                    // looked at (Codex review).
+                    // A column counts when it is in view, or when the
+                    // segment from it to its run neighbour crosses a view
+                    // edge — a segment can cross the whole view with
+                    // neither end inside (Codex recheck).
+                    let in_view = |f: f64| (f_min..=f_max).contains(&f);
+                    let mut all: Vec<f64> = Vec::new();
+                    for (idx, v) in &runs {
+                        for k in 0..idx.len() {
+                            let f = input.freqs[idx[k]];
+                            let crosses_next = idx
+                                .get(k + 1)
+                                .is_some_and(|&j| f < f_min && input.freqs[j] >= f_min);
+                            let crosses_prev =
+                                k > 0 && f > f_max && input.freqs[idx[k - 1]] <= f_max;
+                            if v[k].is_finite() && (in_view(f) || crosses_next || crosses_prev) {
+                                all.push(v[k]);
+                            }
+                        }
+                    }
+                    all.sort_by(f64::total_cmp);
+                    let pick = |q: f64| {
+                        all.get(((all.len() as f64 - 1.0) * q).round() as usize)
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    let unit = if view == PhaseView::GroupDelay {
+                        "ms"
+                    } else {
+                        "\u{b0}"
+                    };
+                    let span = (
+                        pick(PHASE_VIEW_RANGE_TRIM),
+                        pick(1.0 - PHASE_VIEW_RANGE_TRIM),
+                    );
+                    if span.0.is_finite() && span.1.is_finite() {
+                        phase_span = Some(span);
+                    }
+                    let (lo_in, hi_in) = modes.phase_range.unwrap_or(span);
+                    let (axis, (lo, hi)) = crate::ticks::linear_axis(lo_in, hi_in, unit);
+                    phase_axis = axis;
+                    runs.into_iter()
+                        .filter(|(idx, _)| !idx.is_empty())
+                        .map(|(idx, values)| {
+                            idx.iter()
+                                .zip(values)
+                                .filter(|(_, v)| v.is_finite())
+                                .map(|(&i, v)| {
+                                    (
+                                        freq_to_x(input.freqs[i], f_min, f_max),
+                                        crate::ticks::linear_to_y(v, lo, hi),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|seg| !seg.is_empty())
+                        .collect()
+                }
+            };
             (
                 split_on_mask(&input.coherence, modes.coherence_mask, mag_points),
-                split_on_mask(&input.coherence, modes.coherence_mask, phase_points),
+                phase_segments,
             )
         } else {
             (Vec::new(), Vec::new())
@@ -1264,7 +1469,9 @@ impl TransferScene {
             },
             freq_axis: crate::ticks::freq_axis(f_min, f_max),
             mag_axis: crate::ticks::db_axis(db_min, db_max),
-            phase_axis: crate::ticks::phase_axis(),
+            phase_axis,
+            phase_view_readout: modes.phase_view.label(),
+            phase_span,
             delay_readout: delay.delay_readout,
             delay_control_readout: input.delay_control.map(|c| c.readout(input.sr)),
             delay_samples: input.delay_control.map(|c| c.samples),
@@ -1336,6 +1543,36 @@ fn split_on_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex review of #695: on an uneven grid the slope at a column is
+    /// the three-point derivative. For a quadratic phase φ = −a·f² it is
+    /// exact (−2a·f); the rejected neighbours' secant is not.
+    #[test]
+    fn group_delay_is_exact_for_a_quadratic_phase_on_an_uneven_grid() {
+        let freqs = [100.0, 110.0, 200.0, 260.0];
+        let a = 0.001;
+        let deg: Vec<f64> = freqs.iter().map(|f| -a * f * f).collect();
+        let gd = group_delay_ms(&freqs, &deg);
+        let exact = |f: f64| 2.0 * a * f / 360.0 * 1000.0;
+        for i in 1..3 {
+            assert!(
+                (gd[i] - exact(freqs[i])).abs() < 1e-9,
+                "{i}: {} vs {}",
+                gd[i],
+                exact(freqs[i])
+            );
+        }
+        let secant = -(deg[2] - deg[0]) / (freqs[2] - freqs[0]) / 360.0 * 1000.0;
+        assert!(
+            (secant - exact(110.0)).abs() > 0.1,
+            "the secant was meant to miss"
+        );
+        // A pure delay: 1 ms at every column, ends included.
+        let delay: Vec<f64> = freqs.iter().map(|f| -360.0 * f * 0.001).collect();
+        assert!(group_delay_ms(&freqs, &delay)
+            .iter()
+            .all(|g| (g - 1.0).abs() < 1e-9));
+    }
 
     #[test]
     fn wrap_interval_is_open_at_minus_180_closed_at_plus_180() {
