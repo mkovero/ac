@@ -175,7 +175,8 @@ pub use provenance::{
 /// - v15: `sti` gains `mtf` (the noise-free MTF behind it), `levels` (the
 ///   STI under a given speech level and the background noise measured
 ///   before the sweep, masking and threshold applied, #726) and
-///   `levels_refused`. Absent on v14 reports, whose STI is noise-free only.
+///   `levels_refused`, and `warnings` (e.g. the room's T30 over twice the IR,
+///   §6.2 b). Absent on v14 reports, whose STI is noise-free only.
 pub const SCHEMA_VERSION: u32 = 15;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /

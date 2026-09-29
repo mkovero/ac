@@ -1908,6 +1908,9 @@ fn sti_lines(s: &ac_core::measurement::sti::Sti) -> Vec<String> {
     if let Some(why) = &s.levels_refused {
         lines.push(format!("      STI with levels \u{2014}  {why}"));
     }
+    for w in &s.warnings {
+        lines.push(format!("      warning  {w}"));
+    }
     lines
 }
 
@@ -2337,6 +2340,7 @@ mod tests {
                 noise_db: vec![48.0, 42.0, 38.0, 33.0, 30.0, 27.0, 24.0],
             }),
             levels_refused: None,
+            warnings: vec!["the room's reverberation time (3.50 s) is over twice".into()],
             note: NOISE_FREE_NOTE.into(),
             citation: cite.clone(),
         };
@@ -2353,6 +2357,9 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.contains("noise dB SPL  125 48") && l.contains("8k 24")));
+        assert!(lines.iter().any(|l| l
+            .trim()
+            .starts_with("warning  the room's reverberation time")));
         let no = Sti {
             sti: None,
             mti: vec![],
@@ -2360,6 +2367,7 @@ mod tests {
             mtf: vec![],
             levels: None,
             levels_refused: Some("the level-corrected STI needs an SPL-calibrated mic".into()),
+            warnings: vec![],
             note: NOISE_FREE_NOTE.into(),
             citation: cite,
         };

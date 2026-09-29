@@ -1540,8 +1540,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 }
             };
             // IEC 60268-16 STI from the same span and band windows.
+            let room_rt = room.as_ref().and_then(|r| r.t30_mid_s.or(r.t20_mid_s));
+            let span_s = span.len() as f64 / sr as f64;
             let sti = sti_requested
-                .then(|| ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz))
+                .then(|| {
+                    ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz)
+                        .check_room_rt(span_s, room_rt)
+                })
                 .map(|s| match (speech_dba, spl_offset, &noise_capture) {
                     (None, _, _) => s,
                     (Some(_), None, _) => s.levels_refused(
