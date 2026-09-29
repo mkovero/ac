@@ -133,6 +133,7 @@ pub(super) enum RingTick {
 /// they fill, how full it must be, and what they then compute from it.
 pub(super) fn capture_into_ring(
     eng: &mut dyn crate::audio::AudioEngine,
+    captured: Option<Vec<f32>>,
     ch: &mut ChannelState,
     ctx: &TickCtx,
     kind: RingKind,
@@ -144,9 +145,12 @@ pub(super) fn capture_into_ring(
     // regardless of `--max-fps`, so CWT emitted at 50 fps even when the
     // UI was capped at 30 — wasted work on both sides.
     let tick_secs = ctx.tick_secs;
-    let Some(samples) =
-        capture_or_report(eng.capture_contiguous(tick_secs), ctx.pub_tx, ch.channel)
-    else {
+    // Several channels arrive already captured, together (#666).
+    let result = match captured {
+        Some(buf) => Ok(buf),
+        None => eng.capture_contiguous(tick_secs),
+    };
+    let Some(samples) = capture_or_report(result, ctx.pub_tx, ch.channel) else {
         return RingTick::Failed;
     };
     // `eng.xruns()` is already a cumulative count for this engine session
@@ -263,7 +267,7 @@ mod ring_contiguity_tests {
             cqt: ring_cap,
             reass: ring_cap,
         };
-        let mut ch = ChannelState::new(0, "fake:in".into(), None, None, SR, TONE_HZ, &caps);
+        let mut ch = ChannelState::new(0, None, None, SR, TONE_HZ, &caps);
         let (pub_tx, _pub_rx) = crossbeam_channel::unbounded();
         let scope_frame_idx = Cell::new(0);
         let ctx = TickCtx {
@@ -274,6 +278,7 @@ mod ring_contiguity_tests {
             scope_frame_idx: &scope_frame_idx,
             mic_corr_enabled: false,
             tick_secs: TICK_SECS,
+            capture_ts_ns: None,
         };
 
         // Enough ticks to fill the ring and then slide it a few more times,
@@ -281,7 +286,7 @@ mod ring_contiguity_tests {
         let per_tick = (TICK_SECS * SR as f64) as usize;
         let ticks = ring_cap.div_ceil(per_tick) + 4;
         for _ in 0..ticks {
-            match capture_into_ring(&mut eng, &mut ch, &ctx, kind, ring_cap, 0) {
+            match capture_into_ring(&mut eng, None, &mut ch, &ctx, kind, ring_cap, 0) {
                 RingTick::Ready { .. } | RingTick::NotReady => {}
                 RingTick::Failed => panic!("fake capture failed"),
             }

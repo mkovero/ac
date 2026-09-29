@@ -333,22 +333,18 @@ fn monitor_spectrum_fake_noise_stays_bounded() {
 
 #[test]
 fn monitor_spectrum_emits_scope_frames() {
-    // The daemon emits a `visualize/scope` sidecar frame per channel
-    // capture. Multi-channel monitor captures channels one after another
-    // (reconnect, flush, block capture), so scope frames must NOT carry a
-    // shared identity or timestamp that would let a consumer pair them as
-    // simultaneous (#434). Asserting on:
+    // The daemon emits a `visualize/scope` sidecar frame per channel per
+    // tick. Since #666 a multi-channel monitor captures every channel in
+    // one drain, so a tick's frames cover the same acquisition interval
+    // and share its `timestamp` — the key a consumer pairs them by (until
+    // #666 they were sequential and unpairable, #434). Asserting on:
     //   - frames arrive at all (regression catch if the emit is removed)
     //   - non-empty f32 samples in [-1, 1], capped at SCOPE_MAX_SAMPLES
-    //   - every frame declares `capture_mode: "sequential"`
-    //   - `frame_idx` strictly increases in emission order, so no two
-    //     frames (in particular ch 0 and ch 1 of one round) share it
-    //   - when the channel changes between consecutive frames, the
-    //     timestamps are at least half a per-channel capture apart. The
-    //     fake engine's block capture sleeps for its full duration
-    //     (interval / n_channels = 50 ms here), so a sequential capture
-    //     puts ≥ 50 ms between the two channels' completion times, while
-    //     a simultaneous (or tick-wide) timestamp puts 0 there.
+    //   - every frame declares `capture_mode: "simultaneous"`
+    //   - `frame_idx` strictly increases in emission order: it still
+    //     identifies one frame, never a pair
+    //   - ch 0 then ch 1 of one tick carry the same timestamp, and the
+    //     next tick's frames a later one.
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
@@ -394,8 +390,8 @@ fn monitor_spectrum_emits_scope_frames() {
     for f in &frames {
         assert_eq!(
             f["capture_mode"],
-            json!("sequential"),
-            "scope frame must declare sequential capture: {f}",
+            json!("simultaneous"),
+            "scope frame must declare simultaneous capture: {f}",
         );
         let samples = f["samples"].as_array().expect("samples array");
         assert!(!samples.is_empty(), "samples must be non-empty: {f}");
@@ -421,8 +417,7 @@ fn monitor_spectrum_emits_scope_frames() {
     chans.dedup();
     assert_eq!(chans, vec![0, 1], "expected frames from both channels");
 
-    const MIN_CHANNEL_GAP_NS: u64 = 25_000_000;
-    let mut channel_switches = 0;
+    let mut paired = 0;
     for pair in frames.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
         let (ia, ib) = (
@@ -440,22 +435,58 @@ fn monitor_spectrum_emits_scope_frames() {
             a["timestamp"].as_u64().expect("timestamp u64"),
             b["timestamp"].as_u64().expect("timestamp u64"),
         );
-        if a["channel"] != b["channel"] {
-            channel_switches += 1;
-            assert!(
-                tb >= ta + MIN_CHANNEL_GAP_NS,
-                "sequential captures must carry their own completion times: \
-                 ch {} at {ta} then ch {} at {tb} (gap {} ns < {MIN_CHANNEL_GAP_NS})",
-                a["channel"],
-                b["channel"],
-                tb.saturating_sub(ta),
-            );
+        if a["channel"] == json!(0) && b["channel"] == json!(1) {
+            paired += 1;
+            assert_eq!(ta, tb, "one tick's channels must share its capture time");
+        } else {
+            assert!(tb > ta, "the next tick is captured later: {ta} then {tb}");
         }
     }
-    assert!(
-        channel_switches >= 3,
-        "expected ≥3 channel switches in emission order; got {channel_switches}",
-    );
+    assert!(paired >= 3, "expected ≥3 ch0/ch1 tick pairs; got {paired}");
+}
+
+/// #666: every channel gets the whole tick's audio. Until #666 the
+/// channels took turns on one input, so each got `interval / n` of it —
+/// 240 samples per tick of a four-channel monitor at 20 ms and 48 kHz
+/// (the 5 ms share), against the 960 each gets now. The scope frame
+/// carries the tick's capture (capped at 2048 samples), so its length is
+/// the per-channel share.
+#[test]
+fn each_channel_of_a_multi_channel_monitor_gets_the_whole_tick() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let interval = 0.02;
+    let r = c.call(json!({
+        "cmd":      "monitor_spectrum",
+        "channels": [0, 1, 2, 3],
+        "interval": interval,
+        "fft_n":    8192,
+    }));
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+    let whole_tick = interval * 48_000.0;
+    let old_share = whole_tick / 4.0;
+    let mut lens: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let Some((topic, payload)) = c.recv_pub(200) else {
+            continue;
+        };
+        if topic != "data" || payload["type"] != json!("visualize/scope") {
+            continue;
+        }
+        let ch = payload["channel"].as_u64().expect("channel");
+        let n = payload["samples"].as_array().expect("samples").len();
+        lens.entry(ch).or_default().push(n);
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    assert_eq!(lens.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    for (ch, ns) in &lens {
+        let mean = ns.iter().sum::<usize>() as f64 / ns.len() as f64;
+        assert!(
+            mean >= 0.9 * whole_tick && mean > 2.0 * old_share,
+            "ch{ch}: {mean:.0} samples per tick, want the whole {whole_tick:.0}"
+        );
+    }
 }
 
 #[test]

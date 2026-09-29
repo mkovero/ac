@@ -17,7 +17,6 @@ mod capture;
 mod channel;
 mod frames;
 mod mode;
-mod reconnect;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -230,6 +229,16 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     };
     let fake = selected_backend_is_fake(&*eng);
     let backend = eng.backend_name();
+    // Every channel is captured in the same process periods (#666); a
+    // backend that cannot is refused rather than shown one input under
+    // several channel names.
+    let together = eng.simultaneous_inputs();
+    if channels.len() > together {
+        return json!({"ok": false, "error": format!(
+            "the {backend} backend captures {together} input(s) at once; \
+             monitor at most {together} channel(s)"
+        )});
+    }
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
     let in_ports_worker = in_ports.clone();
@@ -269,6 +278,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             );
             return;
         }
+        // #666: the other channels ride along as capture ports of the same
+        // engine, so one drain hands every channel the whole tick's audio.
+        for port in in_ports_worker.iter().skip(1) {
+            if let Err(e) = eng.add_ref_input(port) {
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({"cmd":"monitor_spectrum","message":format!("input {port}: {e}")}),
+                );
+                return;
+            }
+        }
         // Apply the display-truth harness's stimulus knobs (#170) — fake
         // backend only, real hardware is never touched by this command.
         // Precedence when more than one is given: fake_tones > fake_noise_dbfs
@@ -290,10 +311,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         }
         let sr = eng.sample_rate();
         // Scope-frame counter: incremented once per emitted
-        // `visualize/scope` frame, so every frame has its own identity.
-        // Channels are captured one after another, so a per-tick value
-        // shared across channels would claim a simultaneity the capture
-        // does not have (#434). Wraps on u64 overflow.
+        // `visualize/scope` frame, so every frame has its own identity; a
+        // tick's channels pair by their shared `timestamp` instead (#666).
+        // Wraps on u64 overflow.
         let scope_frame_idx = std::cell::Cell::new(0u64);
 
         // CWT state: recomputed when sigma/n_scales change.
@@ -379,21 +399,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         };
         let mut channel_states: Vec<ChannelState> = channels_worker
             .iter()
-            .zip(in_ports_worker.iter())
             .zip(channel_cals)
-            .map(|((&channel, in_port), (cal, check))| {
-                ChannelState::new(
-                    channel,
-                    in_port.clone(),
-                    cal,
-                    check,
-                    sr,
-                    freq_hz,
-                    &ring_caps,
-                )
+            .map(|(&channel, (cal, check))| {
+                ChannelState::new(channel, cal, check, sr, freq_hz, &ring_caps)
             })
             .collect();
         let single_channel = channel_states.len() == 1;
+        // A clearing capture leaves every ring at the same phase; the
+        // contiguous drains below keep them there (#216's lesson).
+        if !single_channel {
+            let _ = eng.capture_multi(0.05);
+        }
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
@@ -451,7 +467,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             // mic-correction toggle is sampled once per tick so all of a
             // tick's frames agree on it; before, each branch re-read the
             // atomic and one channel could disagree with the next.
-            let ctx = TickCtx {
+            let mut ctx = TickCtx {
                 pub_tx: &pub_tx,
                 n_channels,
                 sr,
@@ -464,69 +480,54 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // emitted at 50 fps even when the UI was capped at 30 —
                 // wasted work on both sides.
                 tick_secs: cur_interval.clamp(0.016, 0.100),
+                capture_ts_ns: None,
             };
 
-            for ch in channel_states.iter_mut() {
+            // #666: every channel's audio for this tick, from one drain.
+            // Until #666 the channels took turns on one input port, each
+            // getting `interval / n` of the tick — so each ring held a
+            // quarter of the audio of a four-channel session, spliced.
+            // The ring modes pace themselves on `tick_secs`, the FFT mode
+            // on the interval.
+            let mut together: Option<Vec<Vec<f32>>> = None;
+            if !single_channel {
+                let secs = if mode.paces_itself() {
+                    ctx.tick_secs
+                } else {
+                    cur_interval
+                };
+                let first = channel_states[0].channel;
+                let Some(bufs) =
+                    capture_or_report(eng.capture_multi_contiguous(secs), &pub_tx, first)
+                else {
+                    return;
+                };
+                if bufs.len() != channel_states.len() {
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({"cmd":"monitor_spectrum","message":format!(
+                            "the {backend} backend returned {} inputs for {} channels",
+                            bufs.len(),
+                            channel_states.len()
+                        )}),
+                    );
+                    return;
+                }
+                ctx.capture_ts_ns = Some(now_ns());
+                together = Some(bufs);
+            }
+
+            for (idx, ch) in channel_states.iter_mut().enumerate() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
                 let channel = ch.channel;
-                if !single_channel {
-                    if let Err(e) = eng.reconnect_input(&ch.in_port) {
-                        let now = std::time::Instant::now();
-                        let st = &mut ch.reconnect;
-                        st.note_failure(now);
-                        if st.should_give_up(now) {
-                            let outage_s = st
-                                .first_failure_at
-                                .map(|t0| now.duration_since(t0).as_secs())
-                                .unwrap_or(0);
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!(
-                                        "ch{channel} gave up after {outage_s}s of reconnect failures: {e}",
-                                    ),
-                                }),
-                            );
-                            return;
-                        }
-                        if st.should_emit_error(now) {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!(
-                                        "reconnect ch{channel} (failures: {}): {e}",
-                                        st.consecutive_failures,
-                                    ),
-                                }),
-                            );
-                        }
-                        let backoff = st.backoff();
-                        if !backoff.is_zero() {
-                            std::thread::sleep(backoff);
-                        }
-                        continue;
-                    }
-                    ch.reconnect.note_success();
-                    // Multi-channel capture is time-multiplexed (#434, ZMQ.md
-                    // "Sequential capture"), so this flush means the CWT /
-                    // CQT / reassigned rings of a multi-channel monitor are
-                    // still spliced: each channel's ring gets `tick_secs`
-                    // fragments separated by the other channels' capture
-                    // time. The non-clearing drain in `capture_into_ring`
-                    // (#210) makes the single-channel rings contiguous; it
-                    // does not and cannot fix this case, which needs
-                    // simultaneous multi-port capture.
-                    eng.flush_capture();
-                }
+                let captured = together.as_mut().map(|b| std::mem::take(&mut b[idx]));
                 if mode == Mode::Cwt {
                     let xruns_total = match capture_into_ring(
                         &mut *eng,
+                        captured,
                         ch,
                         &ctx,
                         RingKind::Cwt,
@@ -671,6 +672,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // would confuse the waterfall.
                     let xruns_total = match capture_into_ring(
                         &mut *eng,
+                        captured,
                         ch,
                         &ctx,
                         RingKind::Cqt,
@@ -706,6 +708,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 if mode == Mode::Reassigned {
                     let xruns_total = match capture_into_ring(
                         &mut *eng,
+                        captured,
                         ch,
                         &ctx,
                         RingKind::Reassigned,
@@ -745,16 +748,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                 // FFT path. Each channel has its own sliding ring so refresh
                 // cadence (`cur_interval`) is decoupled from FFT window length
-                // (`cur_fft_n`). Single-channel uses `capture_available` (non-
-                // clearing drain on JACK, falls back to capture_block
-                // elsewhere); multi-channel must use block capture because
-                // `reconnect_input` clears the ring on every switch.
-                let per_ch_budget = (cur_interval / n_channels as f64).max(0.002);
-                let budget_samples = capture_budget_samples(per_ch_budget, sr);
-                let captured = if single_channel {
-                    eng.capture_available(budget_samples)
-                } else {
-                    eng.capture_block(budget_samples as f64 / sr as f64)
+                // (`cur_fft_n`). A single channel drains with
+                // `capture_available` (non-clearing on JACK, falls back to
+                // capture_block elsewhere); several arrive from the tick's
+                // one drain above, a whole interval each (#666).
+                let captured = match captured {
+                    Some(buf) => Ok(buf),
+                    None => eng.capture_available(capture_budget_samples(cur_interval, sr)),
                 };
                 let Some(new) = capture_or_report(captured, &pub_tx, channel) else {
                     return;

@@ -415,39 +415,34 @@ below).
   "n_channels":   <int>,          // channels in the monitor request (context only)
   "sr":           <int>,          // sample rate (Hz)
   "frame_idx":    <int>,          // unique per emitted scope frame, increasing
-  "capture_mode": "sequential",   // always present; see below
+  "capture_mode": "simultaneous", // always present; see below
   "samples":      [<float>, ...], // raw f32 in [-1, 1], length ≤ 2048
-  "timestamp":    <int>,          // UNIX-epoch ns at this channel's capture completion
+  "timestamp":    <int>,          // UNIX-epoch ns at the tick's capture completion
   "xruns":        <int>,
   "backend":      <string>
 }
 ```
 
-**Sequential capture — frames are not pairable (#434).** A
-multi-channel monitor captures its channels one after another:
-reconnect to the channel's input, flush, capture a block, then move to
-the next channel. Two channels' frames therefore never cover the same
-acquisition interval. The wire says so:
+**Simultaneous capture — a tick's frames pair by `timestamp` (#666).**
+A multi-channel monitor registers every channel as a capture port of one
+engine and drains them together once per tick, so every channel receives
+the whole tick's audio and the tick's frames cover the same acquisition
+interval:
 
-- `frame_idx` increments once per emitted scope frame, across all
-  channels, so no two frames share a value. It orders frames; it is
-  not a pair key.
-- `timestamp` is the wall-clock time this channel's capture completed,
-  not a tick-wide value; consecutive channels' timestamps differ by at
-  least that channel's capture time.
-- `capture_mode` is `"sequential"` on every frame. `n_channels` is the
-  size of the monitor request, not a claim that the channels were
-  captured together.
+- `timestamp` is the tick's capture completion, shared by every channel's
+  scope frame of that tick; a single-channel monitor stamps its own.
+  Consumers pair a tick's channels by equal `timestamp`.
+- `frame_idx` still increments once per emitted scope frame, across all
+  channels, so it identifies one frame, never a pair.
+- `capture_mode` is `"simultaneous"` on every frame.
+- A backend that cannot capture that many inputs at once is refused at
+  the request (`jack`: 17 channels; `cpal`: 1), rather than showing one
+  input under several channel names.
 
-**Breaking semantic change.** Before #434, `frame_idx` and `timestamp`
-were shared by every channel of a worker tick and this section told
-subscribers to pair L/R frames by equal `frame_idx`. That pairing was
-never valid — the samples were captured sequentially — and equal
-`frame_idx` values no longer occur. A consumer that draws a paired
-trajectory (Goniometer, PhaseScope3D, any Lissajous of two channels)
-must check `capture_mode` and refuse any frame whose mode is not a
-simultaneous capture; no current mode is. A simultaneous
-multi-channel scope needs its own capture path and contract.
+**History.** #434 made frames `"sequential"`: until #666 the channels
+took turns on one input port, each getting `interval / n` of every tick,
+so frames were not pairable and each channel's analysis rings held
+spliced fragments.
 
 **No calibration.** The trajectory consumers are dimensionless —
 displaying a Lissajous figure of `(L, R)` doesn't need voltage or SPL
@@ -2156,14 +2151,12 @@ Resolution / trade-off the user gets:
   Consecutive LF frames are **not** independent estimates. Successive
   recomputes share most of their samples, and each recompute passes through a
   power-domain EMA (τ = `LF_AVG_TAU_S`, 0.25 s) before it is cached. How much
-  they share depends on the channel count: each channel's nominal capture
-  budget per tick is `interval / n_channels` (floored at 2 ms). For a
-  single-channel monitor at the default interval, 9600 of 65536 samples
-  advance per tick (≈ 85 % shared); with two channels it is
-  4800 (≈ 93 % shared), and more channels share more. For a single channel,
-  roughly one independent LF estimate arrives per window length; with
-  `n_channels` channels a full window of new samples per channel takes about
-  `n_channels` times as long.
+  they share does not depend on the channel count: every channel receives the
+  whole tick's audio (#666; until then each got `interval / n_channels`). At
+  the default interval, 9600 of 65536 samples advance per tick (≈ 85 %
+  shared), and roughly one independent LF estimate arrives per window length
+  (≈ 1.4 s at 65536 / 48 kHz) — the time a low-frequency change takes to
+  show in full, whatever the refresh rate.
 - **Above `crossover_hz`:** unchanged — `Δf = sr / fft_n` at the live refresh
   rate, so mid/high responsiveness is not degraded.
 

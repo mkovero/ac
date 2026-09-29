@@ -14,7 +14,6 @@ use crate::handlers::mic::{
 };
 
 use super::frames::TickCtx;
-use super::reconnect::ReconnectState;
 
 /// LF-band FFT overlap fraction (#173). The previous un-overlapped block
 /// cadence (~0.7-1.4 s depending on `lf_fft_n`) recomputed the LF spectrum
@@ -307,9 +306,6 @@ impl LfState {
 /// different channels within one tick.
 pub(super) struct ChannelState {
     pub(super) channel: u32,
-    /// Resolved input port; used only by the multi-channel
-    /// `reconnect_input` path.
-    pub(super) in_port: String,
     /// The calibration as applied: a voltage scale the session check
     /// refused is already withheld here (#466).
     pub(super) cal: Option<Calibration>,
@@ -331,10 +327,6 @@ pub(super) struct ChannelState {
     /// reflects the mic-corrected acoustic level.
     pub(super) loudness_fir: Option<MicCurveFir>,
     pub(super) current_freq: f64,
-    /// #93: reconnect-failure state for the multi-channel path.
-    /// Single-channel never touches `eng.reconnect_input()` and this
-    /// stays zeroed.
-    pub(super) reconnect: ReconnectState,
     pub(super) cwt_ring: std::collections::VecDeque<f32>,
     pub(super) cqt_ring: std::collections::VecDeque<f32>,
     pub(super) reass_ring: std::collections::VecDeque<f32>,
@@ -382,7 +374,6 @@ impl ChannelState {
 
     pub(super) fn new(
         channel: u32,
-        in_port: String,
         cal: Option<Calibration>,
         voltage_check: Option<ac_core::shared::calibration::LayerVerdict>,
         sr: u32,
@@ -396,14 +387,12 @@ impl ChannelState {
             .map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS));
         Self {
             channel,
-            in_port,
             cal,
             voltage_check,
             spl_offset,
             mic_curve,
             loudness_fir,
             current_freq: freq_hz,
-            reconnect: ReconnectState::new(),
             cwt_ring: std::collections::VecDeque::with_capacity(caps.cwt),
             cqt_ring: std::collections::VecDeque::with_capacity(caps.cqt),
             reass_ring: std::collections::VecDeque::with_capacity(caps.reass),
