@@ -1992,8 +1992,8 @@ length (frequency resolution). The two are independent: for single-channel
 monitoring the daemon maintains a sliding ring per channel, pulling only
 `interval × sr` new samples per tick and analysing the trailing `fft_n`
 window, so refresh can run faster than `fft_n / sr`. Multi-channel mode
-captures a fresh `fft_n`-sample block per channel per tick (continuity
-across `reconnect_input` can't be preserved).
+does the same for every channel: all channels are captured together, one
+drain per tick, and each channel's ring receives the whole tick (#666).
 
 **Request**
 ```json
@@ -2036,13 +2036,14 @@ A repeat is refused, not de-duplicated.
 Both `interval` and `fft_n` are live-reconfigurable — see
 `set_monitor_params` below.
 
-When `channels` contains more than one index, the worker cycles through the
-ports via `reconnect_input` (each channel gets `interval / N` seconds between
-cycles; capture length per channel is still `fft_n` samples). Every
-published `spectrum` frame carries distinct `channel` and `n_channels` fields
-so subscribers can route frames independently. Backends whose
-`reconnect_input` is a no-op (fake, CPAL) will emit N frames per cycle but
-all drawn from the same live port.
+When `channels` contains more than one index, every channel's port is a
+capture input of one engine and all are drained together each tick, so
+each channel receives the whole `interval` of audio (#666; until then the
+worker cycled through the ports via `reconnect_input`, `interval / N`
+each). Every published `spectrum` frame carries distinct `channel` and
+`n_channels` fields so subscribers can route frames independently. A
+backend that cannot capture that many inputs at once is refused: `cpal`
+monitors one channel, `jack` up to 17.
 
 **Reply**
 ```json

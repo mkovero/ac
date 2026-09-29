@@ -122,6 +122,39 @@ fn parse_fake_tones(cmd: &Value) -> Result<Option<Vec<FakeTone>>, wire::WireErro
         .map(Some)
 }
 
+/// Longest single drain of a multi-channel tick (#666). JACK's reference
+/// rings hold 4 s at 192 kHz; an FFT tick may last up to 60 s, so a long
+/// tick is drained in pieces that each fit, or the reference rings would
+/// drop audio the measurement ring keeps and the channels would stop
+/// covering the same time (Codex review).
+const MAX_DRAIN_S: f64 = 0.5;
+
+/// Every channel's `secs` of audio, drained together in pieces of at most
+/// [`MAX_DRAIN_S`] and joined per channel.
+fn capture_together(
+    eng: &mut dyn crate::audio::AudioEngine,
+    secs: f64,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    let mut out: Vec<Vec<f32>> = Vec::new();
+    let mut left = secs;
+    loop {
+        let piece = left.min(MAX_DRAIN_S);
+        let bufs = eng.capture_multi_contiguous(piece)?;
+        if out.is_empty() {
+            out = bufs;
+        } else {
+            anyhow::ensure!(bufs.len() == out.len(), "input count changed mid-tick");
+            for (o, b) in out.iter_mut().zip(bufs) {
+                o.extend(b);
+            }
+        }
+        left -= piece;
+        if left <= 1e-9 {
+            return Ok(out);
+        }
+    }
+}
+
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
     cfg_guard!(state);
@@ -498,7 +531,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 };
                 let first = channel_states[0].channel;
                 let Some(bufs) =
-                    capture_or_report(eng.capture_multi_contiguous(secs), &pub_tx, first)
+                    capture_or_report(capture_together(&mut *eng, secs), &pub_tx, first)
                 else {
                     return;
                 };
