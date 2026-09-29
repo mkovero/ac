@@ -179,6 +179,20 @@ impl Session {
         if self.launched {
             let _ = self.client.call(&json!({"cmd": "stop"}));
             self.launched = false;
+            // DATA and CTRL are separate sockets, so the stop reply can
+            // overtake the old session's last frames. Its worker sends
+            // `done` after any `error`, so reading up to `done` leaves no
+            // old failure to be taken for the next session's (Codex review
+            // of #649). Bounded: a daemon that never sends it costs 1 s.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                match self.client.recv_frame(Duration::from_millis(50)) {
+                    Recv::Frame(topic, v) if topic == "done" && v["cmd"] == "transfer_stream" => {
+                        break
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 

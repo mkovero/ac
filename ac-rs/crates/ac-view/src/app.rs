@@ -1711,8 +1711,12 @@ impl AcViewApp {
             );
             // #643: a refused relaunch leaves no session running; say so
             // until something replaces the message.
-            if let Err(e) = launched {
-                self.set_toast(format!("no session \u{2014} {e:#}"), Instant::now(), None);
+            // A relaunch that took replaces whatever failure was showing.
+            match launched {
+                Err(e) => {
+                    self.set_toast(format!("no session \u{2014} {e:#}"), Instant::now(), None)
+                }
+                Ok(()) => self.set_toast("session relaunched".into(), Instant::now(), Some(2.0)),
             }
         }
         self.set_pairs(vec![(applied.meas_channel, applied.ref_channel)]);
