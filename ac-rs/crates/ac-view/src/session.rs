@@ -180,14 +180,19 @@ impl Session {
             let _ = self.client.call(&json!({"cmd": "stop"}));
             self.launched = false;
             // DATA and CTRL are separate sockets, so the stop reply can
-            // overtake the old session's last frames. Its worker sends
-            // `done` after any `error`, so reading up to `done` leaves no
+            // overtake the old session's last frames. Its worker's last
+            // frame is `done`, or an `error` where it failed before
+            // streaming (engine, spool) — reading up to either leaves no
             // old failure to be taken for the next session's (Codex review
-            // of #649). Bounded: a daemon that never sends it costs 1 s.
+            // of #649). Bounded at 1 s: PUB lagging CTRL by more than that
+            // is the one case left.
             let deadline = Instant::now() + Duration::from_secs(1);
             while Instant::now() < deadline {
                 match self.client.recv_frame(Duration::from_millis(50)) {
-                    Recv::Frame(topic, v) if topic == "done" && v["cmd"] == "transfer_stream" => {
+                    Recv::Frame(topic, v)
+                        if (topic == "done" || topic == "error")
+                            && v["cmd"] == "transfer_stream" =>
+                    {
                         break
                     }
                     _ => {}
