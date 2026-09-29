@@ -172,7 +172,12 @@ pub use provenance::{
 /// - v14: optional top-level `sti: Sti` on `plot_ir` reports — the IEC
 ///   60268-16 speech transmission index from the IR (clause 6), noise-free
 ///   ([`crate::measurement::sti`]), or why not. Absent on v1-v13 reports.
-pub const SCHEMA_VERSION: u32 = 14;
+/// - v15: `sti` gains `mtf` (the noise-free MTF behind it), `levels` (the
+///   STI under a given speech level and the background noise measured
+///   before the sweep, masking and threshold applied, #726) and
+///   `levels_refused`, and `warnings` (e.g. the room's T30 over twice the IR,
+///   §6.2 b). Absent on v14 reports, whose STI is noise-free only.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Oldest `schema_version` [`MeasurementReport::from_json`] /
 /// [`MeasurementReport::from_value`] still read (#429). Everything from
@@ -449,7 +454,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 14"));
+        assert!(json.contains("\"schema_version\": 15"));
     }
 
     #[test]
@@ -473,7 +478,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 14"));
+            assert!(json.contains("\"schema_version\": 15"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

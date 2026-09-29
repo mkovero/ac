@@ -403,6 +403,9 @@ pub enum CommandKind {
         distance_m: Option<f64>,
         /// `sti` (#724): also compute the IEC 60268-16 STI.
         sti: bool,
+        /// `speech <dB(A)>` (#726): the operational speech level for the
+        /// level-corrected STI.
+        speech_dba: Option<f64>,
     },
     Plot {
         start: Option<f64>,
@@ -783,8 +786,10 @@ Commands:
                   [--verbose|-v]                                      (-v: fund + noise columns, harmonic table)
   plot level      <start> <stop> [freq] [steps] [show] [-v]           per-point THD vs level
   plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
-                  [<N>harm] [<N>win] [<N>s tail] [sti]                (gate params: harmonics, window, tail capture;
-                                                                      sti: IEC 60268-16 STI, tail 1.6 s unless typed)
+                  [<N>harm] [<N>win] [<N>s tail] [sti [speech <dBA>]] (gate params: harmonics, window, tail capture;
+                                                                      sti: IEC 60268-16 STI, tail 1.6 s unless typed;
+                                                                      speech: also STI with measured noise, needs
+                                                                      ac calibrate spl)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
   transfer        [channels]                                          transfer view; each channel is measured against the reference
                                                                       live spectrum (default FFT; cwt = Morlet)

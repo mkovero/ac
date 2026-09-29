@@ -70,7 +70,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(14));
+                assert_eq!(v["report"]["schema_version"], json!(15));
                 // ISO 3382-1 room parameters (schema v13) need a decay:
                 // this 0.1 s tail is too short, so they are absent and the
                 // notes say why and what to change — never a silent gap.
@@ -1663,4 +1663,62 @@ fn sti_is_computed_only_when_asked_and_lengthens_an_untyped_tail() {
         let r = c.call(bad);
         assert_eq!(r["ok"], json!(false), "sti {not_bool}: {r}");
     }
+}
+
+/// #726: `speech_dba` needs `sti`; without an SPL-calibrated mic the
+/// level-corrected STI says why it is absent; with one, the report carries
+/// the level-corrected STI or the reason there is none, and the ack echoes
+/// the speech level.
+#[test]
+fn a_speech_level_gives_the_level_corrected_sti_or_the_reason() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let base = json!({
+        "cmd": "plot_ir", "f1_hz": 60.0, "f2_hz": 16_000.0,
+        "duration": 2.0, "level_dbfs": -20.0,
+    });
+
+    let mut no_sti = base.clone();
+    no_sti["speech_dba"] = json!(65.0);
+    assert_eq!(c.call(no_sti)["ok"], json!(false));
+
+    let mut asked = base.clone();
+    asked["sti"] = json!(true);
+    asked["speech_dba"] = json!(65.0);
+    let r = c.call(asked.clone());
+    assert_eq!(r["speech_dba"], json!(65.0), "{r}");
+    let rep = next_report(&c);
+    assert!(
+        rep["sti"]["levels_refused"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ac calibrate spl"),
+        "no reason without SPL calibration: {}",
+        rep["sti"]
+    );
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+
+    let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+    assert_eq!(r["ok"], json!(true), "calibrate_spl: {r}");
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("cal_prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
+    let r = c.call(asked);
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let rep = next_report(&c);
+    // The fake backend loops the sweep back (an electrical path: STI near
+    // 1 noise-free) and captures a -20 dBFS 1 kHz tone as its "noise",
+    // which the SPL calibration puts at ~97 dB SPL in the 1 kHz band: the
+    // level-corrected STI must come out, and far lower.
+    let sti = &rep["sti"];
+    let free = sti["sti"].as_f64().expect("noise-free STI");
+    let levelled = sti["levels"]["sti"].as_f64().expect("level-corrected STI");
+    assert!(free > 0.95, "loopback STI {free}");
+    assert!(levelled < free - 0.3, "levels did not lower it: {levelled}");
+    assert_eq!(sti["levels"]["noise_db"].as_array().map(Vec::len), Some(7));
+    assert_eq!(sti["levels"]["speech_dba"], json!(65.0));
 }
