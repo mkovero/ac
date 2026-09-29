@@ -199,31 +199,43 @@ pub fn run_level(
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
 pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
-    let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s, distance_m) =
-        match cmd {
-            CommandKind::PlotIr {
-                f1,
-                f2,
-                duration,
-                level,
-                level_defaulted,
-                n_harmonics,
-                window_len,
-                tail_s,
-                distance_m,
-            } => (
-                *f1,
-                *f2,
-                *duration,
-                level,
-                *level_defaulted,
-                *n_harmonics,
-                *window_len,
-                *tail_s,
-                *distance_m,
-            ),
-            _ => unreachable!(),
-        };
+    let (
+        f1,
+        f2,
+        duration,
+        level,
+        level_defaulted,
+        n_harmonics,
+        window_len,
+        tail_s,
+        distance_m,
+        sti,
+    ) = match cmd {
+        CommandKind::PlotIr {
+            f1,
+            f2,
+            duration,
+            level,
+            level_defaulted,
+            n_harmonics,
+            window_len,
+            tail_s,
+            distance_m,
+            sti,
+        } => (
+            *f1,
+            *f2,
+            *duration,
+            level,
+            *level_defaulted,
+            *n_harmonics,
+            *window_len,
+            *tail_s,
+            *distance_m,
+            *sti,
+        ),
+        _ => unreachable!(),
+    };
     io::print_run_header("plot ir");
     println!();
 
@@ -271,6 +283,9 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     if let Some(v) = distance_m {
         cmd_json["distance_m"] = serde_json::json!(v);
     }
+    if sti {
+        cmd_json["sti"] = serde_json::json!(true);
+    }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
     // #501 UX: the whole stimulus block prints after the ack, because
@@ -282,6 +297,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         window: window_len.is_some(),
         n_harmonics: n_harmonics.is_some(),
         tail: tail_s.is_some(),
+        sti,
     };
     println!();
     for line in ir_stimulus_lines(&ack, typed) {
@@ -374,6 +390,8 @@ struct IrTyped {
     window: bool,
     n_harmonics: bool,
     tail: bool,
+    /// `sti` was asked for, which lengthens an untyped tail (#724).
+    sti: bool,
 }
 
 // The `level` block's fallback for an ack field an older daemon does not
@@ -423,7 +441,14 @@ fn ir_stimulus_lines(ack: &serde_json::Value, typed: IrTyped) -> Vec<String> {
         let unit = if n == 1 { "order" } else { "orders" };
         format!("{n:>4} {unit}  {}", origin_tag(typed.n_harmonics))
     });
-    let tail = f64_of("tail_s").map(|t| format!("{t:>7.2} s  {}", origin_tag(typed.tail)));
+    let tail = f64_of("tail_s").map(|t| {
+        let origin = if typed.sti && !typed.tail {
+            "(for STI)"
+        } else {
+            origin_tag(typed.tail)
+        };
+        format!("{t:>7.2} s  {origin}")
+    });
 
     vec![
         row("band", band),
@@ -2229,6 +2254,35 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
 
+    /// #724: with `sti` asked for and no tail typed, the tail the daemon
+    /// raised to 1.6 s says why, not "default".
+    #[test]
+    fn the_tail_row_says_it_was_lengthened_for_sti() {
+        let ack = serde_json::json!({"ok": true, "tail_s": 1.6, "sti": true});
+        let typed = |tail: bool, sti: bool| IrTyped {
+            f1: false,
+            f2: false,
+            duration: false,
+            window: false,
+            n_harmonics: false,
+            tail,
+            sti,
+        };
+        let row = |t| {
+            ir_stimulus_lines(&ack, t)
+                .into_iter()
+                .find(|l| l.contains("tail"))
+                .unwrap()
+        };
+        assert!(
+            row(typed(false, true)).ends_with("(for STI)"),
+            "{}",
+            row(typed(false, true))
+        );
+        assert!(row(typed(true, true)).ends_with("(typed)"));
+        assert!(row(typed(false, false)).ends_with("(default)"));
+    }
+
     /// #722: the STI block prints the value and every band's MTI, or the
     /// reason there is none — and always the note on what it leaves out.
     #[test]
@@ -4009,6 +4063,7 @@ mod tests {
             window: true,
             n_harmonics: true,
             tail: true,
+            sti: false,
         };
         assert_eq!(
             ir_stimulus_lines(&ack, typed),

@@ -47,6 +47,10 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
 
     if args.first().map(|a| expand(a)) == Some("ir") {
         args.remove(0);
+        // `sti` (#724): a bare word, not a classified token.
+        let before = args.len();
+        args.retain(|a| !a.eq_ignore_ascii_case("sti"));
+        let sti = args.len() != before;
         args.extend(verbose_flags);
         let mut tokens = classify_all(args)?;
         // Unset stays unset: the daemon applies `ac-core`'s defaults and
@@ -77,6 +81,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
                 window_len,
                 tail_s,
                 distance_m,
+                sti,
             },
             show_plot,
         });
@@ -297,6 +302,34 @@ mod tests {
         }
     }
 
+    /// #724: `sti` anywhere among `plot ir`'s arguments asks for the STI,
+    /// in any case, without disturbing the other tokens.
+    #[test]
+    fn test_plot_ir_sti_flag() {
+        for line in [
+            "plot ir sti",
+            "plot ir 2s STI 1.5m",
+            "plot ir -50dbfs sti 2s 1.6s",
+        ] {
+            let p = parse(&args(line)).unwrap();
+            match p.cmd {
+                CommandKind::PlotIr { sti, .. } => assert!(sti, "{line}"),
+                other => panic!("{line}: expected PlotIr, got {other:?}"),
+            }
+        }
+        match parse(&args("plot ir 2s STI 1.5m")).unwrap().cmd {
+            CommandKind::PlotIr {
+                duration,
+                distance_m,
+                ..
+            } => {
+                assert_eq!(duration, Some(2.0));
+                assert_eq!(distance_m, Some(1.5));
+            }
+            other => panic!("expected PlotIr, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_plot_ir_defaults() {
         let p = parse(&args("plot ir")).unwrap();
@@ -311,8 +344,10 @@ mod tests {
                 window_len,
                 tail_s,
                 distance_m,
+                sti,
             } => {
                 assert_eq!(distance_m, None);
+                assert!(!sti, "sti is off unless asked for");
                 // Unset — the daemon applies `ac-core`'s defaults (#501),
                 // so the CLI holds no copy that could drift from them.
                 assert_eq!(f1, None);

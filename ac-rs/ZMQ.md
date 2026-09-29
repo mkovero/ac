@@ -1403,6 +1403,10 @@ a configured reference.
   "duration":     <float>,   // seconds, default 4.0
   "level_dbfs":   <float>,   // default -40
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
+                             // (1.6 when `sti` is true and this is absent)
+  "sti":          <bool>,    // optional, default false (#724): also compute
+                             // the IEC 60268-16 STI (`report.sti`); anything
+                             // but a bool is refused
   "n_harmonics":  <int>,     // default 5
   "window_len":   <int>,     // requested IR gate length in samples;
                              // default round(0.4 s × engine sample rate)
@@ -1477,6 +1481,7 @@ also stated in the report `notes`.
 { "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": 0.0,
   "f1_hz": <float>, "f2_hz": <float>, "duration": <float>,  // accepted, defaults applied
   "n_harmonics": <int>, "tail_s": <float>,                  // accepted, defaults applied
+  "sti": <bool>,                                            // whether the STI was asked for
   "window_len": <int>,          // only when the request carried window_len
   "window_default_s": 0.4,      // only when the request did not carry window_len
   "ref_in_port": "<reference-capture-port>",    // only when a reference is configured

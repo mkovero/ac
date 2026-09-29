@@ -401,6 +401,8 @@ pub enum CommandKind {
         tail_s: Option<f64>,
         /// Source-to-receiver distance, metres (#460 causal bound).
         distance_m: Option<f64>,
+        /// `sti` (#724): also compute the IEC 60268-16 STI.
+        sti: bool,
     },
     Plot {
         start: Option<f64>,
@@ -781,7 +783,8 @@ Commands:
                   [--verbose|-v]                                      (-v: fund + noise columns, harmonic table)
   plot level      <start> <stop> [freq] [steps] [show] [-v]           per-point THD vs level
   plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
-                  [<N>harm] [<N>win] [<N>s tail]                      (gate params: harmonics, window, tail capture)
+                  [<N>harm] [<N>win] [<N>s tail] [sti]                (gate params: harmonics, window, tail capture;
+                                                                      sti: IEC 60268-16 STI, tail 1.6 s unless typed)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
   transfer        [channels]                                          transfer view; each channel is measured against the reference
                                                                       live spectrum (default FFT; cwt = Morlet)

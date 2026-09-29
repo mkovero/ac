@@ -684,6 +684,7 @@ const COMMANDS: &[Command] = &[
             "level_dbfs",
             "level_unit",
             "n_harmonics",
+            "sti",
             "tail_s",
             "window_len",
         ],
