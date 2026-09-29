@@ -218,7 +218,7 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
     if len_s < MIN_IR_S {
         return refuse(format!(
             "impulse response {len_s:.2} s long, under the 1.6 s IEC 60268-16 \u{a7}6.2 b) asks \
-             for (plot ir: tail_s 1.6 or more)"
+             for (plot ir: tail and sweep duration 1.6 s or more)"
         ));
     }
     if let Some(rt) = rt_s.filter(|rt| len_s < rt / 2.0) {

@@ -1587,3 +1587,78 @@ fn plot_ir_with_a_long_tail_reports_room_acoustics() {
         json!("ISO 3382-1:2009")
     );
 }
+
+/// Wait for one `plot_ir` report and return it.
+fn next_report(c: &Client) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/report" => return v["report"].clone(),
+            Some((t, v)) if t == "error" => panic!("plot_ir error: {v}"),
+            _ => {}
+        }
+    }
+    panic!("no report")
+}
+
+/// #724: STI only on request. Without `sti` the report carries none; with
+/// it an untyped tail becomes 1.6 s (echoed) and the report carries an STI
+/// block — a value, or the reason there is none. A non-boolean `sti` is
+/// refused.
+#[test]
+fn sti_is_computed_only_when_asked_and_lengthens_an_untyped_tail() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let base = json!({
+        "cmd": "plot_ir", "f1_hz": 60.0, "f2_hz": 16_000.0,
+        "duration": 2.0, "level_dbfs": -20.0,
+    });
+
+    let r = c.call(base.clone());
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["sti"], json!(false), "{r}");
+    assert!(next_report(&c).get("sti").is_none(), "STI without asking");
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+
+    let mut asked = base.clone();
+    asked["sti"] = json!(true);
+    let r = c.call(asked);
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["sti"], json!(true), "{r}");
+    assert_eq!(r["tail_s"], json!(1.6), "untyped tail not lengthened: {r}");
+    let rep = next_report(&c);
+    let sti = rep.get("sti").expect("no STI block when asked");
+    assert!(
+        sti["sti"].is_number() || sti["refused"].is_string(),
+        "STI block has neither a value nor a reason: {sti}"
+    );
+    assert!(sti["note"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not applied"));
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+
+    let mut typed = base.clone();
+    typed["sti"] = json!(true);
+    typed["tail_s"] = json!(0.5);
+    let r = c.call(typed);
+    assert_eq!(r["tail_s"], json!(0.5), "a typed tail was overridden: {r}");
+    let rep = next_report(&c);
+    assert!(
+        rep["sti"]["refused"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1.6 s"),
+        "a short typed tail did not refuse the STI: {}",
+        rep["sti"]
+    );
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+
+    let mut bad = base;
+    bad["sti"] = json!("yes");
+    let r = c.call(bad);
+    assert_eq!(r["ok"], json!(false), "{r}");
+}

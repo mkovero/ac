@@ -1093,6 +1093,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return e,
     };
     let tail_typed = cmd.get("tail_s").is_some();
+    // STI on request (#724): computed only when asked. It needs a 1.6 s
+    // impulse response (IEC 60268-16 §6.2 b), so an untyped tail becomes
+    // 1.6 s; a typed one is kept, and a short one refuses the STI with the
+    // reason in the report.
+    let sti_requested = match cmd.get("sti") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return request_error("plot_ir", "sti must be true or false".to_string());
+        }
+    };
+    let tail_s = if sti_requested && !tail_typed {
+        tail_s.max(ac_core::measurement::sti::MIN_IR_S)
+    } else {
+        tail_s
+    };
     let n_harmonics = match bounded_usize(
         cmd,
         "n_harmonics",
@@ -1479,8 +1495,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             // IEC 60268-16 STI from the same span and band windows, checked
             // against half the room's mid-band reverberation time (§6.2 b).
             let rt = room.as_ref().and_then(|r| r.t30_mid_s.or(r.t20_mid_s));
-            let sti = ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz, rt);
-            (room, Some(sti))
+            let sti = sti_requested
+                .then(|| ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz, rt));
+            (room, sti)
         };
         let mut notes = vec![decay_note];
         notes.extend(room_note);
@@ -1843,6 +1860,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         "duration": duration,
         "n_harmonics": n_harmonics,
         "tail_s": tail_s,
+        "sti": sti_requested,
     });
     // The engine rate is not known yet, so a defaulted window can only be
     // echoed in seconds; its sample count arrives in the
