@@ -14,6 +14,24 @@ fn main() -> eframe::Result<()> {
     // flag — the CLI cannot ask a launch to come up driving; drive only
     // ever starts through the in-app arm→fire machine.
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // `--report <file>` (#665): a window on one report, no daemon —
+    // what `ac plot ir` opens once its report is written.
+    if let Some(i) = raw.iter().position(|a| a == "--report") {
+        let Some(path) = raw.get(i + 1) else {
+            eprintln!("ac-view: --report needs a file");
+            std::process::exit(1);
+        };
+        let view = ac_view::report_view::ReportView::open(std::path::Path::new(path));
+        let title = view.title();
+        return eframe::run_native(
+            &title,
+            eframe::NativeOptions::default(),
+            Box::new(|cc| {
+                ac_view::fonts::install(&cc.egui_ctx);
+                Ok(Box::new(view))
+            }),
+        );
+    }
     let transfer = raw.iter().any(|a| a == "--transfer");
     // `--meas <N>[,<N>…]` overrides the measurement channel(s) from the
     // CLI (an explicit `ac monitor`/`ac transfer` channel spec); each is

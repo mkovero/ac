@@ -211,6 +211,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         distance_m,
         sti,
         speech_dba,
+        view,
     ) = match cmd {
         CommandKind::PlotIr {
             f1,
@@ -224,6 +225,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             distance_m,
             sti,
             speech_dba,
+            view,
         } => (
             *f1,
             *f2,
@@ -236,6 +238,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             *distance_m,
             *sti,
             *speech_dba,
+            *view,
         ),
         _ => unreachable!(),
     };
@@ -379,6 +382,9 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     if let Some(done) = frames.done.as_ref() {
         for line in report_files_lines(done) {
             println!("{line}");
+        }
+        if view {
+            println!("{}", open_in_view(done, client.host()));
         }
     }
     for line in ir_notes_lines(report.as_ref()) {
@@ -1960,6 +1966,69 @@ fn room_acoustics_lines(r: &ac_core::measurement::room_acoustics::RoomAcoustics)
     lines
 }
 
+/// Why `ac plot ir` cannot open its report in `ac-view` (#665), or the
+/// viewer to run. Each reason names what to check. Decided from its inputs
+/// alone so a test can walk every branch without a display.
+fn view_target(
+    report: Option<&str>,
+    has_display: bool,
+    report_is_local: bool,
+    viewer: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, &'static str> {
+    if report.is_none() {
+        return Err("no report written");
+    }
+    if !has_display {
+        return Err("no display (DISPLAY / WAYLAND_DISPLAY unset)");
+    }
+    if !report_is_local {
+        return Err("the report is not on this machine (remote daemon?)");
+    }
+    viewer.ok_or("ac-view not found (cargo build -p ac-view)")
+}
+
+/// Open the report the `done` frame names in `ac-view --report`, detached:
+/// its own process group, no stdio, never waited for — so the viewer
+/// neither blocks `ac` nor changes its exit status, and a Ctrl-C at the
+/// shell does not close it. Returns the `view` line to print.
+fn open_in_view(done: &serde_json::Value, daemon_host: &str) -> String {
+    let report = done["report_files"]["json"]["path"].as_str();
+    let has_display = ["DISPLAY", "WAYLAND_DISPLAY"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()));
+    // The path is the daemon's: only a daemon on this machine names a file
+    // here, however a same-named local file may look (Codex review).
+    let is_local = crate::spawn::is_local_host(daemon_host)
+        && report.is_some_and(|p| std::path::Path::new(p).is_file());
+    let target = view_target(
+        report,
+        has_display,
+        is_local,
+        crate::spawn::find_binary("ac-view"),
+    );
+    let viewer = match target {
+        Ok(v) => v,
+        Err(why) => return format!("{}not opened \u{2014} {why}", label_prefix("view")),
+    };
+    use std::os::unix::process::CommandExt;
+    let spawned = std::process::Command::new(&viewer)
+        .arg("--report")
+        .arg(report.unwrap_or_default())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn();
+    match spawned {
+        Ok(_) => format!("{}opened in ac-view", label_prefix("view")),
+        Err(e) => format!(
+            "{}not opened \u{2014} {}: {e}",
+            label_prefix("view"),
+            viewer.display()
+        ),
+    }
+}
+
 /// The `setup` command that sets the report directory, as the `report`
 /// line prints it (#472): built from the parser's own token, and fed back
 /// through the parser by a test, so it cannot name something `ac setup`
@@ -2319,6 +2388,23 @@ mod tests {
 
     /// #722: the STI block prints the value and every band's MTI, or the
     /// reason there is none — and always the note on what it leaves out.
+    #[test]
+    fn a_report_opens_in_ac_view_or_says_what_to_check() {
+        use super::view_target;
+        let bin = || Some(std::path::PathBuf::from("/bin/ac-view"));
+        let p = Some("/r/t-plot_ir.json");
+        assert_eq!(view_target(p, true, true, bin()), Ok("/bin/ac-view".into()));
+        assert_eq!(
+            view_target(None, true, true, bin()),
+            Err("no report written")
+        );
+        assert!(view_target(p, false, true, bin()).is_err_and(|w| w.contains("DISPLAY")));
+        assert!(
+            view_target(p, true, false, bin()).is_err_and(|w| w.contains("not on this machine"))
+        );
+        assert!(view_target(p, true, true, None).is_err_and(|w| w.contains("ac-view not found")));
+    }
+
     #[test]
     fn sti_block_prints_the_value_bands_and_note_or_the_reason() {
         use ac_core::measurement::sti::{Sti, NOISE_FREE_NOTE};

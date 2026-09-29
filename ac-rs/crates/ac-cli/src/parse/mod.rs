@@ -406,6 +406,9 @@ pub enum CommandKind {
         /// `speech <dB(A)>` (#726): the operational speech level for the
         /// level-corrected STI.
         speech_dba: Option<f64>,
+        /// Open the written report in `ac-view` (#665); `noview` turns
+        /// it off.
+        view: bool,
     },
     Plot {
         start: Option<f64>,
@@ -790,6 +793,7 @@ Commands:
                                                                       sti: IEC 60268-16 STI, tail 1.6 s unless typed;
                                                                       speech: also STI with measured noise, needs
                                                                       ac calibrate spl)
+                  [noview]                                            report opens in ac-view unless noview
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
   transfer        [channels]                                          transfer view; each channel is measured against the reference
                                                                       live spectrum (default FFT; cwt = Morlet)
