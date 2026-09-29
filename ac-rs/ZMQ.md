@@ -1992,8 +1992,9 @@ length (frequency resolution). The two are independent: for single-channel
 monitoring the daemon maintains a sliding ring per channel, pulling only
 `interval × sr` new samples per tick and analysing the trailing `fft_n`
 window, so refresh can run faster than `fft_n / sr`. Multi-channel mode
-does the same for every channel: all channels are captured together, one
-drain per tick, and each channel's ring receives the whole tick (#666).
+does the same for every channel: all channels are captured together (a
+tick over 0.5 s in pieces of at most 0.5 s, so the reference rings never
+overflow) and each channel's ring receives the whole tick (#666).
 
 **Request**
 ```json

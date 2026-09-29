@@ -335,7 +335,7 @@ fn monitor_spectrum_fake_noise_stays_bounded() {
 fn monitor_spectrum_emits_scope_frames() {
     // The daemon emits a `visualize/scope` sidecar frame per channel per
     // tick. Since #666 a multi-channel monitor captures every channel in
-    // one drain, so a tick's frames cover the same acquisition interval
+    // one joint capture, so a tick's frames cover the same acquisition interval
     // and share its `timestamp` — the key a consumer pairs them by (until
     // #666 they were sequential and unpairable, #434). Asserting on:
     //   - frames arrive at all (regression catch if the emit is removed)

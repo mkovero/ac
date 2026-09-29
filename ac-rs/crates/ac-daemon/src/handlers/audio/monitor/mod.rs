@@ -312,7 +312,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         // #666: the other channels ride along as capture ports of the same
-        // engine, so one drain hands every channel the whole tick's audio.
+        // engine, so a joint capture hands every channel the whole tick's audio.
         for port in in_ports_worker.iter().skip(1) {
             if let Err(e) = eng.add_ref_input(port) {
                 send_pub(
@@ -516,7 +516,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 capture_ts_ns: None,
             };
 
-            // #666: every channel's audio for this tick, from one drain.
+            // #666: every channel's audio for this tick, captured together (`capture_together`).
             // Until #666 the channels took turns on one input port, each
             // getting `interval / n` of the tick — so each ring held a
             // quarter of the audio of a four-channel session, spliced.
@@ -784,7 +784,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // (`cur_fft_n`). A single channel drains with
                 // `capture_available` (non-clearing on JACK, falls back to
                 // capture_block elsewhere); several arrive from the tick's
-                // one drain above, a whole interval each (#666).
+                // joint capture above, a whole interval each (#666).
                 let captured = match captured {
                     Some(buf) => Ok(buf),
                     None => eng.capture_available(capture_budget_samples(cur_interval, sr)),
