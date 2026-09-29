@@ -3119,3 +3119,50 @@ fn a_click_on_the_ir_panel_pins_a_time() {
     });
     assert_eq!(pins(&app).0, None);
 }
+
+// ---- #649 / #643: daemon failures reach the screen ----
+
+/// The daemon's `transfer_stream` error frame, sent after the launch was
+/// accepted, stops the drain as a failure and stays on screen; an `error`
+/// frame for another command is not this session's and is skipped.
+#[test]
+fn a_session_error_frame_is_shown_until_replaced() {
+    let mut queue: std::collections::VecDeque<crate::zmq_client::Recv> = [
+        &br#"error {"cmd":"probe","message":"not ours"}"#[..],
+        &br#"error {"cmd":"transfer_stream","message":"engine would not start"}"#[..],
+    ]
+    .iter()
+    .map(|b| crate::zmq_client::parse_frame(b))
+    .collect();
+    let mut malformed = 0u64;
+    let drained = collect_drained(|| {
+        crate::session::poll_next(
+            || queue.pop_front().unwrap_or(crate::zmq_client::Recv::Empty),
+            &mut malformed,
+        )
+    });
+    assert_eq!(drained.len(), 1, "only the session's own error is kept");
+    let mut app = transfer_app();
+    assert!(!app.ingest_drained(drained, std::time::Instant::now()));
+    assert_eq!(
+        app.toast_text(),
+        Some("session stopped \u{2014} engine would not start")
+    );
+}
+
+/// A control reply's refusal text is the daemon's own; an accepted reply
+/// has none, and an unreachable daemon says why.
+#[test]
+fn a_refused_control_reply_gives_its_reason() {
+    use crate::session::refusal;
+    assert_eq!(refusal(Ok(serde_json::json!({"ok": true}))), None);
+    assert_eq!(
+        refusal(Ok(serde_json::json!({"ok": false, "error": "busy"}))).as_deref(),
+        Some("busy")
+    );
+    assert!(refusal(Ok(serde_json::json!({"ok": false}))).is_some_and(|w| w.contains("no reason")));
+    assert!(
+        refusal(Err(anyhow::anyhow!("CTRL recv (daemon unreachable?)")))
+            .is_some_and(|w| w.contains("unreachable"))
+    );
+}
