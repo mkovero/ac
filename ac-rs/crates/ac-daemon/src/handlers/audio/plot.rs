@@ -1423,10 +1423,20 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             (Some(_), Some(_)) => {
                 eng.set_silence();
                 let _ = eng.capture_block(0.1);
-                Some(
-                    eng.capture_block(ac_core::measurement::sti::NOISE_CAPTURE_S)
-                        .map_err(|e| format!("{e}")),
-                )
+                // An xrun inside the noise capture voids its levels (Codex
+                // review): a dropped block is not the room's noise.
+                let before = eng.xruns();
+                let cap = eng
+                    .capture_block(ac_core::measurement::sti::NOISE_CAPTURE_S)
+                    .map_err(|e| format!("{e}"));
+                let dropped = eng.xruns().saturating_sub(before);
+                Some(cap.and_then(|c| {
+                    if dropped > 0 {
+                        Err(format!("{dropped} xrun(s) during the noise capture"))
+                    } else {
+                        Ok(c)
+                    }
+                }))
             }
             _ => None,
         };
@@ -1540,7 +1550,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                             .to_string(),
                     ),
                     (Some(dba), Some(off), Some(Ok(cap))) => {
-                        match ac_core::measurement::sti::octave_levels_dbfs(cap, sr) {
+                        match ac_core::measurement::sti::octave_levels_db(cap, sr) {
                             Ok(l) => s.with_levels(dba, l.map(|v| v + off)),
                             Err(e) => s.levels_refused(format!("background noise: {e}")),
                         }

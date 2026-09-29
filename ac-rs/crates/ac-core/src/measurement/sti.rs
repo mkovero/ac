@@ -192,11 +192,13 @@ pub fn speech_levels(speech_dba: f64) -> [f64; 7] {
     MALE_SPECTRUM_DB.map(|d| speech_dba + d)
 }
 
-/// The seven octave levels of `capture` in dBFS (AES17 mean-square
-/// convention, [`crate::shared::reference_levels::mean_sq_to_dbfs`]),
-/// IEC 61260 filters, the first 0.1 s of each band skipped as filter
+/// The seven octave levels of `capture`, `10·log10(mean square)` — the
+/// convention `calibrate_spl` stores the mic sensitivity in (`20·log10(rms)`),
+/// so adding the calibration's `spl_offset_db` gives dB SPL. Not the AES17
+/// sine-referenced dBFS, which would read 3.01 dB high here (Codex review of
+/// #726). IEC 61260 filters, the first 0.1 s of each band skipped as filter
 /// settling. `Err` when a band is outside what `sample_rate` reaches.
-pub fn octave_levels_dbfs(capture: &[f32], sample_rate: u32) -> Result<[f64; 7], String> {
+pub fn octave_levels_db(capture: &[f32], sample_rate: u32) -> Result<[f64; 7], String> {
     let fs = sample_rate as f64;
     let x: Vec<f64> = capture.iter().map(|&v| f64::from(v)).collect();
     let hi = (0.45 * fs - 1.0).min(OCTAVES_HZ[6] * 2f64.sqrt());
@@ -218,7 +220,7 @@ pub fn octave_levels_dbfs(capture: &[f32], sample_rate: u32) -> Result<[f64; 7],
             .filter(|s| !s.is_empty())
             .ok_or("noise capture too short")?;
         let ms = y.iter().map(|v| v * v).sum::<f64>() / y.len() as f64;
-        out[k] = crate::shared::reference_levels::mean_sq_to_dbfs(ms);
+        out[k] = 10.0 * ms.max(1e-24).log10();
     }
     Ok(out)
 }
@@ -780,11 +782,12 @@ mod tests {
         );
     }
 
-    /// #726: the noise octave levels follow the AES17 dBFS convention — a
-    /// 1 kHz tone at -20 dBFS reads -20 dBFS in the 1 kHz band and far less
-    /// in bands two octaves away.
+    /// #726: the noise octave levels are `10·log10(mean square)`, the
+    /// convention `calibrate_spl` measures the mic in — a 1 kHz sine of peak
+    /// 0.1 (rms 0.0707) reads -23.01 in the 1 kHz band, not the AES17 -20,
+    /// and far less in bands two octaves away.
     #[test]
-    fn a_tones_octave_level_is_its_dbfs_level() {
+    fn a_tones_octave_level_is_its_mean_square_level() {
         let fs = 48_000u32;
         let a = 10f64.powf(-20.0 / 20.0);
         let x: Vec<f32> = (0..fs as usize * 2)
@@ -792,8 +795,8 @@ mod tests {
                 (a * (2.0 * std::f64::consts::PI * 1000.0 * k as f64 / fs as f64).sin()) as f32
             })
             .collect();
-        let l = octave_levels_dbfs(&x, fs).unwrap();
-        assert!((l[3] + 20.0).abs() < 0.3, "1 kHz band {}", l[3]);
+        let l = octave_levels_db(&x, fs).unwrap();
+        assert!((l[3] + 23.01).abs() < 0.3, "1 kHz band {}", l[3]);
         assert!(l[1] < -60.0 && l[5] < -60.0, "{l:?}");
     }
 
@@ -813,5 +816,33 @@ mod tests {
             .sti
             .unwrap_or_else(|| panic!("refused: {:?}", got.refused));
         assert!(sti > 0.95, "STI {sti}");
+    }
+
+    /// Codex review of #726: a strong direct sound over a long reverberant
+    /// tail supplies the first 10 dB of decay at once, so the early decay
+    /// alone read a short room. The decay's extent — the tail standing over
+    /// the noise and gliding into it — reads it long, and a 1.7 s capture of
+    /// a 3.5 s room is refused by §6.2 b).
+    #[test]
+    fn a_strong_direct_sound_over_a_long_tail_is_still_a_long_room() {
+        let fs = 48_000u32;
+        let n = (1.7 * fs as f64) as usize;
+        let tail = noise(n, 11);
+        let floor = noise(n, 13);
+        let ir: Vec<f64> = (0..n)
+            .map(|k| {
+                let t = k as f64 / fs as f64;
+                let direct = if k == 480 { 1.0 } else { 0.0 };
+                // RT 3.5 s from -54 dB, under 2 % of the energy (so the
+                // first 10 dB of decay is the direct sound alone), reaching
+                // the -80 dB floor within the capture; 1.7 s is under half.
+                direct + 0.002 * tail[k] * (-6.9 * t / 3.5).exp() + 1e-4 * floor[k]
+            })
+            .collect();
+        let got = sti_from_ir(&ir, fs, 20.0, 20_000.0);
+        assert!(
+            got.refused.as_deref().is_some_and(|r| r.contains("half")),
+            "{got:?}"
+        );
     }
 }

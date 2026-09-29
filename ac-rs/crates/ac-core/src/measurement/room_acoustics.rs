@@ -274,11 +274,12 @@ fn filter_delay(fb: &Filterbank, i: usize, fs: f64) -> usize {
 }
 
 /// A band's reverberation time for the STI's §6.2 b) length check (#726),
-/// s: the early decay (0…−10 dB of the backward-integrated curve, §5.3.3,
-/// scaled to 60 dB). The early fall is the direct sound and reflections,
-/// not the noise: the late-decay line (fitted over the last 10 dB above the
-/// noise) and a T20/T30 fit over a noise-dominated curve both read a
-/// loopback's near-delta as a 47 s room, and refused its STI.
+/// s: the larger of the early decay (0…−10 dB of the backward-integrated
+/// curve, §5.3.3, scaled to 60 dB) and the late decay's
+/// ([`BandWindow::late_rt_s`], only where the band has a real tail). The
+/// early decay alone passes a strong direct sound over a long tail (Codex
+/// review); the late line alone, or a T20/T30 over a noise-dominated curve,
+/// read a loopback's near-delta as a 47 s room.
 pub(crate) fn window_rt(w: &BandWindow, fs: f64) -> Option<f64> {
     let t1 = w.t1.min(w.e.len().saturating_sub(1));
     let mut acc = w.correction;
@@ -296,9 +297,13 @@ pub(crate) fn window_rt(w: &BandWindow, fs: f64) -> Option<f64> {
         .iter()
         .map(|&v| 10.0 * (v / total).max(1e-300).log10())
         .collect();
-    fit_slope(&level, from, 0.0, -10.0, fs)
+    let edt = fit_slope(&level, from, 0.0, -10.0, fs)
         .filter(|s| *s < 0.0)
-        .map(|s| -60.0 / s)
+        .map(|s| -60.0 / s);
+    match (edt, w.late_rt_s) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// One band's squared response and the part of it that is the room
@@ -323,6 +328,11 @@ pub(crate) struct BandWindow {
     /// STI integrates to here (Codex review of #722: clause 6's Schroeder
     /// integral includes such an echo; §5.3.3's first crossing did not).
     pub last_above: usize,
+    /// The late decay's reverberation time, `−60/slope_db_s`, when the band
+    /// glides into its last 10 dB over the background — a real tail —
+    /// rather than jumping from its peak straight into the noise, where the
+    /// late line is fitted over noise alone (#726).
+    pub late_rt_s: Option<f64>,
 }
 
 /// Band `i` of `ir` filtered, and its decay window. `Err` carries the
@@ -385,6 +395,14 @@ pub(crate) fn band_window(
         .iter()
         .rposition(|&l| l >= noise_db + 10.0)
         .map_or(t1, |b| ((b + 1) * w).min(n) - 1);
+    // Where the level first reaches 10 dB over the background: a tail
+    // arrives there from above (still ≥ 8 dB over); a near-delta lands
+    // straight in the noise, and its late line is then a fit over noise.
+    let t0_blk = smooth[peak_blk.min(smooth.len() - 1)..]
+        .iter()
+        .position(|&l| l <= noise_db + 10.0)
+        .map_or(smooth.len() - 1, |k| k + peak_blk);
+    let late_rt_s = (smooth[t0_blk] - noise_db >= 8.0).then(|| -60.0 / slope);
 
     // The band's own trigger (A.3.4): its response within 20 dB of its
     // maximum. The decay curve and its fits start there.
@@ -400,6 +418,7 @@ pub(crate) fn band_window(
         slope_db_s: slope,
         peak_to_noise_db,
         last_above,
+        late_rt_s,
     })
 }
 
