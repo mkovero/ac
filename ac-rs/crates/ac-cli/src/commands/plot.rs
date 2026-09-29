@@ -384,7 +384,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             println!("{line}");
         }
         if view {
-            println!("{}", open_in_view(done));
+            println!("{}", open_in_view(done, client.host()));
         }
     }
     for line in ir_notes_lines(report.as_ref()) {
@@ -1991,12 +1991,15 @@ fn view_target(
 /// its own process group, no stdio, never waited for — so the viewer
 /// neither blocks `ac` nor changes its exit status, and a Ctrl-C at the
 /// shell does not close it. Returns the `view` line to print.
-fn open_in_view(done: &serde_json::Value) -> String {
+fn open_in_view(done: &serde_json::Value, daemon_host: &str) -> String {
     let report = done["report_files"]["json"]["path"].as_str();
     let has_display = ["DISPLAY", "WAYLAND_DISPLAY"]
         .iter()
         .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()));
-    let is_local = report.is_some_and(|p| std::path::Path::new(p).is_file());
+    // The path is the daemon's: only a daemon on this machine names a file
+    // here, however a same-named local file may look (Codex review).
+    let is_local = crate::spawn::is_local_host(daemon_host)
+        && report.is_some_and(|p| std::path::Path::new(p).is_file());
     let target = view_target(
         report,
         has_display,

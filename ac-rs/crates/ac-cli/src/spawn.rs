@@ -4,6 +4,12 @@ use std::time::{Duration, Instant};
 
 use crate::client::AcClient;
 
+/// Whether `host` names this machine — the one test for "the daemon's
+/// files are ours" (auto-spawn, #665's report viewer).
+pub fn is_local_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 pub fn find_binary(name: &str) -> Option<PathBuf> {
     if let Ok(path) = which(name) {
         return Some(path);
@@ -88,7 +94,7 @@ fn mismatch_warning(reply: &serde_json::Value, host: &str, ctrl_port: u16) -> Op
 }
 
 pub fn ensure_server(client: &mut AcClient, host: &str, ctrl_port: u16) {
-    let is_local = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    let is_local = is_local_host(host);
 
     let status = client.send_cmd(&serde_json::json!({"cmd": "status"}), Some(1500));
 

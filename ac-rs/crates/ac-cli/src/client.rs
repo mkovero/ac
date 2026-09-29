@@ -11,6 +11,11 @@ pub struct AcClient {
 }
 
 impl AcClient {
+    /// The daemon host this client talks to.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     pub fn new(host: &str, ctrl_port: u16, data_port: u16) -> Result<Self> {
         let ctx = zmq::Context::new();
 
