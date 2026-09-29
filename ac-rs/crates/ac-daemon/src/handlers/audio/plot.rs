@@ -1098,7 +1098,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     // 1.6 s; a typed one is kept, and a short one refuses the STI with the
     // reason in the report.
     let sti_requested = match cmd.get("sti") {
-        None | Some(Value::Null) => false,
+        None => false,
         Some(Value::Bool(b)) => *b,
         Some(_) => {
             return request_error("plot_ir", "sti must be true or false".to_string());

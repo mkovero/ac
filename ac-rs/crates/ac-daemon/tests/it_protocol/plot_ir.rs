@@ -1657,8 +1657,10 @@ fn sti_is_computed_only_when_asked_and_lengthens_an_untyped_tail() {
     );
     let _ = c.wait_for_topic("done", Duration::from_secs(10));
 
-    let mut bad = base;
-    bad["sti"] = json!("yes");
-    let r = c.call(bad);
-    assert_eq!(r["ok"], json!(false), "{r}");
+    for not_bool in [json!("yes"), json!(null), json!(1)] {
+        let mut bad = base.clone();
+        bad["sti"] = not_bool.clone();
+        let r = c.call(bad);
+        assert_eq!(r["ok"], json!(false), "sti {not_bool}: {r}");
+    }
 }
