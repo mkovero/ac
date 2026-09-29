@@ -1104,6 +1104,27 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return request_error("plot_ir", "sti must be true or false".to_string());
         }
     };
+    // The operational speech level at the position, dB(A) (#726): with it
+    // the STI also comes level-corrected — background noise measured before
+    // the sweep, masking and threshold applied. Only with `sti`.
+    let speech_dba = match cmd.get("speech_dba") {
+        None => None,
+        Some(v) => match v
+            .as_f64()
+            .filter(|d| d.is_finite() && (20.0..=120.0).contains(d))
+        {
+            Some(d) if sti_requested => Some(d),
+            Some(_) => {
+                return request_error("plot_ir", "speech_dba needs sti".to_string());
+            }
+            None => {
+                return request_error(
+                    "plot_ir",
+                    "speech_dba must be a number of dB(A) between 20 and 120".to_string(),
+                );
+            }
+        },
+    };
     let tail_s = if sti_requested && !tail_typed {
         tail_s.max(ac_core::measurement::sti::MIN_IR_S)
     } else {
@@ -1394,6 +1415,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
 
+        // #726: the background noise for the level-corrected STI, captured
+        // in silence before the sweep — only when a speech level was given
+        // and the mic is SPL-calibrated (without it there are no dB SPL).
+        let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
+        let noise_capture: Option<Result<Vec<f32>, String>> = match (speech_dba, spl_offset) {
+            (Some(_), Some(_)) => {
+                eng.set_silence();
+                let _ = eng.capture_block(0.1);
+                Some(
+                    eng.capture_block(ac_core::measurement::sti::NOISE_CAPTURE_S)
+                        .map_err(|e| format!("{e}")),
+                )
+            }
+            _ => None,
+        };
+
         let xruns_before = eng.xruns();
         let (capture, reference_leg) = match ref_in_port.as_deref() {
             Some(ref_port) if eng.supports_reference_capture() => {
@@ -1492,11 +1529,27 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                     None
                 }
             };
-            // IEC 60268-16 STI from the same span and band windows, checked
-            // against half the room's mid-band reverberation time (§6.2 b).
-            let rt = room.as_ref().and_then(|r| r.t30_mid_s.or(r.t20_mid_s));
+            // IEC 60268-16 STI from the same span and band windows.
             let sti = sti_requested
-                .then(|| ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz, rt));
+                .then(|| ac_core::measurement::sti::sti_from_ir(span, sr, f1_hz, f2_hz))
+                .map(|s| match (speech_dba, spl_offset, &noise_capture) {
+                    (None, _, _) => s,
+                    (Some(_), None, _) => s.levels_refused(
+                        "the level-corrected STI needs an SPL-calibrated mic \
+                         (ac calibrate spl)"
+                            .to_string(),
+                    ),
+                    (Some(dba), Some(off), Some(Ok(cap))) => {
+                        match ac_core::measurement::sti::octave_levels_dbfs(cap, sr) {
+                            Ok(l) => s.with_levels(dba, l.map(|v| v + off)),
+                            Err(e) => s.levels_refused(format!("background noise: {e}")),
+                        }
+                    }
+                    (Some(_), Some(_), Some(Err(e))) => {
+                        s.levels_refused(format!("background noise capture failed: {e}"))
+                    }
+                    (Some(_), Some(_), None) => s,
+                });
             (room, sti)
         };
         let mut notes = vec![decay_note];
@@ -1862,6 +1915,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         "tail_s": tail_s,
         "sti": sti_requested,
     });
+    if let Some(d) = speech_dba {
+        reply["speech_dba"] = json!(d);
+    }
     // The engine rate is not known yet, so a defaulted window can only be
     // echoed in seconds; its sample count arrives in the
     // `measurement/impulse_response` frame's `window_len_requested`.

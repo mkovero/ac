@@ -191,7 +191,7 @@ pub(crate) fn trigger(ir: &[f64], sample_rate: u32, f_hi: f64) -> usize {
 /// Least-squares slope, dB per second, of `level` (dB) at the samples where
 /// it lies in `[bottom, top]`, from `from` on. `None` if the curve never
 /// reaches `bottom` or fewer than two samples qualify.
-fn fit_slope(level: &[f64], from: usize, top: f64, bottom: f64, fs: f64) -> Option<f64> {
+pub(crate) fn fit_slope(level: &[f64], from: usize, top: f64, bottom: f64, fs: f64) -> Option<f64> {
     let reach = level[from..].iter().position(|&l| l <= bottom)? + from;
     let (mut n, mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for (k, &l) in level.iter().enumerate().take(reach + 1).skip(from) {
@@ -271,6 +271,34 @@ fn filter_delay(fb: &Filterbank, i: usize, fs: f64) -> usize {
             acc >= total / 2.0
         })
         .unwrap_or(0)
+}
+
+/// A band's reverberation time for the STI's §6.2 b) length check (#726),
+/// s: the early decay (0…−10 dB of the backward-integrated curve, §5.3.3,
+/// scaled to 60 dB). The early fall is the direct sound and reflections,
+/// not the noise: the late-decay line (fitted over the last 10 dB above the
+/// noise) and a T20/T30 fit over a noise-dominated curve both read a
+/// loopback's near-delta as a 47 s room, and refused its STI.
+pub(crate) fn window_rt(w: &BandWindow, fs: f64) -> Option<f64> {
+    let t1 = w.t1.min(w.e.len().saturating_sub(1));
+    let mut acc = w.correction;
+    let mut sched = vec![0.0; t1 + 1];
+    for k in (0..=t1).rev() {
+        acc += w.e[k];
+        sched[k] = acc;
+    }
+    let from = w.band_start.min(t1);
+    let total = sched[from];
+    if total <= 0.0 {
+        return None;
+    }
+    let level: Vec<f64> = sched
+        .iter()
+        .map(|&v| 10.0 * (v / total).max(1e-300).log10())
+        .collect();
+    fit_slope(&level, from, 0.0, -10.0, fs)
+        .filter(|s| *s < 0.0)
+        .map(|s| -60.0 / s)
 }
 
 /// One band's squared response and the part of it that is the room

@@ -51,6 +51,21 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
         let before = args.len();
         args.retain(|a| !a.eq_ignore_ascii_case("sti"));
         let sti = args.len() != before;
+        // `speech <dB(A)>` (#726): the operational speech level for the
+        // level-corrected STI. Two words, taken out before classifying.
+        let mut speech_dba = None;
+        if let Some(i) = args.iter().position(|a| a.eq_ignore_ascii_case("speech")) {
+            let v = args
+                .get(i + 1)
+                .and_then(|v| {
+                    v.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '(' || c == ')')
+                        .parse::<f64>()
+                        .ok()
+                })
+                .ok_or_else(|| "speech needs a level in dB(A), e.g. speech 65".to_string())?;
+            args.drain(i..=i + 1);
+            speech_dba = Some(v);
+        }
         args.extend(verbose_flags);
         let mut tokens = classify_all(args)?;
         // Unset stays unset: the daemon applies `ac-core`'s defaults and
@@ -82,6 +97,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
                 tail_s,
                 distance_m,
                 sti,
+                speech_dba,
             },
             show_plot,
         });
@@ -330,6 +346,24 @@ mod tests {
         }
     }
 
+    /// #726: `speech <dB(A)>` gives the operational speech level; a bare
+    /// `speech` with no number is refused.
+    #[test]
+    fn test_plot_ir_speech_level() {
+        for line in ["plot ir sti speech 65", "plot ir speech 65dBA sti 2s"] {
+            match parse(&args(line)).unwrap().cmd {
+                CommandKind::PlotIr {
+                    sti, speech_dba, ..
+                } => {
+                    assert!(sti, "{line}");
+                    assert_eq!(speech_dba, Some(65.0), "{line}");
+                }
+                other => panic!("{line}: expected PlotIr, got {other:?}"),
+            }
+        }
+        assert!(parse(&args("plot ir sti speech")).is_err());
+    }
+
     #[test]
     fn test_plot_ir_defaults() {
         let p = parse(&args("plot ir")).unwrap();
@@ -345,7 +379,9 @@ mod tests {
                 tail_s,
                 distance_m,
                 sti,
+                speech_dba,
             } => {
+                assert_eq!(speech_dba, None);
                 assert_eq!(distance_m, None);
                 assert!(!sti, "sti is off unless asked for");
                 // Unset — the daemon applies `ac-core`'s defaults (#501),

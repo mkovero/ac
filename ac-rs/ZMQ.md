@@ -1407,6 +1407,11 @@ a configured reference.
   "sti":          <bool>,    // optional, default false (#724): also compute
                              // the IEC 60268-16 STI (`report.sti`); anything
                              // but a bool is refused
+  "speech_dba":   <float>,   // optional, with `sti` only (#726): the speech
+                             // level at the position, dB(A), 20–120. Adds the
+                             // level-corrected STI (`report.sti.levels`): 3 s
+                             // of background noise captured before the sweep,
+                             // octave levels in dB SPL (needs `calibrate_spl`)
   "n_harmonics":  <int>,     // default 5
   "window_len":   <int>,     // requested IR gate length in samples;
                              // default round(0.4 s × engine sample rate)
@@ -1482,6 +1487,7 @@ also stated in the report `notes`.
   "f1_hz": <float>, "f2_hz": <float>, "duration": <float>,  // accepted, defaults applied
   "n_harmonics": <int>, "tail_s": <float>,                  // accepted, defaults applied
   "sti": <bool>,                                            // whether the STI was asked for
+  "speech_dba": <float>,                                    // only when given
   "window_len": <int>,          // only when the request carried window_len
   "window_default_s": 0.4,      // only when the request did not carry window_len
   "ref_in_port": "<reference-capture-port>",    // only when a reference is configured

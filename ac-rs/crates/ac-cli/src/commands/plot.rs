@@ -210,6 +210,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
         tail_s,
         distance_m,
         sti,
+        speech_dba,
     ) = match cmd {
         CommandKind::PlotIr {
             f1,
@@ -222,6 +223,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             tail_s,
             distance_m,
             sti,
+            speech_dba,
         } => (
             *f1,
             *f2,
@@ -233,6 +235,7 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
             *tail_s,
             *distance_m,
             *sti,
+            *speech_dba,
         ),
         _ => unreachable!(),
     };
@@ -285,6 +288,9 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     }
     if sti {
         cmd_json["sti"] = serde_json::json!(true);
+    }
+    if let Some(v) = speech_dba {
+        cmd_json["speech_dba"] = serde_json::json!(v);
     }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
@@ -1877,6 +1883,31 @@ fn sti_lines(s: &ac_core::measurement::sti::Sti) -> Vec<String> {
         )),
     }
     lines.push(format!("      note {}", s.note));
+    // #726: under operational levels, when a speech level was given.
+    if let Some(l) = &s.levels {
+        lines.push(format!(
+            "      STI  {:.2}  with speech {:.0} dB(A) (male, Table A.4) and the background \
+             noise measured here; masking and threshold applied",
+            l.sti, l.speech_dba
+        ));
+        let noise = ac_core::measurement::sti::OCTAVES_HZ
+            .iter()
+            .zip(&l.noise_db)
+            .map(|(f, n)| {
+                let f = if *f >= 1000.0 {
+                    format!("{}k", f / 1000.0)
+                } else {
+                    format!("{f:.0}")
+                };
+                format!("{f} {n:.0}")
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        lines.push(format!("      noise dB SPL  {noise}"));
+    }
+    if let Some(why) = &s.levels_refused {
+        lines.push(format!("      STI with levels \u{2014}  {why}"));
+    }
     lines
 }
 
@@ -2297,6 +2328,15 @@ mod tests {
             sti: Some(0.6234),
             mti: vec![0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
             refused: None,
+            mtf: vec![],
+            levels: Some(ac_core::measurement::sti::StiLevels {
+                sti: 0.5812,
+                mti: vec![0.5; 7],
+                speech_dba: 65.0,
+                speech_db: vec![0.0; 7],
+                noise_db: vec![48.0, 42.0, 38.0, 33.0, 30.0, 27.0, 24.0],
+            }),
+            levels_refused: None,
             note: NOISE_FREE_NOTE.into(),
             citation: cite.clone(),
         };
@@ -2306,15 +2346,29 @@ mod tests {
             .iter()
             .any(|l| l.contains("125 0.50") && l.contains("8k 0.80")));
         assert!(lines.iter().any(|l| l.contains("not applied")));
+        // #726: the level-corrected value and the measured noise.
+        assert!(lines
+            .iter()
+            .any(|l| l.trim().starts_with("STI  0.58  with speech 65 dB(A)")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("noise dB SPL  125 48") && l.contains("8k 24")));
         let no = Sti {
             sti: None,
             mti: vec![],
             refused: Some("impulse response 0.51 s long".into()),
+            mtf: vec![],
+            levels: None,
+            levels_refused: Some("the level-corrected STI needs an SPL-calibrated mic".into()),
             note: NOISE_FREE_NOTE.into(),
             citation: cite,
         };
         let lines = super::sti_lines(&no);
         assert!(lines.iter().any(|l| l.contains("0.51 s long")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("SPL-calibrated")),
+            "{lines:?}"
+        );
     }
 
     #[test]

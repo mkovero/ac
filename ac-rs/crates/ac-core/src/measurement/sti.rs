@@ -47,6 +47,14 @@ pub const BETA_MALE: [f64; 6] = [0.085, 0.078, 0.065, 0.011, 0.047, 0.095];
 /// Table A.2: absolute speech reception threshold per band, dB SPL.
 pub const ART_DB: [f64; 7] = [46.0, 27.0, 12.0, 6.5, 7.5, 8.0, 12.0];
 
+/// Table A.4, males: octave band levels relative to the A-weighted speech
+/// level, dB.
+pub const MALE_SPECTRUM_DB: [f64; 7] = [2.9, 2.9, -0.8, -6.8, -12.8, -18.8, -24.8];
+
+/// Background noise captured before the sweep for the level corrections,
+/// s (#726).
+pub const NOISE_CAPTURE_S: f64 = 3.0;
+
 /// §6.2 b): the least length of the impulse response, s.
 pub const MIN_IR_S: f64 = 1.6;
 
@@ -178,6 +186,57 @@ pub fn schroeder_mtf(
     out
 }
 
+/// The speech octave levels of Table A.4 (male) at an A-weighted speech
+/// level, dB SPL.
+pub fn speech_levels(speech_dba: f64) -> [f64; 7] {
+    MALE_SPECTRUM_DB.map(|d| speech_dba + d)
+}
+
+/// The seven octave levels of `capture` in dBFS (AES17 mean-square
+/// convention, [`crate::shared::reference_levels::mean_sq_to_dbfs`]),
+/// IEC 61260 filters, the first 0.1 s of each band skipped as filter
+/// settling. `Err` when a band is outside what `sample_rate` reaches.
+pub fn octave_levels_dbfs(capture: &[f32], sample_rate: u32) -> Result<[f64; 7], String> {
+    let fs = sample_rate as f64;
+    let x: Vec<f64> = capture.iter().map(|&v| f64::from(v)).collect();
+    let hi = (0.45 * fs - 1.0).min(OCTAVES_HZ[6] * 2f64.sqrt());
+    let fb = Filterbank::new(sample_rate, 1, OCTAVES_HZ[0] / 2f64.sqrt(), hi)
+        .map_err(|e| format!("octave filters: {e}"))?;
+    let skip = (0.1 * fs) as usize;
+    let mut out = [0.0; 7];
+    for (k, &oct) in OCTAVES_HZ.iter().enumerate() {
+        let i = fb
+            .centres_hz()
+            .iter()
+            .position(|&c| (c / oct - 1.0).abs() < 0.05)
+            .ok_or_else(|| format!("the {oct:.0} Hz band is out of reach at {sample_rate} Hz"))?;
+        let y = fb
+            .filter_band(i, &x)
+            .ok_or("band filter produced nothing")?;
+        let y = y
+            .get(skip..)
+            .filter(|s| !s.is_empty())
+            .ok_or("noise capture too short")?;
+        let ms = y.iter().map(|v| v * v).sum::<f64>() / y.len() as f64;
+        out[k] = crate::shared::reference_levels::mean_sq_to_dbfs(ms);
+    }
+    Ok(out)
+}
+
+/// The STI under operational levels (A.5.3, Annex M step 3) — speech at an
+/// A-weighted level with Table A.4's male spectrum, and the background
+/// noise measured at the position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StiLevels {
+    pub sti: f64,
+    pub mti: Vec<f64>,
+    /// The speech level asked for, dB(A), and its octave levels, dB SPL.
+    pub speech_dba: f64,
+    pub speech_db: Vec<f64>,
+    /// The measured background noise, octave levels, dB SPL.
+    pub noise_db: Vec<f64>,
+}
+
 /// The STI of an impulse response (clause 6), without level corrections.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sti {
@@ -186,6 +245,18 @@ pub struct Sti {
     /// MTI per band, 125 Hz first, when the STI was computed.
     #[serde(default)]
     pub mti: Vec<f64>,
+    /// The noise-free MTF behind it, per band (125 Hz first) at the 14
+    /// modulation frequencies — what the level corrections start from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mtf: Vec<[f64; 14]>,
+    /// The STI with background noise, masking and threshold applied (#726),
+    /// when a speech level was given and the noise could be measured in dB
+    /// SPL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<StiLevels>,
+    /// Why the level-corrected STI is absent although it was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels_refused: Option<String>,
     /// Why there is no STI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
@@ -203,12 +274,15 @@ pub const NOISE_FREE_NOTE: &str =
 
 /// The STI of `ir` (the linear IR with its tail, as captured, from just
 /// before the direct sound), sampled at `sample_rate`, measured over
-/// `[f_lo, f_hi]`. `rt_s`, when known, is the reverberation time §6.2 b)
-/// compares the length with.
-pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Option<f64>) -> Sti {
+/// `[f_lo, f_hi]`. §6.2 b)'s reverberation time is each band's own early
+/// decay (see [`crate::measurement::room_acoustics::window_rt`]).
+pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64) -> Sti {
     let refuse = |why: String| Sti {
         sti: None,
         mti: Vec::new(),
+        mtf: Vec::new(),
+        levels: None,
+        levels_refused: None,
         refused: Some(why),
         note: NOISE_FREE_NOTE.into(),
         citation: citation(),
@@ -221,12 +295,7 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
              for (plot ir: tail and sweep duration 1.6 s or more)"
         ));
     }
-    if let Some(rt) = rt_s.filter(|rt| len_s < rt / 2.0) {
-        return refuse(format!(
-            "impulse response {len_s:.2} s long, under half the reverberation time \
-             ({rt:.2} s; \u{a7}6.2 b)"
-        ));
-    }
+
     let lo = f_lo.max(OCTAVES_HZ[0] / 2f64.sqrt());
     let hi = f_hi.min(0.45 * fs - 1.0);
     let fb = match Filterbank::new(sample_rate, 1, lo, hi) {
@@ -235,7 +304,9 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
     };
     let centres = fb.centres_hz();
     let mut m: Mtf = [[0.0; 14]; 7];
-    let mut longest_rt: f64 = rt_s.unwrap_or(0.0);
+    // §6.2 b) against each band's own early decay — not a room T30, which
+    // over a noise-dominated curve read a loopback as 47 s (#726).
+    let mut longest_rt: f64 = 0.0;
     let start = crate::measurement::room_acoustics::trigger(ir, sample_rate, f_hi);
     for (k, &oct) in OCTAVES_HZ.iter().enumerate() {
         let Some(i) = centres.iter().position(|&c| (c / oct - 1.0).abs() < 0.05) else {
@@ -260,8 +331,10 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
         // strong echo after a quiet gap is part of the channel.
         let end = w.t1.max(w.last_above);
         m[k] = schroeder_mtf(&w.e, w.band_start, end, w.correction, w.t1, tau_s, fs);
-        // The band's reverberation time from its late decay's rate.
-        longest_rt = longest_rt.max(-60.0 / w.slope_db_s);
+        // The band's reverberation time from its backward-integrated decay.
+        if let Some(rt) = crate::measurement::room_acoustics::window_rt(&w, fs) {
+            longest_rt = longest_rt.max(rt);
+        }
     }
     // §6.2 b) against the longest band decay found, not only a caller's
     // RT: a room whose T20/T30 could not be read still has one (Codex
@@ -276,9 +349,48 @@ pub fn sti_from_ir(ir: &[f64], sample_rate: u32, f_lo: f64, f_hi: f64, rt_s: Opt
     Sti {
         sti: Some(sti),
         mti: mti.to_vec(),
+        mtf: m.to_vec(),
+        levels: None,
+        levels_refused: None,
         refused: None,
         note: NOISE_FREE_NOTE.into(),
         citation: citation(),
+    }
+}
+
+impl Sti {
+    /// Apply operational levels (#726): speech at `speech_dba` (Table A.4
+    /// male spectrum) and the measured background `noise_db` (octave levels,
+    /// dB SPL), through [`correct_mtf`]. With no MTF (the STI itself was
+    /// refused) it says so rather than staying silent.
+    pub fn with_levels(mut self, speech_dba: f64, noise_db: [f64; 7]) -> Sti {
+        let Ok(m): Result<Mtf, _> = self.mtf.clone().try_into() else {
+            self.levels_refused = Some("no STI to correct (see above)".to_string());
+            return self;
+        };
+        let speech = speech_levels(speech_dba);
+        let corrected = correct_mtf(
+            &m,
+            &Levels {
+                speech_db: speech,
+                noise_db,
+            },
+        );
+        let (sti, mti) = sti_from_mtf(&corrected);
+        self.levels = Some(StiLevels {
+            sti,
+            mti: mti.to_vec(),
+            speech_dba,
+            speech_db: speech.to_vec(),
+            noise_db: noise_db.to_vec(),
+        });
+        self
+    }
+
+    /// Record why the level-corrected STI could not be formed.
+    pub fn levels_refused(mut self, why: String) -> Sti {
+        self.levels_refused = Some(why);
+        self
     }
 }
 
@@ -454,7 +566,7 @@ mod tests {
         let fs = 48_000u32;
         let rt = 0.8;
         let ir = room(rt, -30.0, 2.0, fs);
-        let got = sti_from_ir(&ir, fs, 20.0, 20_000.0, Some(rt));
+        let got = sti_from_ir(&ir, fs, 20.0, 20_000.0);
         let sti = got
             .sti
             .unwrap_or_else(|| panic!("refused: {:?}", got.refused));
@@ -499,23 +611,18 @@ mod tests {
     #[test]
     fn what_the_standard_does_not_allow_is_refused_with_the_reason() {
         let fs = 48_000u32;
-        let short = sti_from_ir(&room(0.5, -60.0, 1.0, fs), fs, 20.0, 20_000.0, None);
+        let short = sti_from_ir(&room(0.5, -60.0, 1.0, fs), fs, 20.0, 20_000.0);
         assert!(
             short.refused.as_deref().unwrap().contains("1.6 s"),
             "{short:?}"
         );
-        let narrow = sti_from_ir(&room(0.5, -60.0, 2.0, fs), fs, 20.0, 6_000.0, None);
+        let narrow = sti_from_ir(&room(0.5, -60.0, 2.0, fs), fs, 20.0, 6_000.0);
         assert!(
             narrow.refused.as_deref().unwrap().contains("8000 Hz"),
             "{narrow:?}"
         );
-        let noisy = sti_from_ir(&room(0.5, -12.0, 2.0, fs), fs, 20.0, 20_000.0, None);
+        let noisy = sti_from_ir(&room(0.5, -12.0, 2.0, fs), fs, 20.0, 20_000.0);
         assert!(noisy.sti.is_none(), "{noisy:?}");
-        let long_rt = sti_from_ir(&room(0.5, -60.0, 2.0, fs), fs, 20.0, 20_000.0, Some(5.0));
-        assert!(
-            long_rt.refused.as_deref().unwrap().contains("half"),
-            "{long_rt:?}"
-        );
         assert_eq!(short.note, NOISE_FREE_NOTE);
     }
 
@@ -565,7 +672,7 @@ mod tests {
                 })
                 .collect()
         };
-        let got = sti_from_ir(&shaped(1e-3, true), fs, 20.0, 20_000.0, None);
+        let got = sti_from_ir(&shaped(1e-3, true), fs, 20.0, 20_000.0);
         let sti = got.sti.unwrap_or_else(|| panic!("{:?}", got.refused));
         let want = whole_sti(&shaped(0.0, true), fs);
         let without = whole_sti(&shaped(0.0, false), fs);
@@ -585,7 +692,7 @@ mod tests {
     #[test]
     fn half_the_reverberation_time_is_checked_without_a_caller_rt() {
         let fs = 48_000u32;
-        let long = sti_from_ir(&room(4.0, -40.0, 1.7, fs), fs, 20.0, 20_000.0, None);
+        let long = sti_from_ir(&room(4.0, -40.0, 1.7, fs), fs, 20.0, 20_000.0);
         assert!(
             long.refused.as_deref().is_some_and(|r| r.contains("half")),
             "{long:?}"
@@ -642,5 +749,69 @@ mod tests {
             err(&at_end) > 5.0 * err(&at_t1),
             "placement made no difference"
         );
+    }
+
+    /// #726: Table A.4 at 80 dB(A) is Annex M's operational speech row, and
+    /// its noise-free MTF under that speech and its noise gives its STI,
+    /// 0.76 — through `with_levels`, the path `plot ir` takes.
+    #[test]
+    fn operational_levels_reproduce_annex_m() {
+        assert_eq!(
+            speech_levels(80.0).map(|v| (v * 10.0).round() / 10.0),
+            [82.9, 82.9, 79.2, 73.2, 67.2, 61.2, 55.2]
+        );
+        let m = transpose(&M2);
+        let base = Sti {
+            sti: Some(sti_from_mtf(&m).0),
+            mti: Vec::new(),
+            mtf: m.to_vec(),
+            levels: None,
+            levels_refused: None,
+            refused: None,
+            note: NOISE_FREE_NOTE.into(),
+            citation: citation(),
+        };
+        let got = base.with_levels(80.0, [55.5, 47.5, 41.5, 37.5, 34.5, 32.5, 30.5]);
+        let l = got.levels.expect("levels applied");
+        assert!((l.sti - 0.76).abs() < 0.005, "STI {}", l.sti);
+        assert!(
+            l.sti < got.sti.unwrap(),
+            "noise and masking did not lower it"
+        );
+    }
+
+    /// #726: the noise octave levels follow the AES17 dBFS convention — a
+    /// 1 kHz tone at -20 dBFS reads -20 dBFS in the 1 kHz band and far less
+    /// in bands two octaves away.
+    #[test]
+    fn a_tones_octave_level_is_its_dbfs_level() {
+        let fs = 48_000u32;
+        let a = 10f64.powf(-20.0 / 20.0);
+        let x: Vec<f32> = (0..fs as usize * 2)
+            .map(|k| {
+                (a * (2.0 * std::f64::consts::PI * 1000.0 * k as f64 / fs as f64).sin()) as f32
+            })
+            .collect();
+        let l = octave_levels_dbfs(&x, fs).unwrap();
+        assert!((l[3] + 20.0).abs() < 0.3, "1 kHz band {}", l[3]);
+        assert!(l[1] < -60.0 && l[5] < -60.0, "{l:?}");
+    }
+
+    /// #726: an electrical path — a delta over a quiet floor — has no
+    /// reverberation and an STI near 1. Its band decay's late line, fitted
+    /// over noise, read 47 s and refused it by §6.2 b); the check now reads
+    /// the backward-integrated decay.
+    #[test]
+    fn an_electrical_path_is_not_refused_and_reads_near_one() {
+        let fs = 48_000u32;
+        let n = 2 * fs as usize;
+        let floor = noise(n, 5);
+        let mut ir: Vec<f64> = floor.iter().map(|v| v * 1e-4).collect();
+        ir[480] += 1.0;
+        let got = sti_from_ir(&ir, fs, 20.0, 20_000.0);
+        let sti = got
+            .sti
+            .unwrap_or_else(|| panic!("refused: {:?}", got.refused));
+        assert!(sti > 0.95, "STI {sti}");
     }
 }
