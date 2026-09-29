@@ -80,6 +80,10 @@ impl Rig {
             .env("HOME", &self.home)
             .env("AC_CTRL_PORT", self.ctrl.to_string())
             .env("AC_DATA_PORT", self.data.to_string())
+            // No display: `plot ir` opens its report in `ac-view` (#665),
+            // which a test run must never do on a desktop session.
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .current_dir(cwd)
             .args(args)
             .output()
@@ -724,6 +728,11 @@ fn setup_report_dir_then_plot_ir_prints_the_written_report() {
     );
     assert!(Path::new(report).is_file(), "{report} not on disk");
     assert!(!stdout.contains("not saved"), "{stdout}");
+    // #665: headless, the viewer is not opened and the line says why.
+    assert!(
+        stdout.contains("  view          not opened \u{2014} no display"),
+        "{stdout}"
+    );
     assert_eq!(files_with_extension(&dir, "json").len(), 1);
     assert_eq!(files_with_extension(&dir, "csv").len(), 1);
 }

@@ -16,6 +16,7 @@ pub mod keys;
 pub mod offset_entry;
 pub mod range;
 pub mod report_flow;
+pub mod report_view;
 pub mod session;
 pub mod settings;
 pub mod snapshot_flow;

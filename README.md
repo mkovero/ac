@@ -287,6 +287,13 @@ ac-view <host> <ctrl-port> <data-port> [--transfer] [--meas <N>]
 # defaults: 127.0.0.1 5556 5557
 ```
 
+`ac plot ir` opens its written report in `ac-view` itself (#665): the
+sweep-derived, gated IR in its own window, detached, so `ac` exits with
+the measurement's status. `noview` skips it; with no display, a remote
+daemon, or no `ac-view` binary the `view` line says which. The same
+window opens by hand with `ac-view --report <file.json>` (Esc or Q
+closes it).
+
 ## Snapshots — `.acsnap`
 
 The daemon keeps a rolling ring of **raw pre-processing samples** for

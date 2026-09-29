@@ -51,6 +51,11 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
         let before = args.len();
         args.retain(|a| !a.eq_ignore_ascii_case("sti"));
         let sti = args.len() != before;
+        // `noview` (#665): the report is opened in `ac-view` unless asked
+        // not to.
+        let before = args.len();
+        args.retain(|a| !a.eq_ignore_ascii_case("noview"));
+        let view = args.len() == before;
         // `speech <dB(A)>` (#726): the operational speech level for the
         // level-corrected STI. Two words, taken out before classifying.
         let mut speech_dba = None;
@@ -98,6 +103,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
                 distance_m,
                 sti,
                 speech_dba,
+                view,
             },
             show_plot,
         });
@@ -364,6 +370,17 @@ mod tests {
         assert!(parse(&args("plot ir sti speech")).is_err());
     }
 
+    /// `noview` (#665) keeps the report out of `ac-view`, in any position.
+    #[test]
+    fn test_plot_ir_noview() {
+        for line in ["plot ir noview", "plot ir 2s noview sti"] {
+            match parse(&args(line)).unwrap().cmd {
+                CommandKind::PlotIr { view, .. } => assert!(!view, "{line}"),
+                other => panic!("{line}: expected PlotIr, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_plot_ir_defaults() {
         let p = parse(&args("plot ir")).unwrap();
@@ -380,7 +397,9 @@ mod tests {
                 distance_m,
                 sti,
                 speech_dba,
+                view,
             } => {
+                assert!(view, "the report opens in ac-view unless noview");
                 assert_eq!(speech_dba, None);
                 assert_eq!(distance_m, None);
                 assert!(!sti, "sti is off unless asked for");

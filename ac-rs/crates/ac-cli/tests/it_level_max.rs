@@ -44,6 +44,9 @@ impl Rig {
             .env("HOME", &self.home)
             .env("AC_CTRL_PORT", self.ctrl.to_string())
             .env("AC_DATA_PORT", self.data.to_string())
+            // `plot ir` would open its report in `ac-view` (#665).
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .current_dir(&self.home)
             .args(args)
             .output()
