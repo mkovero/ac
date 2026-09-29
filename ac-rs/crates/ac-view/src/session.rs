@@ -43,6 +43,10 @@ const MALFORMED_LOG_LIMIT: u64 = 5;
 pub enum PolledFrame {
     Transfer(serde_json::Value),
     Ir(serde_json::Value),
+    /// The daemon's `error` frame for `transfer_stream` (#649): the session
+    /// failed after its `{"ok":true}` reply — an engine that would not
+    /// start, a refused spool directory — and no frame will follow.
+    Failed(String),
 }
 
 /// The skip / count-malformed / return-tagged decision behind
@@ -74,6 +78,10 @@ pub(crate) fn poll_next(
                 }
             }
             Recv::Frame(topic, v) => {
+                if topic == "error" && v["cmd"] == "transfer_stream" {
+                    let why = v["message"].as_str().unwrap_or("no reason given");
+                    return Some(PolledFrame::Failed(why.to_string()));
+                }
                 if topic != "data" {
                     continue;
                 }
@@ -85,6 +93,21 @@ pub(crate) fn poll_next(
                 }
             }
         }
+    }
+}
+
+/// A control reply's refusal text: the daemon's own `error` string, or why
+/// the call failed. `None` for `{"ok":true}`.
+pub(crate) fn refusal(reply: Result<serde_json::Value>) -> Option<String> {
+    match reply {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(true) => None,
+        Ok(v) => Some(
+            v["error"]
+                .as_str()
+                .unwrap_or("refused, no reason given")
+                .to_string(),
+        ),
+        Err(e) => Some(format!("{e:#}")),
     }
 }
 
@@ -145,6 +168,13 @@ impl Session {
         Ok(())
     }
 
+    /// Send a control command and return the daemon's refusal text, if it
+    /// refused or could not be reached (#643). `None` is an accepted
+    /// command.
+    pub fn control(&self, cmd: &serde_json::Value) -> Option<String> {
+        refusal(self.client.call(cmd))
+    }
+
     pub fn stop(&mut self) {
         if self.launched {
             let _ = self.client.call(&json!({"cmd": "stop"}));
@@ -192,8 +222,11 @@ impl Session {
     pub fn poll_frame(&mut self, timeout: Duration) -> Option<PolledFrame> {
         let client = &self.client;
         let frame = poll_next(|| client.recv_frame(timeout), &mut self.malformed_frames);
-        if frame.is_some() {
-            self.last_frame_at = Some(Instant::now());
+        match frame {
+            // The worker has returned: no session is running any more.
+            Some(PolledFrame::Failed(_)) => self.launched = false,
+            Some(_) => self.last_frame_at = Some(Instant::now()),
+            None => {}
         }
         frame
     }

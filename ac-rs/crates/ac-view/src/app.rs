@@ -1456,8 +1456,13 @@ impl AcViewApp {
         let request = serde_json::json!({"cmd": "set_speed", "speed": next.tag()});
         #[cfg(test)]
         self.sent_speed.push(request.clone());
-        if let Some(session) = &self.session {
-            let _ = session.client().call(&request);
+        if let Some(why) = self.session.as_ref().and_then(|s| s.control(&request)) {
+            self.speed_pending = None;
+            self.set_toast(
+                format!("speed not changed \u{2014} {why}"),
+                Instant::now(),
+                Some(6.0),
+            );
         }
     }
 
@@ -1466,8 +1471,12 @@ impl AcViewApp {
         request["pair"] = serde_json::json!(self.selected_pair());
         #[cfg(test)]
         self.sent_delay.push(request.clone());
-        if let Some(session) = &self.session {
-            let _ = session.client().call(&request);
+        if let Some(why) = self.session.as_ref().and_then(|s| s.control(&request)) {
+            self.set_toast(
+                format!("delay not changed \u{2014} {why}"),
+                Instant::now(),
+                Some(6.0),
+            );
         }
     }
 
@@ -1695,11 +1704,16 @@ impl AcViewApp {
     fn relaunch(&mut self, applied: crate::settings::Applied) {
         if let Some(session) = &mut self.session {
             session.stop();
-            let _ = session.launch(
+            let launched = session.launch(
                 &[(applied.meas_channel, applied.ref_channel)],
                 self.weighting,
                 self.integration,
             );
+            // #643: a refused relaunch leaves no session running; say so
+            // until something replaces the message.
+            if let Err(e) = launched {
+                self.set_toast(format!("no session \u{2014} {e:#}"), Instant::now(), None);
+            }
         }
         self.set_pairs(vec![(applied.meas_channel, applied.ref_channel)]);
         // Re-read rather than reuse a construction-time value: `apply`
@@ -2010,6 +2024,10 @@ impl AcViewApp {
                     }
                 }
                 PolledFrame::Ir(v) => self.ingest_raw_ir_frame(v),
+                // #649: held until replaced — the session is gone.
+                PolledFrame::Failed(why) => {
+                    self.set_toast(format!("session stopped \u{2014} {why}"), now, None)
+                }
             }
         }
         got_new_frame
