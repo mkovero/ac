@@ -1089,6 +1089,10 @@ impl AudioEngine for JackEngine {
         "jack"
     }
 
+    fn simultaneous_inputs(&self) -> usize {
+        1 + MAX_REF_INPUTS
+    }
+
     fn period_size(&self) -> Option<u32> {
         // Queried fresh from the live client, never cached — a running
         // jackd's buffer size can change mid-session (see trait docs).

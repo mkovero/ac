@@ -562,6 +562,10 @@ impl AudioEngine for FakeEngine {
         "fake"
     }
 
+    fn simultaneous_inputs(&self) -> usize {
+        usize::MAX
+    }
+
     fn playback_ports(&self) -> Vec<String> {
         (0..20).map(|i| format!("fake:playback_{i}")).collect()
     }

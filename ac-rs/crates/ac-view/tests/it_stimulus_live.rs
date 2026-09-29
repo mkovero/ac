@@ -69,6 +69,7 @@ fn next_peak(session: &mut Session, timeout: Duration) -> Option<f64> {
             // The IR sidecar carries no peak — not a gap in the stream,
             // just not the frame this helper reads.
             Some(PolledFrame::Ir(_)) => {}
+            Some(PolledFrame::Failed(why)) => panic!("session failed: {why}"),
             None => {
                 if latest.is_some() {
                     break;

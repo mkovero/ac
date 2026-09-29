@@ -59,24 +59,24 @@ pub(super) fn emit_loudness_frame(
 /// to watch for and would prompt a v2 decimator.
 pub(super) const SCOPE_MAX_SAMPLES: usize = 2048;
 
-/// The only `capture_mode` a `visualize/scope` frame carries. The worker
-/// captures one channel at a time (reconnect, flush, block capture), so
-/// two channels' frames never cover the same acquisition interval and
-/// must not be paired as simultaneous (#434).
-pub(super) const SCOPE_CAPTURE_MODE: &str = "sequential";
+/// The only `capture_mode` a `visualize/scope` frame carries. Every
+/// channel of a tick is captured in the same process periods (#666), so
+/// the tick's frames cover the same acquisition interval and share its
+/// `timestamp`. Until #666 it was `"sequential"`: one channel at a time,
+/// never pairable (#434).
+pub(super) const SCOPE_CAPTURE_MODE: &str = "simultaneous";
 
 /// Emit a `visualize/scope` sidecar frame for one channel — raw f32
 /// samples (no voltage / SPL / mic-curve calibration applied).
 ///
-/// Both callers invoke this straight after the channel's capture
-/// returns, so identity and time are assigned here: `frame_idx` is the
-/// next value of the worker's scope counter, unique per emitted frame
-/// (it identifies this one capture, not a worker tick), and `timestamp`
-/// is taken now, i.e. at capture completion. Neither is shared across
-/// channels: the captures are sequential, which `capture_mode` states on
-/// the wire.
+/// Both callers invoke this straight after the channel's samples are in
+/// hand: `frame_idx` is the next value of the worker's scope counter,
+/// unique per emitted frame, and `timestamp` is the tick's capture
+/// completion ([`TickCtx::capture_ts_ns`]) — shared by every channel of
+/// the tick, the key a consumer pairs them by — or now on a single
+/// channel.
 pub(super) fn emit_scope_frame(ch: &ChannelState, ctx: &TickCtx, samples: &[f32], xruns: u32) {
-    let ts_ns = now_ns();
+    let ts_ns = ctx.capture_ts_ns.unwrap_or_else(now_ns);
     let frame_idx = ctx.scope_frame_idx.get().wrapping_add(1);
     ctx.scope_frame_idx.set(frame_idx);
     let tail = if samples.len() > SCOPE_MAX_SAMPLES {
@@ -127,6 +127,10 @@ pub(super) struct TickCtx<'a> {
     /// Capture-block duration for the ring-buffered modes, already
     /// clamped to [16 ms, 100 ms].
     pub(super) tick_secs: f64,
+    /// When this tick's capture of every channel completed (#666), the
+    /// `timestamp` all of the tick's scope frames share. `None` before the
+    /// capture, and on a single channel, which takes its own.
+    pub(super) capture_ts_ns: Option<u64>,
 }
 
 /// Mic-correct `mags` in place, then emit the mode's `visualize/*` frame

@@ -278,6 +278,15 @@ pub trait AudioEngine: Send + 'static {
         "unknown"
     }
 
+    /// Input ports this backend captures in the same process period:
+    /// the measurement port plus every `add_ref_input` port, all read by
+    /// [`Self::capture_multi_contiguous`]. One for a backend whose
+    /// `capture_multi` is the default fallback, which repeats one input
+    /// rather than capturing several (#666).
+    fn simultaneous_inputs(&self) -> usize {
+        1
+    }
+
     /// What the graph declares this path's round-trip latency to be, in
     /// frames (#363).
     ///
