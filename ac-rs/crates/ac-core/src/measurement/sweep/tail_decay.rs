@@ -107,8 +107,9 @@ const PRE_S: f64 = 0.05;
 /// longer capture.
 const FALLING_MIN_DB: f64 = 1.0;
 
-/// Largest 2σ scatter, dB, of that fall at which "no fall" may be read as
-/// levelled off; above it the band is [`TailTrend::Undetermined`].
+/// Largest 2σ scatter, dB, of that fall at which a fall under
+/// `max(FALLING_MIN_DB, 1.5σ)` may be read as levelled off. A fall between
+/// that and 3σ, or a wider scatter, is [`TailTrend::Undetermined`].
 const LEVELLED_MAX_2SIGMA_DB: f64 = 4.0;
 
 /// Standard deviation, dB, of a mean-square level estimate of Gaussian
@@ -182,7 +183,10 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
         let y = fb
             .filter_band(band, segment)
             .expect("band index from the filterbank's own centres");
-        let peak = y
+        // From the linear peak on: the run-in before it can hold the 2nd-
+        // harmonic IR (40 ms before it on a 0.4 s sweep), which would read
+        // as a higher peak and a larger decay (Codex recheck).
+        let peak = y[pre..]
             .chunks(block)
             .map(mean_db)
             .fold(f64::NEG_INFINITY, f64::max);
@@ -205,7 +209,9 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
         let sigma = std::f64::consts::SQRT_2 * level_sigma_db(b_hz, quarter as f64 / fs);
         let trend = if fall > FALLING_MIN_DB.max(3.0 * sigma) {
             TailTrend::Falling
-        } else if 2.0 * sigma <= LEVELLED_MAX_2SIGMA_DB {
+        } else if fall <= FALLING_MIN_DB.max(1.5 * sigma) && 2.0 * sigma <= LEVELLED_MAX_2SIGMA_DB {
+            // Levelled only when the fall is small against its own scatter;
+            // between that and 3σ it may still be falling (Codex recheck).
             TailTrend::Levelled
         } else {
             TailTrend::Undetermined
@@ -368,28 +374,28 @@ mod tests {
         );
     }
 
-    /// The same floor across the default band: the low bands have too few
-    /// cycles in 0.5 s to judge a trend, so the verdict is never a FAILED —
-    /// it says the tail is too short to tell, and names both remedies.
-    /// Against the pre-peak floor this replaced (Codex review): a steady
-    /// floor is never read as still falling.
+    /// The same floor in the low bands only: too few cycles in 0.5 s to
+    /// judge a trend, so the verdict is never a FAILED — it says the tail is
+    /// too short to tell, and names both remedies.
     #[test]
     fn a_floor_the_low_bands_cannot_resolve_is_undetermined_not_failed() {
-        let p = defaults(SR);
+        // 25–100 Hz only: every band has too few cycles in 0.5 s to judge.
+        let p = SweepParams {
+            f2_hz: 100.0,
+            ..defaults(SR)
+        };
         let full = synthetic_full(&p, 0.5, 0.05, 0.003);
         let check = check_tail_decay(&full, &p, 0.5).unwrap();
         assert!(
-            !check.passed && check.trend != TailTrend::Falling,
+            !check.passed && check.trend == TailTrend::Undetermined,
             "{check:?}"
         );
         let note = check.note();
         assert!(!note.contains("FAILED"), "{note}");
-        if check.trend == TailTrend::Undetermined {
-            assert!(
-                note.contains("too short to tell") && note.contains("drive level"),
-                "{note}"
-            );
-        }
+        assert!(
+            note.contains("too short to tell") && note.contains("drive level"),
+            "{note}"
+        );
     }
 
     /// Codex review of #504: a steady tone that outlasts the stimulus sits
