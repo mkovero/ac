@@ -241,8 +241,9 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         .unwrap_or(ac_core::shared::constants::DBU_REF_EXACT);
 
     println!("\n  -- Hardware config (server) --");
+    // #514: a label recorded with calibrations, not a device selector.
     println!(
-        "  Device:         {}",
+        "  Device:         {}  (calibration label; the backend opens its default device)",
         srv_cfg.get("device").and_then(|v| v.as_u64()).unwrap_or(0)
     );
     println!(
@@ -286,8 +287,9 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
     let dmm = srv_cfg.get("dmm_host").and_then(|v| v.as_str());
     println!("  DMM host:      {}", dmm.unwrap_or("(not configured)"));
 
-    let gpio = srv_cfg.get("gpio_port").and_then(|v| v.as_str());
-    println!("  GPIO port:     {}", gpio.unwrap_or("(not configured)"));
+    // #514: GPIO starts only from `ac-daemon --gpio`; a stored port starts
+    // nothing, so none is shown as if it were configured.
+    println!("  GPIO:          start the daemon with --gpio <port>  (ac gpio: status)");
 
     let r_start = srv_cfg
         .get("range_start_hz")
@@ -343,27 +345,6 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         println!("  saved            {path}");
     }
 
-    if let Some(gp) = gpio_port {
-        let port_val: serde_json::Value = match gp {
-            Some(p) => p.clone().into(),
-            None => serde_json::Value::Null,
-        };
-        let gpio_ack = client.send_cmd(
-            &serde_json::json!({"cmd": "gpio_setup", "port": port_val}),
-            Some(5000),
-        );
-        match gpio_ack {
-            Some(ref a) if a.get("ok").and_then(|v| v.as_bool()) == Some(true) => match gp {
-                Some(p) => println!("  GPIO: started on {p}"),
-                None => println!("  GPIO: stopped"),
-            },
-            Some(ref a) => {
-                let err = a.get("error").and_then(|e| e.as_str()).unwrap_or("error");
-                println!("  GPIO: {err}");
-            }
-            None => println!("  GPIO: server not responding"),
-        }
-    }
     println!();
 }
 

@@ -42,6 +42,9 @@ struct SetupScalars {
     server_idle_timeout_secs: Option<Option<u64>>,
     server_enabled: Option<bool>,
     dmm_host: Option<Option<String>>,
+    // #514: acknowledged and never applied until now.
+    range_start_hz: Option<f64>,
+    range_stop_hz: Option<f64>,
 }
 
 fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> {
@@ -54,6 +57,8 @@ fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> 
         // clear the host, and `server_enabled: "true"` was skipped.
         server_enabled: wire::opt_bool(update, "server_enabled")?,
         dmm_host: wire::opt_nullable_string(update, "dmm_host")?,
+        range_start_hz: wire::opt_positive_f64(update, "range_start_hz")?,
+        range_stop_hz: wire::opt_positive_f64(update, "range_stop_hz")?,
     })
 }
 
@@ -229,6 +234,28 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // #514: two keys `ac setup` sends that nothing here can honour. The
+    // audio backend opens its own default device, so a stored `device`
+    // would relabel calibrations without changing the hardware; GPIO has
+    // no live command and starts only from `ac-daemon --gpio`. Refused
+    // with where the setting really lives, never acknowledged and dropped.
+    for (key, why) in [
+        (
+            "device",
+            "selects no audio device \u{2014} the backend opens its default device",
+        ),
+        (
+            "gpio_port",
+            "is a daemon start option \u{2014} start the daemon with --gpio <port>",
+        ),
+    ] {
+        if update.get(key).is_some() {
+            return json!({"ok": false, "error": format!(
+                "setup rejected \u{2014} {key} {why}\nconfig    unchanged"
+            )});
+        }
+    }
+
     // Every change is made on a copy and committed to `state.cfg` only after
     // it is on disk (#430), so a failed save leaves memory and disk agreeing
     // on the last-good config. The lock is not held across the save:
@@ -286,6 +313,23 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     }
     if let Some(host) = scalars.dmm_host.clone() {
         cfg.dmm_host = host;
+    }
+    // #514: the default sweep band `ac plot` / `ac sweep` read when no band
+    // is typed (from this daemon's config, not the CLI's).
+    if let Some(v) = scalars.range_start_hz {
+        cfg.range_start_hz = v;
+    }
+    if let Some(v) = scalars.range_stop_hz {
+        cfg.range_stop_hz = v;
+    }
+    // Judged on the resulting pair, so moving both ends in one update, or
+    // one end past the other's stored value, is caught alike.
+    if cfg.range_start_hz >= cfg.range_stop_hz {
+        return json!({"ok": false, "error": format!(
+            "setup rejected \u{2014} range_start_hz {} is not below range_stop_hz {}\n\
+             config    unchanged",
+            cfg.range_start_hz, cfg.range_stop_hz
+        )});
     }
     // `0` clears the timeout, as `null` does.
     if let Some(v) = scalars.server_idle_timeout_secs {

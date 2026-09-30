@@ -981,13 +981,33 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "temperature_c":     <number> | null,  // optional — finite; null = clear
     "server_idle_timeout_secs": <int> | null,  // optional — integer >= 0;
                                     //   0 or null = clear (no idle timeout)
-    "report_dir":        "<absolute path>" | null  // optional — null = do not persist
+    "report_dir":        "<absolute path>" | null,  // optional — null = do not persist
+    "range_start_hz":    <number>,  // optional — finite, > 0; `plot`/`sweep`'s
+    "range_stop_hz":     <number>   //   default band; start must stay below stop (#514)
   }
 }
 ```
 
-The four channel fields and the four scalar keys `dbu_ref_vrms`,
-`snapshot_ring_s`, `temperature_c` and `server_idle_timeout_secs` follow
+Every key `ac setup` sends is applied or refused — none is acknowledged and
+dropped (#514). `device` and `gpio_port` are refused whatever their value:
+the audio backend opens its own default device, so a stored `device` would
+relabel calibrations without changing the hardware, and GPIO starts only
+from `ac-daemon --gpio <port>` (there is no live GPIO command).
+`range_start_hz` and `range_stop_hz` are the band `ac plot` / `ac sweep` run
+when none is typed — read from **this daemon's** config, so a remote setup
+takes effect — and are judged on the pair the update leaves: an update that
+would put the start at or above the stop, one end or both, is refused with
+the config unchanged:
+
+```text
+setup rejected — range_start_hz 400 is not below range_stop_hz 300
+config    unchanged
+```
+
+The four channel fields and the scalar keys `dbu_ref_vrms`,
+`snapshot_ring_s`, `temperature_c`, `server_idle_timeout_secs`,
+`server_enabled`, `dmm_host`, `range_start_hz`, `range_stop_hz`,
+`report_dir` and `snapshot_spool_dir` (their types) follow
 **Error handling → Wire values**: all are checked before anything is
 applied, so a wrong type or a value outside the key's domain leaves the
 whole config unchanged (`setup rejected — …`, `config  unchanged`). A float

@@ -367,11 +367,12 @@ Optional hardware interface for hands-free operation. A [usb2gpio](https://githu
 Buttons trigger ZMQ commands to the server — press SINE to generate a 1 kHz tone at the calibrated level, press STOP to silence it. LEDs reflect what's playing.
 
 ```bash
-ac setup gpio /dev/ttyUSB0   # enable
-ac setup gpio none           # disable
-ac gpio                      # show status
-ac gpio log                  # stream button events
+ac-daemon --gpio /dev/ttyUSB0   # GPIO starts with the daemon; there is no live enable
+ac gpio                         # show status
+ac gpio log                     # stream button events
 ```
+
+`ac setup gpio …` is refused (#514): a stored port would start nothing.
 
 The server auto-starts the GPIO handler on launch if `gpio_port` is configured.
 
