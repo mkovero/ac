@@ -119,11 +119,48 @@ pub fn encode(channels: &[Vec<f32>], sr: u32) -> Result<Vec<u8>> {
         }
     }
 
-    let config = flacenc::config::Encoder::default()
+    // #661: flacenc's default picks the fixed-predictor order from an
+    // entropy estimate that ignores the Rice-parameter cap (14). Broadband
+    // 24-bit noise below full scale then looks cheap to predict, while the
+    // real, capped coding costs up to thousands of bytes a sample (a 5 s
+    // two-channel ring became 350 MB). `BitCount` counts the capped bits
+    // and so falls back to verbatim when prediction does not pay.
+    let mut config = flacenc::config::Encoder::default();
+    config.subframe_coding.fixed.order_sel = flacenc::config::OrderSel::BitCount;
+    let bytes = encode_with(config, &interleaved, n_channels, sr)?;
+    // Backstop for any other estimate that goes wrong: a stream clearly
+    // larger than verbatim is re-encoded verbatim and the smaller kept.
+    // Verbatim is the raw i24 bytes plus framing (≈ 0.05 %: the fixture's
+    // 864 000 sample bytes take 864 404), so the allowance is 1 % — far
+    // under the ×10–×2000 growth #661 saw, and noise at verbatim size does
+    // not pay a second encode (Codex review).
+    let raw_bytes = interleaved.len() * 3;
+    if bytes.len() <= raw_bytes + raw_bytes / 100 + 4096 {
+        return Ok(bytes);
+    }
+    let mut verbatim = flacenc::config::Encoder::default();
+    verbatim.subframe_coding.use_fixed = false;
+    verbatim.subframe_coding.use_lpc = false;
+    let plain = encode_with(verbatim, &interleaved, n_channels, sr)?;
+    Ok(if plain.len() < bytes.len() {
+        plain
+    } else {
+        bytes
+    })
+}
+
+/// One flacenc pass over `interleaved` i24 samples with `config`.
+fn encode_with(
+    config: flacenc::config::Encoder,
+    interleaved: &[i32],
+    n_channels: usize,
+    sr: u32,
+) -> Result<Vec<u8>> {
+    let config = config
         .into_verified()
         .map_err(|(_cfg, e)| anyhow!("flacenc config invalid: {e:?}"))?;
     let source = flacenc::source::MemSource::from_samples(
-        &interleaved,
+        interleaved,
         n_channels,
         24, // bits_per_sample
         sr as usize,
@@ -173,6 +210,57 @@ mod tests {
                 (amp as f64 * (2.0 * std::f64::consts::PI * freq_hz * i as f64 / sr).sin()) as f32
             })
             .collect()
+    }
+
+    /// Broadband noise at `a` of full scale, from the fake backend's
+    /// correlated-source mixer (#661's reproduction).
+    fn noise(n: usize, a: f32, seed: u64) -> Vec<f32> {
+        (0..n as u64)
+            .map(|i| {
+                let mut z = seed.wrapping_add(i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                let u = ((z >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                u as f32 * a
+            })
+            .collect()
+    }
+
+    /// #661: no input encodes larger than its raw i24 samples plus framing.
+    /// Under flacenc's default order selection, noise at 0.5 of full scale
+    /// took 2130 bytes a sample and at 0.7 took 32; the amplitudes are the
+    /// issue's table, one and two channels.
+    #[test]
+    fn noise_below_full_scale_never_exceeds_raw_size() {
+        let n = 48_000;
+        for a in [1.0f32, 0.9, 0.7, 0.6, 0.5, 0.3, 0.25, 0.1, 0.01] {
+            for chans in [1usize, 2] {
+                let channels: Vec<Vec<f32>> =
+                    (0..chans).map(|c| noise(n, a, 7 + c as u64)).collect();
+                let bytes = encode(&channels, 48_000).unwrap();
+                let per_sample = bytes.len() as f64 / (n * chans) as f64;
+                assert!(
+                    per_sample <= 3.01,
+                    "a={a}, {chans} ch: {per_sample:.2} bytes/sample"
+                );
+                let (back, _, _) = decode(&bytes).unwrap();
+                for (b, c) in back.iter().zip(&channels) {
+                    for (x, y) in b.iter().zip(c) {
+                        assert_eq!(f32_to_i24(*x), f32_to_i24(*y));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fix keeps FLAC's point: a predictable signal still compresses.
+    #[test]
+    fn a_tone_still_compresses() {
+        let n = 48_000;
+        let bytes = encode(&[sine(n, 997.0, 48_000.0, 0.5)], 48_000).unwrap();
+        let per_sample = bytes.len() as f64 / n as f64;
+        assert!(per_sample < 2.0, "{per_sample:.2} bytes/sample");
     }
 
     #[test]
