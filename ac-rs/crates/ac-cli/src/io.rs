@@ -38,6 +38,9 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) -> bool {
         for &f in &fields {
             let key = if f == "freq_hz" {
                 r.get("freq_hz").or_else(|| r.get("fundamental_hz"))
+            } else if f == "thd_pct" && thd_measured(r).is_none() {
+                // #627: not measured is an empty cell, not 0.
+                None
             } else {
                 r.get(f)
             };
@@ -154,6 +157,19 @@ fn pct_row(lbl: &str, qual: &str, pct: f64) -> String {
     )
 }
 
+/// [`pct_row`] for a THD figure that may be unmeasured (#627): no harmonic
+/// below Nyquist at any point.
+fn thd_row(lbl: &str, qual: &str, pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => pct_row(lbl, qual, p),
+        None => format!(
+            "{}{qual:<5}  {:>8}    no harmonic below Nyquist",
+            label(lbl),
+            "-"
+        ),
+    }
+}
+
 /// `captured` value: one figure when every point captured the same length,
 /// else the `min–max` range; [`NOT_REPORTED`] when no frame carries
 /// `capture_s` (a daemon older than #116). Never defaulted on this side:
@@ -242,20 +258,14 @@ pub fn summary_lines(
         clean
     };
 
-    let worst_thd = valid
-        .iter()
-        .filter_map(|r| thd_measured(r))
-        .fold(0.0_f64, f64::max);
+    let thds: Vec<f64> = valid.iter().filter_map(|r| thd_measured(r)).collect();
+    // #627: with no measurable THD anywhere, both rows say so.
+    let worst_thd = thds.iter().copied().reduce(f64::max);
     let worst_thdn = valid
         .iter()
         .filter_map(|r| f64_of(r, "thdn_pct"))
         .fold(0.0_f64, f64::max);
-    let thds: Vec<f64> = valid.iter().filter_map(|r| thd_measured(r)).collect();
-    let avg_thd = if thds.is_empty() {
-        0.0
-    } else {
-        thds.iter().sum::<f64>() / thds.len() as f64
-    };
+    let avg_thd = (!thds.is_empty()).then(|| thds.iter().sum::<f64>() / thds.len() as f64);
     let worst_noise = valid
         .iter()
         .filter_map(|r| f64_of(r, "noise_floor_dbfs"))
@@ -271,8 +281,8 @@ pub fn summary_lines(
             points(n)
         ),
         String::new(),
-        pct_row("THD", "worst", worst_thd),
-        pct_row("", "avg", avg_thd),
+        thd_row("THD", "worst", worst_thd),
+        thd_row("", "avg", avg_thd),
         pct_row("THD+N", "worst", worst_thdn),
     ];
     lines.push(match worst_noise {
@@ -616,6 +626,43 @@ mod tests {
 
     fn cols(line: &str) -> usize {
         line.chars().count()
+    }
+
+    /// #627: a sweep where no point had a harmonic below Nyquist says so in
+    /// the summary, and its CSV leaves the THD cells empty.
+    #[test]
+    fn an_all_unmeasured_sweep_reports_no_thd_anywhere() {
+        let pts: Vec<Value> = [16_000.0, 20_000.0]
+            .iter()
+            .map(|&f| {
+                let mut p = uncal_point(f, -0.0, -90.0, 0.2);
+                p["harmonic_levels"] = json!([]);
+                p["thdn_pct"] = json!(1.0);
+                p
+            })
+            .collect();
+        let text = summary_lines(&pts, "DUT", false, 0).join("\n");
+        assert_eq!(
+            text.matches("no harmonic below Nyquist").count(),
+            2,
+            "{text}"
+        );
+        assert!(!text.contains("0.0000 %"), "{text}");
+
+        let dir = std::env::temp_dir().join(format!("ac-627-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.csv");
+        assert!(save_csv(&pts, &path));
+        let csv = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let header: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+        let col = header
+            .iter()
+            .position(|h| *h == "thd_pct_re_total")
+            .unwrap();
+        for line in csv.lines().skip(1) {
+            assert_eq!(line.split(',').nth(col), Some(""), "{line}");
+        }
     }
 
     /// #627: a point with no harmonic below Nyquist prints THD as `-`, in
