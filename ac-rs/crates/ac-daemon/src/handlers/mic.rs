@@ -120,19 +120,36 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 ///   `noise_floor_dbfs`; same reason. `total_output_rms` is published as
 ///   measured.
 pub(crate) fn apply_mic_curve_to_analysis(curve: &MicResponse, r: &mut AnalysisResult) {
+    let (fundamental_dbfs, thd_pct) = corrected_tone(curve, r);
     apply_mic_curve_linear_f64(curve, &r.freqs, &mut r.spectrum);
-    r.fundamental_dbfs -= curve.correction_at(r.fundamental_hz as f32) as f64;
     for h in r.harmonic_levels.iter_mut() {
         h.1 *= mic_curve_scale(curve, h.0);
     }
+    r.fundamental_dbfs = fundamental_dbfs;
+    r.thd_pct = thd_pct;
+}
+
+/// The corrected `(fundamental_dbfs, thd_pct)` of
+/// [`apply_mic_curve_to_analysis`], without touching the spectrum — what the
+/// monitor stamps on a frame whose columns it corrects separately (#600).
+/// One definition, so the two cannot drift.
+pub(crate) fn corrected_tone(curve: &MicResponse, r: &AnalysisResult) -> (f64, f64) {
+    let fundamental_dbfs = r.fundamental_dbfs - curve.correction_at(r.fundamental_hz as f32) as f64;
     // Recompute THD from corrected harmonics over the total output at the
     // fundamental's correction: a same-terminal ratio, so the curve's gain
     // at the fundamental cancels (IEC 60268-3 §15.12.3.2 e), #167).
     let denom = r.total_output_rms * mic_curve_scale(curve, r.fundamental_hz);
-    if denom > 1e-30 && !r.harmonic_levels.is_empty() {
-        let harm_pow: f64 = r.harmonic_levels.iter().map(|(_, a)| a * a).sum();
-        r.thd_pct = (harm_pow.sqrt() / denom) * 100.0;
-    }
+    let thd_pct = if denom > 1e-30 && !r.harmonic_levels.is_empty() {
+        let harm_pow: f64 = r
+            .harmonic_levels
+            .iter()
+            .map(|&(hz, a)| (a * mic_curve_scale(curve, hz)).powi(2))
+            .sum();
+        (harm_pow.sqrt() / denom) * 100.0
+    } else {
+        r.thd_pct
+    };
+    (fundamental_dbfs, thd_pct)
 }
 
 /// Apply mic-curve correction to a gated (quasi-anechoic) frequency

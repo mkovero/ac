@@ -899,10 +899,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
                                 .collect();
                             let peak_thr = r.fundamental_dbfs as f32 - 80.0;
+                            // Twice the 64 published, so the corrected top 64
+                            // (#600) can include a peak the curve lifts.
                             let mut peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
                                 &r.spectrum,
                                 &raw_freqs,
-                                64,
+                                128,
                                 peak_thr,
                             );
                             // Below the crossover the long-N LF spectrum gives
@@ -918,18 +920,26 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     .collect();
                                 let mut lf_peaks =
                                     ac_core::visualize::spectrum::find_interpolated_peaks(
-                                        lf, &lf_freqs, 64, peak_thr,
+                                        lf, &lf_freqs, 128, peak_thr,
                                     );
                                 peaks.retain(|p| p.freq_hz >= cx);
                                 lf_peaks.retain(|p| p.freq_hz < cx);
                                 peaks.append(&mut lf_peaks);
-                                peaks.sort_by(|a, b| {
-                                    b.dbfs
-                                        .partial_cmp(&a.dbfs)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                                peaks.truncate(64);
                             }
+                            // #600: each peak corrected at its own frequency
+                            // before the strongest-first order and the cap.
+                            let curve = mc.curve.filter(|_| mc.enabled);
+                            if let Some(c) = curve {
+                                for p in peaks.iter_mut() {
+                                    p.dbfs -= c.correction_at(p.freq_hz);
+                                }
+                            }
+                            peaks.sort_by(|a, b| {
+                                b.dbfs
+                                    .partial_cmp(&a.dbfs)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            peaks.truncate(64);
                             let (spec, freqs) = spectrum_columns(
                                 &r.spectrum,
                                 lf_spec_for_merge,
@@ -947,27 +957,19 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             // the same function `plot` uses — one truth for
                             // the frame, not a corrected spectrum beside a raw
                             // fundamental and THD.
-                            let curve = mc.curve.filter(|_| mc.enabled);
-                            let corrected = curve.map(|c| {
-                                let mut rc = r.clone();
-                                crate::handlers::mic::apply_mic_curve_to_analysis(c, &mut rc);
-                                rc
-                            });
-                            let tone = corrected.as_ref().unwrap_or(&r);
+                            let (fundamental_dbfs, thd_pct) = curve
+                                .map_or((r.fundamental_dbfs, r.thd_pct), |c| {
+                                    crate::handlers::mic::corrected_tone(c, &r)
+                                });
                             frame.peaks = Some(
                                 peaks
                                     .iter()
-                                    .map(|p| {
-                                        let corr = curve
-                                            .map_or(0.0, |c| c.correction_at(p.freq_hz) as f64);
-                                        [f64::from(p.freq_hz), f64::from(p.dbfs) - corr]
-                                    })
+                                    .map(|p| [f64::from(p.freq_hz), f64::from(p.dbfs)])
                                     .collect(),
                             );
-                            frame.fundamental_dbfs = Some(tone.fundamental_dbfs);
+                            frame.fundamental_dbfs = Some(fundamental_dbfs);
                             // #627: no harmonic below Nyquist is not 0 %.
-                            frame.thd_pct =
-                                (!tone.harmonic_levels.is_empty()).then_some(tone.thd_pct);
+                            frame.thd_pct = (!r.harmonic_levels.is_empty()).then_some(thd_pct);
                             frame.thdn_pct = Some(r.thdn_pct);
                             frame.in_dbu = Some(in_dbu);
                             frame.clipping = Some(r.clipping);
