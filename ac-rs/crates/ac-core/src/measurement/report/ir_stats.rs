@@ -43,10 +43,26 @@ use crate::shared::calibration::{
 /// the rig's emission consent rules, so that blind spot is real and
 /// documented here rather than picked by eye.
 ///
+/// **#733 (2026-09-30) — read this first.** Until then `inverse_sweep`'s
+/// envelope had the wrong sign and tilted every deconvolution −12 dB/octave.
+/// Every figure below that predates it — a perfect loopback at 21.1–22.0 dB,
+/// pupu's 12.8 dB, the before-argmax/before-arrival table — was that tilted
+/// kernel's residue. With the corrected inverse:
+/// - a perfect loopback at the defaults reads 75.4–76.2 dB (44.1–192 kHz,
+///   τ 0–40 ms); pupu read 76.0 dB on its loopback and 74.8 dB acoustically
+///   at 1 m, −50 dBFS (`work/rig/rig-2026-09-30-733-inverse-sign-results.md`);
+/// - noise far under the floor leaves the figure and noise near it lowers
+///   it, so it now behaves as the SNR it is named for;
+/// - a noise-only capture read at most 15.2 dB over 200 draws.
+///
+/// 18 dB stays: 57 dB under a perfect cable and above every noise-only draw.
+/// The history below explains why a fixed value was kept and is left for
+/// that reasoning, not for its numbers.
+///
 /// **Scored for the default sweep (#501).** The figure a clean loopback
-/// reads is set by the stimulus, not by the capture's noise (#471), so
-/// this value means something only for the stimulus it was checked
-/// against. It was checked against the `plot_ir` defaults in
+/// reads was set by the stimulus, not by the capture's noise (#471 — the
+/// tilted kernel of #733), so this value meant something only for the
+/// stimulus it was checked against. It was checked against the `plot_ir` defaults in
 /// [`crate::measurement::sweep::IR_DEFAULT_DURATION_S`] and its siblings —
 /// 20 Hz–20 kHz, 4.0 s, a 0.4 s window, 5 harmonics, 0.5 s tail — on a
 /// synthetic chain that mirrors `plot_ir` (`log_sweep` → delay → tail →

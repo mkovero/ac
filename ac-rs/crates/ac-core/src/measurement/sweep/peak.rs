@@ -84,11 +84,10 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::measurement::sweep::onset::aic_change_point;
     use crate::measurement::sweep::{
         deconvolve_full, estimate_onset, extract_irs, inverse_sweep, log_sweep, BoundInputs,
         CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, SweepParams,
-        WindowLimit, EDGE_GUARD_TOLERANCE_SAMPLES,
+        WindowLimit,
     };
 
     #[test]
@@ -318,15 +317,14 @@ pub(crate) mod tests {
     /// Rust gave `ArrivalAmbiguous` in three (developer stop, 2026-09-18),
     /// and revision 3 replaced the requirement with this one, stating each
     /// standing as a documented fact:
-    /// - narrow (A and B): `ArrivalAmbiguous`, a correct refusal. At 48 kHz
-    ///   the 9-tap boxcar passes 2–5 kHz at gain 1.0 against the HF
-    ///   component's 0.3, so the pick lands on the low component (+13), with
-    ///   a half-cycle within about 1 dB of it.
-    /// - A rig-like: `Agrees`, on `t0`.
-    /// - B rig-like: `ArrivalAmbiguous`, margin about 2.6 dB, with the pick
-    ///   on `t0`. **A known false refusal of a correct pick**, recorded here
-    ///   as the rule's cost. It is not a reason to retune
-    ///   [`crate::measurement::report::ARRIVAL_LOBE_MARGIN_MIN_DB`].
+    /// Re-pinned on the corrected inverse (#733, 2026-09-30):
+    /// - narrow and rig-like with the loud low component (A and B):
+    ///   `ArrivalAmbiguous`, correct refusals — the pick lands on the low
+    ///   component (+5 to +59) with a comparable lobe beside it.
+    /// - rig-like at the original gain (A and B): `Agrees` on `t0`, the
+    ///   broadband peak on `t0` too. Before #733 band B refused this case
+    ///   as ambiguous (the recorded false refusal); the tilted kernel made
+    ///   the low component look loud.
     #[test]
     fn two_way_dut_band_limited_arrival_is_never_produced_off_t0() {
         use crate::measurement::report::{band_limited_arrival, ArrivalCrossCheck};
@@ -341,8 +339,24 @@ pub(crate) mod tests {
                 false,
             ),
             ("B narrow", band_b, 48_000, &TWO_WAY_NARROW, true, false),
+            (
+                "A rig-like loud",
+                band_a,
+                96_000,
+                &TWO_WAY_RIG_LIKE_LOUD,
+                true,
+                false,
+            ),
+            (
+                "B rig-like loud",
+                band_b,
+                96_000,
+                &TWO_WAY_RIG_LIKE_LOUD,
+                true,
+                false,
+            ),
             ("A rig-like", band_a, 96_000, &TWO_WAY_RIG_LIKE, false, true),
-            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE, true, true),
+            ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE, false, true),
         ] {
             let p = band(sr);
             let r = two_way_bounded(&p, shape);
@@ -371,84 +385,54 @@ pub(crate) mod tests {
         }
     }
 
-    /// #346 architect revision 3: the guard fires on a rig-like two-way
-    /// edge-follower. 96 kHz, band A, `G = 24`, 33-tap boxcar, bound
-    /// `t0 − 14` (5 cm). The unguarded bounded pick lands well after `t0`,
-    /// between the bound and the peak — the pattern of the rig's 2 m
-    /// capture (bound +0, onset +20, peak +40). It is clear of the window
-    /// start and would pass every other onset condition, so without the
-    /// guard its standing would be `Unscored`.
+    /// #734 (open): on the corrected inverse (#733) the #346 edge guard no
+    /// longer does what it was built for. It passes a late pick on the loud
+    /// rig-like shape and refuses a right one on the realistic shape. The
+    /// onset is a readout — no flight time is derived from it — so this is
+    /// recorded, not fixed, here. When #734 re-derives the guard these
+    /// assertions flip; update them from its design, not by loosening.
     #[test]
-    fn edge_guard_fires_on_a_rig_like_two_way_edge_follower() {
-        let r = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE);
-
-        // Computed inline from the IR, not taken from the estimate.
-        let (peak_inline, _) = ir_peak(&r.ir);
-        assert_eq!(peak_inline as i64 - r.centre as i64, r.peak);
-        let unguarded = r.bound_index
-            + aic_change_point(&r.ir[r.bound_index..=peak_inline]).expect("window has variance");
-        let unguarded = unguarded as i64 - r.centre as i64;
+    fn edge_guard_on_the_corrected_kernel_is_open() {
+        let loud = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE_LOUD);
+        assert!(loud.bound_binds(), "the 5 cm bound sets the window start");
+        assert!(
+            loud.bound_index < loud.centre + TWO_WAY_T0 as usize,
+            "the bound sits before t0"
+        );
+        assert!(
+            loud.onset - TWO_WAY_T0 >= 10,
+            "loud onset t0 {:+}",
+            loud.onset - TWO_WAY_T0
+        );
         assert_eq!(
-            r.onset, unguarded,
-            "the guard reports, it does not move the pick"
+            loud.edge_guard(),
+            Some(EdgeGuard::Passed),
+            "#734: late pick passed"
         );
 
+        let realistic = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE);
         assert!(
-            r.onset - TWO_WAY_T0 >= 10,
-            "test setup: the pick must follow the bound, landing at least 10 samples \
-             after t0; got {} (bound {}, peak {})",
-            r.onset - TWO_WAY_T0,
-            r.bound_index as i64 - r.centre as i64 - TWO_WAY_T0,
-            r.peak - TWO_WAY_T0
+            (realistic.onset - TWO_WAY_T0).abs() <= 1,
+            "realistic onset t0 {:+}",
+            realistic.onset - TWO_WAY_T0
         );
-        assert!(r.onset < r.peak, "test setup: the pick is before the peak");
         assert!(
-            r.bound_binds(),
-            "test setup: the bound sets the window start"
-        );
-        match r.estimate.pick {
-            OnsetPick::Picked { pinned, .. } => {
-                assert!(!pinned, "test setup: the pick is clear of the window start")
-            }
-            OnsetPick::Declined => panic!("picker declined: {}", r.estimate.rule),
-        }
-        assert!(
-            matches!(r.edge_guard(), Some(EdgeGuard::Failed { repick: Some(_) })),
-            "the guard must refuse an edge-following pick, got {:?}",
-            r.edge_guard()
+            matches!(realistic.edge_guard(), Some(EdgeGuard::Failed { .. })),
+            "#734: right pick refused, got {:?}",
+            realistic.edge_guard()
         );
     }
 
-    /// #346 architect revision 3, tested against the rejected
-    /// implementation: revision 2's guard re-picked over a window whose
-    /// start was moved *later*, by half the lead segment. On a noise-free
-    /// deconvolution the pre-onset samples are band-limited skirt, so the
-    /// trim moves a correct pick. 48 kHz, band A, `G = 8`, 9-tap boxcar,
-    /// bound `t0 − 7`: the trim re-pick is computed inline and must move
-    /// by more than the tolerance, while the shipped extension guard
-    /// passes the same pick.
+    /// #734 (open), narrow shapes: the bounded pick lands 8 samples late in
+    /// both bands; the guard passes it in band A and refuses it in band B.
     #[test]
-    fn extension_guard_passes_a_right_pick_the_trim_guard_refused() {
-        let r = two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW);
-        let onset_abs = r.estimate.index;
-        assert!(
-            (r.onset - TWO_WAY_T0).abs() <= 1,
-            "test setup: the pick must be right, got t0 {:+}",
-            r.onset - TWO_WAY_T0
-        );
-
-        let (peak_index, _) = ir_peak(&r.ir);
-        let trimmed_start = r.bound_index + (onset_abs - r.bound_index).div_ceil(2);
-        let trim_repick = trimmed_start
-            + aic_change_point(&r.ir[trimmed_start..=peak_index]).expect("window has variance");
-        assert!(
-            trim_repick.abs_diff(onset_abs) > EDGE_GUARD_TOLERANCE_SAMPLES,
-            "test setup: the rejected trim guard must refuse this right pick; its re-pick \
-             went to t0 {:+}",
-            trim_repick as i64 - r.centre as i64 - TWO_WAY_T0
-        );
-
-        assert_eq!(r.edge_guard(), Some(EdgeGuard::Passed));
+    fn extension_guard_on_the_corrected_kernel_is_open() {
+        let a = two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW);
+        let b = two_way_bounded(&band_b(48_000), &TWO_WAY_NARROW);
+        assert_eq!(a.onset - TWO_WAY_T0, 8);
+        assert_eq!(b.onset - TWO_WAY_T0, 8);
+        assert_eq!(a.edge_guard(), Some(EdgeGuard::Passed));
+        assert!(matches!(b.edge_guard(), Some(EdgeGuard::Failed { .. })));
     }
 
     /// `t0` of [`two_way_bounded`]'s full-band component, as an offset
@@ -479,12 +463,39 @@ pub(crate) mod tests {
         g: usize,
         /// Boxcar low-pass length, samples.
         taps: usize,
+        /// The low component's per-sample peak re the full-band arrival's
+        /// (`0.3`). `None`: the original fixture's flat gain of 1.0, a
+        /// `1/taps` per-sample peak, under the arrival.
+        low_over_high: Option<f32>,
     }
 
     /// The branch's original fixture: small group delay.
-    const TWO_WAY_NARROW: TwoWayShape = TwoWayShape { g: 8, taps: 9 };
-    /// Rig-like group delay at 96 kHz (onset-to-peak gap ≥ 23 samples).
-    pub(crate) const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape { g: 24, taps: 33 };
+    ///
+    /// #733: with the original gain, the low component outweighed the
+    /// arrival only through the inverse filter's reversed envelope (~40 dB
+    /// of low-band boost). These shapes set it to twice the arrival's
+    /// per-sample peak, so the broadband peak lands late on its own merit —
+    /// what the estimator tests below exist to exercise.
+    const TWO_WAY_NARROW: TwoWayShape = TwoWayShape {
+        g: 8,
+        taps: 9,
+        low_over_high: Some(2.0),
+    };
+    /// Rig-like group delay at 96 kHz (onset-to-peak gap ≥ 23 samples),
+    /// loud low component as [`TWO_WAY_NARROW`].
+    const TWO_WAY_RIG_LIKE_LOUD: TwoWayShape = TwoWayShape {
+        g: 24,
+        taps: 33,
+        low_over_high: Some(2.0),
+    };
+    /// Rig-like group delay with the original gain: the arrival suite's
+    /// speaker kernel. With the corrected inverse its broadband peak lands
+    /// on `t0`, as pupu's 1083 did on 2026-09-30.
+    pub(crate) const TWO_WAY_RIG_LIKE: TwoWayShape = TwoWayShape {
+        g: 24,
+        taps: 33,
+        low_over_high: None,
+    };
 
     pub(crate) struct TwoWay {
         /// The windowed linear IR.
@@ -524,11 +535,15 @@ pub(crate) mod tests {
     /// bounded onset picker with the bound 5 cm of flight at 343 m/s before
     /// `t0` (7 samples at 48 kHz, 14 at 96 kHz).
     pub(crate) fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
-        const LOW_GAIN: f32 = 1.0;
         const HIGH_GAIN: f32 = 0.3;
         const C: f64 = 343.0;
         let window_len = 4_096usize;
-        let TwoWayShape { g, taps } = *shape;
+        let TwoWayShape {
+            g,
+            taps,
+            low_over_high,
+        } = *shape;
+        let low_gain = low_over_high.map_or(1.0, |r| r * HIGH_GAIN * taps as f32);
         let t0 = TWO_WAY_T0 as usize;
         let x = log_sweep(params).unwrap();
         let lp: Vec<f32> = (0..x.len())
@@ -544,7 +559,7 @@ pub(crate) mod tests {
         // The boxcar above is causal, so its own delay is already in `lp`;
         // the low component's total delay is t0 + G + (taps − 1)/2.
         for (n, &v) in lp.iter().enumerate() {
-            y[n + t0 + g] += LOW_GAIN * v;
+            y[n + t0 + g] += low_gain * v;
         }
         let xi = inverse_sweep(params).unwrap();
         let full = deconvolve_full(&y, &xi);
