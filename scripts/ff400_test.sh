@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ff400_test.sh — rig-free regression test for ff400.sh's JACK alias
-# handling (issue #444). Stubs jack_lsp / jack_alias / amixer on PATH; no
-# FF400 hardware or real JACK server needed.
+# handling (issue #444), card lookup by name (#453), S/PDIF mute (#452) and
+# toggle writes (#454). Stubs jack_lsp / jack_alias / amixer on PATH and the
+# ALSA card list via FF400_SOUND_SYSFS; no FF400 hardware or real JACK
+# server needed.
 #
 #   bash scripts/ff400_test.sh
 
@@ -20,10 +22,13 @@ fail() { echo "FAIL: $1"; FAILED=1; }
 # per port holding that port's current aliases (one per line, in the order
 # they were set — file line 1 stands in for jackd's own alsa_pcm alias).
 #
-# amixer's `cget numid=N` answers with a values= list whose width is fixed
+# amixer's `cget numid=N` answers with the control's header line (name and
+# index as the real FF400 reports them; BAD_NAME_NUMID / BAD_INDEX_NUMID
+# corrupt one) and a values= list whose width is fixed
 # per control family, matching the upstream ctl-service model (architect,
 # issue #444 re-entry): numid=8 → WIDTH_8 (default 18), numid 9..26 →
-# WIDTH_ANALOG (default 8), numid 45..62 → WIDTH_ADAT (default 8), numid
+# WIDTH_ANALOG (default 8), numid 27..44 → WIDTH_SPDIF (default 2, as
+# measured on pupu), numid 45..62 → WIDTH_ADAT (default 8), numid
 # 63..80 → WIDTH_STREAM (default 18). These widths do NOT follow JACK port
 # count — reset_state's port count and the mixer widths are independent
 # knobs, on purpose (case (e)). FAIL_NUMID, if set, makes that one numid's
@@ -53,16 +58,29 @@ case "$*" in
         if [[ -n "${FAIL_NUMID:-}" && "$numid" == "$FAIL_NUMID" ]]; then
             exit 0   # no values= line at all: simulates an unreadable control
         fi
+        name=""; base=0
         if [[ "$numid" == 8 ]]; then
-            n="${WIDTH_8:-18}"
+            n="${WIDTH_8:-18}"; name="output-volume"; base=8
         elif [[ "$numid" -ge 9 && "$numid" -le 26 ]]; then
-            n="${WIDTH_ANALOG:-8}"
+            n="${WIDTH_ANALOG:-8}"; name="mixer:analog-source-gain"; base=9
+        elif [[ "$numid" -ge 27 && "$numid" -le 44 ]]; then
+            n="${WIDTH_SPDIF:-2}"; name="mixer:spdif-source-gain"; base=27
         elif [[ "$numid" -ge 45 && "$numid" -le 62 ]]; then
-            n="${WIDTH_ADAT:-8}"
+            n="${WIDTH_ADAT:-8}"; name="mixer:adat-source-gain"; base=45
         elif [[ "$numid" -ge 63 && "$numid" -le 80 ]]; then
-            n="${WIDTH_STREAM:-18}"
+            n="${WIDTH_STREAM:-18}"; name="mixer:stream-source-gain"; base=63
         else
             n=1
+        fi
+        index=$((numid - base))
+        [[ "$numid" == "${BAD_NAME_NUMID:-}" ]] && name="meter:stream-input"
+        [[ "$numid" == "${BAD_INDEX_NUMID:-}" ]] && index=$((index + 1))
+        if [[ -n "$name" ]]; then
+            if [[ "$index" -eq 0 ]]; then
+                echo "numid=$numid,iface=MIXER,name='$name'"
+            else
+                echo "numid=$numid,iface=MIXER,name='$name',index=$index"
+            fi
         fi
         vals=$(python3 -c "print(','.join(['0']*int(\"$n\")))")
         echo ": values=$vals"
@@ -135,6 +153,18 @@ export JACK_STATE="$STATE"
 export JACK_DOWN="$WORK/jack_down"     # file exists => jack_lsp fails
 export JACK_A_CALLS="$WORK/jack_a_calls"   # jack_lsp -A call counter, see JACK_A_DOWN
 export AMIXER_LOG="$WORK/amixer.log"
+export FF400_SOUND_SYSFS="$WORK/sound"
+
+# set_cards ID...: one sysfs card directory per argument, card0 upward.
+set_cards() {
+    rm -rf "$FF400_SOUND_SYSFS"; mkdir -p "$FF400_SOUND_SYSFS"
+    local i=0 id
+    for id in "$@"; do
+        mkdir -p "$FF400_SOUND_SYSFS/card$i"
+        echo "$id" > "$FF400_SOUND_SYSFS/card$i/id"
+        i=$((i + 1))
+    done
+}
 export ALIAS_LOG="$WORK/alias.log"
 
 reset_state() {
@@ -144,7 +174,8 @@ reset_state() {
     rm -rf "$STATE"; mkdir -p "$STATE"
     rm -f "$JACK_DOWN" "$JACK_A_CALLS"
     : > "$AMIXER_LOG"; : > "$ALIAS_LOG"
-    unset FORCE_UNALIAS_FAIL JACK_A_DOWN JACK_A_DOWN_AFTER
+    unset FORCE_UNALIAS_FAIL JACK_A_DOWN JACK_A_DOWN_AFTER BAD_NAME_NUMID BAD_INDEX_NUMID
+    set_cards PCH Fireface400   # the FF400 is card 1, as on pupu
     for i in $(seq 1 "$1"); do
         echo "alsa_pcm:hw:Card:out$i" > "$STATE/system:capture_$i"
         echo "alsa_pcm:hw:Card:in$i"  > "$STATE/system:playback_$i"
@@ -193,6 +224,7 @@ expected_width() {
     local numid="$1"
     if [[ "$numid" == 8 ]]; then echo "${WIDTH_8:-18}"
     elif [[ "$numid" -ge 9 && "$numid" -le 26 ]]; then echo "${WIDTH_ANALOG:-8}"
+    elif [[ "$numid" -ge 27 && "$numid" -le 44 ]]; then echo "${WIDTH_SPDIF:-2}"
     elif [[ "$numid" -ge 45 && "$numid" -le 62 ]]; then echo "${WIDTH_ADAT:-8}"
     elif [[ "$numid" -ge 63 && "$numid" -le 80 ]]; then echo "${WIDTH_STREAM:-18}"
     fi
@@ -288,8 +320,74 @@ echo "$out" | grep -q 'ch01 (could not be read)' \
 echo "$out" | grep -q 'ch02 ' \
     || fail "(l) show aborted before printing ch02 after an unreadable row: $out"
 
+# ── (n),(o): no FF400, or two, aborts before any amixer call (#453) ─────────
+for cards in "PCH" "Fireface400 Fireface400"; do
+    reset_state 18
+    # shellcheck disable=SC2086  # word-split into one id per card on purpose
+    set_cards $cards
+    out="$(bash "$FF400" 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] || fail "(n/o) script exited 0 with cards [$cards]: $out"
+    echo "$out" | grep -q "ALSA cards with id Fireface400" \
+        || fail "(n/o) card failure not named with cards [$cards]: $out"
+    [[ -s "$AMIXER_LOG" ]] && fail "(n/o) amixer called with cards [$cards]: $(cat "$AMIXER_LOG")"
+done
+
+# ── (p): every amixer call addresses the FF400 by its current index ────────
+# Must go red against the old literal CARD=0, which wrote to card 0 (PCH).
+reset_state 18
+set_cards PCH HDMI Fireface400
+out="$(bash "$FF400" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "(p) script exited $rc with the FF400 at card 2: $out"
+grep -v '^-c 2 ' "$AMIXER_LOG" | grep -q . \
+    && fail "(p) amixer addressed a card other than 2: $(grep -v '^-c 2 ' "$AMIXER_LOG" | head -3)"
+
+# ── (q): S/PDIF source gain rows 27..44 are written to zero (#452) ─────────
+reset_state 18
+out="$(bash "$FF400" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "(q) script exited $rc: $out"
+for numid in $(seq 27 44); do
+    last=$(grep "cset numid=$numid " "$AMIXER_LOG" | tail -1)
+    [[ "$last" == *"cset numid=$numid 0,0" ]] \
+        || fail "(q) numid=$numid (spdif-source-gain) last write '${last:-none}', expected 0,0"
+done
+
+# ── (r): every cset is a toggle — two writes to the same numid whose first
+# value differs from the target in every element (#454) ─────────────────
+# Must go red against a single same-value write, which ALSA drops without
+# notifying the ctl-service.
+reset_state 18
+out="$(bash "$FF400" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "(r) script exited $rc: $out"
+mapfile -t csets < <(grep 'cset numid=' "$AMIXER_LOG")
+[[ ${#csets[@]} -gt 0 && $((${#csets[@]} % 2)) -eq 0 ]] \
+    || fail "(r) ${#csets[@]} csets, expected a non-zero even count"
+for ((k = 0; k + 1 < ${#csets[@]}; k += 2)); do
+    read -r _ _ _ id1 v1 <<< "${csets[k]}"
+    read -r _ _ _ id2 v2 <<< "${csets[k + 1]}"
+    if [[ "$id1" != "$id2" ]]; then
+        fail "(r) unpaired write: '${csets[k]}' then '${csets[k + 1]}'"
+        break
+    fi
+    IFS=, read -ra a <<< "$v1"; IFS=, read -ra b <<< "$v2"
+    for ((e = 0; e < ${#b[@]}; e++)); do
+        [[ "${a[e]:-}" != "${b[e]}" ]] \
+            || fail "(r) $id1 toggle leaves element $e at ${b[e]}: '$v1' then '$v2'"
+    done
+done
+
+# ── (s),(t): a wrong name or index at a numid aborts before any cset ───────
+for knob in BAD_NAME_NUMID BAD_INDEX_NUMID; do
+    reset_state 18
+    export "$knob=30"
+    out="$(bash "$FF400" 2>&1)"; rc=$?
+    unset "$knob"
+    [[ $rc -ne 0 ]] || fail "(s/t) script exited 0 with $knob=30: $out"
+    echo "$out" | grep -q '\bnumid=30\b' || fail "(s/t) $knob failure did not name numid=30: $out"
+    grep -q 'cset' "$AMIXER_LOG" && fail "(s/t) a cset was issued with $knob=30"
+done
+
 if [[ $FAILED -ne 0 ]]; then
-    echo "ff400.sh alias handling: FAILED"
+    echo "ff400.sh: FAILED"
     exit 1
 fi
-echo "ff400.sh alias handling: all cases as expected"
+echo "ff400.sh: all cases as expected"
