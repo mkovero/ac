@@ -15,7 +15,9 @@ delivered by the audio backend, before any gain, calibration, weighting,
 or DSP touches them. Every calibrated or derived quantity a live
 `transfer_stream` session ships on the wire (H1, calibrated spectra, SPL,
 and — format v3, #221 — the multi-time-window ladder columns the transfer
-view draws) is re-derivable offline from a `.acsnap`'s raw samples, using
+view draws) is re-derivable offline from a `.acsnap`'s raw samples — for
+every pair whose delay was estimated when the snapshot was taken (a v4
+`null` delay is refused, see `session.delay_samples`) — using
 the identical `ac-core` functions the daemon's live path calls — see
 `ac_core::visualize::pair_derivation`, `ac_core::visualize::mtw::replay`
 and `ac_core::snapshot::Snapshot::derive_pair`.
@@ -67,7 +69,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "sr": 48000,
   "channel_map": ["meas_0", "ref"],
   "per_channel": [
@@ -118,7 +120,7 @@ Both entries are required; a reader must reject a file missing either one.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `format_version` | int | `write_acsnap` writes `3`; `read_acsnap` reads `1`, `2` and `3`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). v2 (#637) added `per_channel[i].stream_sha256`; v3 (#221) added `session.mtw`. v1 files are read exactly as before, under the v1 limit in *Reader validation*; v1 and v2 files have no ladder to replay. |
+| `format_version` | int | `write_acsnap` writes `4`; `read_acsnap` reads `1` to `4`. A reader **must refuse** an unrecognised version rather than guess at the schema — bump this on any breaking layout change (e.g. a future 32-bit FLAC path). v2 (#637) added `per_channel[i].stream_sha256`; v3 (#221) added `session.mtw`; v4 (#524) lets `session.delay_samples[i]` be `null`. v1 files are read exactly as before, under the v1 limit in *Reader validation*; v1 and v2 files have no ladder to replay. |
 | `sr` | int | Sample rate, Hz. Also `audio.flac`'s own stream rate — a reader cross-checks the two match. |
 | `channel_map` | `[string]` | FLAC stream channel index → session role (`"meas_0"`, `"meas_1"`, `"ref"`, …). The field a reader checks first. |
 | `per_channel` | `[ChannelMeta]` | Same order as `channel_map`. |
@@ -129,9 +131,9 @@ Both entries are required; a reader must reject a file missing either one.
 | `per_channel[i].calibration` | object or `null` | Full 3-layer `Calibration` (voltage / SPL / mic-curve) in effect at capture time. `null` when the channel had no cal entry. |
 | `per_channel[i].stream_sha256` | string | **v2: required. v1: must be absent.** SHA-256, 64 lowercase hex characters, of `audio.flac` stream `i`: every sample on the i24 grid as `i32` little-endian, in stream order over the whole stream. The writer computes it from the audio it encodes. A binding check — which stream this entry describes — not integrity or tamper protection. |
 | `session.pairs` | `[[int,int]]` | `(meas_input_channel, ref_input_channel)` per pair, session indices — not FLAC stream positions. |
-| `session.delay_samples` | `[int]` | Per-pair ref↔meas delay in samples, same order as `pairs`. |
+| `session.delay_samples` | `[int｜null]` | Per-pair ref↔meas delay in samples, same order as `pairs`. **v4:** `null` for a pair whose delay had not been estimated when the snapshot was taken (#524); `derive_pair` refuses such a pair by name rather than aligning it at 0. v1–v3 wrote that case as `0`, indistinguishable from a real zero-sample lock, and a reader takes their `0` at face value; a `null` in a v1–v3 file is refused. |
 | `session.nperseg` | int | Welch segment length in effect. `h1_estimate_core` currently pins this to `sr` (`ac_core::visualize::transfer::h1_nperseg`), but it's recorded explicitly — a future estimator change can't silently break old snapshots. |
-| `session.mtw` | `[object｜null]` | **v3: required, one entry per `pairs` entry. v1/v2: must be absent.** Per pair, the live multi-time-window ladder's provenance, or `null` for a pair that had none (it never locked, or the rate has no ladder). `offset`: the alignment offset (signed full-rate samples) the ladder was built with. `origin`: the ladder's first input sample as a signed full-rate index relative to the first stored sample — negative when the ladder started before the ring's retained window. `n_blocks`, `ppo`, `f_min`/`f_max`: the averaging depth and column grid the live frame was assembled at. `nfft`, `hop`, `stages[{decim, rate, hop, blocks}]`: the ladder layout, which a reader must build identically to replay — see *Offline derivation*. Top-level `hop` is stage 0's and `n_blocks` the base count; a stage's own `hop` and `blocks` (since #699; deeper stages overlap more and average more) fall back to them when absent, which is how files written before #699 read. |
+| `session.mtw` | `[object｜null]` | **v3 and later: required, one entry per `pairs` entry. v1/v2: must be absent.** Per pair, the live multi-time-window ladder's provenance, or `null` for a pair that had none (it never locked, or the rate has no ladder). `offset`: the alignment offset (signed full-rate samples) the ladder was built with. `origin`: the ladder's first input sample as a signed full-rate index relative to the first stored sample — negative when the ladder started before the ring's retained window. `n_blocks`, `ppo`, `f_min`/`f_max`: the averaging depth and column grid the live frame was assembled at. `nfft`, `hop`, `stages[{decim, rate, hop, blocks}]`: the ladder layout, which a reader must build identically to replay — see *Offline derivation*. Top-level `hop` is stage 0's and `n_blocks` the base count; a stage's own `hop` and `blocks` (since #699; deeper stages overlap more and average more) fall back to them when absent, which is how files written before #699 read. |
 | `captured_at_utc` | RFC3339 string | Wall-clock instant `snapshot` was triggered (the ring's *tail* — the ring's start is `ring_duration_s` seconds earlier). |
 | `daemon_version` | string | `ac-daemon`'s own version string. |
 | `ring_duration_s` | float | Actual captured duration in this file (≤ the session's configured `snapshot_ring_s` — shorter if the session hadn't run that long yet). |
@@ -159,11 +161,12 @@ that breaks any of these rules, and `write_acsnap` refuses to write one
    any reorder of `per_channel` against the audio — two same-role entries
    swapped, or `channel_map` and `per_channel` permuted together — moves a
    digest off its stream.
-8. **v3.** `session.mtw` is present with exactly one entry per
+8. **v3 and later.** `session.mtw` is present with exactly one entry per
    `session.pairs` entry (#221); a v1 or v2 file must not carry it.
+9. **Before v4.** No `session.delay_samples` entry is `null` (#524).
 
 Presence and shape of `stream_sha256` are checked with the metadata: a v2
-or v3 entry must carry it as 64 lowercase hex characters; a v1 entry must
+or later entry must carry it as 64 lowercase hex characters; a v1 entry must
 not carry it at all.
 
 Whether a `session.mtw` entry describes a ladder this reader builds is
@@ -171,8 +174,8 @@ Whether a `session.mtw` entry describes a ladder this reader builds is
 refuses to replay it (see *Offline derivation*), so the reason is stated
 where the replay would have happened.
 
-The reader checks `format_version` first (1, 2 and 3 are accepted), then
-rules 2–6 and 8, the metadata half of rule 1 and the digest's presence and
+The reader checks `format_version` first (1 to 4 are accepted), then
+rules 2–6, 8 and 9, the metadata half of rule 1 and the digest's presence and
 shape before it decodes the audio, then the stream count, then rule 7. An error
 names the fields and indices that disagree and never states a cause. Rule 7
 names the entry, its input, and which stream its digest does match:
@@ -311,8 +314,8 @@ verified.
 
 ## Fixture
 
-`tests/fixtures/snapshot-fixture-v3.acsnap` (repo root) is a checked-in,
-synthetic format-v3 `.acsnap` used by `ac-core`'s self-containment test
+`tests/fixtures/snapshot-fixture-v4.acsnap` (repo root) is a checked-in,
+synthetic format-v4 `.acsnap` used by `ac-core`'s self-containment test
 (`snapshot::tests::t3_checked_in_fixture_reprocesses_with_no_daemon`) and
 by `ac-scene`'s display-truth fixtures. Its one pair records a ladder
 (`session.mtw`) that starts with the ring, so its derivation also replays
@@ -322,12 +325,13 @@ the ladder. Regenerate via:
 cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored
 ```
 
-`tests/fixtures/snapshot-fixture-v1.acsnap` and
-`tests/fixtures/snapshot-fixture-v2.acsnap` hold the same samples as
-format-v1 and format-v2 files. Both are **byte-frozen**: nothing
-regenerates them, since `write_acsnap` writes only v3, and
-`snapshot::tests::v1_fixture_is_byte_frozen` /
-`v2_fixture_is_byte_frozen` pin their sha256. They are the v1 and v2 read
-paths' real archives: `v1_and_v2_fixtures_derive_bit_identical_h1` checks
-that all three fixtures derive bit-identical Welch H1, and that only the
-v3 one replays a ladder.
+`tests/fixtures/snapshot-fixture-v1.acsnap`,
+`tests/fixtures/snapshot-fixture-v2.acsnap` and
+`tests/fixtures/snapshot-fixture-v3.acsnap` hold the same samples as
+format-v1, v2 and v3 files. All three are **byte-frozen**: nothing
+regenerates them, since `write_acsnap` writes only v4, and
+`snapshot::tests::v1_fixture_is_byte_frozen` / `v2_…` / `v3_…` pin their
+sha256. They are the older read paths' real archives:
+`v1_and_v2_fixtures_derive_bit_identical_h1` checks that all four fixtures
+derive bit-identical Welch H1, and that only the v3 and v4 ones replay a
+ladder.

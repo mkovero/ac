@@ -89,7 +89,7 @@ fn open_local_snapshot_needs_no_daemon_connection() {
         ],
         session: SessionMeta {
             pairs: vec![(0, 1)],
-            delay_samples: vec![0],
+            delay_samples: vec![Some(0)],
             nperseg: sr as usize,
             // One `None` per pair: a valid v3 file whose pair has no ladder.
             mtw: Some(vec![None]),

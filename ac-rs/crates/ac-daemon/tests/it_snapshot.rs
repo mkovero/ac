@@ -1062,7 +1062,7 @@ fn snapshot_replays_the_live_ladder_columns_under_a_two_source_stimulus() {
     assert!(!frames.is_empty(), "no mtw frame around the snapshot call");
 
     let snap = read_acsnap(&bytes).expect("read fetched .acsnap");
-    assert_eq!(snap.meta.format_version, 3);
+    assert_eq!(snap.meta.format_version, ac_core::snapshot::FORMAT_VERSION);
     let derived = snap
         .derive_pair(0, WeightingCurve::Z, None)
         .expect("derive_pair on fetched snapshot");

@@ -311,7 +311,8 @@ impl SnapshotRingState {
             })
             .collect();
 
-        let delay_samples: Vec<i64> = self.delay_samples.iter().map(|d| d.unwrap_or(0)).collect();
+        // #524: an unestimated delay is written as such, never as 0.
+        let delay_samples: Vec<Option<i64>> = self.delay_samples.clone();
 
         // Ladder origins into ring coordinates (#221): the first stored
         // sample is stream sample `pushed_total − n_frames`. Negative when

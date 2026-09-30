@@ -412,7 +412,7 @@ mod tests {
             per_channel: vec![channel("meas_0", 0), channel("ref", 1)],
             session: SessionMeta {
                 pairs: vec![(0, 1)],
-                delay_samples: vec![OFFSET],
+                delay_samples: vec![Some(OFFSET)],
                 nperseg: SR as usize,
                 mtw: Some(vec![Some(prov)]),
             },

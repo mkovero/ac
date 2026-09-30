@@ -186,6 +186,15 @@ pub fn capture_into(
     settings: crate::view::SlotSettings,
 ) -> Result<Captured> {
     let (bytes, snap) = crate::snapshot_flow::trigger_and_fetch_bytes(client)?;
+    // #524: a pair with no delay estimate yet cannot become a slot, so it
+    // is refused before anything is written — no file left behind a
+    // "storing failed" (Codex review).
+    if matches!(snap.meta.session.delay_samples.get(pair), Some(None)) {
+        anyhow::bail!(
+            "pair {pair} has no delay estimate yet \u{2014} nothing stored; \
+             store again once the live trace shows"
+        );
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let (path, _) = write_new(
         dir,
