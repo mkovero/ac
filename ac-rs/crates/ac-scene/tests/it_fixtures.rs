@@ -141,9 +141,13 @@ fn ac4_wire_and_snapshot_scenes_are_equivalent_except_the_integration_tag() {
         assert_eq!(w.segments.len(), s.segments.len());
         let (w_pts, s_pts) = (&w.segments[0], &s.segments[0]);
         assert_eq!(w_pts.len(), s_pts.len());
+        // Normalized plot coordinates. 1e-6 (a millionth of the pane) covers
+        // the cross-CPU noise between the committed wire fixture and a
+        // snapshot derived on another CPU (#201: 2.2e-7 in y on the CI
+        // runner; see `regenerate_fixture.rs`), far under a visible pixel.
         for (wp, sp) in w_pts.iter().zip(s_pts.iter()) {
-            assert!((wp.0 - sp.0).abs() < 1e-9, "x mismatch: {wp:?} vs {sp:?}");
-            assert!((wp.1 - sp.1).abs() < 1e-9, "y mismatch: {wp:?} vs {sp:?}");
+            assert!((wp.0 - sp.0).abs() < 1e-6, "x mismatch: {wp:?} vs {sp:?}");
+            assert!((wp.1 - sp.1).abs() < 1e-6, "y mismatch: {wp:?} vs {sp:?}");
         }
     }
     assert_eq!(wire_scene.freq_axis.ticks, snap_scene.freq_axis.ticks);
