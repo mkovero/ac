@@ -1603,8 +1603,7 @@ high-passed sample more than one corner period before the arrival is within
 20 dB of it); `BroadbandEarlier` (the broadband maximum is more
 than 2.0 ms earlier); `BroadbandLater` (the earliest broadband
 peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
-than 2.0 ms later — marked); `Agrees`. The onset diagnostic
-searches before the arrival, not the broadband peak.
+than 2.0 ms later — marked); `Agrees`.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
 (#544; `NoLatency` when the basis is withheld) against
@@ -1839,10 +1838,9 @@ than `plot_ir`.
 
 `report.position.distance_m` is the request's `distance_m`, recorded when
 supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
-read-out: no ms → m figure returns (#391). It feeds two things. The causal
-bound limits only the onset diagnostic's search, which since #537 runs before
-the band-limited arrival; it never moves the arrival itself. And since #537
-it bounds the flight time from below (`IrStats::distance_check`, above):
+read-out: no ms → m figure returns (#391). Since #537 it bounds the flight
+time from below (`IrStats::distance_check`, above); the onset search's causal
+bound it also fed was removed by #734:
 earlier than `d/c − ε` withholds the flight time. There is no upper bound
 (#552): the excess over `d/c` is reported, not judged. From v7,
 `position` may be present carrying only `distance_m`.

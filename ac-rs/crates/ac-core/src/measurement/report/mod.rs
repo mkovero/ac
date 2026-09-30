@@ -114,8 +114,9 @@ pub use provenance::{
 /// - v6: optional capture `backend`; v1-v5 reports decode with it absent.
 /// - v7: optional `reference_latency: ReferenceLatency` records τ of the
 ///   *reference* loopback pair, read from a reference leg captured in the
-///   same run (#460). It feeds only the onset search's causal bound and is
-///   never subtracted from the arrival (`interface_latency` is the capture
+///   same run (#460). At v7 it fed only the onset search's causal bound
+///   (removed by #734; from v12 the flight time subtracts it with
+///   `inter_pair_offset`) and was never subtracted from the arrival on its own (`interface_latency` is the capture
 ///   pair's own τ). A stored τ cannot stand in for it: it re-picks by a
 ///   multiple of the FireWire SYT interval on every device enumeration
 ///   (#461). Also from v7, `position` may be present with only
