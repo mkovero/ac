@@ -39,3 +39,17 @@ The lost commit `d6c8fd85` recorded 100.0 → 0.6 dB p-p on the Babyface loopbac
 - The sign fix flattens the loopback to 0.5 dB p-p. It raises the pre-impulse figure 54 dB on both paths, and it removes the late broadband peak on the acoustic path. The 2 kHz high-passed arrival did not move (±1 sample).
 - The loopback tail-decay FAILED of #504 is gone at the default tail.
 - The acoustic 25 Hz band rises only 4.6–8.3 dB over its floor. The 1083 produces little at 25 Hz at −50 dBFS. That is a property of the path and level, not of the tail length ("levelled off").
+
+## Final build `860a16352816` (all re-derivations in), same setup, same night
+
+| run | pre-imp SNR dB | arrival | broadband Δ | tail-decay line | STI | exit |
+|---|---|---|---|---|---|---|
+| loop-1, loop-2 | 76.0 | +1711 | +0 | adequate, 25 Hz 33.3 dB | — | 0 |
+| loop-sti (1.6 s tail) | 76.0 | +1711 | +0 | adequate, 1585 Hz 75.0 dB | 1.00 | 0 |
+| acou-1 | 74.9 | +2031 | −3 | "tail long enough; 25 Hz band rises only 7.3 dB above its floor — check the drive level and the background noise in that band" | — | 0 |
+| acou-2 | 73.1 | +2031 | −3 | same, 9.7 dB | — | 0 |
+| acou-sti (1.6 s tail) | 74.0 | +2031 | −3 | same, 7.6 dB | 0.99 | 0 |
+
+- **Acoustic room figures, octave bands 500 Hz–4 kHz:** T30 0.11–0.16 s, C50 +29 to +34 dB. On `main` the same bands read T30 0.12–0.15 s and C50 +28 to +33 dB. The octave-band room figures are nearly unchanged by the fix: the band filters remove a smooth tilt, so per-band decay did not depend on it.
+- **STI:** 0.99 at 1 m in this dead room is consistent with those figures.
+- **Reference leg:** `ref latency` measured 1711 samples on every acoustic run, with the reference gate now capped at 24 dB.
