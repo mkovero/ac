@@ -19,7 +19,7 @@ below pointed at nothing. Keep the map and the rows in one file.
 | `loudness/` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | see document map; EBU Tech 3341/3342 conformance cases (not a `stddocs/` file) |
 | `sweep/mod.rs::citation()` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see document map (Annex B pending human cross-check, `verified: false`) |
 | `sweep/mod.rs::farina_citation()` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis (log sweep, inverse filter, harmonic offsets) | see document map; `verified: false` |
-| `sweep/mod.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) quasi-anechoic frequency response via time-gated impulse response | see document map; pending human cross-check, `verified: false` |
+| `sweep/mod.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) frequency response via time-gated impulse response (not "quasi-anechoic": the instrument cannot know the gate ends before the first reflection, #503) | see document map; pending human cross-check, `verified: false` |
 | `sti.rs` | IEC 60268-16:2011 (BS EN 60268-16:2011) | clause 6 indirect method (Schroeder MTF); §6.2 b) c); A.2.2; A.3.2–A.3.4, Tables A.1–A.3 (male); A.5.3–A.5.6 | see document map; Annex M worked example (Table M.1) reproduced in `sti.rs` tests |
 
 When a standard is revised and the revision changes a computation, the

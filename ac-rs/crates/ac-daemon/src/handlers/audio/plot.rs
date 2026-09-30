@@ -1507,7 +1507,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let mut room_note: Option<String> = None;
         let decay_note = match check_tail_decay(&full, &params, tail_s) {
             Ok(check) => check.note(),
-            Err(e) => format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
+            Err(e) => {
+                format!("30 dB tail rule (after ISO 18233 \u{a7}6.3.2) could not be evaluated: {e}")
+            }
         };
 
         // ISO 3382-1 room acoustic parameters, from the linear IR and its
