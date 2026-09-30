@@ -79,6 +79,10 @@ pub(crate) enum Problem {
     NotPositive,
     NotNonNegativeInteger,
     NotArray,
+    /// Not `true` or `false` (#593).
+    NotBool,
+    /// Not a string or `null` (#593).
+    NotStringOrNull,
     /// A number above a fixed ceiling (#635). `limit` is a `u32` so the
     /// text renders it exactly, with no `.0`.
     AtMost {
@@ -105,6 +109,8 @@ impl Problem {
             Problem::NotPositive => "must be a finite number > 0".into(),
             Problem::NotNonNegativeInteger => "must be a non-negative integer".into(),
             Problem::NotArray => "must be an array".into(),
+            Problem::NotBool => "must be true or false".into(),
+            Problem::NotStringOrNull => "must be a string or null".into(),
             Problem::AtMost { limit, unit } => format!("must be at most {limit} {unit}").into(),
             Problem::TooManyEntries { limit } => {
                 format!("must list at most {limit} entries").into()
@@ -277,6 +283,33 @@ pub(crate) fn opt_nullable_u64(obj: &Value, field: &str) -> Result<Option<Option
             .as_u64()
             .map(|n| Some(Some(n)))
             .ok_or_else(|| WireError::new(field, Problem::NotNonNegativeInteger, v)),
+    }
+}
+
+/// Optional boolean. Absent → `None`; `true`/`false` → `Some`; anything
+/// else — `"true"`, `1`, `null` included — is refused (#593).
+pub(crate) fn opt_bool(obj: &Value, field: &str) -> Result<Option<bool>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| WireError::new(field, Problem::NotBool, v)),
+    }
+}
+
+/// Optional nullable string. Absent → `None` (keep), `null` → `Some(None)`
+/// (clear), string → `Some(Some(s))` (set); anything else is refused, never
+/// read as a clear (#593).
+pub(crate) fn opt_nullable_string(
+    obj: &Value,
+    field: &str,
+) -> Result<Option<Option<String>>, WireError> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) => Ok(Some(Some(s.clone()))),
+        Some(v) => Err(WireError::new(field, Problem::NotStringOrNull, v)),
     }
 }
 

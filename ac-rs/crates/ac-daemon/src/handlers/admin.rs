@@ -40,6 +40,8 @@ struct SetupScalars {
     snapshot_ring_s: Option<RingSeconds>,
     temperature_c: Option<Option<f64>>,
     server_idle_timeout_secs: Option<Option<u64>>,
+    server_enabled: Option<bool>,
+    dmm_host: Option<Option<String>>,
 }
 
 fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> {
@@ -48,6 +50,10 @@ fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> 
         server_idle_timeout_secs: wire::opt_nullable_u64(update, "server_idle_timeout_secs")?,
         snapshot_ring_s: parse_ring_seconds(update)?,
         temperature_c: wire::opt_nullable_finite_f64(update, "temperature_c")?,
+        // #593: a wrong type refuses the update; `dmm_host: 42` used to
+        // clear the host, and `server_enabled: "true"` was skipped.
+        server_enabled: wire::opt_bool(update, "server_enabled")?,
+        dmm_host: wire::opt_nullable_string(update, "dmm_host")?,
     })
 }
 
@@ -252,7 +258,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Some(v) = scalars.dbu_ref_vrms {
         cfg.dbu_ref_vrms = v;
     }
-    if let Some(v) = update.get("server_enabled").and_then(Value::as_bool) {
+    if let Some(v) = scalars.server_enabled {
         cfg.server_enabled = v;
     }
     if let Some(v) = update.get("backend") {
@@ -270,8 +276,8 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
                 "backend must be jack, cpal, fake, or null"});
         }
     }
-    if update.get("dmm_host").is_some() {
-        cfg.dmm_host = update["dmm_host"].as_str().map(str::to_string);
+    if let Some(host) = scalars.dmm_host.clone() {
+        cfg.dmm_host = host;
     }
     // `0` clears the timeout, as `null` does.
     if let Some(v) = scalars.server_idle_timeout_secs {

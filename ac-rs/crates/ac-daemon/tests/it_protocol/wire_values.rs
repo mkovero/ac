@@ -20,6 +20,8 @@ fn seeded_cfg() -> Value {
         "range_start_hz": 20.0,
         "range_stop_hz": 20_000.0,
         "server_enabled": false,
+        // #593: a host to lose — `dmm_host: 42` used to clear it.
+        "dmm_host": "192.0.2.1",
     })
 }
 
@@ -400,6 +402,8 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
     const FINITE: &str = "must be a finite number";
     const NON_NEG_INT: &str = "must be a non-negative integer";
     const AT_MOST_RING: &str = "must be at most 300 s";
+    const BOOL: &str = "must be true or false";
+    const STRING_OR_NULL: &str = "must be a string or null";
     let cases = [
         ("dbu_ref_vrms", json!("0.775"), POSITIVE),
         ("dbu_ref_vrms", json!(0), POSITIVE),
@@ -419,6 +423,13 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         ("server_idle_timeout_secs", json!(-1), NON_NEG_INT),
         ("server_idle_timeout_secs", json!(1.5), NON_NEG_INT),
         ("server_idle_timeout_secs", json!(30.0), NON_NEG_INT),
+        // #593: skipped, or read as a clear, before.
+        ("server_enabled", json!("true"), BOOL),
+        ("server_enabled", json!(1), BOOL),
+        ("server_enabled", Value::Null, BOOL),
+        ("dmm_host", json!(42), STRING_OR_NULL),
+        ("dmm_host", json!(true), STRING_OR_NULL),
+        ("dmm_host", json!([]), STRING_OR_NULL),
     ];
     for (key, bad, domain) in cases {
         let mut update = json!({
@@ -440,6 +451,24 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         );
         assert_eq!(config_of(&c), before, "{what}: config must be unchanged");
     }
+}
+
+/// #593: valid `server_enabled` and `dmm_host` values still apply, and
+/// `null` clears the host.
+#[test]
+fn setup_applies_valid_server_enabled_and_dmm_host() {
+    let d = Daemon::spawn_with_config(Some(seeded_cfg()));
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "setup", "update": {
+        "server_enabled": false, "dmm_host": "192.0.2.7",
+    }}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let cfg = config_of(&c);
+    assert_eq!(cfg["server_enabled"], json!(false), "{cfg}");
+    assert_eq!(cfg["dmm_host"], json!("192.0.2.7"), "{cfg}");
+    let r = c.call(json!({"cmd": "setup", "update": {"dmm_host": null}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(config_of(&c)["dmm_host"].is_null());
 }
 
 /// Valid values for all four scalar keys are still applied and persisted.
