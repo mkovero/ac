@@ -17,7 +17,7 @@ const DB_RANGE: (f64, f64) = (-140.0, 0.0);
 fn acsnap_fixture_path() -> PathBuf {
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../tests/fixtures/snapshot-fixture-v3.acsnap"
+        "/../../../tests/fixtures/snapshot-fixture-v4.acsnap"
     ))
 }
 

@@ -120,7 +120,7 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
         ],
         session: SessionMeta {
             pairs: vec![(0, 1)],
-            delay_samples: vec![0],
+            delay_samples: vec![Some(0)],
             nperseg: sr as usize,
             // One `None` per pair: a valid v3 file whose pair has no ladder.
             mtw: Some(vec![None]),

@@ -87,6 +87,15 @@ pub(super) fn validate_metadata(meta: &SnapshotMeta) -> Result<()> {
     }
 
     let session = &meta.session;
+    // #524: `null` exists from v4; an older writer never produced one.
+    if meta.format_version < 4 {
+        if let Some(i) = session.delay_samples.iter().position(Option::is_none) {
+            return Err(anyhow!(
+                "session.delay_samples[{i}] is null, but format_version {} has no unestimated delay",
+                meta.format_version
+            ));
+        }
+    }
     if session.delay_samples.len() != session.pairs.len() {
         return Err(anyhow!(
             "session.delay_samples has {} entries but session.pairs has {}",
@@ -282,7 +291,7 @@ mod tests {
             per_channel: vec![channel("ref", 4), channel("meas_0", 0), channel("ref", 7)],
             session: SessionMeta {
                 pairs: vec![(0, 4), (0, 7)],
-                delay_samples: vec![0, 0],
+                delay_samples: vec![Some(0), Some(0)],
                 nperseg: SR as usize,
                 mtw: Some(vec![None, None]),
             },
@@ -399,7 +408,7 @@ mod tests {
             per_channel: vec![channel("meas_0", 0)],
             session: SessionMeta {
                 pairs: vec![(0, 0)],
-                delay_samples: vec![0],
+                delay_samples: vec![Some(0)],
                 nperseg: SR as usize,
                 mtw: Some(vec![None]),
             },
@@ -476,7 +485,7 @@ mod tests {
     #[test]
     fn read_rejects_delay_samples_longer_than_pairs() {
         let mut meta = control_meta();
-        meta.session.delay_samples.push(0);
+        meta.session.delay_samples.push(Some(0));
         assert_read_rejects(
             &meta,
             3,
@@ -679,7 +688,10 @@ mod tests {
         meta.per_channel[1].stream_sha256 = None;
         assert_eq!(
             read_err(&zip_by_hand(&meta, &channels)),
-            "read_acsnap: per_channel[1].stream_sha256 missing; format_version 3 requires it"
+            format!(
+                "read_acsnap: per_channel[1].stream_sha256 missing; format_version \
+                 {FORMAT_VERSION} requires it"
+            )
         );
     }
 
@@ -792,7 +804,7 @@ mod tests {
         assert_read_rejects(
             &meta,
             3,
-            "session.mtw missing; format_version 3 requires it",
+            &format!("session.mtw missing; format_version {FORMAT_VERSION} requires it"),
         );
         let err = match write_acsnap(&meta, &short_audio(3)) {
             Ok(_) => panic!("write_acsnap wrote a v3 file with no session.mtw"),

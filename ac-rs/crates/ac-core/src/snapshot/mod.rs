@@ -30,9 +30,12 @@ use crate::shared::calibration::{Calibration, LayerVerdict};
 /// FLAC path) — readers must refuse an unrecognised version rather than
 /// guess. v2 (#637) added the required `per_channel[i].stream_sha256`;
 /// v3 (#221) added the required `session.mtw`, the per-pair ladder
-/// provenance the live view's columns are replayed from. `read_acsnap`
-/// still reads v1 and v2.
-pub const FORMAT_VERSION: u32 = 3;
+/// provenance the live view's columns are replayed from. v4 (#524) lets
+/// `session.delay_samples[i]` be `null` for a pair whose delay was never
+/// estimated, which v1–v3 wrote as `0`, indistinguishable from a real
+/// zero-sample lock. `read_acsnap` still reads v1–v3, whose `0` it takes at
+/// face value.
+pub const FORMAT_VERSION: u32 = 4;
 
 pub use crate::visualize::mtw::replay::{MtwProvenance, StageProvenance};
 
@@ -74,8 +77,10 @@ pub struct SessionMeta {
     /// `(meas_input_channel, ref_input_channel)` pairs, session indices
     /// (not FLAC stream positions).
     pub pairs: Vec<(u32, u32)>,
-    /// Per-pair delay in samples, in the same order as `pairs`.
-    pub delay_samples: Vec<i64>,
+    /// Per-pair delay in samples, in the same order as `pairs`. `None`
+    /// (`null`) when the pair's delay had not been estimated when the
+    /// snapshot was taken (format v4, #524); v1–v3 wrote such a pair as `0`.
+    pub delay_samples: Vec<Option<i64>>,
     /// Welch segment length in effect (`h1_estimate_core` pins this to
     /// `sr`, but it's recorded explicitly rather than assumed, so a
     /// future estimator change can't silently break old snapshots).
@@ -157,12 +162,21 @@ impl Snapshot {
             .pairs
             .get(pair_idx)
             .ok_or_else(|| anyhow!("derive_pair: pair index {pair_idx} out of range"))?;
-        let delay_samples = *self
+        let delay_samples = self
             .meta
             .session
             .delay_samples
             .get(pair_idx)
-            .ok_or_else(|| anyhow!("derive_pair: no recorded delay for pair {pair_idx}"))?;
+            .ok_or_else(|| anyhow!("derive_pair: no recorded delay for pair {pair_idx}"))?
+            // #524: a pair captured before its delay was estimated has no
+            // alignment to reprocess with; deriving it at delay 0 would be
+            // a silently misaligned H1.
+            .ok_or_else(|| {
+                anyhow!(
+                    "derive_pair: pair {pair_idx} (meas {meas_ch}, ref {ref_ch}) had no delay \
+                     estimate when the snapshot was taken \u{2014} nothing to align it with"
+                )
+            })?;
 
         let meas_idx = self
             .channel_index_for(meas_ch)
@@ -354,7 +368,7 @@ mod tests {
                 .collect(),
             session: SessionMeta {
                 pairs: vec![(0, 1)],
-                delay_samples: vec![0],
+                delay_samples: vec![Some(0)],
                 nperseg: 48_000,
                 mtw: Some(vec![None]),
             },
@@ -422,7 +436,11 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert_eq!(
-            err, "read_acsnap: unsupported format_version 999 (this reader supports 1 to 3)",
+            err,
+            format!(
+                "read_acsnap: unsupported format_version 999 (this reader supports 1 to \
+                 {FORMAT_VERSION})"
+            ),
             "refused for the wrong reason"
         );
     }
@@ -475,6 +493,56 @@ mod tests {
     /// shape the checked-in fixture test (M1 deliverable, `tests/`) will
     /// use against a file that ships in the repo instead of one built
     /// in-test.
+    /// #524: a pair captured before its delay was estimated round-trips as
+    /// `None`, apart from a pair locked at 0 samples, and `derive_pair`
+    /// refuses it by name instead of aligning it at 0.
+    #[test]
+    fn an_unestimated_delay_round_trips_apart_from_zero_and_is_not_derived() {
+        let sig: Vec<f32> = (0..48_000)
+            .map(|i| {
+                (0.3 * (2.0 * std::f64::consts::PI * 1_000.0 * i as f64 / 48_000.0).sin()) as f32
+            })
+            .collect();
+        let channels = vec![sig.clone(), sig];
+        for (delay, derives) in [(Some(0), true), (None, false)] {
+            let mut meta = tiny_meta(2);
+            meta.session.delay_samples = vec![delay];
+            let (bytes, _) = write_acsnap(&meta, &channels).expect("write");
+            let snap = read_acsnap(&bytes).expect("read");
+            assert_eq!(snap.meta.session.delay_samples, vec![delay]);
+            let got = snap.derive_pair(
+                0,
+                crate::visualize::weighting_curves::WeightingCurve::Z,
+                None,
+            );
+            match (derives, got) {
+                (true, Ok(_)) => {}
+                (false, Err(e)) => {
+                    let msg = format!("{e:#}");
+                    assert!(
+                        msg.contains("pair 0 (meas 0, ref 1)") && msg.contains("no delay estimate"),
+                        "{msg}"
+                    );
+                }
+                (want, got) => panic!("delay {delay:?}: derives={want}, got ok={}", got.is_ok()),
+            }
+        }
+    }
+
+    /// #524: a `null` delay in a file older than v4 is not a thing any writer
+    /// produced; it is refused rather than read.
+    #[test]
+    fn a_null_delay_in_a_v3_file_is_refused() {
+        let mut meta = tiny_meta(2);
+        meta.format_version = 3;
+        meta.session.delay_samples = vec![None];
+        let err = crate::snapshot::validate::validate_metadata(&meta).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("session.delay_samples[0] is null, but format_version 3"),
+            "{err:#}"
+        );
+    }
+
     #[test]
     fn derive_pair_end_to_end_from_written_acsnap() {
         let sr = 48_000u32;
@@ -589,7 +657,7 @@ mod tests {
             ],
             session: SessionMeta {
                 pairs: vec![(0, 1)],
-                delay_samples: vec![0],
+                delay_samples: vec![Some(0)],
                 nperseg: sr as usize,
                 mtw: Some(vec![None]),
             },
@@ -643,7 +711,7 @@ mod tests {
     fn fixture_path() -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../tests/fixtures/snapshot-fixture-v3.acsnap"
+            "/../../../tests/fixtures/snapshot-fixture-v4.acsnap"
         ))
     }
 
@@ -659,6 +727,20 @@ mod tests {
 
     const V2_FIXTURE_SHA256: &str =
         "056edcefd1913e914a8a68336810c4e266cb3bfbadb9fe4340ab0d3d87ed7c4c";
+
+    /// The format-v3 fixture, byte-frozen (#524) as v2 was by #221: the
+    /// writer now writes only v4, so this is the v3 read path's only real
+    /// archive. [`V3_FIXTURE_SHA256`] pins the bytes — the fixture as it
+    /// stood after #733's FLAC fix, the last one a v3 writer produced.
+    fn v3_fixture_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/snapshot-fixture-v3.acsnap"
+        ))
+    }
+
+    const V3_FIXTURE_SHA256: &str =
+        "f4d5aa037646a1f35439056a86933ac29a048dcd6ea8106d52d0a45359f25a46";
 
     /// The format-v1 fixture, byte-frozen (#637). Nothing regenerates it:
     /// `write_acsnap` writes only the current version, so a regenerated file
@@ -711,7 +793,21 @@ mod tests {
         );
     }
 
-    /// #637 test 6, fixture half, extended by #221: the frozen v1 and v2
+    /// #524: the v3 fixture is the same content as the v4 one, written
+    /// before v4 existed. It must stay exactly those bytes.
+    #[test]
+    fn v3_fixture_is_byte_frozen() {
+        let bytes = std::fs::read(v3_fixture_path()).expect(
+            "tests/fixtures/snapshot-fixture-v3.acsnap must exist — it is frozen, not generated",
+        );
+        assert_eq!(
+            sha256_hex(&bytes),
+            V3_FIXTURE_SHA256,
+            "the frozen v3 .acsnap fixture changed; restore it from git — no code can regenerate a v3 file"
+        );
+    }
+
+    /// #637 test 6, fixture half, extended by #221 and #524: the frozen v1 and v2
     /// fixtures and the v3 one hold the same samples, so pair 0 derives
     /// bit-identical Welch H1 from all three in one build. Also pins that v1
     /// and v2 archives still read, with no ladder to replay.
@@ -722,11 +818,16 @@ mod tests {
             .expect("v1 fixture must still read");
         let v2 = read_acsnap(&std::fs::read(v2_fixture_path()).expect("read v2 fixture"))
             .expect("v2 fixture must still read");
-        let v3 = read_acsnap(&std::fs::read(fixture_path()).expect("read v3 fixture"))
-            .expect("v3 fixture must read");
+        let v3 = read_acsnap(&std::fs::read(v3_fixture_path()).expect("read v3 fixture"))
+            .expect("v3 fixture must still read");
+        let v4 = read_acsnap(&std::fs::read(fixture_path()).expect("read current fixture"))
+            .expect("current fixture must read");
         assert_eq!(v1.meta.format_version, 1);
         assert_eq!(v2.meta.format_version, 2);
         assert_eq!(v3.meta.format_version, 3);
+        assert_eq!(v4.meta.format_version, FORMAT_VERSION);
+        assert_eq!(v3.channels, v4.channels);
+        assert_eq!(v3.meta.session.delay_samples, v4.meta.session.delay_samples);
         assert!(v1
             .meta
             .per_channel
@@ -745,7 +846,10 @@ mod tests {
         let d3 = v3
             .derive_pair(0, WeightingCurve::Z, None)
             .expect("derive v3");
-        for d in [&d2, &d3] {
+        let d4 = v4
+            .derive_pair(0, WeightingCurve::Z, None)
+            .expect("derive v4");
+        for d in [&d2, &d3, &d4] {
             assert_eq!(d1.h1.magnitude_db, d.h1.magnitude_db);
             assert_eq!(d1.h1.phase_deg, d.h1.phase_deg);
             assert_eq!(d1.h1.coherence, d.h1.coherence);
@@ -755,8 +859,8 @@ mod tests {
             "pre-v3 files have no ladder"
         );
         assert!(
-            d3.mtw.is_some(),
-            "the v3 fixture records a ladder for pair 0"
+            d3.mtw.is_some() && d4.mtw.is_some(),
+            "the v3 and v4 fixtures record a ladder for pair 0"
         );
     }
 
@@ -887,7 +991,7 @@ mod tests {
     /// fixture had one). SPL-calibrated meas channel so `derive_pair`'s
     /// `spl` path is exercised too.
     #[test]
-    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v3.acsnap — run manually"]
+    #[ignore = "regenerates tests/fixtures/snapshot-fixture-v4.acsnap — run manually"]
     fn generate_snapshot_fixture() {
         let (bytes, sha256) = build_snapshot_fixture();
         std::fs::write(fixture_path(), &bytes).expect("write fixture file");
@@ -968,7 +1072,7 @@ mod tests {
             ],
             session: SessionMeta {
                 pairs: vec![(0, 1)],
-                delay_samples: vec![delay as i64],
+                delay_samples: vec![Some(delay as i64)],
                 nperseg: sr as usize,
                 mtw: Some(vec![Some(fixture_ladder(sr, delay as i64))]),
             },
@@ -1018,7 +1122,7 @@ mod tests {
     fn snapshot_fixture_on_disk_is_current() {
         let (expected_bytes, expected_sha) = build_snapshot_fixture();
         let on_disk = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v3.acsnap must exist — regenerate with \
+            "tests/fixtures/snapshot-fixture-v4.acsnap must exist — regenerate with \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let actual_sha = {
@@ -1095,7 +1199,7 @@ mod tests {
                 ],
                 session: SessionMeta {
                     pairs: vec![(0, 1)],
-                    delay_samples: vec![delay as i64],
+                    delay_samples: vec![Some(delay as i64)],
                     nperseg: sr as usize,
                     mtw: Some(vec![Some(fixture_ladder(sr, delay as i64))]),
                 },
@@ -1119,7 +1223,7 @@ mod tests {
     #[test]
     fn t3_checked_in_fixture_reprocesses_with_no_daemon() {
         let bytes = std::fs::read(fixture_path()).expect(
-            "tests/fixtures/snapshot-fixture-v3.acsnap must exist — regenerate via \
+            "tests/fixtures/snapshot-fixture-v4.acsnap must exist — regenerate via \
              `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
         );
         let snap = read_acsnap(&bytes).expect("read checked-in fixture");
