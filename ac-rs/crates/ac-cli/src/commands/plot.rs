@@ -7,6 +7,39 @@ use crate::io;
 use crate::parse::CommandKind;
 use ac_core::measurement::report::{MeasurementReport, ReportReadError};
 
+/// The band a sweep runs when none, or only one end, is typed (#514): the
+/// **daemon's** stored `range_start_hz` / `range_stop_hz`, which `ac setup`
+/// writes there — against a remote daemon the CLI's own config file is not
+/// the one that was set. Falls back to the local config only when the daemon
+/// does not answer the read.
+pub(crate) fn default_band(
+    client: &mut AcClient,
+    cfg: &ac_core::config::Config,
+    start: Option<f64>,
+    stop: Option<f64>,
+) -> (f64, f64) {
+    if let (Some(a), Some(b)) = (start, stop) {
+        return (a, b);
+    }
+    let server = client
+        .send_cmd(
+            &serde_json::json!({"cmd": "setup", "update": {}}),
+            Some(5000),
+        )
+        .and_then(|r| r.get("config").cloned());
+    let read = |key: &str, local: f64| {
+        server
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(local)
+    };
+    (
+        start.unwrap_or_else(|| read("range_start_hz", cfg.range_start_hz)),
+        stop.unwrap_or_else(|| read("range_stop_hz", cfg.range_stop_hz)),
+    )
+}
+
 pub fn run(
     cmd: &CommandKind,
     cfg: &ac_core::config::Config,
@@ -37,8 +70,7 @@ pub fn run(
     let level_db = level_to_dbfs(level, cal.as_ref());
     let consumes = consumes_voltage(cal.as_ref(), Some(level));
 
-    let start_hz = start.unwrap_or(cfg.range_start_hz);
-    let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
+    let (start_hz, stop_hz) = default_band(client, cfg, start, stop);
 
     println!("\n  band       {start_hz:.0} Hz \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
 

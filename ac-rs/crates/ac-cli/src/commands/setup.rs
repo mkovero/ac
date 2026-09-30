@@ -343,14 +343,6 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         println!("  saved            {path}");
     }
 
-    // #514: the daemon has no live GPIO command; a stored port starts with
-    // the next daemon start (`ac-daemon --gpio` still overrides it).
-    if let Some(gp) = gpio_port {
-        match gp {
-            Some(p) => println!("  GPIO             {p} \u{2014} starts at the next daemon start"),
-            None => println!("  GPIO             cleared \u{2014} stops at the next daemon start"),
-        }
-    }
     println!();
 }
 

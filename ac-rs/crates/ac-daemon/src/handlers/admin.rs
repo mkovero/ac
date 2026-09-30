@@ -43,8 +43,6 @@ struct SetupScalars {
     server_enabled: Option<bool>,
     dmm_host: Option<Option<String>>,
     // #514: acknowledged and never applied until now.
-    device: Option<u32>,
-    gpio_port: Option<Option<String>>,
     range_start_hz: Option<f64>,
     range_stop_hz: Option<f64>,
 }
@@ -59,8 +57,6 @@ fn parse_setup_scalars(update: &Value) -> Result<SetupScalars, wire::WireError> 
         // clear the host, and `server_enabled: "true"` was skipped.
         server_enabled: wire::opt_bool(update, "server_enabled")?,
         dmm_host: wire::opt_nullable_string(update, "dmm_host")?,
-        device: wire::opt_u32(update, "device")?,
-        gpio_port: wire::opt_nullable_string(update, "gpio_port")?,
         range_start_hz: wire::opt_positive_f64(update, "range_start_hz")?,
         range_stop_hz: wire::opt_positive_f64(update, "range_stop_hz")?,
     })
@@ -238,6 +234,28 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // #514: two keys `ac setup` sends that nothing here can honour. The
+    // audio backend opens its own default device, so a stored `device`
+    // would relabel calibrations without changing the hardware; GPIO has
+    // no live command and starts only from `ac-daemon --gpio`. Refused
+    // with where the setting really lives, never acknowledged and dropped.
+    for (key, why) in [
+        (
+            "device",
+            "selects no audio device \u{2014} the backend opens its default device",
+        ),
+        (
+            "gpio_port",
+            "is a daemon start option \u{2014} start the daemon with --gpio <port>",
+        ),
+    ] {
+        if update.get(key).is_some() {
+            return json!({"ok": false, "error": format!(
+                "setup rejected \u{2014} {key} {why}\nconfig    unchanged"
+            )});
+        }
+    }
+
     // Every change is made on a copy and committed to `state.cfg` only after
     // it is on disk (#430), so a failed save leaves memory and disk agreeing
     // on the last-good config. The lock is not held across the save:
@@ -296,15 +314,8 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Some(host) = scalars.dmm_host.clone() {
         cfg.dmm_host = host;
     }
-    // #514: the four keys `ac setup` sends that were acknowledged and
-    // dropped. `device` and the range are read per command; `gpio_port`
-    // starts at the next daemon start (`main.rs`), which the CLI says.
-    if let Some(v) = scalars.device {
-        cfg.device = v;
-    }
-    if let Some(port) = scalars.gpio_port.clone() {
-        cfg.gpio_port = port;
-    }
+    // #514: the default sweep band `ac plot` / `ac sweep` read when no band
+    // is typed (from this daemon's config, not the CLI's).
     if let Some(v) = scalars.range_start_hz {
         cfg.range_start_hz = v;
     }

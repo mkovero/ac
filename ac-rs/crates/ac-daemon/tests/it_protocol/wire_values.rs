@@ -433,9 +433,6 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         ("report_dir", json!(7), STRING_OR_NULL),
         ("snapshot_spool_dir", json!(false), STRING_OR_NULL),
         // #514: applied now, so typed like the rest.
-        ("device", json!("2"), "must be an integer"),
-        ("device", json!(-1), "is outside 0\u{2013}4294967295"),
-        ("gpio_port", json!(5), STRING_OR_NULL),
         ("range_start_hz", json!("20"), POSITIVE),
         ("range_stop_hz", json!(0), POSITIVE),
     ];
@@ -461,21 +458,20 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
     }
 }
 
-/// #514: `device`, `gpio_port` and the default sweep range, acknowledged and
-/// dropped before, are applied and read back; an inverted range is refused
-/// with the config unchanged, judged on the resulting pair.
+/// #514: the default sweep range, acknowledged and dropped before, is
+/// applied and read back; an inverted range is refused with the config
+/// unchanged, judged on the resulting pair. `device` and `gpio_port`, which
+/// nothing here can honour, are refused whatever their value, naming where
+/// the setting really lives.
 #[test]
-fn setup_applies_device_gpio_and_range() {
+fn setup_applies_the_range_and_refuses_device_and_gpio() {
     let d = Daemon::spawn_with_config(Some(seeded_cfg()));
     let c = Client::new(&d);
     let r = c.call(json!({"cmd": "setup", "update": {
-        "device": 3, "gpio_port": "/dev/ttyACM9",
         "range_start_hz": 50.0, "range_stop_hz": 10_000.0,
     }}));
     assert_eq!(r["ok"], json!(true), "{r}");
     let cfg = config_of(&c);
-    assert_eq!(cfg["device"], json!(3), "{cfg}");
-    assert_eq!(cfg["gpio_port"], json!("/dev/ttyACM9"), "{cfg}");
     assert_eq!(cfg["range_start_hz"], json!(50.0), "{cfg}");
     assert_eq!(cfg["range_stop_hz"], json!(10_000.0), "{cfg}");
 
@@ -496,9 +492,30 @@ fn setup_applies_device_gpio_and_range() {
         assert_eq!(config_of(&c), before, "{update}: config must be unchanged");
     }
 
-    let r = c.call(json!({"cmd": "setup", "update": {"gpio_port": null}}));
-    assert_eq!(r["ok"], json!(true), "{r}");
-    assert!(config_of(&c)["gpio_port"].is_null());
+    for (update, why) in [
+        (json!({"device": 3}), "device selects no audio device"),
+        (
+            json!({"device": "x", "range_start_hz": 30.0}),
+            "device selects no audio device",
+        ),
+        (
+            json!({"gpio_port": "/dev/ttyACM9"}),
+            "gpio_port is a daemon start option",
+        ),
+        (
+            json!({"gpio_port": null}),
+            "gpio_port is a daemon start option",
+        ),
+    ] {
+        let r = c.call(json!({"cmd": "setup", "update": update}));
+        assert_eq!(r["ok"], json!(false), "{update}: {r}");
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains(why) && err.contains("config    unchanged"),
+            "{err}"
+        );
+        assert_eq!(config_of(&c), before, "{update}: config must be unchanged");
+    }
 }
 
 /// #593: valid `server_enabled` and `dmm_host` values still apply, and
