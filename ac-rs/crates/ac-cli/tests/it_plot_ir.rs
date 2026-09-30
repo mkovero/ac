@@ -562,7 +562,11 @@ fn plot_ir_error_frame_is_the_last_stderr_line() {
             "{gone:?} must not follow an error frame:\n{stderr}"
         );
     }
-    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "#590: a refused run exits 1; stderr:\n{stderr}"
+    );
 }
 
 /// #376: a capture whose pre-impulse SNR does not clear the threshold is

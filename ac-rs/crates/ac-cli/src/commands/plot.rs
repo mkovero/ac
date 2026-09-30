@@ -84,8 +84,10 @@ pub fn run(
     }
 
     let (results, outcome) = collect_sweep(client, "plot", have_cal, verbose);
+    // #596: a failed sweep (error frame or data timeout, already printed)
+    // exits 1, partial results or not — #428 already writes nothing for it.
     let SweepOutcome::Done { xruns } = outcome else {
-        return;
+        std::process::exit(1);
     };
     if verbose {
         io::print_harmonic_table(&results, io::HarmonicKey::Freq);
@@ -173,8 +175,9 @@ pub fn run_level(
     }
 
     let (results, outcome) = collect_sweep(client, "plot_level", have_cal, verbose);
+    // #596: as `plot frequency` — a failed sweep exits 1.
     let SweepOutcome::Done { xruns } = outcome else {
-        return;
+        std::process::exit(1);
     };
     if verbose {
         let key = if have_cal {
@@ -390,6 +393,20 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     for line in ir_notes_lines(report.as_ref()) {
         println!("{line}");
     }
+    // #590: a script reads the outcome from `$?` — anything short of a
+    // measured IR with its report exits 1, after everything is printed.
+    if !ir_measured(&frames, report.is_some()) {
+        std::process::exit(1);
+    }
+}
+
+/// Whether a `plot ir` run measured something (#590): it ended on `done`,
+/// the IR arrived, and its report decoded. An `error` frame, a timeout, a
+/// missing frame or a refused report schema all exit 1.
+fn ir_measured(frames: &IrFrames, report_decoded: bool) -> bool {
+    frames.end == IrEnd::Done
+        && frames.ir.as_ref().and_then(|f| f.get("data")).is_some()
+        && report_decoded
 }
 
 /// Which `plot ir` stimulus fields the operator typed; the rest are the
@@ -2604,6 +2621,17 @@ mod tests {
             done: (end == IrEnd::Done).then(|| serde_json::json!({})),
             end,
         }
+    }
+
+    /// #590: only a complete run exits 0.
+    #[test]
+    fn a_plot_ir_run_counts_as_measured_only_when_complete() {
+        use super::ir_measured;
+        assert!(ir_measured(&ir_frames(true, true, IrEnd::Done), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Done), false));
+        assert!(!ir_measured(&ir_frames(false, true, IrEnd::Done), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Error), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Timeout), true));
     }
 
     /// #588: a `plot_ir` run that ended on `error` gets no missing-frame
