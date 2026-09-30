@@ -576,147 +576,6 @@ fn pre_impulse_snr_lines(
     }
 }
 
-/// The edge guard's outcome, in the shape [`short_onset_rule`] takes, read
-/// from the typed onset standing (#346 UX revision 4): `Unscored` (every
-/// condition held) is a passed guard, `EdgeFollowing` carries its typed
-/// re-pick, and every other standing is `None` — the guard did not run, or
-/// another row already states the standing.
-fn guard_outcome(
-    standing: &ac_core::measurement::report::OnsetStanding,
-) -> Option<ac_core::measurement::sweep::EdgeGuard> {
-    use ac_core::measurement::report::OnsetStanding;
-    use ac_core::measurement::sweep::EdgeGuard;
-    match *standing {
-        OnsetStanding::Unscored => Some(EdgeGuard::Passed),
-        OnsetStanding::EdgeFollowing { repick } => Some(EdgeGuard::Failed { repick }),
-        OnsetStanding::NoCausalBound
-        | OnsetStanding::BoundNotBinding
-        | OnsetStanding::PickerDeclined
-        | OnsetStanding::PickOnWindowStart
-        | OnsetStanding::DeconvolutionFailed => None,
-    }
-}
-
-/// Derives the short terminal tag from `IrStats::onset_rule`'s full
-/// sentence (#346 AC4, revised for #378's picker). Two facts a reader
-/// needs a year later: which window the pick was made over, and whether
-/// the pick landed inside it or on its edge — a pick sitting on the
-/// window start is a stable, repeatable, possibly wrong number, and it
-/// has to be visible on the line rather than inferable from the JSON.
-///
-/// Returns 3 lines normally (the onset's sample index with the rule's
-/// intro, window start, and the causal-bound row built from `bound`'s own
-/// fields, #460) and 4 when the pick is pinned to the window start or, per
-/// `guard` (#346), the edge guard ran. `guard` is the guard's typed
-/// outcome — `Passed`, `Failed { repick: Some(r) }` moved to `r`,
-/// `Failed { repick: None }` no re-pick ran — and `None` when no guard row
-/// prints. On a decline it returns the decline line, the case, and
-/// a `check:` line — plus the bound row when the bound itself caused it. On a decline the second line is
-/// the degenerate case named in `rule`, printed verbatim from between
-/// its parentheses, so a case added in `ac-core` later reaches the
-/// terminal without a change here. Falls back to the full string
-/// verbatim if its shape ever changes underneath this, so a reader never
-/// sees nothing.
-fn short_onset_rule(
-    rule: &str,
-    onset_index: usize,
-    bound: &ac_core::measurement::sweep::CausalBound,
-    guard: Option<ac_core::measurement::sweep::EdgeGuard>,
-    offset_measured: bool,
-) -> Vec<String> {
-    if rule.contains("picker declined") {
-        let case = rule
-            .split_once('(')
-            .and_then(|(_, rest)| rest.split_once(')'))
-            .map(|(inside, _)| inside.to_string());
-        let mut lines = vec!["picker declined \u{2014} no onset estimate".to_string()];
-        let bound_caused_it = case.as_deref() == Some("causal bound at or after the peak");
-        if let Some(case) = case {
-            lines.push(case);
-        }
-        if bound_caused_it {
-            // #460: the bound's own inputs put it there, so those are what
-            // to check, not the gate.
-            lines.extend(causal_bound_row(bound, offset_measured));
-            lines.push("check: typed distance, reference loopback routing".to_string());
-        } else {
-            lines.push("check: gate length, peak position in gate".to_string());
-        }
-        return lines;
-    }
-    let Some(start) = rule.find("window start at sample ").map(|at| {
-        rule[at + "window start at sample ".len()..]
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .unwrap_or("")
-            .to_string()
-    }) else {
-        return vec![rule.to_string()];
-    };
-    let limit = if rule.contains("search span is the tighter limit") {
-        "search span"
-    } else if rule.contains("causal bound enforced") {
-        "causal bound"
-    } else if rule.contains("no causal bound") {
-        "search span"
-    } else {
-        return vec![rule.to_string()];
-    };
-    let intro = format!(
-        "at sample {onset_index}  (AIC change-point pick, {:.1} ms window)",
-        ac_core::measurement::sweep::ONSET_SEARCH_WINDOW_S * 1000.0
-    );
-    let pinned = rule.contains("pick landed on the window start");
-    let clear = start
-        .parse::<usize>()
-        .map(|s| onset_index.saturating_sub(s))
-        .unwrap_or(0);
-    let mut lines = vec![
-        intro,
-        if pinned {
-            format!("window start {start} ({limit}), pick ON start")
-        } else {
-            format!("window start {start} ({limit}), pick {clear} clear")
-        },
-    ];
-    // #460 AC3 / UX row 3: what the bound was built from, or which input
-    // it lacked — always on the same row, so the eye finds the answer there.
-    lines.extend(causal_bound_row(bound, offset_measured));
-    if pinned {
-        lines.push("onset may lie earlier than the window allows".to_string());
-    }
-    // #346 UX revision 4: the guard row, printed whenever the guard ran, so
-    // a pass is not silent. The distance and the tolerance come from the
-    // core constants; the extended start index is not printed, so the
-    // m → samples conversion is not repeated here.
-    use ac_core::measurement::sweep::{EdgeGuard, EDGE_GUARD_TOLERANCE_SAMPLES};
-    let cm = ac_core::measurement::sweep::EDGE_GUARD_EXTENSION_M * 100.0;
-    match guard {
-        Some(EdgeGuard::Passed) => {
-            let unit = if EDGE_GUARD_TOLERANCE_SAMPLES == 1 {
-                "sample"
-            } else {
-                "samples"
-            };
-            lines.push(format!(
-                "window start {cm:.0} cm earlier: pick moves \u{2264} \
-                 {EDGE_GUARD_TOLERANCE_SAMPLES} {unit}"
-            ));
-        }
-        Some(EdgeGuard::Failed {
-            repick: Some(repick),
-        }) => lines.push(format!(
-            "window start {cm:.0} cm earlier: pick moves to {repick} ({:+})",
-            repick as i64 - onset_index as i64
-        )),
-        Some(EdgeGuard::Failed { repick: None }) => lines.push(format!(
-            "no re-pick \u{2014} window cannot start {cm:.0} cm earlier"
-        )),
-        None => {}
-    }
-    lines
-}
-
 /// Row 2 under `arrival` (#346 UX revision 4, #537 UX): the rule that
 /// produced the arrival, with the corner formatted from the source, never a
 /// literal. `ArrivalSource::Peak` arises only when the band did not allow the
@@ -1006,58 +865,6 @@ fn broadband_delta_lines(stats: &ac_core::measurement::report::IrStats) -> Vec<S
         _ => {}
     }
     lines
-}
-
-/// The onset block's last row (#346 UX revision 4, #537 UX): the
-/// onset-to-arrival gap, always qualified `, not used for flight time`.
-/// `None` when the onset is not before the arrival — a declined picker
-/// reports the arrival.
-fn onset_gap_line(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
-    if stats.onset_index >= stats.arrival_index {
-        return None;
-    }
-    Some(format!(
-        "{CONT_INDENT}{} samples before arrival, not used for flight time",
-        stats.arrival_index - stats.onset_index
-    ))
-}
-
-/// Onset block row 3 (#460 UX), printed from the bound's own fields rather
-/// than parsed from `onset_rule`. An assumed speed of sound is said so: an
-/// unset temperature silently uses the default `c`. `offset_measured` is
-/// whether the report's inter-pair offset is `measured` — the bound then
-/// includes it (#544 UX); an identity offset adds nothing and is not named.
-/// A row that would run past 80 columns at the onset block's 16-column
-/// indent wraps before `c` (display-only, as #494's wraps are).
-fn causal_bound_row(
-    bound: &ac_core::measurement::sweep::CausalBound,
-    offset_measured: bool,
-) -> Vec<String> {
-    use ac_core::measurement::sweep::{CausalBound, MissingBoundInput};
-    match bound {
-        CausalBound::Enforced { inputs, .. } => {
-            let c = match inputs.temperature_c {
-                Some(t) => format!("c {:.1} m/s at {t:.1} \u{b0}C", inputs.speed_of_sound_m_s),
-                None => format!("c {:.1} m/s assumed", inputs.speed_of_sound_m_s),
-            };
-            let offset = if offset_measured { "offset + " } else { "" };
-            let head = format!("bound from ref latency + {offset}{} m,", inputs.distance_m);
-            if 16 + head.chars().count() + 1 + c.chars().count() <= 80 {
-                vec![format!("{head} {c}")]
-            } else {
-                vec![head, c]
-            }
-        }
-        CausalBound::Unavailable(MissingBoundInput::Distance) => {
-            vec!["no causal bound \u{2014} distance not given (token: 1m)".to_string()]
-        }
-        CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { .. }) => {
-            vec!["no causal bound \u{2014} ref latency unavailable (below)".to_string()]
-        }
-        CausalBound::Unavailable(MissingBoundInput::Both { .. }) => {
-            vec!["no causal bound \u{2014} no distance, ref latency unavailable".to_string()]
-        }
-    }
 }
 
 /// Left-pads `label` to the column every #359 read-out line shares with
@@ -1811,33 +1618,6 @@ fn print_ir_report(report: &MeasurementReport) {
         for line in broadband_delta_lines(&stats) {
             println!("{line}");
         }
-        // #346 UX: the onset is its own labelled block, a diagnostic
-        // beside `peak`. The
-        // rule that produced it reaches the terminal as a short derived tag
-        // (the full sentence runs past 80 columns); the untruncated rule
-        // still rides the persisted JSON via `IrStats::onset_rule`. The
-        // guard row is driven by the typed `onset_standing`, not by
-        // parsing the rule.
-        let onset_lines = short_onset_rule(
-            &stats.onset_rule,
-            stats.onset_index,
-            &stats.causal_bound,
-            guard_outcome(&stats.onset_standing),
-            matches!(
-                report.inter_pair_offset,
-                Some(ac_core::measurement::report::InterPairOffset::Measured(_))
-            ),
-        );
-        println!("{}{}", label_prefix("onset"), onset_lines[0]);
-        for line in &onset_lines[1..] {
-            println!("{CONT_INDENT}{line}");
-        }
-        // The onset-to-arrival gap: the loudspeaker's group-delay excess,
-        // and the quantity #378's AC6 found moving with position. Printed on
-        // every capture so an operator who moves the mic sees it move.
-        if let Some(line) = onset_gap_line(&stats) {
-            println!("{line}");
-        }
     }
     // #359 UX: the latency block — `latency`, `ref latency`, `ref stored`,
     // `ref Δ` — replaces the single `ref latency` line in its previous
@@ -2573,19 +2353,17 @@ mod tests {
         answered_enumeration_lines, arrival_check_lines, arrival_snr_lines, arrival_source_line,
         broadband_delta_lines, captured_line, collect_ir_frames, collect_sweep_frames,
         decode_ir_report, deconvolution_failed_lines, distance_lines, earlier_peak_line,
-        flight_time_block, flight_time_line, guard_outcome, inter_pair_offset_lines,
-        ir_absence_lines, ir_notes_lines, ir_stimulus_lines, label_prefix, onset_gap_line,
-        pre_impulse_snr_lines, reference_latency_lines, reference_stored_latency_lines,
-        report_files_lines, second_lobe_line, short_onset_rule, wrap_comma_list, IrEnd, IrFrames,
-        IrTyped, SweepOutcome, CONT_INDENT,
+        flight_time_block, flight_time_line, inter_pair_offset_lines, ir_absence_lines,
+        ir_notes_lines, ir_stimulus_lines, label_prefix, pre_impulse_snr_lines,
+        reference_latency_lines, reference_stored_latency_lines, report_files_lines,
+        second_lobe_line, wrap_comma_list, IrEnd, IrFrames, IrTyped, SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, InterPairOffset,
         InterfaceLatency, IrStats, IrVerdict, LatencyBasis, LiveOffset, MeasuredInterPairOffset,
-        MeasuredLatency, MeasuredReferenceLatency, OnsetStanding, PreImpulseAnchor,
-        PreImpulseSnrScope, ReferenceLatency, ScoredSweepParam, WithheldBasis,
+        MeasuredLatency, MeasuredReferenceLatency, PreImpulseAnchor, PreImpulseSnrScope,
+        ReferenceLatency, ScoredSweepParam, WithheldBasis,
     };
-    use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
     use ac_core::shared::calibration::{EnumerationCheck, TauDisagreement};
     use std::collections::VecDeque;
 
@@ -2923,286 +2701,6 @@ mod tests {
         }
     }
 
-    fn unbounded() -> CausalBound {
-        CausalBound::Unavailable(MissingBoundInput::Both {
-            reference_reason: "no reference configured (ac setup reference)".into(),
-        })
-    }
-
-    fn enforced(distance_m: f64, temperature_c: Option<f64>) -> CausalBound {
-        CausalBound::Enforced {
-            index: 1305,
-            inputs: BoundInputs {
-                reference_tau_s: 0.017_822_9,
-                distance_m,
-                speed_of_sound_m_s: ac_core::shared::conversions::speed_of_sound_from_config(
-                    temperature_c,
-                ),
-                temperature_c,
-            },
-        }
-    }
-
-    /// QA (PR #377), carried into #378: `short_onset_rule`'s decline
-    /// branch had no test naming its output — a typo in the
-    /// `.contains("picker declined")` match here, or in the string it
-    /// matches against in `ac_core::measurement::sweep::estimate_onset`,
-    /// would fall through to the window-clause branch instead, silently
-    /// dropping the operator-facing warning at the terminal.
-    #[test]
-    fn short_onset_rule_surfaces_the_decline_line() {
-        let rule = "onset picker declined (search window shorter than 2 samples) — index is \
-                    the peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), None, false);
-        assert_eq!(
-            lines,
-            vec![
-                "picker declined — no onset estimate".to_string(),
-                "search window shorter than 2 samples".to_string(),
-                "check: gate length, peak position in gate".to_string(),
-            ]
-        );
-    }
-
-    /// A degenerate case added in `ac-core` later must reach the terminal
-    /// without a change here: the parenthetical is printed verbatim, not
-    /// matched against a list.
-    #[test]
-    fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
-        let rule = "onset picker declined (a case invented by this test) — index is the peak, \
-                    not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), None, false);
-        assert_eq!(lines[1], "a case invented by this test".to_string());
-    }
-
-    /// #460 UX frame 5: a bound at or after the peak names the bound's inputs
-    /// and says to check them, not the gate.
-    #[test]
-    fn short_onset_rule_names_the_bound_inputs_when_the_bound_caused_the_decline() {
-        let rule = "onset picker declined (causal bound at or after the peak) — index is the \
-                    peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None), None, false);
-        assert_eq!(
-            lines,
-            vec![
-                "picker declined — no onset estimate".to_string(),
-                "causal bound at or after the peak".to_string(),
-                "bound from ref latency + 3 m, c 343.0 m/s assumed".to_string(),
-                "check: typed distance, reference loopback routing".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn short_onset_rule_reports_the_window_start_how_clear_the_pick_is_and_the_bound() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
-                    causal bound enforced";
-        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)), None, false);
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert_eq!(
-            lines[0],
-            "at sample 1369  (AIC change-point pick, 10.0 ms window)"
-        );
-        assert_eq!(lines[1], "window start 1305 (causal bound), pick 64 clear");
-        assert!(
-            lines[2].starts_with("bound from ref latency + 1 m, c ")
-                && lines[2].ends_with(" m/s at 21.5 °C"),
-            "{:?}",
-            lines[2]
-        );
-    }
-
-    /// #460 AC3 / UX: the old `(search span, no geometry known)` named
-    /// neither input. The window line now says only which limit set it, and
-    /// row 3 names what was missing.
-    /// #544 UX: a measured offset is named in the bound row, an identity
-    /// offset is not; a row too wide for 80 columns wraps before `c`.
-    #[test]
-    fn the_bound_row_names_a_measured_offset() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
-                    causal bound enforced";
-        let lines = short_onset_rule(rule, 1369, &enforced(1.0, None), None, true);
-        assert!(
-            lines[2].starts_with("bound from ref latency + offset + 1 m, c ")
-                && lines[2].ends_with(" m/s assumed"),
-            "{lines:?}"
-        );
-        let lines = short_onset_rule(rule, 1369, &enforced(1.0, None), None, false);
-        assert!(
-            lines[2].starts_with("bound from ref latency + 1 m, c "),
-            "{lines:?}"
-        );
-        let lines = short_onset_rule(rule, 1369, &enforced(12.25, Some(-10.5)), None, true);
-        assert_eq!(lines[2], "bound from ref latency + offset + 12.25 m,");
-        assert!(lines[3].starts_with("c ") && lines[3].ends_with(" at -10.5 \u{b0}C"));
-    }
-
-    #[test]
-    fn short_onset_rule_names_the_missing_input_when_no_bound_applies() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
-                    no causal bound (distance not given)";
-        let cases = [
-            (
-                MissingBoundInput::Distance,
-                "no causal bound — distance not given (token: 1m)",
-            ),
-            (
-                MissingBoundInput::ReferenceLatency {
-                    reason: "no reference configured (ac setup reference)".into(),
-                },
-                "no causal bound — ref latency unavailable (below)",
-            ),
-            (
-                MissingBoundInput::Both {
-                    reference_reason: "no reference configured (ac setup reference)".into(),
-                },
-                "no causal bound — no distance, ref latency unavailable",
-            ),
-        ];
-        for (missing, row) in cases {
-            let lines =
-                short_onset_rule(rule, 519, &CausalBound::Unavailable(missing), None, false);
-            assert_eq!(lines[1], "window start 455 (search span), pick 64 clear");
-            assert_eq!(lines[2], row);
-            assert!(
-                !lines.iter().any(|l| l.contains("no geometry known")),
-                "pre-#460 clause survives: {lines:?}"
-            );
-        }
-    }
-
-    /// A causal bound that did not set the window start must not read as
-    /// though it did — the operator's question is which limit the pick is
-    /// pinned against.
-    #[test]
-    fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
-                    causal bound enforced at sample 10, search span is the tighter limit";
-        let lines = short_onset_rule(rule, 519, &enforced(1.0, None), None, false);
-        assert_eq!(
-            lines[1],
-            "window start 455 (search span), pick 64 clear".to_string()
-        );
-    }
-
-    /// The abnormal case keeps the extra line (#460 UX frame 6): rows 1–3
-    /// as normal, the pinned warning on row 4.
-    #[test]
-    fn short_onset_rule_flags_a_pick_pinned_to_the_window_start() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
-                    causal bound enforced; pick landed on the window start — the true onset \
-                    may lie earlier";
-        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None), None, false);
-        assert_eq!(
-            lines,
-            vec![
-                "at sample 1305  (AIC change-point pick, 10.0 ms window)".to_string(),
-                "window start 1305 (causal bound), pick ON start".to_string(),
-                "bound from ref latency + 1 m, c 343.0 m/s assumed".to_string(),
-                "onset may lie earlier than the window allows".to_string(),
-            ]
-        );
-    }
-
-    /// #346: `print_ir_report` feeds `short_onset_rule` through
-    /// `guard_outcome`. `Unscored` is a passed guard, both typed re-pick
-    /// shapes of `EdgeFollowing` reach the row unchanged, and every other
-    /// standing maps to `None`.
-    #[test]
-    fn guard_outcome_maps_every_onset_standing() {
-        assert_eq!(
-            guard_outcome(&OnsetStanding::Unscored),
-            Some(EdgeGuard::Passed)
-        );
-        for standing in [
-            OnsetStanding::NoCausalBound,
-            OnsetStanding::BoundNotBinding,
-            OnsetStanding::PickerDeclined,
-            OnsetStanding::PickOnWindowStart,
-            OnsetStanding::DeconvolutionFailed,
-        ] {
-            assert_eq!(guard_outcome(&standing), None, "{standing:?}");
-        }
-        assert_eq!(
-            guard_outcome(&OnsetStanding::EdgeFollowing {
-                repick: Some(10_471)
-            }),
-            Some(EdgeGuard::Failed {
-                repick: Some(10_471)
-            })
-        );
-        assert_eq!(
-            guard_outcome(&OnsetStanding::EdgeFollowing { repick: None }),
-            Some(EdgeGuard::Failed { repick: None })
-        );
-    }
-
-    /// #346 UX revisions 3 and 4, frames 1 to 3: the guard row follows the
-    /// bound row whenever the guard ran — a pass states the tolerance it was
-    /// held to, a failure the re-pick; rows 1–3 are unchanged. The re-pick
-    /// delta is always signed, in either direction. No row when the guard
-    /// did not run.
-    #[test]
-    fn short_onset_rule_flags_a_pick_that_follows_the_window_edge() {
-        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 10463, \
-                    causal bound enforced; re-pick with the window start 5 cm earlier went to \
-                    sample 10471 — the pick follows the window edge";
-        let head = vec![
-            "at sample 10483  (AIC change-point pick, 10.0 ms window)".to_string(),
-            "window start 10463 (causal bound), pick 20 clear".to_string(),
-            "bound from ref latency + 2 m, c 343.0 m/s assumed".to_string(),
-        ];
-        let with_row = |row: &str| {
-            let mut v = head.clone();
-            v.push(row.to_string());
-            v
-        };
-        let failed = |repick| Some(EdgeGuard::Failed { repick });
-        assert_eq!(
-            short_onset_rule(
-                rule,
-                10483,
-                &enforced(2.0, None),
-                failed(Some(10471)),
-                false
-            ),
-            with_row("window start 5 cm earlier: pick moves to 10471 (-12)")
-        );
-        assert_eq!(
-            short_onset_rule(
-                rule,
-                10483,
-                &enforced(2.0, None),
-                failed(Some(10486)),
-                false
-            ),
-            with_row("window start 5 cm earlier: pick moves to 10486 (+3)")
-        );
-        let unchecked = "AIC change-point pick over a 10.0 ms window; window start at sample \
-                         10463, causal bound enforced; no re-pick — the window cannot start 5 cm \
-                         earlier, so the pick could not be checked";
-        assert_eq!(
-            short_onset_rule(unchecked, 10483, &enforced(2.0, None), failed(None), false),
-            with_row("no re-pick — window cannot start 5 cm earlier")
-        );
-        let passed_rule = "AIC change-point pick over a 10.0 ms window; window start at sample \
-                           10463, causal bound enforced";
-        let passed = short_onset_rule(
-            passed_rule,
-            10483,
-            &enforced(2.0, None),
-            Some(EdgeGuard::Passed),
-            false,
-        );
-        assert_eq!(
-            passed,
-            with_row("window start 5 cm earlier: pick moves ≤ 1 sample"),
-            "a passed guard is stated, not silent"
-        );
-        let not_run = short_onset_rule(passed_rule, 10483, &enforced(2.0, None), None, false);
-        assert_eq!(not_run, head, "no guard row when the guard did not run");
-    }
-
     /// #346 UX revision 4, #537 UX: row 2 under `arrival` names the rule,
     /// with the corner formatted from the source. It names no onset and
     /// points nowhere `(below)`. The broadband peak is only the rule when
@@ -3229,40 +2727,6 @@ mod tests {
             assert!(!line.contains("(below)"), "{line:?}");
             assert!(line.chars().count() <= 80, "{line:?}");
         }
-    }
-
-    /// #537 UX: the gap row is measured to the arrival, not the peak, and
-    /// says `not used for flight time` on every onset standing; it is absent
-    /// when the onset is not before the arrival.
-    #[test]
-    fn onset_gap_line_is_measured_to_the_arrival() {
-        let mut stats = stats_with(None, ArrivalCheck::Agree);
-        stats.peak_index = 12_005;
-        stats.arrival_index = 10_503;
-        stats.onset_index = 10_483;
-        for standing in [
-            OnsetStanding::Unscored,
-            OnsetStanding::NoCausalBound,
-            OnsetStanding::BoundNotBinding,
-            OnsetStanding::PickerDeclined,
-            OnsetStanding::PickOnWindowStart,
-            OnsetStanding::EdgeFollowing {
-                repick: Some(10_474),
-            },
-            OnsetStanding::EdgeFollowing { repick: None },
-            OnsetStanding::DeconvolutionFailed,
-        ] {
-            stats.onset_standing = standing;
-            assert_eq!(
-                onset_gap_line(&stats),
-                Some(format!(
-                    "{CONT_INDENT}20 samples before arrival, not used for flight time"
-                )),
-                "{standing:?}"
-            );
-        }
-        stats.onset_index = stats.arrival_index;
-        assert_eq!(onset_gap_line(&stats), None);
     }
 
     /// #460 UX: the `ref latency` line in `calibrate`'s `Delay:` format, and
@@ -3809,9 +3273,6 @@ mod tests {
             window_len: 1024,
             peak_index: 600,
             peak_magnitude: 0.5,
-            onset_index: 590,
-            onset_rule: String::new(),
-            causal_bound: unbounded(),
             arrival_source: ArrivalSource::BandLimitedPeak { corner_hz: 2000.0 },
             arrival_index: 600,
             band_limited_snr_db: Some(40.0),
@@ -3819,7 +3280,6 @@ mod tests {
             arrival_lobe_offset: Some(40),
             broadband_delta_level_db: Some(0.0),
             arrival_cross_check: ArrivalCrossCheck::Agrees { gap: 0 },
-            onset_standing: OnsetStanding::NoCausalBound,
             delay_samples: 88,
             arrival_s: 88.0 / 96_000.0,
             arrival_check,
@@ -3982,72 +3442,11 @@ mod tests {
         }
     }
 
-    /// Every line the onset block and the `ref latency` read-out can emit must
-    /// fit 80 columns at the indent `print_ir_report` uses (16, #346 UX) — at a 6-digit
-    /// sample index, the widest distance and temperature the #460 UX pass
-    /// measured, every decline case, and every reference reason.
+    /// Every line the `ref latency` read-out can emit must fit 80 columns at
+    /// the indent `print_ir_report` uses (16, #346 UX), for every reference
+    /// reason.
     #[test]
-    fn onset_and_reference_lines_fit_eighty_columns() {
-        let mut rules = vec![
-            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
-             causal bound enforced; pick landed on the window start — the true onset may \
-             lie earlier"
-                .to_string(),
-            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
-             causal bound enforced at sample 9, search span is the tighter limit"
-                .to_string(),
-            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
-             no causal bound (no distance, reference latency unavailable)"
-                .to_string(),
-        ];
-        // Every decline case `estimate_onset` can name, so a new one that
-        // does not fit is caught here rather than at a rig terminal.
-        for case in [
-            "search window shorter than 2 samples",
-            "zero variance in the search window",
-            "peak at sample 0",
-            "nothing in the search window above the pre-impulse floor",
-            "no change point earlier than the peak in the window",
-            "causal bound at or after the peak",
-        ] {
-            rules.push(format!(
-                "onset picker declined ({case}) — index is the peak, not an onset"
-            ));
-        }
-        let bounds = [
-            enforced(12.25, Some(-10.5)),
-            enforced(12.25, None),
-            CausalBound::Unavailable(MissingBoundInput::Distance),
-            CausalBound::Unavailable(MissingBoundInput::ReferenceLatency {
-                reason: String::new(),
-            }),
-            unbounded(),
-        ];
-        for rule in &rules {
-            for bound in &bounds {
-                for guard in [
-                    None,
-                    Some(EdgeGuard::Passed),
-                    Some(EdgeGuard::Failed { repick: None }),
-                    Some(EdgeGuard::Failed {
-                        repick: Some(123_456),
-                    }),
-                ] {
-                    // #544: `+ offset` joins the bound row when measured.
-                    for offset_measured in [false, true] {
-                        for line in short_onset_rule(rule, 262_144, bound, guard, offset_measured) {
-                            assert!(
-                                16 + line.chars().count() <= 80,
-                                "line {:?} runs to {} columns",
-                                line,
-                                16 + line.chars().count()
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
+    fn reference_lines_fit_eighty_columns() {
         let long_tau = ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s: 0.123_456_7,
             pre_impulse_snr_db: Some(104.3),

@@ -1016,13 +1016,11 @@ mod tests {
         }
     }
 
-    /// #346 UX revision 4, #537 UX: the marker names the rule that produced
-    /// the arrival — `peak above 2 kHz:` — on every onset standing,
-    /// including `Unscored`, where the rejected revision printed `onset`;
-    /// `broadband peak:` when the arrival is the broadband peak.
+    /// #537 UX: the marker names the rule that produced the arrival —
+    /// `peak above 2 kHz:`, or `broadband peak:` when the arrival is the
+    /// broadband peak.
     #[test]
     fn arrival_marker_names_the_rule_that_produced_the_arrival() {
-        use ac_core::measurement::report::OnsetStanding;
         let r = gated_report_with_delayed_peak();
         let mut stats = r.ir_stats().unwrap();
         assert_eq!(
@@ -1030,14 +1028,10 @@ mod tests {
             ArrivalSource::BandLimitedPeak { corner_hz: 2000.0 }
         );
         let value = arrival_marker_value(&stats);
-        for standing in [OnsetStanding::NoCausalBound, OnsetStanding::Unscored] {
-            stats.onset_standing = standing;
-            assert_eq!(
-                arrival_marker_text(&stats),
-                format!("peak above 2 kHz: {value}"),
-                "{standing:?}"
-            );
-        }
+        assert_eq!(
+            arrival_marker_text(&stats),
+            format!("peak above 2 kHz: {value}")
+        );
         stats.arrival_source = ArrivalSource::Peak;
         assert_eq!(
             arrival_marker_text(&stats),

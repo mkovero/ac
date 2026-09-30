@@ -330,25 +330,6 @@ fn assert_calibrated_tau_pairs_with_plot_ir(
          ({} samples) must agree exactly on the fake loopback",
         stats.delay_samples
     );
-
-    // #351 triage AC5, tested against the rejected pairing: if the
-    // arrival were ever taken from the onset instead of the peak while τ
-    // stayed peak-derived, this is the residual that would leak into
-    // `ir_arrival_distance()`. Computed here, not asserted as a fixed
-    // value (it moved -0.310 → -2.458 ms across #346/#378 and is a
-    // diagnostic's bias, not a contract) — only that it clears even the
-    // ±1-sample real-hardware budget above, so a future regression that
-    // reinstates that mismatch fails here rather than only in a rig
-    // session.
-    let centre = (stats.window_len / 2) as i64;
-    let rejected_residual = stats.onset_index as i64 - centre - tau_samples;
-    assert!(
-        rejected_residual.abs() >= 2,
-        "rejected pairing (onset-derived arrival minus peak-derived τ) \
-         residual is only {rejected_residual} samples on f1={f1_hz} \
-         f2={f2_hz} window_len={window_len} — too small to demonstrate \
-         #351's divergence on this fixture"
-    );
 }
 
 /// Run `calibrate` on out0/in0 with both voltage prompts skipped and return
@@ -909,17 +890,13 @@ fn report_for(c: &Client, req: Value) -> (Value, MeasurementReport) {
     (reply, report)
 }
 
-/// #460 AC1 + AC4, through the producer: a supplied distance reaches
-/// `report.position.distance_m`, the same-capture reference is measured, and
-/// `ir_stats()`'s causal bound is built from exactly those two. The expected
-/// bound index is computed here from the fake's reference delay and `c`; so
-/// is the index a bound built by mistake from the measurement leg would give,
-/// which must differ. Two distances, one either side of the peak, so both
-/// outcomes — bound enforced and the at-or-after-peak decline — are reached,
-/// and which one each distance gives is computed rather than assumed.
+/// #460 AC1, through the producer: a supplied distance reaches
+/// `report.position.distance_m`, and the same-capture reference is measured
+/// at the fake reference leg's delay, on its own ports. (#734 removed the
+/// onset's causal bound these once fed; the distance still scores the flight
+/// time, the reference still sets its latency.)
 #[test]
-fn plot_ir_builds_the_causal_bound_from_distance_and_same_capture_reference() {
-    let mut outcomes = Vec::new();
+fn plot_ir_records_the_distance_and_the_same_capture_reference() {
     for distance_m in [0.05_f64, 0.5] {
         let d = Daemon::spawn_with_config(Some(reference_config()));
         let c = Client::new(&d);
@@ -943,54 +920,12 @@ fn plot_ir_builds_the_causal_bound_from_distance_and_same_capture_reference() {
         assert_eq!(reference.method, "farina_same_capture_reference_v1");
         assert_eq!(reference.input_port, "fake:capture_1");
         assert_eq!(reference.output_port, "fake:playback_1");
-
-        let stats = report.ir_stats().expect("ir_stats");
-        let centre = stats.window_len / 2;
-        let c_m_s = ac_core::shared::conversions::speed_of_sound_from_config(None);
-        let expected_bound =
-            (centre as f64 + (expected_tau_s + distance_m / c_m_s) * FAKE_SR).round() as usize;
-        let measurement_leg_bound = (centre as f64
-            + (FAKE_MEAS_DELAY_SAMPLES as f64 / FAKE_SR + distance_m / c_m_s) * FAKE_SR)
-            .round() as usize;
-        assert_ne!(
-            expected_bound, measurement_leg_bound,
-            "test setup: the two legs must give different bounds"
-        );
-        assert_eq!(
-            stats.causal_bound.min_admissible_index(),
-            Some(expected_bound),
-            "distance {distance_m}: {:?}",
-            stats.causal_bound
-        );
-        if expected_bound < stats.peak_index {
-            assert!(
-                stats.onset_rule.contains("causal bound enforced"),
-                "distance {distance_m}: {}",
-                stats.onset_rule
-            );
-            assert!(stats.onset_index >= expected_bound);
-            outcomes.push("enforced");
-        } else {
-            assert!(
-                stats
-                    .onset_rule
-                    .contains("causal bound at or after the peak"),
-                "distance {distance_m}: {}",
-                stats.onset_rule
-            );
-            outcomes.push("declined");
-        }
     }
-    assert_eq!(
-        outcomes,
-        vec!["enforced", "declined"],
-        "test setup: the two distances must reach both outcomes"
-    );
 }
 
 /// #460 AC3 through the producer: a distance with no reference configured
 /// records the reference as unavailable, with the reason the read-out prints,
-/// and the bound names the reference latency as the missing input.
+/// and the reason is the one the read-out prints.
 #[test]
 fn plot_ir_with_a_distance_but_no_reference_names_the_reference_as_missing() {
     let d = Daemon::spawn();
@@ -1007,15 +942,6 @@ fn plot_ir_with_a_distance_but_no_reference_names_the_reference_as_missing() {
         }
         other => panic!("expected an unavailable reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert_eq!(stats.causal_bound.min_admissible_index(), None);
-    assert!(
-        stats
-            .onset_rule
-            .contains("no causal bound (reference latency unavailable)"),
-        "{}",
-        stats.onset_rule
-    );
 }
 
 /// #460 AC3: a measured reference with no distance names the distance.
@@ -1033,19 +959,10 @@ fn plot_ir_with_a_reference_but_no_distance_names_the_distance_as_missing() {
         "{:?}",
         report.reference_latency
     );
-    let stats = report.ir_stats().expect("ir_stats");
-    assert!(
-        stats
-            .onset_rule
-            .contains("no causal bound (distance not given)"),
-        "{}",
-        stats.onset_rule
-    );
 }
 
 /// A reference leg that fails `calibrate`'s SNR gate is recorded as
-/// unavailable with an observation and a `check:` part, and no bound is built
-/// from it. `AC_FAKE_REF_GAIN=0` leaves only the noise override's dither on
+/// unavailable with an observation and a `check:` part. `AC_FAKE_REF_GAIN=0` leaves only the noise override's dither on
 /// the reference leg.
 #[test]
 fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
@@ -1068,13 +985,6 @@ fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
         }
         other => panic!("expected an SNR-refused reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert_eq!(stats.causal_bound.min_admissible_index(), None);
-    assert!(
-        stats.onset_rule.contains("reference latency unavailable"),
-        "{}",
-        stats.onset_rule
-    );
 }
 
 /// #471: a good reference leg at `plot ir`'s **default** sweep must measure.
@@ -1107,12 +1017,6 @@ fn plot_ir_measures_the_reference_at_the_default_sweep() {
         }
         other => panic!("default sweep must measure the reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert!(
-        stats.causal_bound.min_admissible_index().is_some(),
-        "a measured reference and a distance must still build the bound: {:?}",
-        stats.causal_bound
-    );
 }
 
 /// A capture tail too short to hold the reference window is recorded as
@@ -1141,8 +1045,6 @@ fn plot_ir_reports_a_short_tail_reference_as_unavailable() {
         }
         other => panic!("expected a tail-refused reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert_eq!(stats.causal_bound.min_admissible_index(), None);
 }
 
 /// An xrun across the capture refuses the reference reading outright,
@@ -1164,8 +1066,6 @@ fn plot_ir_reports_an_xrun_during_capture_as_unavailable() {
         }
         other => panic!("expected an xrun-refused reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert_eq!(stats.causal_bound.min_admissible_index(), None);
 }
 
 /// A reference peak inside the edge margin of its own window is refused,
@@ -1216,8 +1116,6 @@ fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
         }
         other => panic!("expected an edge-refused reference, got {other:?}"),
     }
-    let stats = report.ir_stats().expect("ir_stats");
-    assert_eq!(stats.causal_bound.min_admissible_index(), None);
 }
 
 /// #359: a same-capture reference reading exactly one JACK period apart

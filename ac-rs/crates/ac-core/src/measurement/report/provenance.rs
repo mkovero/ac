@@ -149,8 +149,8 @@ pub struct MeasuredLatency {
 /// a *different* pair, the reference loopback, and must not be subtracted
 /// from the arrival on its own as though it were the capture pair's: τ is
 /// per channel pair. From v12 the flight time subtracts it together with
-/// the stored inter-pair offset ([`super::InterPairOffset`]), and the onset
-/// search's causal bound reads it too. Both need τ from the same client
+/// the stored inter-pair offset ([`super::InterPairOffset`]) — its one
+/// consumer since #734 removed the onset's causal bound. It needs τ from the same client
 /// lifetime and stream epoch as the IR, because a stored τ re-picks by a
 /// multiple of the FireWire SYT interval on every device enumeration (#461).
 /// There is no `measured_at`: the value belongs to this capture.

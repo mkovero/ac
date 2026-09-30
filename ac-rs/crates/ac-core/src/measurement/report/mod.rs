@@ -61,8 +61,8 @@ pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
     arrival_cross_check_tolerance_samples, arrival_snr_low_reason, pre_impulse_snr_scope,
     ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, DistanceWindow, IrStats,
-    IrVerdict, LatencyBasis, LiveOffset, OnsetStanding, PreImpulseAnchor, PreImpulseSnrScope,
-    ScoredSweepParam, WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
+    IrVerdict, LatencyBasis, LiveOffset, PreImpulseAnchor, PreImpulseSnrScope, ScoredSweepParam,
+    WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
     ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
     ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, ARRIVAL_SNR_UNMEASURED_REASON,
     DISTANCE_SPEED_OF_SOUND_REL_TOL, DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_CHECKS_CHAIN,
@@ -258,7 +258,7 @@ pub struct MeasurementReport {
     /// or why no valid reading exists. τ of a *different* pair than
     /// `interface_latency`: never subtract it from the arrival on its own.
     /// From v12 (#544) [`IrStats::flight_time_s`] subtracts it together
-    /// with `inter_pair_offset`, and the causal bound reads it as before.
+    /// with `inter_pair_offset`.
     /// `plot_ir` always records it —
     /// `unavailable` with a reason when no reference is configured — so
     /// `None` means a report written before v7, or a producer that captures

@@ -45,7 +45,6 @@ mod defaults;
 mod floor;
 mod gated;
 mod harmonics;
-mod onset;
 mod peak;
 mod tail_decay;
 
@@ -64,16 +63,11 @@ pub use harmonics::{
     extract_irs, linear_ir_min_capture_len, linear_ir_window_len, pre_impulse_region_len,
     pre_impulse_snr_db, pre_impulse_snr_db_before, DeconvolvedIrs, HarmonicIr,
 };
-pub use onset::{
-    estimate_onset, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate,
-    OnsetPick, WindowLimit, EDGE_GUARD_EXTENSION_M, EDGE_GUARD_TOLERANCE_SAMPLES,
-    ONSET_SEARCH_WINDOW_S,
-};
 pub use peak::ir_peak;
 /// #346's two-way DUT builder, shared with #537's falsification suite as its
 /// speaker kernel (architect revision 3).
 #[cfg(test)]
-pub(crate) use peak::tests::{two_way_bounded, TWO_WAY_RIG_LIKE, TWO_WAY_T0};
+pub(crate) use peak::tests::{two_way, TWO_WAY_RIG_LIKE, TWO_WAY_T0};
 pub use tail_decay::{check_tail_decay, TailDecayCheck, TailTrend};
 
 /// Parameters for a Farina log sweep.
