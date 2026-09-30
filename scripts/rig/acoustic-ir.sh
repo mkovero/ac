@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # acoustic-ir.sh — EMITS through the speaker. One headless `plot_ir` via the
-# staged `ir_probe`: speaker out -> mic in, reporting peak, floor, SNR, offset
-# from window centre and onset.
+# staged `ir_probe`: speaker out -> mic in, reporting peak, floor, SNR and
+# offset from window centre.
 #
 #   scripts/rig/acoustic-ir.sh <rig> --level <dBFS> --consent "<text>"
 #       [--rev <rev>|latest] [--duration 2.0] [--f1 50] [--f2 16000]
 #       [--window 16384] [--tau-ms <ms>] [--mic-position "<where>"]
 #
 # --tau-ms is subtracted from the peak line only, and is meaningful only as a
-# peak-picked τ for the same channel pair. Never subtract it, or any stored or
-# loopback τ, from the onset line (pairing rule, ac-core sweep/peak.rs, #479).
+# peak-picked τ for the same channel pair (pairing rule, ac-core
+# sweep/peak.rs, #479).
 #
 # Uses a daemon spawned from the staged build (identity printed), routed with
 # `ac setup` to the rig's speaker and mic indices. A failed setup, or a

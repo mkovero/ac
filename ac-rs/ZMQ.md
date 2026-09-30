@@ -1839,9 +1839,9 @@ than `plot_ir`.
 `report.position.distance_m` is the request's `distance_m`, recorded when
 supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
 read-out: no ms → m figure returns (#391). Since #537 it bounds the flight
-time from below (`IrStats::distance_check`, above); the onset search's causal
-bound it also fed was removed by #734:
-earlier than `d/c − ε` withholds the flight time. There is no upper bound
+time from below (`IrStats::distance_check`, above): earlier than `d/c − ε`
+withholds the flight time. (The onset search's causal bound it also fed was
+removed by #734.) There is no upper bound
 (#552): the excess over `d/c` is reported, not judged. From v7,
 `position` may be present carrying only `distance_m`.
 
