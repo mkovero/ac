@@ -6,14 +6,14 @@
 //! sweep and the printed one together.
 //!
 //! These defaults and [`crate::measurement::report::PRE_IMPULSE_SNR_MIN_DB`]
-//! only work together. The pre-impulse figure of a clean loopback is fixed by
-//! the stimulus, not by how quiet the capture was (#471, #501): at the
-//! previous defaults (1 s, 4096 samples) a perfect cable read 10.8–13.2 dB at
-//! 96 kHz and 14.9–17.7 dB at 48 kHz, so the 18 dB gate refused every default
-//! run. At these defaults a perfect loopback reads 21.1–22.0 dB at 44.1, 48,
-//! 96 and 192 kHz, and a noise-only capture stays below the gate. The test
-//! module of `report::ir_stats` records that coupling; a change to either side
-//! has to keep those tests green.
+//! were chosen together (#501), when a clean loopback's pre-impulse figure
+//! was fixed by the stimulus — at the previous defaults (1 s, 4096 samples) a
+//! perfect cable read 10.8–17.7 dB and the 18 dB gate refused every run. That
+//! figure was the residue of the reversed inverse filter (#733). Corrected, a
+//! perfect loopback reads 75.4–76.2 dB at these defaults (60.5 dB at the
+//! previous ones) at 44.1–192 kHz, and a noise-only capture stays under 15.2
+//! dB; the gate now has 57 dB of room. The test module of `report::ir_stats`
+//! records both; a change to either side has to keep those tests green.
 //!
 //! **Why 4.0 s and 0.4 s go together.** `extract_irs` clamps the linear IR's
 //! gate to its distance from harmonic order 2, which is

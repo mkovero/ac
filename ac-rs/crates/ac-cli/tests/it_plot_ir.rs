@@ -38,6 +38,12 @@ impl Rig {
     /// [`Self::start`] with extra config keys merged in (#460: a reference
     /// pair for the same-capture reference leg).
     fn start_with(extra_config: serde_json::Value) -> Self {
+        Self::start_with_env(extra_config, &[])
+    }
+
+    /// [`Self::start_with`], plus environment for the `--fake-audio`
+    /// daemon: its opt-in test hooks read their own process environment.
+    fn start_with_env(extra_config: serde_json::Value, env: &[(&str, &str)]) -> Self {
         let home = support::alloc_home("ac-cli-it");
         let cfg_dir = home.join(".config").join("ac");
         let report_dir = home.join("reports");
@@ -59,7 +65,7 @@ impl Rig {
         )
         .expect("seed config.json");
 
-        let daemon = support::spawn_daemon(&home, true, "127.0.0.1", None);
+        let daemon = support::spawn_daemon_with_env(&home, true, "127.0.0.1", None, env);
         let (ctrl, data) = (daemon.ctrl, daemon.data);
         Self {
             daemon,
@@ -377,7 +383,9 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "the ref latency line is always printed (#460):\n{stdout}"
     );
     assert!(
-        stdout.contains("118 samples before arrival, not used for flight time"),
+        // 84 on the corrected inverse (#733; 118 before). A noiseless
+        // loopback's onset should sit on the arrival — #734.
+        stdout.contains("84 samples before arrival, not used for flight time"),
         "onset-to-arrival distance must print as not used (#378, #537):\n{stdout}"
     );
     assert!(
@@ -571,16 +579,29 @@ fn plot_ir_error_frame_is_the_last_stderr_line() {
 
 /// #376: a capture whose pre-impulse SNR does not clear the threshold is
 /// reported as a failed deconvolution, not as a result with a number in
-/// it — a short (1024-sample) gate window leaves too few pre-impulse
-/// samples for a clean floor estimate even on this noise-free fake
-/// loopback (measured ~17.5 dB, under the 18.0 dB threshold), so it
-/// reliably exercises the failure path without hardware.
+/// it, and exits 1.
+///
+/// Driven by a real noise floor in the fake loopback
+/// (`AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE`, 0.25 ≈ −12 dBFS peak) under a
+/// −40 dBFS drive. It used to be driven by a short gate on the *noiseless*
+/// loopback, which read ~17.5 dB only because the inverse filter's envelope
+/// sign was reversed (#733); corrected, that capture reads over 40 dB, and
+/// the test was failing for a reason unrelated to SNR. The lost fix of
+/// 2026-08-28 (d6c8fd85) made the same change.
 #[test]
 fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
-    let rig = Rig::start();
-    let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "1024win", "0.1s",
-    ]);
+    let rig = Rig::start_with_env(
+        serde_json::json!({}),
+        &[("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.25")],
+    );
+    let out = rig.ac_output_in(
+        &rig.home,
+        &[
+            "plot", "ir", "200hz", "8000hz", "0.5s", "-40dbfs", "3harm", "1024win", "0.1s",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "a failed deconvolution exits 1");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     assert!(
         stdout.contains("DECONVOLUTION FAILED"),

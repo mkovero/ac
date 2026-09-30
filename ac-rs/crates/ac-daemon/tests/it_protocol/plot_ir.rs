@@ -1715,7 +1715,9 @@ fn a_speech_level_gives_the_level_corrected_sti_or_the_reason() {
     // which the SPL calibration puts at ~97 dB SPL in the 1 kHz band: the
     // level-corrected STI must come out, and far lower.
     let sti = &rep["sti"];
-    let free = sti["sti"].as_f64().expect("noise-free STI");
+    let free = sti["sti"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("noise-free STI: {sti}"));
     let levelled = sti["levels"]["sti"].as_f64().expect("level-corrected STI");
     assert!(free > 0.95, "loopback STI {free}");
     assert!(levelled < free - 0.3, "levels did not lower it: {levelled}");

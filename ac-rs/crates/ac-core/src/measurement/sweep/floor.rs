@@ -1,15 +1,20 @@
 //! The noiseless pre-impulse floor of a deconvolved sweep (#471).
 //!
-//! [`super::pre_impulse_snr_db`] is named like a signal-to-noise ratio, and on
-//! an acoustic IR it behaves like one. On a short electrical loopback leg it
-//! does not: the pre-peak region is dominated by the deconvolution's own
-//! residue, whose level relative to the peak is fixed by the *stimulus*, not by
-//! how quiet the capture was. Measured on pupu 2026-09-16 and reproduced
-//! synthetically within 0.5 dB: adding white noise from −120 through −20 dBFS
-//! moves the figure by 0.0 dB, and a route attenuated by 40 dB reads the same
-//! as a good cable. What does move it is bandwidth — 20–20000 Hz floors at
-//! ~17 dB, 500–4000 Hz at ~35 dB — while sweep duration is worth ~0.5 dB in the
-//! wrong direction.
+//! [`super::pre_impulse_snr_db`] is named like a signal-to-noise ratio. With
+//! the corrected inverse (#733) it behaves like one: noise far under the floor
+//! leaves it, noise near it lowers it. What this module computes is the
+//! ceiling a perfect loopback reaches for a given sweep — the deconvolution's
+//! own residue, set by the stimulus: 20–20000 Hz floors at ~65 dB, 500–4000 Hz
+//! at ~50 dB (its band edges ring), sweep duration worth ~0.1 dB. Before #733,
+//! measured on pupu 2026-09-16, that residue sat at 17–35 dB and hid noise
+//! from −120 through −20 dBFS entirely.
+//!
+//! #733: every figure in this module's history before 2026-09-30 (17 dB at
+//! the full band, 35 dB at 500–4000 Hz, pupu's 12.8 dB) was the residue of an
+//! inverse filter with its envelope sign reversed, which tilted the kernel
+//! −12 dB/octave. The floor is still a property of the stimulus, 49–67 dB
+//! across the characterised shapes, but it now sits 30 dB or more above the
+//! fixed 18 dB gate everywhere, so the gate needs no derived threshold.
 //!
 //! A fixed threshold therefore cannot mean the same thing under two stimuli.
 //! This module computes what the figure *would* read for a given sweep with a
@@ -144,20 +149,20 @@ mod tests {
         pre_impulse_snr_db(&irs.linear, idx)
     }
 
-    /// The characterisation this rule rests on: the floor tracks the sweep
-    /// shape over ~18 dB. A single constant cannot sit under all four good
-    /// readings and above all four bad ones — that is the defect #471 records.
+    /// The floor tracks the sweep shape over ~15 dB (#471), with the
+    /// corrected inverse of #733.
     #[test]
     fn floor_tracks_the_sweep_shape() {
         let sr = 96_000;
         let wl = window_len(sr);
         let peak = wl / 2 + 1711; // pupu's measured loopback τ at 96 kHz
+                                  // Measured with the corrected inverse (#733), 2026-09-30.
         let cases = [
-            (params(1.0, 20.0, 20_000.0, sr), 17.2),
-            (params(1.0, 50.0, 16_000.0, sr), 20.1),
-            (params(4.0, 200.0, 8_000.0, sr), 28.5),
-            (params(8.0, 500.0, 4_000.0, sr), 35.1),
-            (params(0.2, 100.0, 20_000.0, sr), 26.8), // calibrate's own short ESS
+            (params(1.0, 20.0, 20_000.0, sr), 65.4),
+            (params(1.0, 50.0, 16_000.0, sr), 62.3),
+            (params(4.0, 200.0, 8_000.0, sr), 56.8),
+            (params(8.0, 500.0, 4_000.0, sr), 50.1),
+            (params(0.2, 100.0, 20_000.0, sr), 64.0), // calibrate's own short ESS
         ];
         for (p, expected) in cases {
             let got = pre_impulse_snr_floor_db(&p, wl, peak).expect("floor");
@@ -200,8 +205,10 @@ mod tests {
             );
             for seed in [0x1234_5678u64, 0xBEEF_1234, 0xDEAD_BEEF, 0x0F0F_0F0F, 7] {
                 let bad = no_cable_snr_db(&p, wl, seed);
+                // +inf: the draw's argmax left no pre-region, which the
+                // verdict refuses before any threshold is read.
                 assert!(
-                    bad < threshold,
+                    bad.is_infinite() || bad < threshold,
                     "{} Hz–{} Hz / {} s: no-cable read {bad:.1} dB, which clears the \
                      {threshold:.1} dB derived threshold (floor {floor:.1}, seed {seed:#x})",
                     p.f1_hz,
@@ -212,21 +219,33 @@ mod tests {
         }
     }
 
-    /// Test against the rejected implementation: the shipped constant refuses
-    /// a mathematically perfect loopback at `plot ir`'s default sweep. If this
-    /// ever stops holding, #471's premise is gone and the derived floor is
-    /// unnecessary.
+    /// #733 changed the premise #471 was built on: a perfect loopback no
+    /// longer floors under a fixed gate. Every characterised shape now
+    /// clears the shipped 18 dB gate by 30 dB or more. If this stops
+    /// holding, a fixed gate can refuse a perfect cable again — stop and
+    /// re-derive, as #471 did.
     #[test]
-    fn the_shipped_constant_refuses_a_perfect_cable_at_the_default_sweep() {
+    fn every_characterised_floor_clears_the_fixed_gate_by_30_db() {
         let sr = 96_000;
         let wl = window_len(sr);
-        let floor = pre_impulse_snr_floor_db(&params(1.0, 20.0, 20_000.0, sr), wl, wl / 2 + 1711)
-            .expect("floor");
-        assert!(
-            floor < 24.0,
-            "the default sweep floors at {floor:.1} dB, which the 24 dB constant would accept — \
-             #471's premise no longer holds"
-        );
+        for p in [
+            params(1.0, 20.0, 20_000.0, sr),
+            params(4.0, 20.0, 20_000.0, sr),
+            params(1.0, 50.0, 16_000.0, sr),
+            params(4.0, 200.0, 8_000.0, sr),
+            params(8.0, 500.0, 4_000.0, sr),
+            params(0.2, 100.0, 20_000.0, sr),
+        ] {
+            let floor = pre_impulse_snr_floor_db(&p, wl, wl / 2 + 1711).expect("floor");
+            let gate = crate::measurement::report::PRE_IMPULSE_SNR_MIN_DB;
+            assert!(
+                floor >= gate + 30.0,
+                "{} Hz–{} Hz / {} s floors at {floor:.1} dB, within 30 dB of the {gate} dB gate",
+                p.f1_hz,
+                p.f2_hz,
+                p.duration_s
+            );
+        }
     }
 
     /// The floor must be evaluated at the *measured* peak: it moves by about
@@ -240,8 +259,8 @@ mod tests {
         let near = pre_impulse_snr_floor_db(&p, wl, wl / 2 + 64).expect("floor");
         let far = pre_impulse_snr_floor_db(&p, wl, wl / 2 + 4700).expect("floor");
         assert!(
-            (near - 27.2).abs() < 0.5 && (far - 30.1).abs() < 0.5,
-            "expected ≈27.2 dB near and ≈30.1 dB far, got {near:.1} / {far:.1}"
+            (near - 55.5).abs() < 0.5 && (far - 58.4).abs() < 0.5,
+            "expected ≈55.5 dB near and ≈58.4 dB far, got {near:.1} / {far:.1}"
         );
         assert!(
             far - near > 2.0,

@@ -399,7 +399,12 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     }
     // #590: a script reads the outcome from `$?` — anything short of a
     // measured IR with its report exits 1, after everything is printed.
-    let summarised = report.as_ref().is_some_and(|r| r.ir_stats().is_some());
+    // A failed deconvolution (#376) prints its banner and carries no
+    // usable IR, so it exits 1 like a missing one (#733 review of #590).
+    let summarised = report.as_ref().is_some_and(|r| {
+        r.ir_stats()
+            .is_some_and(|s| s.verdict == ac_core::measurement::report::IrVerdict::Ok)
+    });
     if !ir_measured(&frames, summarised) || report_write_failed(frames.done.as_ref()) {
         std::process::exit(1);
     }

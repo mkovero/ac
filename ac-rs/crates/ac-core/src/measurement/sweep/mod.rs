@@ -74,7 +74,7 @@ pub use peak::ir_peak;
 /// speaker kernel (architect revision 3).
 #[cfg(test)]
 pub(crate) use peak::tests::{two_way_bounded, TWO_WAY_RIG_LIKE, TWO_WAY_T0};
-pub use tail_decay::{check_tail_decay, TailDecayCheck};
+pub use tail_decay::{check_tail_decay, TailDecayCheck, TailTrend};
 
 /// Parameters for a Farina log sweep.
 #[derive(Debug, Clone, Copy, PartialEq)]

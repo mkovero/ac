@@ -233,10 +233,21 @@ fn truncation(level: &[f64], from: usize, noise_db: f64, fs: f64) -> Option<(f64
         .iter()
         .position(|&l| l <= noise_db)
         .map_or(level.len() - 1, |k| k + t0);
-    // Too short a stretch to fit (a step straight into the background):
-    // the line from the peak to t0 stands in.
-    let (a, b) = if floor > t0 { (t0, floor) } else { (from, t0) };
-    let slope = fit_over(&level[a..=b], a, fs).filter(|s| *s < 0.0)?;
+    // Too short a stretch to fit (a step straight into the background), or
+    // one with no fall in it: the line from the peak to t0 stands in. The
+    // second is a clean electrical path (#733): its band response falls
+    // from the peak straight into a floor of floating-point residue, whose
+    // last 10 dB has no slope to fit.
+    let late = (floor > t0)
+        .then(|| fit_over(&level[t0..=floor], t0, fs).filter(|s| *s < 0.0))
+        .flatten();
+    let (a, slope) = match late {
+        Some(s) => (t0, s),
+        None => (
+            from,
+            fit_over(&level[from..=t0], from, fs).filter(|s| *s < 0.0)?,
+        ),
+    };
     let t1 = a as f64 / fs + (noise_db - level[a]) / slope;
     Some((t1.max(t0 as f64 / fs), slope))
 }

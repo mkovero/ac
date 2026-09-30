@@ -43,10 +43,26 @@ use crate::shared::calibration::{
 /// the rig's emission consent rules, so that blind spot is real and
 /// documented here rather than picked by eye.
 ///
+/// **#733 (2026-09-30) — read this first.** Until then `inverse_sweep`'s
+/// envelope had the wrong sign and tilted every deconvolution −12 dB/octave.
+/// Every figure below that predates it — a perfect loopback at 21.1–22.0 dB,
+/// pupu's 12.8 dB, the before-argmax/before-arrival table — was that tilted
+/// kernel's residue. With the corrected inverse:
+/// - a perfect loopback at the defaults reads 75.4–76.2 dB (44.1–192 kHz,
+///   τ 0–40 ms); pupu read 76.0 dB on its loopback and 74.8 dB acoustically
+///   at 1 m, −50 dBFS (`work/rig/rig-2026-09-30-733-inverse-sign-results.md`);
+/// - noise far under the floor leaves the figure and noise near it lowers
+///   it, so it now behaves as the SNR it is named for;
+/// - a noise-only capture read at most 15.2 dB over 200 draws.
+///
+/// 18 dB stays: 57 dB under a perfect cable and above every noise-only draw.
+/// The history below explains why a fixed value was kept and is left for
+/// that reasoning, not for its numbers.
+///
 /// **Scored for the default sweep (#501).** The figure a clean loopback
-/// reads is set by the stimulus, not by the capture's noise (#471), so
-/// this value means something only for the stimulus it was checked
-/// against. It was checked against the `plot_ir` defaults in
+/// reads was set by the stimulus, not by the capture's noise (#471 — the
+/// tilted kernel of #733), so this value meant something only for the
+/// stimulus it was checked against. It was checked against the `plot_ir` defaults in
 /// [`crate::measurement::sweep::IR_DEFAULT_DURATION_S`] and its siblings —
 /// 20 Hz–20 kHz, 4.0 s, a 0.4 s window, 5 harmonics, 0.5 s tail — on a
 /// synthetic chain that mirrors `plot_ir` (`log_sweep` → delay → tail →
@@ -4160,8 +4176,6 @@ mod default_sweep_tests {
     const AMP: f64 = 0.01;
     /// pupu's measured loopback τ at 96 kHz, in samples.
     const RIG_TAU_96K: usize = 1711;
-    /// The pre-impulse figure pupu read under the previous defaults (#501).
-    const RIG_OLD_DEFAULTS_DB: f64 = 12.8;
 
     fn defaults(sample_rate: u32) -> (SweepParams, usize) {
         (
@@ -4296,9 +4310,9 @@ mod default_sweep_tests {
 
     /// Test 1: the defaults clear the gate with margin on a perfect
     /// loopback over the whole plausible τ range (0–40 ms), and added
-    /// noise does not move the figure. Margin: 2.0 dB = 4 × the ≤ 0.5 dB
-    /// rig-vs-synthetic spread measured in #471 and #501 (multiplier
-    /// assumed). Measured minimum 21.14 dB.
+    /// noise does not move the figure. Measured with the corrected inverse
+    /// (#733): 75.36–76.24 dB over 44.1–192 kHz and this τ set; pupu's
+    /// loopback read 76.0 dB (2026-09-30). Before #733 this read 21.1–22.0 dB.
     #[test]
     fn default_sweep_clears_the_gate_on_a_perfect_loopback() {
         let sr = 96_000;
@@ -4307,50 +4321,52 @@ mod default_sweep_tests {
         for tau in taus {
             let (snr, _) = loopback(&p, wl, tau, None);
             assert!(
-                snr >= PRE_IMPULSE_SNR_MIN_DB + 2.0,
+                snr >= PRE_IMPULSE_SNR_MIN_DB + 30.0,
                 "τ = {tau} samples: a perfect loopback at the defaults reads {snr:.2} dB, \
-                 under {:.1} dB + 2.0 dB margin",
+                 under {:.1} dB + 30 dB margin",
                 PRE_IMPULSE_SNR_MIN_DB
             );
             assert!(
-                (21.0..22.1).contains(&snr),
-                "τ = {tau}: {snr:.2} dB left the measured 21.1–22.0 dB range"
+                (75.2..76.4).contains(&snr),
+                "τ = {tau}: {snr:.2} dB left the measured 75.4–76.2 dB range"
             );
         }
         let (clean, _) = loopback(&p, wl, RIG_TAU_96K, None);
-        for dbfs in [-110.0, -70.0] {
-            let (noisy, _) = loopback(&p, wl, RIG_TAU_96K, Some((dbfs, 0xA5A5)));
-            assert!(
-                (noisy - clean).abs() < 0.1,
-                "noise at {dbfs} dBFS moved the default figure {clean:.2} → {noisy:.2} dB"
-            );
-        }
+        // #733: with a flat kernel the figure measures the capture. Noise far
+        // under the floor leaves it; noise near it lowers it. Before #733 the
+        // tilted kernel's own residue set the figure, and noise at −70 dBFS
+        // moved it by nothing (#471) — a statistic blind to its own name.
+        let (quiet, _) = loopback(&p, wl, RIG_TAU_96K, Some((-110.0, 0xA5A5)));
+        assert!(
+            (quiet - clean).abs() < 0.1,
+            "noise at -110 dBFS moved the default figure {clean:.2} → {quiet:.2} dB"
+        );
+        let (noisy, _) = loopback(&p, wl, RIG_TAU_96K, Some((-70.0, 0xA5A5)));
+        assert!(
+            noisy < clean - 1.0,
+            "noise at -70 dBFS left the default figure at {noisy:.2} dB (clean {clean:.2})"
+        );
     }
 
-    /// Test 2 (criteria 1, 2 and 6): the previous defaults are refused by
-    /// the same 18 dB on the same perfect loopback, the synthetic reproduces
-    /// the rig reading within 1.0 dB, and noise does not move it — the
-    /// figure is the stimulus's, not the capture's. Also pins the
-    /// band-limited run the rig passed at 32.7 dB. If the first assertion
-    /// ever fails, the defaults change was unnecessary.
+    /// Test 2: the previous defaults (1 s, 4096) clear the gate too. #501
+    /// changed the defaults because a perfect loopback read 12.8 dB there on
+    /// pupu; that figure, and the synthetic's 13.2 dB, were #733's tilted
+    /// kernel. Corrected: 60.5 dB, unmoved by noise. The band-limited run
+    /// the rig passed at 32.7 dB before #733 reads 61.1 dB.
     #[test]
-    fn previous_defaults_are_refused_by_the_shipped_threshold() {
+    fn previous_defaults_clear_the_gate_with_the_corrected_inverse() {
         let sr = 96_000;
         let (p, wl) = old_defaults(sr);
         let (clean, _) = loopback(&p, wl, RIG_TAU_96K, None);
         assert!(
-            clean < PRE_IMPULSE_SNR_MIN_DB,
-            "the previous defaults read {clean:.2} dB, which the {PRE_IMPULSE_SNR_MIN_DB} dB \
-             gate accepts — #501's premise no longer holds"
+            (clean - 60.5).abs() <= 1.0,
+            "the previous defaults read {clean:.2} dB, not within 1.0 dB of 60.5"
         );
+        assert!(clean >= PRE_IMPULSE_SNR_MIN_DB + 30.0);
+        let (quiet, _) = loopback(&p, wl, RIG_TAU_96K, Some((-110.0, 0x5A5A)));
         assert!(
-            (clean - RIG_OLD_DEFAULTS_DB).abs() <= 1.0,
-            "synthetic {clean:.2} dB is not within 1.0 dB of the rig's {RIG_OLD_DEFAULTS_DB} dB"
-        );
-        let (noisy, _) = loopback(&p, wl, RIG_TAU_96K, Some((-70.0, 0x5A5A)));
-        assert!(
-            (noisy - clean).abs() < 0.1,
-            "noise moved the previous-default figure {clean:.2} → {noisy:.2} dB"
+            (quiet - clean).abs() < 0.1,
+            "noise far under the floor moved the previous-default figure {clean:.2} → {quiet:.2} dB"
         );
 
         let typed = SweepParams {
@@ -4361,8 +4377,8 @@ mod default_sweep_tests {
         };
         let (band_limited, _) = loopback(&typed, 16_384, RIG_TAU_96K, None);
         assert!(
-            (band_limited - 32.7).abs() <= 1.0,
-            "200 Hz–8 kHz / 4 s / 16384 reads {band_limited:.2} dB, not within 1.0 dB of 32.7"
+            (band_limited - 61.1).abs() <= 1.0,
+            "200 Hz–8 kHz / 4 s / 16384 reads {band_limited:.2} dB, not within 1.0 dB of 61.1"
         );
     }
 
@@ -4428,22 +4444,29 @@ mod default_sweep_tests {
         );
     }
 
-    /// Test 5, against the rejected implementation: at the previous
-    /// defaults, #471's derived rule (floor at the draw's argmax − 3 dB)
-    /// accepts a capture with no signal path. That is why #501 changed the
-    /// defaults instead of deriving the gate. Measured: 26 of 200 distinct
-    /// draws (this 60-draw set: 7).
+    /// Test 5: at the previous defaults a capture with no signal path is
+    /// refused by the fixed gate and by #471's derived rule alike. Before
+    /// #733 the derived rule (floor − 3 dB) accepted 26 of 200 such draws,
+    /// because the tilted kernel floored a perfect cable near the noise;
+    /// that is why #501 kept a fixed gate. Measured now: the derived rule
+    /// accepts 0 of 200, and no draw reaches 15 dB. The fixed gate stays —
+    /// it needs no deconvolution per run.
     #[test]
-    fn a_derived_threshold_would_accept_no_signal_at_the_previous_defaults() {
+    fn no_rule_accepts_no_signal_at_the_previous_defaults() {
         let (p, wl) = old_defaults(96_000);
-        let accepted = (0..NO_SIGNAL_OLD_DRAWS)
-            .filter(|seed| no_signal(&p, wl, NO_SIGNAL_OLD_SEED ^ seed).derived_accepts(&p, wl))
-            .count();
-        assert!(
-            accepted >= 1,
-            "the derived rule refused all {NO_SIGNAL_OLD_DRAWS} noise-only draws — the \
-             reason it was rejected for #501 no longer shows on this fixture"
-        );
+        for seed in 0..NO_SIGNAL_OLD_DRAWS {
+            let draw = no_signal(&p, wl, NO_SIGNAL_OLD_SEED ^ seed);
+            assert!(
+                matches!(draw.fixed_verdict(), IrVerdict::Failed { .. }),
+                "seed {seed}: the fixed gate accepted a noise-only draw at {:.2} dB",
+                draw.snr_db
+            );
+            assert!(
+                !draw.derived_accepts(&p, wl),
+                "seed {seed}: the derived rule accepted a noise-only draw at {:.2} dB",
+                draw.snr_db
+            );
+        }
     }
 
     /// `linear` as `ir_stats` reads it: a default-band report at
@@ -4584,10 +4607,15 @@ mod default_sweep_tests {
                 }
             }
         }
-        assert!(
-            rejected_accepts >= 1,
-            "the rejected min(arrival, peak) rule accepted no noise-only draw — this \
-             control no longer shows the trust condition doing anything"
+        // Before #733 the rejected min(arrival, peak) anchor accepted noise-
+        // only draws, which is why #550 conditions the anchor on trust. With
+        // the corrected inverse it accepts none of these 400 either. The
+        // trust condition stays as defence; a draw it would now catch means
+        // it is load-bearing again — look before relaxing it.
+        assert_eq!(
+            rejected_accepts, 0,
+            "the rejected min(arrival, peak) rule now accepts noise-only draws — the trust \
+             condition is load-bearing again"
         );
         assert!(
             unmeasured_arrivals >= 1,
