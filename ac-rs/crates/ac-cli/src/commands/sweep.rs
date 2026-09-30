@@ -64,7 +64,7 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
     super::generate::wait_for_stop(client, "sweep_level");
 }
 
-pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
+pub fn run_frequency(cmd: &CommandKind, client: &mut AcClient) {
     let (start, stop, level, level_defaulted, duration) = match cmd {
         CommandKind::SweepFrequency {
             start,
@@ -79,7 +79,7 @@ pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &
     let mut cal = get_cal(client);
     let level_db = level_to_dbfs(level, cal.as_ref());
     let consumes = consumes_voltage(cal.as_ref(), Some(level));
-    let (start_hz, stop_hz) = super::plot::default_band(client, cfg, start, stop);
+    let (start_hz, stop_hz) = super::plot::default_band(client, start, stop);
 
     println!("\n  Sweep: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  |  {duration:.1}s");
 

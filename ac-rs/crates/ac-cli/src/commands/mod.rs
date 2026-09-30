@@ -79,7 +79,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::CalibrateMicCurve { .. } => calibrate::run_mic_curve(&parsed.cmd, client),
 
         CommandKind::SweepLevel { .. } => sweep::run_level(&parsed.cmd, client),
-        CommandKind::SweepFrequency { .. } => sweep::run_frequency(&parsed.cmd, cfg, client),
+        CommandKind::SweepFrequency { .. } => sweep::run_frequency(&parsed.cmd, client),
 
         CommandKind::Plot { .. } => plot::run(&parsed.cmd, cfg, client, show),
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
