@@ -17,7 +17,9 @@
 //! 44.1, 48 and 96 kHz by `table_2_single_burst_response_within_limits`,
 //! and `table_2_catches_mutated_time_constants` shows the test rejects
 //! perturbed constants, including the pre-#117 set. Table 3
-//! (repetitive-burst response) is not yet tested; see #612.
+//! repetitive-burst conformance is tested the same way by
+//! `table_3_repetitive_burst_response_within_limits` and
+//! `table_3_catches_mutated_time_constants` (#612).
 //!
 //! Reference levels follow the rest of the Tier 1 stack: 0 dBFS ↔ full-
 //! scale sine (peak = 1.0, rms = 1/√2). §2.6 calibration is enforced by
@@ -510,6 +512,141 @@ mod tests {
         );
         assert!(
             table_2_failing_rows(a, r, s).is_empty(),
+            "unmutated constants must pass every row"
+        );
+    }
+
+    /// Rec. ITU-R BS.468-4 §2.2 (method, p. 4), Table 3 (p. 4): response
+    /// to a train of 5 ms 5 kHz bursts, each starting at a zero crossing.
+    /// Rows: (bursts per second, nominal %, lower limit %, upper limit %),
+    /// transcribed from the percent rows. §2.2 sets the steady tone to
+    /// "80 % of full scale" exactly as §2.1 does, and the same argument
+    /// applies (see [`TABLE_2`]): the 100/s upper limit of 100 % is only
+    /// reachable if 100 % is the steady reading, so the percentages are
+    /// `reading(train) / reading(steady)` at equal amplitude. The steady
+    /// tone, amplitude and sample rates are Table 2's.
+    const TABLE_3: &[(f64, f64, f64, f64)] = &[
+        (2.0, 48.0, 43.0, 53.0),
+        (10.0, 77.0, 72.0, 82.0),
+        (100.0, 97.0, 94.0, 100.0),
+    ];
+
+    /// Burst length for Table 3 (§2.2).
+    const TABLE_3_BURST_MS: f64 = 5.0;
+
+    /// Train of 5 ms 5 kHz bursts at `rate` per second, each starting at
+    /// a zero crossing (sin phase 0), over 3 s. The reading climbs over
+    /// the first bursts (at 2/s it is about 0.5 points low after two);
+    /// the six bursts 3 s holds at 2/s are enough for the buffer peak to
+    /// reach the converged maximum at every row.
+    fn table_3_train(fs: u32, rate: f64) -> Vec<f32> {
+        let w = 2.0 * PI * 5000.0 / fs as f64;
+        let n = (TABLE_3_BURST_MS * 1e-3 * fs as f64).round() as usize;
+        let len = 3 * fs as usize;
+        let mut buf = vec![0.0f32; len];
+        let mut k = 0usize;
+        loop {
+            let start = (k as f64 * fs as f64 / rate).round() as usize;
+            if start + n > len {
+                break;
+            }
+            for i in 0..n {
+                buf[start + i] = (TABLE_2_AMPLITUDE * (w * i as f64).sin()) as f32;
+            }
+            k += 1;
+        }
+        buf
+    }
+
+    #[test]
+    fn table_3_repetitive_burst_response_within_limits() {
+        let mut failures = Vec::new();
+        let mut report = Vec::new();
+        for &fs in TABLE_2_RATES {
+            let steady_db = weighted_quasi_peak_dbfs(&table_2_steady(fs), fs).unwrap();
+            for &(rate, _nominal, lo, hi) in TABLE_3 {
+                let train_db = weighted_quasi_peak_dbfs(&table_3_train(fs, rate), fs).unwrap();
+                let pct = 100.0 * 10f64.powf((train_db - steady_db) / 20.0);
+                report.push(format!("{fs} Hz {rate}/s: {pct:.1} %"));
+                if !(lo..=hi).contains(&pct) {
+                    failures.push(format!(
+                        "{fs} Hz, {rate} bursts/s: {pct:.1} % outside [{lo}, {hi}] %"
+                    ));
+                }
+            }
+        }
+        eprintln!("{}", report.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "BS.468-4 Table 3 rows out of limits:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Indices of Table 3 rows that fall outside their limits at 48 kHz
+    /// under the given (attack, release, stage 2) time constants.
+    fn table_3_failing_rows(attack_s: f64, release_s: f64, stage2_s: f64) -> Vec<usize> {
+        let fs = FS;
+        let steady = apply_weighting(&table_2_steady(fs), fs).unwrap();
+        let steady_qp = quasi_peak_with(&steady, fs, attack_s, release_s, stage2_s);
+        TABLE_3
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(rate, _, lo, hi))| {
+                let train = apply_weighting(&table_3_train(fs, rate), fs).unwrap();
+                let qp = quasi_peak_with(&train, fs, attack_s, release_s, stage2_s);
+                let pct = 100.0 * qp / steady_qp;
+                !(lo..=hi).contains(&pct)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The Table 3 test must be able to fail on its own. Stage-1 release
+    /// changes of about −25 % or +33 % pass every Table 2 row (see
+    /// `table_2_catches_mutated_time_constants`) yet push the 2/s row, and
+    /// at −25 % also the 10/s row, out of limits: Table 3 constrains the
+    /// release beyond what Table 2 does.
+    ///
+    /// No single-constant change that passes Table 2 moves the 100/s row
+    /// (94–100 %); from ×0.5 to ×3 on any constant it reads 94.1–98.5 %.
+    /// What fails that row is losing the peak hold between bursts, so it
+    /// is checked against an average-responding stage 1 (release equal to
+    /// attack), which reads the 50 % duty cycle rather than the peak.
+    #[test]
+    fn table_3_catches_mutated_time_constants() {
+        let (a, r, s) = (QP_STAGE1_ATTACK_S, QP_STAGE1_RELEASE_S, QP_STAGE2_S);
+        let cases: &[(&str, f64, f64, f64)] = &[
+            ("release x0.75", a, r * 0.75, s),
+            ("release x1.33", a, r * 1.33, s),
+        ];
+        let mut covered = [false; 3];
+        for &(name, ca, cr, cs) in cases {
+            assert!(
+                table_2_failing_rows(ca, cr, cs).is_empty(),
+                "{name} must pass Table 2 to show Table 3 adds a constraint"
+            );
+            let rows = table_3_failing_rows(ca, cr, cs);
+            let rates: Vec<f64> = rows.iter().map(|&i| TABLE_3[i].0).collect();
+            eprintln!("{name}: fails rows {rates:?} /s");
+            assert!(!rows.is_empty(), "{name} not caught by Table 3");
+            for i in rows {
+                covered[i] = true;
+            }
+        }
+        assert_eq!(
+            covered,
+            [true, true, false],
+            "release mutations should flip the 2/s and 10/s rows only"
+        );
+        let average = table_3_failing_rows(a, a, s);
+        eprintln!("average-responding stage 1: fails rows {average:?}");
+        assert!(
+            average.contains(&2),
+            "an average-responding stage 1 must fail the 100/s row"
+        );
+        assert!(
+            table_3_failing_rows(a, r, s).is_empty(),
             "unmutated constants must pass every row"
         );
     }
