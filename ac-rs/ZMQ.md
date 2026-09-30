@@ -3452,9 +3452,14 @@ error (`{"ok": false, "error": ...}`) rather than something to coerce —
 this is the one command where a silently substituted number reaches a
 loudspeaker.
 
+`on: true` on a **passive** session — launched with neither `drive` nor
+`drivable`, so it opened no output — is refused (#654): the drive would reach
+nothing. `on: false` is accepted there, as everywhere.
+
 **Errors**
 ```json
 { "ok": false, "error": "no transfer_stream session running" }
+{ "ok": false, "error": "this transfer_stream session was launched passive (no drive, no drivable) and has no output to drive; relaunch it with drivable: true" }
 ```
 
 **Keepalive / dead-man.** There is no separate keepalive command and no

@@ -44,19 +44,29 @@ pub struct DriveState {
     /// session goes through `set_drive`, so the UI is always covered.
     keepalive_armed: AtomicBool,
     baseline: Instant,
+    /// Whether the session opened an output at launch (`drive` or
+    /// `drivable`). A passive session opens none, so drive reaches nothing
+    /// and `set_drive {on: true}` is refused (#654).
+    drivable: bool,
 }
 
 impl DriveState {
     /// Initial state from the session's launch params. `on` is the
     /// legacy `drive` param — `ac transfer` never sets it (§4.3).
-    pub fn new(on: bool, level_dbfs: f64) -> DriveState {
+    pub fn new(on: bool, level_dbfs: f64, drivable: bool) -> DriveState {
         DriveState {
             on: AtomicBool::new(on),
             level_bits: AtomicU64::new(level_dbfs.to_bits()),
             last_keepalive_ms: AtomicU64::new(0),
             keepalive_armed: AtomicBool::new(false),
             baseline: Instant::now(),
+            drivable,
         }
+    }
+
+    /// Whether the session has an output for drive to reach (#654).
+    pub fn drivable(&self) -> bool {
+        self.drivable
     }
 
     /// Apply a `set_drive` request. `level_dbfs` must already have passed
