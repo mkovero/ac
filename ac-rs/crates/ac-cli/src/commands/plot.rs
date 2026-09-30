@@ -84,15 +84,19 @@ pub fn run(
     }
 
     let (results, outcome) = collect_sweep(client, "plot", have_cal, verbose);
+    // #596: a failed sweep (error frame or data timeout, already printed)
+    // exits 1, partial results or not — #428 already writes nothing for it.
     let SweepOutcome::Done { xruns } = outcome else {
-        return;
+        std::process::exit(1);
     };
     if verbose {
         io::print_harmonic_table(&results, io::HarmonicKey::Freq);
     }
     io::print_summary(&results, "DUT", have_cal, xruns);
+    // A sweep stopped before its first point measured nothing (#590
+    // review): exit 1 like a failed one.
     if results.is_empty() {
-        return;
+        std::process::exit(1);
     }
     save_results(&results, "plot", cfg);
 }
@@ -173,8 +177,9 @@ pub fn run_level(
     }
 
     let (results, outcome) = collect_sweep(client, "plot_level", have_cal, verbose);
+    // #596: as `plot frequency` — a failed sweep exits 1.
     let SweepOutcome::Done { xruns } = outcome else {
-        return;
+        std::process::exit(1);
     };
     if verbose {
         let key = if have_cal {
@@ -185,8 +190,10 @@ pub fn run_level(
         io::print_harmonic_table(&results, key);
     }
     io::print_summary(&results, "DUT", have_cal, xruns);
+    // A sweep stopped before its first point measured nothing (#590
+    // review): exit 1 like a failed one.
     if results.is_empty() {
-        return;
+        std::process::exit(1);
     }
     save_results(&results, "plot_level", cfg);
 }
@@ -390,6 +397,34 @@ pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     for line in ir_notes_lines(report.as_ref()) {
         println!("{line}");
     }
+    // #590: a script reads the outcome from `$?` — anything short of a
+    // measured IR with its report exits 1, after everything is printed.
+    let summarised = report.as_ref().is_some_and(|r| r.ir_stats().is_some());
+    if !ir_measured(&frames, summarised) || report_write_failed(frames.done.as_ref()) {
+        std::process::exit(1);
+    }
+}
+
+/// Whether a `plot ir` run measured something (#590): it ended on `done`,
+/// the IR arrived, and its report decoded with an IR payload to summarise.
+/// An `error` frame, a timeout, a missing frame, a refused report schema
+/// or an empty report all exit 1.
+fn ir_measured(frames: &IrFrames, report_summarised: bool) -> bool {
+    frames.end == IrEnd::Done
+        && frames.ir.as_ref().and_then(|f| f.get("data")).is_some()
+        && report_summarised
+}
+
+/// Whether the daemon had a report directory and still could not write
+/// the report JSON (#590 review). An unset directory is the operator's
+/// choice and not a failure; a failed write is, since a script expects the
+/// file.
+fn report_write_failed(done: Option<&serde_json::Value>) -> bool {
+    let Some(files) = done.and_then(|d| d.get("report_files")) else {
+        return false;
+    };
+    files.get("dir").and_then(|v| v.as_str()).is_some()
+        && files["json"].get("path").and_then(|v| v.as_str()).is_none()
 }
 
 /// Which `plot ir` stimulus fields the operator typed; the rest are the
@@ -2316,12 +2351,16 @@ fn collect_sweep_frames(
     (results, outcome)
 }
 
+/// Write the sweep's CSV; a failed write exits 1 (#590 review), after
+/// its reason is printed.
 fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::config::Config) {
     let dir = io::output_dir(cfg);
     let ts = io::timestamp();
     let safe = label.replace(' ', "_");
     let path = dir.join(format!("{safe}_{ts}.csv"));
-    io::save_csv(results, &path);
+    if !io::save_csv(results, &path) {
+        std::process::exit(1);
+    }
 }
 
 /// What `launch_ui` should do post-command. The GPU viewer this used to
@@ -2604,6 +2643,36 @@ mod tests {
             done: (end == IrEnd::Done).then(|| serde_json::json!({})),
             end,
         }
+    }
+
+    /// #590 review: a report that could not be written fails the run; one
+    /// not written because no directory is set does not.
+    #[test]
+    fn only_a_failed_report_write_fails_the_run() {
+        use super::report_write_failed;
+        use serde_json::json as j;
+        assert!(!report_write_failed(None));
+        assert!(!report_write_failed(Some(&j!({}))));
+        assert!(!report_write_failed(Some(
+            &j!({"report_files": {"dir": null}})
+        )));
+        assert!(!report_write_failed(Some(
+            &j!({"report_files": {"dir": "/r", "json": {"path": "/r/x.json"}}})
+        )));
+        assert!(report_write_failed(Some(
+            &j!({"report_files": {"dir": "/r", "json": {"error": "EACCES"}}})
+        )));
+    }
+
+    /// #590: only a complete run exits 0.
+    #[test]
+    fn a_plot_ir_run_counts_as_measured_only_when_complete() {
+        use super::ir_measured;
+        assert!(ir_measured(&ir_frames(true, true, IrEnd::Done), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Done), false));
+        assert!(!ir_measured(&ir_frames(false, true, IrEnd::Done), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Error), true));
+        assert!(!ir_measured(&ir_frames(true, true, IrEnd::Timeout), true));
     }
 
     /// #588: a `plot_ir` run that ended on `error` gets no missing-frame
