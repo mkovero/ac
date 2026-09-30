@@ -942,15 +942,32 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             frame.freqs = freqs;
                             frame.spectrum = spec;
                             frame.freq_hz = Some(r.fundamental_hz);
+                            // #600: with the mic curve on, the tone readouts
+                            // are corrected like the columns they sit on, by
+                            // the same function `plot` uses — one truth for
+                            // the frame, not a corrected spectrum beside a raw
+                            // fundamental and THD.
+                            let curve = mc.curve.filter(|_| mc.enabled);
+                            let corrected = curve.map(|c| {
+                                let mut rc = r.clone();
+                                crate::handlers::mic::apply_mic_curve_to_analysis(c, &mut rc);
+                                rc
+                            });
+                            let tone = corrected.as_ref().unwrap_or(&r);
                             frame.peaks = Some(
                                 peaks
                                     .iter()
-                                    .map(|p| [f64::from(p.freq_hz), f64::from(p.dbfs)])
+                                    .map(|p| {
+                                        let corr = curve
+                                            .map_or(0.0, |c| c.correction_at(p.freq_hz) as f64);
+                                        [f64::from(p.freq_hz), f64::from(p.dbfs) - corr]
+                                    })
                                     .collect(),
                             );
-                            frame.fundamental_dbfs = Some(r.fundamental_dbfs);
+                            frame.fundamental_dbfs = Some(tone.fundamental_dbfs);
                             // #627: no harmonic below Nyquist is not 0 %.
-                            frame.thd_pct = (!r.harmonic_levels.is_empty()).then_some(r.thd_pct);
+                            frame.thd_pct =
+                                (!tone.harmonic_levels.is_empty()).then_some(tone.thd_pct);
                             frame.thdn_pct = Some(r.thdn_pct);
                             frame.in_dbu = Some(in_dbu);
                             frame.clipping = Some(r.clipping);

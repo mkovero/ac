@@ -338,12 +338,19 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "peaks":            [[<float>, <float>], ...], // [freq_hz, dBFS], parabolic-interpolated,
                                       // strongest first, at most 64
   "fundamental_dbfs": <float>,
-  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thd_pct":          <float>,        // harmonic residual / total output, percent; absent
+                                      // when no harmonic lies below Nyquist (#627)
   "thdn_pct":         <float>,        // notched residual / total output, percent
   "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
   "clipping":         <bool>
 }
 ```
+
+With `mic_correction == "on"`, `peaks`, `fundamental_dbfs` and `thd_pct` are
+corrected like the `spectrum` columns they sit on (#600) — by the same rule
+`plot` applies: each level by the curve at its own frequency, `thd_pct`
+recomputed from the corrected harmonics over the fundamental's correction, so
+a flat curve leaves it unchanged. `thdn_pct` stays uncorrected, as on `plot`.
 
 `channel` and `n_channels` were added alongside the optional `channels`
 request parameter on `monitor_spectrum` (see below). Subscribers that only
