@@ -54,6 +54,16 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
         _ => return json!({"ok": false, "error": "'level_dbfs' required (finite number)"}),
     };
 
+    // #654: a passive session opened no output, so drive would reach
+    // nothing while the reply said it was on. Turning drive off stays
+    // accepted — it is never the one request that can be refused.
+    if on && !drive.drivable() {
+        return json!({
+            "ok": false,
+            "error": "this transfer_stream session was launched passive (no drive, no drivable) \
+                      and has no output to drive; relaunch it with drivable: true"
+        });
+    }
     let applied = if on {
         let cfg = state.cfg.lock().unwrap().clone();
         match check_emission_or_refuse(state, &cfg, level) {

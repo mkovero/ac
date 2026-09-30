@@ -93,6 +93,25 @@ fn set_drive_without_a_session_is_refused_not_a_panic() {
     assert_eq!(c.call(json!({"cmd": "status"}))["ok"], json!(true));
 }
 
+/// #654: a passive session opened no output, so `on: true` is refused
+/// with a reason instead of acknowledged into silence; `on: false` stays
+/// accepted, since turning drive off is never refused.
+#[test]
+fn set_drive_on_a_passive_session_is_refused_and_off_is_not() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(start_transfer(&c)["ok"], json!(true));
+
+    let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("passive") && err.contains("drivable"), "{err}");
+
+    let r = c.call(json!({"cmd": "set_drive", "on": false, "level_dbfs": DRIVE_DBFS}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+}
+
 #[test]
 fn set_drive_requires_on_and_a_finite_level() {
     let d = Daemon::spawn();
@@ -126,7 +145,7 @@ fn set_drive_requires_on_and_a_finite_level() {
 fn set_drive_on_refuses_above_the_maximum_and_passes_through_at_or_below_it() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
 
     // Above the maximum: refused, and `max_dbfs` rides the refusal.
     let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": MAX_DBFS + 6.0}));
@@ -159,7 +178,7 @@ fn set_drive_on_refuses_above_the_maximum_and_passes_through_at_or_below_it() {
 fn set_drive_bypasses_the_busy_guard_it_would_otherwise_contend_with() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    assert_eq!(start_drivable_transfer(&c)["ok"], json!(true));
 
     // A second transfer_stream IS refused by the busy guard — this
     // establishes that the guard is actually engaged for this session,

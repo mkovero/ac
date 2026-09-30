@@ -196,7 +196,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         state.delay_requests.clone(),
         state.snapshot_ring.clone(),
         state.snapshot_spool.clone(),
-        Arc::new(DriveState::new(plan.drive, plan.level_dbfs)),
+        Arc::new(DriveState::new(plan.drive, plan.level_dbfs, plan.drivable)),
         Arc::new(DelayRequests::new()),
         snapshot_ring,
     );
@@ -689,7 +689,7 @@ mod tests {
                 self.delay.clone(),
                 self.ring.clone(),
                 self.spool.clone(),
-                Arc::new(DriveState::new(false, -40.0)),
+                Arc::new(DriveState::new(false, -40.0, true)),
                 Arc::new(DelayRequests::new()),
                 pending_ring(),
             )
@@ -820,7 +820,7 @@ mod tests {
     fn guard_leaves_a_successors_drive_and_delay_requests_alone() {
         let slots = Slots::new();
         let guard = slots.publish();
-        let successor_drive = Arc::new(DriveState::new(false, -40.0));
+        let successor_drive = Arc::new(DriveState::new(false, -40.0, true));
         let successor_delay = Arc::new(DelayRequests::new());
         let successor_ring = pending_ring();
         *slots.drive.lock().unwrap() = Some(successor_drive.clone());
