@@ -170,11 +170,40 @@ pub fn devices(state: &ServerState) -> Value {
     })
 }
 
+/// Every key a `setup` update may carry (#743). `device` and `gpio_port` are
+/// listed so their own refusal (#514) names where the setting really lives,
+/// rather than the generic unrecognised-field one.
+const SETUP_UPDATE_KEYS: &[&str] = &[
+    "output_channel",
+    "input_channel",
+    "reference_channel",
+    "reference_output_channel",
+    "dbu_ref_vrms",
+    "dmm_host",
+    "server_enabled",
+    "backend",
+    "snapshot_ring_s",
+    "snapshot_spool_dir",
+    "temperature_c",
+    "server_idle_timeout_secs",
+    "report_dir",
+    "range_start_hz",
+    "range_stop_hz",
+    "device",
+    "gpio_port",
+];
+
 pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     let update = match cmd.get("update") {
         Some(u) => u,
         None => return json!({"ok": false, "error": "missing 'update' field"}),
     };
+    // #743: an unknown key — a typo, or a key from another build — is
+    // refused before anything is validated or saved, never saved around.
+    let unknown = wire::unrecognised_fields(update, SETUP_UPDATE_KEYS);
+    if !unknown.is_empty() {
+        return wire::unrecognised_refusal("setup", &unknown, SETUP_UPDATE_KEYS);
+    }
 
     // #472: the report directory is validated before anything else in the
     // update is applied, so a refusal leaves the whole config as it was —

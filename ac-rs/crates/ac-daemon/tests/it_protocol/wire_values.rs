@@ -518,6 +518,31 @@ fn setup_applies_the_range_and_refuses_device_and_gpio() {
     }
 }
 
+/// #743: an unknown update key — here a typo beside a valid key — refuses
+/// the whole update with the unrecognised-field layout, and nothing is
+/// applied or saved.
+#[test]
+fn setup_refuses_an_unknown_update_key() {
+    let d = Daemon::spawn_with_config(Some(seeded_cfg()));
+    let c = Client::new(&d);
+    let before = config_of(&c);
+    let r = c.call(json!({"cmd": "setup", "update": {
+        "output_chanel": 2, "input_channel": 1,
+    }}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(
+        err.starts_with("setup: field 'output_chanel' not recognised \u{2014} command not run"),
+        "{err}"
+    );
+    assert_eq!(r["unrecognised_fields"], json!(["output_chanel"]), "{r}");
+    assert!(
+        r.get("saved").is_none(),
+        "an unknown key must not save: {r}"
+    );
+    assert_eq!(config_of(&c), before, "config must be unchanged");
+}
+
 /// #593: valid `server_enabled` and `dmm_host` values still apply, and
 /// `null` clears the host.
 #[test]

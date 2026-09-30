@@ -988,8 +988,9 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 }
 ```
 
-Every key `ac setup` sends is applied or refused — none is acknowledged and
-dropped (#514). `device` and `gpio_port` are refused whatever their value:
+Every key is applied or refused — none is acknowledged and dropped (#514),
+and a key not in the list above (a typo, a key from another build) refuses
+the whole update with the unrecognised-field layout, nothing saved (#743). `device` and `gpio_port` are refused whatever their value:
 the audio backend opens its own default device, so a stored `device` would
 relabel calibrations without changing the hardware, and GPIO starts only
 from `ac-daemon --gpio <port>` (there is no live GPIO command).
