@@ -988,8 +988,9 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 }
 ```
 
-Every key `ac setup` sends is applied or refused — none is acknowledged and
-dropped (#514). `device` and `gpio_port` are refused whatever their value:
+Every key is applied or refused — none is acknowledged and dropped (#514),
+and a key not in the list above (a typo, a key from another build) refuses
+the whole update with the unrecognised-field layout, nothing saved (#743). `device` and `gpio_port` are refused whatever their value:
 the audio backend opens its own default device, so a stored `device` would
 relabel calibrations without changing the hardware, and GPIO starts only
 from `ac-daemon --gpio <port>` (there is no live GPIO command).
@@ -4128,9 +4129,10 @@ ones its handler reads — plus `cmd`. A request with any other top-level
 key is refused with nothing run: no worker, no config write, no emission,
 and `quit` does not stop the daemon (#628). The check comes after the
 `invalid JSON`, `missing 'cmd' field` and `unknown command` refusals and
-before every other one. Keys nested inside a field are not checked: the
-`setup` `update` object's keys (#514) and the sub-keys of the fake-audio
-harness objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
+before every other one. The `setup` `update` object's keys are checked the
+same way against the keys `setup` reads (#743; `cmd` is not one of them).
+Other nested keys are not checked: the sub-keys of the fake-audio harness
+objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
 
 ```json
 { "ok": false,
