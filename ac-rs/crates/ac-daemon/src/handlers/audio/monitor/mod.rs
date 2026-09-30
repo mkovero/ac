@@ -921,7 +921,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     .collect();
                                 let mut lf_peaks =
                                     ac_core::visualize::spectrum::find_interpolated_peaks(
-                                        lf, &lf_freqs, usize::MAX, peak_thr,
+                                        lf,
+                                        &lf_freqs,
+                                        usize::MAX,
+                                        peak_thr,
                                     );
                                 peaks.retain(|p| p.freq_hz >= cx);
                                 lf_peaks.retain(|p| p.freq_hz < cx);
