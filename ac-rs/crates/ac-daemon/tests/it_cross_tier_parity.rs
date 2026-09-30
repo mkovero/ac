@@ -375,6 +375,50 @@ fn monitor_spectrum_column_reflects_mic_curve_in_linear_domain() {
     );
 }
 
+/// #600: the same frame's tone readouts follow the correction its columns
+/// get — `fundamental_dbfs` and the 1 kHz peak drop by the curve's +3 dB,
+/// and `thd_pct` stays put (a flat curve cancels in the ratio). Before
+/// #600 they stayed raw, so the corrected column sat 3 dB under its own
+/// frame's fundamental.
+#[test]
+fn monitor_tone_readouts_follow_the_mic_curve_like_the_columns() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let raw = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    while c.recv_pub(50).is_some() {}
+    set_flat_curve_3db(&c);
+    let cor = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    assert_envelope(&cor, "on", false, "monitor corrected");
+
+    let f = |v: &Value, k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k}: {v}"));
+    let d_fund = f(&raw, "fundamental_dbfs") - f(&cor, "fundamental_dbfs");
+    assert!(
+        (d_fund - 3.0).abs() < 0.5,
+        "fundamental moved {d_fund:.2} dB"
+    );
+
+    let peak_1k = |v: &Value| {
+        v["peaks"]
+            .as_array()
+            .expect("peaks")
+            .iter()
+            .filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+            .filter(|(hz, _)| (hz - 1000.0).abs() < 20.0)
+            .map(|(_, db)| db)
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let d_peak = peak_1k(&raw) - peak_1k(&cor);
+    assert!(
+        (d_peak - 3.0).abs() < 0.5,
+        "1 kHz peak moved {d_peak:.2} dB"
+    );
+
+    if let (Some(a), Some(b)) = (raw["thd_pct"].as_f64(), cor["thd_pct"].as_f64()) {
+        assert!((a - b).abs() <= 0.01 * a.max(1e-9) + 1e-9, "thd {a} → {b}");
+    }
+}
+
 /// #167: plot's `thd_pct`, `harmonic_levels` and `spectrum` under a mic
 /// curve. `thd::analyze` fills the latter two with linear amplitude; the
 /// pre-#167 correction subtracted 3 from each (≈ −3), then read the
