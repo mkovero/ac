@@ -128,10 +128,14 @@ pub fn encode(channels: &[Vec<f32>], sr: u32) -> Result<Vec<u8>> {
     let mut config = flacenc::config::Encoder::default();
     config.subframe_coding.fixed.order_sel = flacenc::config::OrderSel::BitCount;
     let bytes = encode_with(config, &interleaved, n_channels, sr)?;
-    // Backstop for any other estimate that goes wrong: a stream larger than
-    // the raw i24 samples is replaced by the verbatim one, which cannot be.
+    // Backstop for any other estimate that goes wrong: a stream clearly
+    // larger than verbatim is re-encoded verbatim and the smaller kept.
+    // Verbatim is the raw i24 bytes plus framing (≈ 0.05 %: the fixture's
+    // 864 000 sample bytes take 864 404), so the allowance is 1 % — far
+    // under the ×10–×2000 growth #661 saw, and noise at verbatim size does
+    // not pay a second encode (Codex review).
     let raw_bytes = interleaved.len() * 3;
-    if bytes.len() <= raw_bytes {
+    if bytes.len() <= raw_bytes + raw_bytes / 100 + 4096 {
         return Ok(bytes);
     }
     let mut verbatim = flacenc::config::Encoder::default();
