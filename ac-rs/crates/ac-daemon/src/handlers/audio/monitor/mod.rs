@@ -899,12 +899,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
                                 .collect();
                             let peak_thr = r.fundamental_dbfs as f32 - 80.0;
-                            // Twice the 64 published, so the corrected top 64
-                            // (#600) can include a peak the curve lifts.
+                            // Every peak above the threshold, uncapped, so the
+                            // corrected top 64 (#600) can include one the curve
+                            // lifts past the raw ranking (Codex recheck).
                             let mut peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
                                 &r.spectrum,
                                 &raw_freqs,
-                                128,
+                                usize::MAX,
                                 peak_thr,
                             );
                             // Below the crossover the long-N LF spectrum gives
@@ -920,7 +921,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     .collect();
                                 let mut lf_peaks =
                                     ac_core::visualize::spectrum::find_interpolated_peaks(
-                                        lf, &lf_freqs, 128, peak_thr,
+                                        lf, &lf_freqs, usize::MAX, peak_thr,
                                     );
                                 peaks.retain(|p| p.freq_hz >= cx);
                                 lf_peaks.retain(|p| p.freq_hz < cx);
