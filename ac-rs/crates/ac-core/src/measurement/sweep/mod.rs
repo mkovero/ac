@@ -223,8 +223,10 @@ pub fn farina_citation() -> StandardsCitation {
 }
 
 /// Citation for the [`crate::measurement::report::MeasurementData::GatedFrequencyResponse`]
-/// payload (#284): a quasi-anechoic frequency response derived by
-/// time-gating a Farina-swept-sine impulse response, distinct from the
+/// payload (#284): a frequency response derived by time-gating a
+/// Farina-swept-sine impulse response — quasi-anechoic only when the gate
+/// ends before the first reflection, which the instrument cannot know
+/// (#503), distinct from the
 /// impulse-response payload's own citation ([`citation`]) — both apply,
 /// in relevance order. Paired with [`farina_citation`], not [`citation`]
 /// — see [`farina_citation`]'s doc for why the ISO 18233 half must not
@@ -236,7 +238,13 @@ pub fn farina_citation() -> StandardsCitation {
 pub fn gated_response_citation() -> StandardsCitation {
     StandardsCitation {
         standard: "AES17-2020".into(),
-        clause: "Annex A.4.5 (informative) (quasi-anechoic frequency response via time-gated impulse response)"
+        // #503: not "quasi-anechoic". A.4.5 gates "to prevent reflections
+        // in an acoustical setup from corrupting the frequency response";
+        // the default 200 ms gate does not do that in an ordinary room, and
+        // the instrument cannot know when the first reflection arrives
+        // (operator ruling 2026-09-30: quasi-anechoic only when the gate
+        // ends before it). The payload's gate length says what was kept.
+        clause: "Annex A.4.5 (informative) (frequency response via time-gated impulse response)"
             .into(),
         verified: false,
     }

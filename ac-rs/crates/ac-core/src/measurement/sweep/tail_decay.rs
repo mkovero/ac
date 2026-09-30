@@ -57,7 +57,9 @@ impl TailDecayCheck {
     /// actually measured. A failure names what to check: a longer `tail_s`
     /// only when the band was still falling at the end (#504).
     pub fn note(&self) -> String {
-        let head = "ISO 18233 \u{a7}6.3.2 tail-decay check";
+        // #668: a loudspeaker capture does not claim ISO 18233 (standards.md);
+        // the rule is borrowed from it, and says so (operator, 2026-09-30).
+        let head = "30 dB tail rule (after ISO 18233 \u{a7}6.3.2)";
         let (b, band, d, need) = (
             self.bpo,
             self.worst_band_hz,
@@ -228,7 +230,8 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
     }
     let worst = worst
         .ok_or_else(|| anyhow::anyhow!("no 1/3-octave band carried measurable energy to check"))?;
-    let passed = worst.1 >= REQUIRED_DB;
+    // §6.3.2: "decayed by more than 30 dB" — strictly more (#668).
+    let passed = worst.1 > REQUIRED_DB;
     let (worst_band_hz, worst_decay_db, trend) = worst_falling.unwrap_or(worst);
 
     Ok(TailDecayCheck {
