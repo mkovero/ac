@@ -432,6 +432,12 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         ("dmm_host", json!([]), STRING_OR_NULL),
         ("report_dir", json!(7), STRING_OR_NULL),
         ("snapshot_spool_dir", json!(false), STRING_OR_NULL),
+        // #514: applied now, so typed like the rest.
+        ("device", json!("2"), "must be an integer"),
+        ("device", json!(-1), "is outside 0\u{2013}4294967295"),
+        ("gpio_port", json!(5), STRING_OR_NULL),
+        ("range_start_hz", json!("20"), POSITIVE),
+        ("range_stop_hz", json!(0), POSITIVE),
     ];
     for (key, bad, domain) in cases {
         let mut update = json!({
@@ -453,6 +459,46 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         );
         assert_eq!(config_of(&c), before, "{what}: config must be unchanged");
     }
+}
+
+/// #514: `device`, `gpio_port` and the default sweep range, acknowledged and
+/// dropped before, are applied and read back; an inverted range is refused
+/// with the config unchanged, judged on the resulting pair.
+#[test]
+fn setup_applies_device_gpio_and_range() {
+    let d = Daemon::spawn_with_config(Some(seeded_cfg()));
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "setup", "update": {
+        "device": 3, "gpio_port": "/dev/ttyACM9",
+        "range_start_hz": 50.0, "range_stop_hz": 10_000.0,
+    }}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let cfg = config_of(&c);
+    assert_eq!(cfg["device"], json!(3), "{cfg}");
+    assert_eq!(cfg["gpio_port"], json!("/dev/ttyACM9"), "{cfg}");
+    assert_eq!(cfg["range_start_hz"], json!(50.0), "{cfg}");
+    assert_eq!(cfg["range_stop_hz"], json!(10_000.0), "{cfg}");
+
+    let before = config_of(&c);
+    for update in [
+        json!({"range_start_hz": 20_000.0}),
+        json!({"range_start_hz": 400.0, "range_stop_hz": 300.0}),
+        json!({"range_stop_hz": 50.0}),
+    ] {
+        let r = c.call(json!({"cmd": "setup", "update": update}));
+        assert_eq!(r["ok"], json!(false), "{update}: {r}");
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with("setup rejected \u{2014} range_start_hz")
+                && err.contains("config    unchanged"),
+            "{err}"
+        );
+        assert_eq!(config_of(&c), before, "{update}: config must be unchanged");
+    }
+
+    let r = c.call(json!({"cmd": "setup", "update": {"gpio_port": null}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(config_of(&c)["gpio_port"].is_null());
 }
 
 /// #593: valid `server_enabled` and `dmm_host` values still apply, and

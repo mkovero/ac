@@ -981,13 +981,32 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "temperature_c":     <number> | null,  // optional — finite; null = clear
     "server_idle_timeout_secs": <int> | null,  // optional — integer >= 0;
                                     //   0 or null = clear (no idle timeout)
-    "report_dir":        "<absolute path>" | null  // optional — null = do not persist
+    "report_dir":        "<absolute path>" | null,  // optional — null = do not persist
+    "device":            <int>,     // optional — non-negative (#514)
+    "gpio_port":         "<path>" | null,  // optional — GPIO serial port; takes
+                                    //   effect at the next daemon start (`--gpio`
+                                    //   overrides it); null = none (#514)
+    "range_start_hz":    <number>,  // optional — finite, > 0; `plot`/`sweep`'s
+    "range_stop_hz":     <number>   //   default band; start must stay below stop (#514)
   }
 }
 ```
 
-The four channel fields and the four scalar keys `dbu_ref_vrms`,
-`snapshot_ring_s`, `temperature_c` and `server_idle_timeout_secs` follow
+Every key a `setup` update carries is applied or refused — none is
+acknowledged and dropped (#514). `range_start_hz` and `range_stop_hz` are
+judged on the pair the update leaves, so an update that would put the start
+at or above the stop — one end or both — is refused with the config
+unchanged:
+
+```text
+setup rejected — range_start_hz 400 is not below range_stop_hz 300
+config    unchanged
+```
+
+The four channel fields and the scalar keys `dbu_ref_vrms`,
+`snapshot_ring_s`, `temperature_c`, `server_idle_timeout_secs`,
+`server_enabled`, `dmm_host`, `device`, `gpio_port`, `range_start_hz`,
+`range_stop_hz`, `report_dir` and `snapshot_spool_dir` (their types) follow
 **Error handling → Wire values**: all are checked before anything is
 applied, so a wrong type or a value outside the key's domain leaves the
 whole config unchanged (`setup rejected — …`, `config  unchanged`). A float

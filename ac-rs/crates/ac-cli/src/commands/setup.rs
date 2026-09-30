@@ -343,25 +343,12 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClie
         println!("  saved            {path}");
     }
 
+    // #514: the daemon has no live GPIO command; a stored port starts with
+    // the next daemon start (`ac-daemon --gpio` still overrides it).
     if let Some(gp) = gpio_port {
-        let port_val: serde_json::Value = match gp {
-            Some(p) => p.clone().into(),
-            None => serde_json::Value::Null,
-        };
-        let gpio_ack = client.send_cmd(
-            &serde_json::json!({"cmd": "gpio_setup", "port": port_val}),
-            Some(5000),
-        );
-        match gpio_ack {
-            Some(ref a) if a.get("ok").and_then(|v| v.as_bool()) == Some(true) => match gp {
-                Some(p) => println!("  GPIO: started on {p}"),
-                None => println!("  GPIO: stopped"),
-            },
-            Some(ref a) => {
-                let err = a.get("error").and_then(|e| e.as_str()).unwrap_or("error");
-                println!("  GPIO: {err}");
-            }
-            None => println!("  GPIO: server not responding"),
+        match gp {
+            Some(p) => println!("  GPIO             {p} \u{2014} starts at the next daemon start"),
+            None => println!("  GPIO             cleared \u{2014} stops at the next daemon start"),
         }
     }
     println!();

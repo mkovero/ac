@@ -53,10 +53,13 @@ fn main() {
         .find(|w| w[0] == "--data-port")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(5557);
+    // `--gpio` wins; otherwise the port `ac setup gpio …` stored (#514), so
+    // a stored port is not a setting that quietly does nothing.
     let gpio_port: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--gpio")
-        .map(|w| w[1].clone());
+        .map(|w| w[1].clone())
+        .or_else(|| ac_core::config::load(None).ok().and_then(|c| c.gpio_port));
 
     if let Some(path) = gpio_port {
         gpio::spawn(path, ctrl_port, data_port);
