@@ -783,13 +783,17 @@ fn removed_report_dir_is_flagged_by_setup_and_by_plot_ir() {
         "{setup}"
     );
 
-    let stdout = rig.run_ac(QUICK_IR);
+    let out = rig.ac_output_in(&rig.home, QUICK_IR);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let want = format!(
         "  report        not saved \u{2014} write failed in {}\n                No such file or directory (os error 2)",
         dir.display()
     );
     assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
     assert!(!dir.exists(), "plot ir recreated the removed directory");
+    // #590: the measurement ran, but the report a script expects is not
+    // there — the run exits 1.
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
 }
 
 /// #472: a directory that does not exist is refused when typed, in the

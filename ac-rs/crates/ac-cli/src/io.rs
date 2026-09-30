@@ -2,7 +2,10 @@ use std::path::Path;
 
 use ac_core::measurement::thd::NOISE_FLOOR_BASIS;
 
-pub fn save_csv(results: &[serde_json::Value], path: &Path) {
+/// Write the sweep CSV; `false` when it could not be written, which is
+/// already printed (#590 review: a script must see the missing file in
+/// `$?`).
+pub fn save_csv(results: &[serde_json::Value], path: &Path) -> bool {
     let fields = [
         "freq_hz",
         "drive_db",
@@ -25,11 +28,11 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("  error: cannot write CSV: {e}");
-            return;
+            return false;
         }
     };
 
-    wtr.write_record(headers).ok();
+    let mut written = wtr.write_record(headers);
     for r in results {
         let mut row = Vec::with_capacity(fields.len());
         for &f in &fields {
@@ -44,10 +47,17 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
                 _ => row.push(String::new()),
             }
         }
-        wtr.write_record(&row).ok();
+        written = written.and_then(|()| wtr.write_record(&row));
     }
-    wtr.flush().ok();
+    let flushed = written
+        .map_err(|e| e.to_string())
+        .and_then(|()| wtr.flush().map_err(|e| e.to_string()));
+    if let Err(e) = flushed {
+        eprintln!("  error: cannot write CSV {}: {e}", path.display());
+        return false;
+    }
     println!("  CSV  -> {}", path.display());
+    true
 }
 
 /// THD/THD+N percent expressed as dB relative to the total output.
