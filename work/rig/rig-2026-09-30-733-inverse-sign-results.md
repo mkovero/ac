@@ -53,3 +53,17 @@ The lost commit `d6c8fd85` recorded 100.0 → 0.6 dB p-p on the Babyface loopbac
 - **Acoustic room figures, octave bands 500 Hz–4 kHz:** T30 0.11–0.16 s, C50 +29 to +34 dB. On `main` the same bands read T30 0.12–0.15 s and C50 +28 to +33 dB. The octave-band room figures are nearly unchanged by the fix: the band filters remove a smooth tilt, so per-band decay did not depend on it.
 - **STI:** 0.99 at 1 m in this dead room is consistent with those figures.
 - **Reference leg:** `ref latency` measured 1711 samples on every acoustic run, with the reference gate now capped at 24 dB.
+
+## Last commit `6635d0a44b01` (tail trend measured inside the tail, after the Codex review and recheck)
+
+| run | pre-imp SNR dB | arrival | tail-decay line | STI | exit |
+|---|---|---|---|---|---|
+| loop-1 | 76.0 | +1711 | adequate, 25 Hz 32.6 dB | — | 0 |
+| loop-sti (1.6 s) | 76.0 | +1711 | adequate, 1585 Hz 75.1 dB | 1.00 | 0 |
+| acou-1 (0.5 s) | 75.6 | +2031 | FAILED: 79 Hz band 25.2 dB, still falling — longer tail_s | — | 0 |
+| acou-sti (1.6 s) | 74.3 | +2031 | 25 Hz band 5.5 dB, "tail too short to tell whether it was still falling" | 0.99 | 0 |
+
+The acoustic 79 Hz verdict is a real one, not a false alarm:
+- The rule needs a fall of more than 12 dB between the tail's second and fourth quarters (3σ at B ≈ 18 Hz, 0.125 s): a decay faster than ≈ 48 dB/s that is still going at 0.5 s. That reads as a low room mode ringing past the default tail.
+- With the 1.6 s tail of the STI run the band no longer fails; only 25 Hz is left, where the 1083 has little output.
+- On `main` the same capture printed FAILED on the 15849 Hz band with 0.4 dB of decay: the tilted kernel.
