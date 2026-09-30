@@ -15,7 +15,9 @@ delivered by the audio backend, before any gain, calibration, weighting,
 or DSP touches them. Every calibrated or derived quantity a live
 `transfer_stream` session ships on the wire (H1, calibrated spectra, SPL,
 and — format v3, #221 — the multi-time-window ladder columns the transfer
-view draws) is re-derivable offline from a `.acsnap`'s raw samples, using
+view draws) is re-derivable offline from a `.acsnap`'s raw samples — for
+every pair whose delay was estimated when the snapshot was taken (a v4
+`null` delay is refused, see `session.delay_samples`) — using
 the identical `ac-core` functions the daemon's live path calls — see
 `ac_core::visualize::pair_derivation`, `ac_core::visualize::mtw::replay`
 and `ac_core::snapshot::Snapshot::derive_pair`.
