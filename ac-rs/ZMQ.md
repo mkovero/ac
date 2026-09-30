@@ -4129,9 +4129,10 @@ ones its handler reads — plus `cmd`. A request with any other top-level
 key is refused with nothing run: no worker, no config write, no emission,
 and `quit` does not stop the daemon (#628). The check comes after the
 `invalid JSON`, `missing 'cmd' field` and `unknown command` refusals and
-before every other one. Keys nested inside a field are not checked: the
-`setup` `update` object's keys (#514) and the sub-keys of the fake-audio
-harness objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
+before every other one. The `setup` `update` object's keys are checked the
+same way against the keys `setup` reads (#743; `cmd` is not one of them).
+Other nested keys are not checked: the sub-keys of the fake-audio harness
+objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
 
 ```json
 { "ok": false,

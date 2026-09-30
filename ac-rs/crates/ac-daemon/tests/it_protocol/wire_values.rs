@@ -541,6 +541,9 @@ fn setup_refuses_an_unknown_update_key() {
         "an unknown key must not save: {r}"
     );
     assert_eq!(config_of(&c), before, "config must be unchanged");
+    // `cmd` is a request key, not an update key (Codex review).
+    let r = c.call(json!({"cmd": "setup", "update": {"cmd": "x"}}));
+    assert_eq!(r["unrecognised_fields"], json!(["cmd"]), "{r}");
 }
 
 /// #593: valid `server_enabled` and `dmm_host` values still apply, and

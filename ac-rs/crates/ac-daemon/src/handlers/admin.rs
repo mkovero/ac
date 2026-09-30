@@ -200,7 +200,18 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     };
     // #743: an unknown key — a typo, or a key from another build — is
     // refused before anything is validated or saved, never saved around.
-    let unknown = wire::unrecognised_fields(update, SETUP_UPDATE_KEYS);
+    // Its own key list, not `wire::unrecognised_fields`: that one exempts
+    // `cmd`, which is not an update key (Codex review).
+    let mut unknown: Vec<String> = update
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| !SETUP_UPDATE_KEYS.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    unknown.sort();
     if !unknown.is_empty() {
         return wire::unrecognised_refusal("setup", &unknown, SETUP_UPDATE_KEYS);
     }
