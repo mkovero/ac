@@ -62,12 +62,11 @@ enum ReferenceLeg {
 /// τ of the reference pair from its captured leg (#460). `xruns` is handled by
 /// the caller before this runs, so the SNR gate is never skipped here.
 ///
-/// Window-edge and tail gates are `calibrate`'s. The **SNR gate is not**: this
-/// leg carries whatever sweep the operator asked `plot ir` for, and that
-/// statistic is a property of the sweep rather than of the capture's noise, so
-/// it is judged against its own stimulus's noiseless floor (#471). The fixed
-/// 24 dB constant refused a mathematically perfect loopback at the command's
-/// own default band.
+/// Window-edge and tail gates are `calibrate`'s. The SNR gate is its own
+/// stimulus's noiseless floor less a margin (#471), capped at `calibrate`'s
+/// 24 dB constant (#733): the fixed constant once refused a perfect loopback at
+/// the command's own default band, but that floor was the reversed inverse
+/// filter's residue; corrected, every characterised floor sits above the cap.
 fn reference_latency_from_leg(
     reference: &[f32],
     params: &SweepParams,

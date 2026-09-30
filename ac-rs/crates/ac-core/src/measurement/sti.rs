@@ -840,6 +840,39 @@ mod tests {
         assert!(sti > 0.95, "STI {sti}");
     }
 
+    /// #733: a perfect loopback through the real Farina chain — no noise
+    /// at all, so every band falls from its peak into floating-point residue
+    /// — reads near 1, unrefused. With the tilted kernel it had a decaying
+    /// artefact to fit; corrected, `truncation`'s late stretch is flat and the
+    /// peak-to-background line has to stand in.
+    #[test]
+    fn a_noiseless_loopback_through_the_sweep_chain_reads_near_one() {
+        use crate::measurement::sweep::{deconvolve_full, inverse_sweep, log_sweep, SweepParams};
+        // The daemon test's request (it_protocol `plot_ir`): 60 Hz–16 kHz,
+        // 2 s at −20 dBFS, the STI's 1.6 s tail, and the span `plot_ir`
+        // hands the STI — 10 ms before the peak to the end of the tail.
+        let p = SweepParams {
+            f1_hz: 60.0,
+            f2_hz: 16_000.0,
+            duration_s: 2.0,
+            sample_rate: 48_000,
+        };
+        let tail = (MIN_IR_S * 48_000.0) as usize;
+        let mut y: Vec<f32> = log_sweep(&p).unwrap().iter().map(|v| v * 0.1).collect();
+        y.extend(std::iter::repeat_n(0.0f32, tail));
+        let full: Vec<f64> = deconvolve_full(&y, &inverse_sweep(&p).unwrap())
+            .iter()
+            .map(|v| v / 0.1)
+            .collect();
+        let lc = p.n_samples() - 1;
+        let ir = &full[lc - 480..(lc + tail).min(full.len())];
+        let got = sti_from_ir(ir, 48_000, 60.0, 16_000.0);
+        let sti = got
+            .sti
+            .unwrap_or_else(|| panic!("refused: {:?}", got.refused));
+        assert!(sti > 0.95, "STI {sti}");
+    }
+
     /// A direct sound over a 3.5 s tail with energy: the early decay reads
     /// the tail, and a 1.7 s capture is refused by §6.2 b). A weaker tail
     /// hides under the direct sound's first 10 dB — the known limit; the
