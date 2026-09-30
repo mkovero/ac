@@ -949,7 +949,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     .collect(),
                             );
                             frame.fundamental_dbfs = Some(r.fundamental_dbfs);
-                            frame.thd_pct = Some(r.thd_pct);
+                            // #627: no harmonic below Nyquist is not 0 %.
+                            frame.thd_pct = (!r.harmonic_levels.is_empty()).then_some(r.thd_pct);
                             frame.thdn_pct = Some(r.thdn_pct);
                             frame.in_dbu = Some(in_dbu);
                             frame.clipping = Some(r.clipping);

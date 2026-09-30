@@ -145,7 +145,10 @@ pub fn analyze(
         harmonic_levels.push((hf, amp));
     }
 
-    let harmonic_power = h_amps.iter().map(|a| a * a).sum::<f64>();
+    // Folded from +0.0: `Iterator::sum` of an empty f64 iterator is −0.0,
+    // which a point with every harmonic above Nyquist printed as
+    // "-0.0000 %" (#627).
+    let harmonic_power = h_amps.iter().fold(0.0_f64, |acc, a| acc + a * a);
 
     // THD+N: notch the fundamental and sum |spec|² outside. Direct sum
     // beats `total − notch` when nearly all energy sits in the notch.
@@ -667,6 +670,17 @@ mod tests {
                 r.thd_pct
             );
         }
+    }
+
+    /// #627: a fundamental whose every harmonic is above Nyquist reports no
+    /// harmonics and a THD of +0, never −0 (which printed as "-0.0000").
+    #[test]
+    fn no_harmonic_below_nyquist_gives_positive_zero_thd() {
+        let samples = pure_sine(20_000.0, 0.5, SR, SR as usize);
+        let r = analyze(&samples, SR, 20_000.0, 10).unwrap();
+        assert!(r.harmonic_levels.is_empty());
+        assert_eq!(r.thd_pct, 0.0);
+        assert!(r.thd_pct.is_sign_positive(), "THD {}", r.thd_pct);
     }
 
     #[test]

@@ -137,7 +137,7 @@ pub const PRE_IMPULSE_SNR_CHECKS_SWEEP: &str = "sweep band start, length, window
 pub const PRE_IMPULSE_SNR_CHECKS_CHAIN: &str = "drive level, input gain, distance, room noise";
 
 /// A sweep parameter [`PRE_IMPULSE_SNR_MIN_DB`] was scored for (#550), in
-/// the order `ac plot ir`'s `IR sweep` block prints them.
+/// the order `ac plot ir`'s stimulus block prints them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoredSweepParam {
     /// f1 and f2 against `IR_DEFAULT_F1_HZ` / `IR_DEFAULT_F2_HZ`.
@@ -3401,7 +3401,7 @@ mod tests {
     }
 
     /// #550 (QA on PR #578): the scope line names only the parameters that
-    /// differ, in the `IR sweep` block's order.
+    /// differ, in the stimulus block's order.
     #[test]
     fn scope_names_only_the_parameters_that_differ_in_print_order() {
         let sr = 48_000;
