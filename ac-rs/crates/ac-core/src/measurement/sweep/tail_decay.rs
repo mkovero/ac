@@ -24,15 +24,30 @@ pub struct TailDecayCheck {
     pub required_db: f64,
     /// Every band decayed the required 30 dB.
     pub passed: bool,
-    /// Whether the named band was still falling over the capture's last
-    /// stretch (#504): the one case a longer `tail_s` helps, and the only
-    /// one reported as FAILED. A band that levelled off short of 30 dB
-    /// reached its floor inside the capture — the path carries too little
-    /// in that band at this level (the rig's 1083 at 25 Hz, −50 dBFS) — and
-    /// more tail would only record more floor.
-    pub still_falling: bool,
+    /// How the named band ended (#504): only [`TailTrend::Falling`] is a
+    /// tail-length failure and reported as FAILED.
+    pub trend: TailTrend,
     /// Count of 1/3-octave bands in `[f1_hz, f2_hz]` this check considered.
     pub bands_total: usize,
+}
+
+/// A band's trend at the end of the capture: its level over the tail's
+/// second quarter against its fourth (#504, Codex review) — measured inside
+/// the tail, so no pre-peak stretch (where harmonic IRs sit) is read as a
+/// floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailTrend {
+    /// Still falling at the end: the fall between the quarters exceeds the
+    /// scatter of the two estimates. A longer `tail_s` helps.
+    Falling,
+    /// Levelled off: no fall beyond the scatter, and the scatter small
+    /// enough to say so. The band reached its floor inside the capture —
+    /// too little signal in it at this level (the rig's 1083 at 25 Hz,
+    /// −50 dBFS) — and more tail would only record more floor.
+    Levelled,
+    /// Too few cycles of the band in the tail to tell (a 1/3 octave at
+    /// 25 Hz is 5.8 Hz wide; over 0.125 s its level scatters ±5 dB).
+    Undetermined,
 }
 
 impl TailDecayCheck {
@@ -55,18 +70,25 @@ impl TailDecayCheck {
                  peak by the end of the captured tail (need \u{2265}{need:.0} dB) \u{2014} \
                  capture adequate."
             )
-        } else if self.still_falling {
-            format!(
-                "{head} FAILED: 1/{b}-oct {band:.0} Hz band only decayed {d:.1} dB from its \
-                 peak and was still falling at the end of the capture (need \u{2265}{need:.0} \
-                 dB) \u{2014} re-run with a longer tail_s."
-            )
         } else {
-            format!(
-                "{head}: tail long enough; 1/{b}-oct {band:.0} Hz band rises only {d:.1} dB \
-                 above its floor (need \u{2265}{need:.0} dB for band-resolved work) \u{2014} \
-                 check the drive level and the background noise in that band."
-            )
+            match self.trend {
+                TailTrend::Falling => format!(
+                    "{head} FAILED: 1/{b}-oct {band:.0} Hz band only decayed {d:.1} dB from its \
+                     peak and was still falling at the end of the capture (need \u{2265}{need:.0} \
+                     dB) \u{2014} re-run with a longer tail_s."
+                ),
+                TailTrend::Levelled => format!(
+                    "{head}: tail long enough; 1/{b}-oct {band:.0} Hz band rises only {d:.1} dB \
+                     above its floor (need \u{2265}{need:.0} dB for band-resolved work) \u{2014} \
+                     check the drive level and the background noise in that band."
+                ),
+                TailTrend::Undetermined => format!(
+                    "{head}: 1/{b}-oct {band:.0} Hz band decayed only {d:.1} dB from its peak \
+                     (need \u{2265}{need:.0} dB), and the tail is too short to tell whether it \
+                     was still falling \u{2014} a longer tail_s would tell; if it levels off, \
+                     check the drive level and the background noise in that band."
+                ),
+            }
         }
     }
 }
@@ -80,15 +102,14 @@ const BLOCK_S: f64 = 0.005;
 /// the quiet pre-impulse region rather than a step at the peak.
 const PRE_S: f64 = 0.05;
 
-/// Longest stretch before the linear-IR peak read as each band's floor, s.
-/// Bounded further to half the gap to the 2nd-harmonic IR (`L·ln 2` before
-/// the peak), so no distortion product sits in it.
-const FLOOR_MAX_S: f64 = 0.25;
+/// Least fall, dB, between the tail's third and fourth quarters that
+/// counts as falling, whatever the scatter — below it a fall is not worth a
+/// longer capture.
+const FALLING_MIN_DB: f64 = 1.0;
 
-/// Least margin, dB, by which the end of the capture must sit above the
-/// band's floor to count as still falling — before the level-estimate
-/// scatter below is considered.
-const FALLING_MIN_DB: f64 = 6.0;
+/// Largest 2σ scatter, dB, of that fall at which "no fall" may be read as
+/// levelled off; above it the band is [`TailTrend::Undetermined`].
+const LEVELLED_MAX_2SIGMA_DB: f64 = 4.0;
 
 /// Standard deviation, dB, of a mean-square level estimate of Gaussian
 /// noise over `t_s` in a band `b_hz` wide: `10·log10(e)/√(B·T)`. A 1/3-octave
@@ -110,11 +131,10 @@ fn level_sigma_db(b_hz: f64, t_s: f64) -> f64 {
 /// fractional-octave weighted response (§6.3.2, the filter applied to the
 /// broadband IR from before its peak), its envelope in [`BLOCK_S`] blocks,
 /// and the decay from the envelope's peak to the mean level of the capture's
-/// last eighth. A band short of 30 dB is either still falling — the end of
-/// the capture sits clearly above the band's own floor, read in the clean
-/// stretch before the peak — or has levelled off at that floor. Only the
-/// first is a tail-length failure; the second is too little signal in the
-/// band for its noise, which a longer tail cannot change (#504).
+/// last eighth. A band short of 30 dB is judged by its own last half
+/// ([`TailTrend`]): still falling (a tail-length failure), levelled off (too
+/// little signal in the band for its noise, which a longer tail cannot
+/// change), or too few cycles in it to tell (#504).
 ///
 /// #504: the rule this replaced compared mean band levels over a window at
 /// the peak and one at the end, and told every band short of 30 dB to re-run
@@ -146,31 +166,23 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
     let f_max = p.f2_hz.min(fs * 0.45 - 1.0);
     let fb = Filterbank::new(p.sample_rate, BPO, f_min, f_max)?;
     let centres = fb.centres_hz();
-    let warm = fb.settle_samples().into_iter().max().unwrap_or(0);
-
-    // Layout before the peak, latest first: `pre` of run-in, then the
-    // floor stretch, then `warm` for the filters to settle into it.
     let pre = ((PRE_S * fs).round() as usize).min(linear_centre);
-    let floor_s = (0.5 * p.harmonic_time_offset_s(2)).min(FLOOR_MAX_S);
-    let floor_len = ((floor_s * fs).round() as usize).min(linear_centre - pre);
-    let start = (linear_centre - pre - floor_len).saturating_sub(warm);
-    let segment = &full[start..linear_centre + tail_len];
-    let floor_at = linear_centre - pre - floor_len - start;
-    let peak_from = linear_centre - pre - start;
+    let segment = &full[linear_centre - pre..linear_centre + tail_len];
+    let quarter = tail_len / 4;
     let mean_db = |y: &[f64]| {
         let ms = y.iter().map(|v| v * v).sum::<f64>() / y.len() as f64;
         10.0 * ms.log10()
     };
 
-    // (centre_hz, decay_db, still_falling): the worst band overall, and the
-    // worst of those cut off while still falling — the actionable one.
-    let mut worst: Option<(f64, f64, bool)> = None;
-    let mut worst_falling: Option<(f64, f64, bool)> = None;
+    // (centre_hz, decay_db, trend): the worst band overall, and the worst
+    // of those cut off while still falling — the actionable one.
+    let mut worst: Option<(f64, f64, TailTrend)> = None;
+    let mut worst_falling: Option<(f64, f64, TailTrend)> = None;
     for (band, &c) in centres.iter().enumerate() {
         let y = fb
             .filter_band(band, segment)
             .expect("band index from the filterbank's own centres");
-        let peak = y[peak_from..]
+        let peak = y
             .chunks(block)
             .map(mean_db)
             .fold(f64::NEG_INFINITY, f64::max);
@@ -183,34 +195,35 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
         } else {
             f64::INFINITY
         };
-        // Still falling: the end of the capture sits clearly above the
-        // band's own floor before the impulse — by more than the scatter
-        // of the two level estimates. With no floor stretch (a sweep too
-        // short for one) a band short of 30 dB counts as still falling:
-        // the tail advice is the one that cannot be wrong for lack of data.
-        let still_falling = if floor_len >= block {
-            let floor = mean_db(&y[floor_at..floor_at + floor_len]);
-            let b_hz = c * (2f64.powf(1.0 / 6.0) - 2f64.powf(-1.0 / 6.0));
-            let sigma = level_sigma_db(b_hz, last as f64 / fs)
-                .hypot(level_sigma_db(b_hz, floor_len as f64 / fs));
-            end - floor > FALLING_MIN_DB.max(2.0 * sigma)
+        let n = y.len();
+        // Second quarter of the tail against the fourth: a real decay falls
+        // twice as far over that gap as between adjacent quarters, for the
+        // same scatter. 3σ, because 29 bands are judged at once and a 2σ
+        // rule reads a steady floor as falling in one of them by chance.
+        let fall = mean_db(&y[n - 3 * quarter..n - 2 * quarter]) - mean_db(&y[n - quarter..]);
+        let b_hz = c * (2f64.powf(1.0 / 6.0) - 2f64.powf(-1.0 / 6.0));
+        let sigma = std::f64::consts::SQRT_2 * level_sigma_db(b_hz, quarter as f64 / fs);
+        let trend = if fall > FALLING_MIN_DB.max(3.0 * sigma) {
+            TailTrend::Falling
+        } else if 2.0 * sigma <= LEVELLED_MAX_2SIGMA_DB {
+            TailTrend::Levelled
         } else {
-            true
+            TailTrend::Undetermined
         };
         if worst.map(|(_, d, _)| decay < d).unwrap_or(true) {
-            worst = Some((c, decay, still_falling));
+            worst = Some((c, decay, trend));
         }
-        if still_falling
+        if trend == TailTrend::Falling
             && decay < REQUIRED_DB
             && worst_falling.map(|(_, d, _)| decay < d).unwrap_or(true)
         {
-            worst_falling = Some((c, decay, still_falling));
+            worst_falling = Some((c, decay, trend));
         }
     }
     let worst = worst
         .ok_or_else(|| anyhow::anyhow!("no 1/3-octave band carried measurable energy to check"))?;
     let passed = worst.1 >= REQUIRED_DB;
-    let (worst_band_hz, worst_decay_db, still_falling) = worst_falling.unwrap_or(worst);
+    let (worst_band_hz, worst_decay_db, trend) = worst_falling.unwrap_or(worst);
 
     Ok(TailDecayCheck {
         bpo: BPO as u32,
@@ -218,7 +231,7 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
         worst_decay_db,
         required_db: REQUIRED_DB,
         passed,
-        still_falling,
+        trend,
         bands_total: centres.len(),
     })
 }
@@ -303,7 +316,10 @@ mod tests {
         let p = defaults(SR);
         let full = synthetic_full(&p, 0.5, 3.0, 0.0);
         let check = check_tail_decay(&full, &p, 0.5).unwrap();
-        assert!(!check.passed && check.still_falling, "{check:?}");
+        assert!(
+            !check.passed && check.trend == TailTrend::Falling,
+            "{check:?}"
+        );
         let note = check.note();
         assert!(
             note.contains("FAILED") && note.contains("longer tail_s"),
@@ -314,15 +330,22 @@ mod tests {
         assert!(check_tail_decay(&full, &p, 2.5).unwrap().passed);
     }
 
-    /// A path whose floor sits within 30 dB of its peak: the tail is long
-    /// enough (the band levelled off), so no FAILED and no tail advice —
-    /// the note names level and noise instead (#504).
+    /// A path whose floor sits within 30 dB of its peak, in bands with
+    /// enough cycles in a 0.5 s tail to judge (1 kHz and up): levelled off,
+    /// so no FAILED and no tail advice — the note names level and noise
+    /// (#504).
     #[test]
     fn a_floor_limited_band_is_not_a_tail_failure() {
-        let p = defaults(SR);
-        let full = synthetic_full(&p, 0.5, 0.05, 0.003);
+        let p = SweepParams {
+            f1_hz: 1_000.0,
+            ..defaults(SR)
+        };
+        let full = synthetic_full(&p, 0.5, 0.05, 0.01);
         let check = check_tail_decay(&full, &p, 0.5).unwrap();
-        assert!(!check.passed && !check.still_falling, "{check:?}");
+        assert!(
+            !check.passed && check.trend == TailTrend::Levelled,
+            "{check:?}"
+        );
         let note = check.note();
         assert!(
             !note.contains("FAILED") && !note.contains("tail_s"),
@@ -335,7 +358,7 @@ mod tests {
         // Against the rejected advice: the rule this replaced said "re-run
         // with a longer tail_s" for every band short of 30 dB. Here a tail
         // four times as long still falls short, so that advice was useless.
-        let longer = synthetic_full(&p, 2.0, 0.05, 0.003);
+        let longer = synthetic_full(&p, 2.0, 0.05, 0.01);
         let again = check_tail_decay(&longer, &p, 2.0).unwrap();
         assert!(
             !again.passed && again.worst_decay_db < check.worst_decay_db + 3.0,
@@ -343,6 +366,52 @@ mod tests {
             again.worst_decay_db,
             check.worst_decay_db
         );
+    }
+
+    /// The same floor across the default band: the low bands have too few
+    /// cycles in 0.5 s to judge a trend, so the verdict is never a FAILED —
+    /// it says the tail is too short to tell, and names both remedies.
+    /// Against the pre-peak floor this replaced (Codex review): a steady
+    /// floor is never read as still falling.
+    #[test]
+    fn a_floor_the_low_bands_cannot_resolve_is_undetermined_not_failed() {
+        let p = defaults(SR);
+        let full = synthetic_full(&p, 0.5, 0.05, 0.003);
+        let check = check_tail_decay(&full, &p, 0.5).unwrap();
+        assert!(
+            !check.passed && check.trend != TailTrend::Falling,
+            "{check:?}"
+        );
+        let note = check.note();
+        assert!(!note.contains("FAILED"), "{note}");
+        if check.trend == TailTrend::Undetermined {
+            assert!(
+                note.contains("too short to tell") && note.contains("drive level"),
+                "{note}"
+            );
+        }
+    }
+
+    /// Codex review of #504: a steady tone that outlasts the stimulus sits
+    /// above any pre-peak floor, and the floor-referenced rule read it as
+    /// still falling. Its trend is flat, so it is never a tail failure.
+    #[test]
+    fn a_steady_tone_through_the_tail_is_not_still_falling() {
+        let p = SweepParams {
+            f1_hz: 500.0,
+            ..defaults(SR)
+        };
+        let fs = SR as f64;
+        let mut full = synthetic_full(&p, 0.5, 0.05, 0.0);
+        for (k, v) in full.iter_mut().enumerate() {
+            *v += 0.03 * (2.0 * std::f64::consts::PI * 1000.0 * k as f64 / fs).sin();
+        }
+        let check = check_tail_decay(&full, &p, 0.5).unwrap();
+        assert!(
+            !check.passed && check.trend != TailTrend::Falling,
+            "{check:?}"
+        );
+        assert!(!check.note().contains("FAILED"), "{}", check.note());
     }
 
     /// Both at once: a floor-limited band must not hide a band the capture
@@ -361,10 +430,10 @@ mod tests {
                 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin() * (-6.9078 * t / 4.0).exp();
         }
         let check = check_tail_decay(&full, &p, 0.5).unwrap();
-        assert!(check.still_falling, "{check:?}");
+        assert_eq!(check.trend, TailTrend::Falling, "{check:?}");
         assert!(
-            (check.worst_band_hz - 1000.0).abs() < 60.0,
-            "named {:.0} Hz, not the ringing 1 kHz band",
+            (700.0..1_700.0).contains(&check.worst_band_hz),
+            "named {:.0} Hz, not a band the 1 kHz ring reaches",
             check.worst_band_hz
         );
         assert!(check.note().contains("FAILED"));

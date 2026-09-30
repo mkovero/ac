@@ -1,16 +1,13 @@
 //! The noiseless pre-impulse floor of a deconvolved sweep (#471).
 //!
-//! [`super::pre_impulse_snr_db`] is named like a signal-to-noise ratio, and on
-//! an acoustic IR it behaves like one. On a short electrical loopback leg it
-//! does not: the pre-peak region is dominated by the deconvolution's own
-//! residue, whose level relative to the peak is fixed by the *stimulus*, not by
-//! how quiet the capture was. Measured on pupu 2026-09-16 and reproduced
-//! synthetically within 0.5 dB: adding white noise from −120 through −20 dBFS
-//! moves the figure by 0.0 dB, and a route attenuated by 40 dB reads the same
-//! as a good cable. What does move it is bandwidth — with the corrected
-//! inverse (#733) 20–20000 Hz floors at ~65 dB and 500–4000 Hz at ~50 dB, the
-//! narrower band now lower (its band edges ring) — while sweep duration is
-//! worth ~0.1 dB.
+//! [`super::pre_impulse_snr_db`] is named like a signal-to-noise ratio. With
+//! the corrected inverse (#733) it behaves like one: noise far under the floor
+//! leaves it, noise near it lowers it. What this module computes is the
+//! ceiling a perfect loopback reaches for a given sweep — the deconvolution's
+//! own residue, set by the stimulus: 20–20000 Hz floors at ~65 dB, 500–4000 Hz
+//! at ~50 dB (its band edges ring), sweep duration worth ~0.1 dB. Before #733,
+//! measured on pupu 2026-09-16, that residue sat at 17–35 dB and hid noise
+//! from −120 through −20 dBFS entirely.
 //!
 //! #733: every figure in this module's history before 2026-09-30 (17 dB at
 //! the full band, 35 dB at 500–4000 Hz, pupu's 12.8 dB) was the residue of an
