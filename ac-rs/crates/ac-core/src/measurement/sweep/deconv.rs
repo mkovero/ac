@@ -37,9 +37,10 @@ pub fn log_sweep(p: &SweepParams) -> Result<Vec<f32>> {
 }
 
 /// Generate Farina's inverse filter `x_inv(t)`: the time-reversed sweep,
-/// amplitude-modulated by `exp(-(T-t)/L)` so that the spectrum of
-/// `x(t) * x_inv(t)` is flat and the convolution approximates a unit
-/// impulse at `t = T` regardless of `log(f2/f1)`.
+/// amplitude-modulated by `exp(+(T-t)/L)` — equivalently `exp(-t/L)` in the
+/// reversed filter's own time index, a 6 dB/octave decay — so that the
+/// spectrum of `x(t) * x_inv(t)` is flat and the convolution approximates a
+/// unit impulse at `t = T` regardless of `log(f2/f1)`.
 ///
 /// The returned buffer is normalised so that for a unity-amplitude sweep
 /// `log_sweep(p)` the peak of `deconvolve_full(log_sweep(p), x_inv)` is
@@ -61,7 +62,24 @@ pub fn inverse_sweep(p: &SweepParams) -> Result<Vec<f32>> {
         .map(|i| {
             let j = n - 1 - i;
             let t_fwd = j as f64 / fs;
-            x[j] * (-a * t_fwd).exp()
+            // In the *reversed* filter's own time index the amplitude must
+            // fall 6 dB/octave: the reversed sweep descends in frequency,
+            // so an envelope proportional to the instantaneous frequency
+            // cancels the ESS's f^-1/2 magnitude on both sides:
+            //
+            //   |X(f)| ∝ f^-1/2   (ESS, dt/df = L/f)
+            //   w ∝ e^(+t_fwd/L) ∝ f
+            //   |X| · w · |X| ∝ f^-1/2 · f · f^-1/2 = const
+            //
+            // #504: this read e^(-t_fwd/L) until 2026-09-30, tilting every
+            // `plot ir` response by -12 dB/octave (≈ 110 dB across
+            // 20 Hz–20 kHz) and smearing its impulse into a slow,
+            // low-frequency tail, while the peak normalisation below kept
+            // the identity peak at exactly 1 — so every peak-based test
+            // passed. The fix was first written on 2026-08-28 (d6c8fd85,
+            // rig-verified: loopback 100 dB p-p → 0.6 dB p-p) and never
+            // merged. `identity_deconvolution_is_spectrally_flat` pins it.
+            x[j] * (a * t_fwd).exp()
         })
         .collect();
 
@@ -157,6 +175,75 @@ fn fft_linear_convolve(a: &[f64], b: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::measurement::sweep::testkit::*;
+
+    /// The deconvolution kernel `x ⊛ x_inv` must be spectrally *flat*, not
+    /// merely unit-peaked (#504; first written on the never-merged
+    /// d6c8fd85). The peak normalisation in `inverse_sweep` holds the
+    /// identity peak at 1 whichever way the envelope leans, so a sign error
+    /// passes every peak check while tilting the response 12 dB/octave.
+    /// Computes the rejected (wrong-sign) kernel inline and requires the
+    /// shipped one to be far flatter, so a gentler version of the same
+    /// mistake cannot satisfy it.
+    #[test]
+    fn identity_deconvolution_is_spectrally_flat() {
+        use rustfft::{num_complex::Complex, FftPlanner};
+
+        let p = SweepParams {
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 0.5,
+            sample_rate: 96_000,
+        };
+        let n = p.n_samples();
+        let fs = p.sample_rate as f64;
+        let a = 1.0 / p.time_constant();
+        let x = log_sweep(&p).unwrap();
+        let x64 = log_sweep_f64(&p).unwrap();
+
+        // Ripple, dB peak-to-peak, of |FFT(x ⊛ x_inv)| well inside the
+        // swept band, for a given inverse.
+        let ripple_db = |inv: &[f32]| -> f64 {
+            let full = deconvolve_full(&x, inv);
+            let fft_len = full.len().next_power_of_two();
+            let mut buf: Vec<Complex<f64>> = full
+                .iter()
+                .map(|&v| Complex::new(v, 0.0))
+                .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
+                .take(fft_len)
+                .collect();
+            FftPlanner::<f64>::new()
+                .plan_fft_forward(fft_len)
+                .process(&mut buf);
+            let bin_hz = fs / fft_len as f64;
+            let lo = (2.0 * p.f1_hz / bin_hz).ceil() as usize;
+            let hi = (0.5 * p.f2_hz / bin_hz).floor() as usize;
+            let mags: Vec<f64> = (lo..=hi)
+                .map(|k| 20.0 * buf[k].norm().max(1e-300).log10())
+                .collect();
+            let max = mags.iter().cloned().fold(f64::MIN, f64::max);
+            let min = mags.iter().cloned().fold(f64::MAX, f64::min);
+            max - min
+        };
+
+        let shipped = ripple_db(&inverse_sweep(&p).unwrap());
+        let rejected_inv: Vec<f32> = (0..n)
+            .map(|i| {
+                let j = n - 1 - i;
+                (x64[j] * (-a * j as f64 / fs).exp()) as f32
+            })
+            .collect();
+        let rejected = ripple_db(&rejected_inv);
+
+        assert!(shipped < 6.0, "identity deconvolution {shipped:.1} dB p-p");
+        assert!(
+            rejected > 40.0,
+            "the wrong sign should be grossly tilted: {rejected:.1} dB p-p"
+        );
+        assert!(
+            rejected > shipped + 30.0,
+            "shipped {shipped:.1} dB p-p vs rejected {rejected:.1} dB p-p"
+        );
+    }
 
     #[test]
     fn sweep_starts_at_zero_phase() {
