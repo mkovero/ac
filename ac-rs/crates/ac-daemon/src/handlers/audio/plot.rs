@@ -1159,8 +1159,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         },
     };
 
-    // #460: operator-entered source-to-receiver distance for the onset
-    // search's causal bound. Checked before port resolution, like the other
+    // #460: operator-entered source-to-receiver distance, which the flight
+    // time is checked against (#537). Checked before port resolution, like the other
     // budgets, so an unusable value is refused with no audio.
     let distance_m = match cmd.get("distance_m") {
         None | Some(Value::Null) => None,
@@ -1610,8 +1610,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         };
         // #460: τ of the reference pair, read from the reference leg of this
         // same capture with `calibrate`'s single-reading gates (SNR, window
-        // edge, xrun). It feeds the onset search's causal bound and, with
-        // `inter_pair_offset`, the flight time (#544).
+        // edge, xrun). With `inter_pair_offset` it gives the flight time's
+        // latency (#544).
         let reference_latency = Some(match reference_leg {
             ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
             ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {

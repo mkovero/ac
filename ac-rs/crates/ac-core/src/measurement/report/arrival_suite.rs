@@ -31,9 +31,9 @@ use super::fixtures::*;
 use super::ir_stats::{band_limited_arrival_under, ArrivalRule};
 use super::*;
 use crate::measurement::sweep::{
-    deconvolve_full, extract_irs, inverse_sweep, ir_peak, log_sweep, two_way_bounded,
-    zero_phase_high_pass, SweepParams, ARRIVAL_HIGH_PASS_CORNER_HZ, IR_DEFAULT_DURATION_S,
-    IR_DEFAULT_F1_HZ, IR_DEFAULT_F2_HZ, TWO_WAY_RIG_LIKE, TWO_WAY_T0,
+    deconvolve_full, extract_irs, inverse_sweep, ir_peak, log_sweep, two_way, zero_phase_high_pass,
+    SweepParams, ARRIVAL_HIGH_PASS_CORNER_HZ, IR_DEFAULT_DURATION_S, IR_DEFAULT_F1_HZ,
+    IR_DEFAULT_F2_HZ, TWO_WAY_RIG_LIKE, TWO_WAY_T0,
 };
 
 const SR: u32 = 96_000;
@@ -222,7 +222,7 @@ fn pure_delay(p: &SweepParams) -> Vec<f64> {
 /// #346's two-way DUT at its rig-like group delay, first path at its HF
 /// component.
 fn speaker(p: &SweepParams) -> Vec<f64> {
-    let r = two_way_bounded(p, &TWO_WAY_RIG_LIKE);
+    let r = two_way(p, &TWO_WAY_RIG_LIKE);
     embed(&r.ir, (r.centre as i64 + TWO_WAY_T0) as usize)
 }
 

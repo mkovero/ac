@@ -1418,7 +1418,6 @@ a configured reference.
   "window_len":   <int>,     // requested IR gate length in samples;
                              // default round(0.4 s × engine sample rate)
   "distance_m":   <float>    // optional, metres source to receiver; feeds the
-                             // onset search's causal bound (#460) and the
                              // flight time's distance check (#537)
 }
 ```
@@ -1519,7 +1518,7 @@ the same accepted level, which is why the reply names it. A reference that is
 configured but does not resolve (out-of-range channel, or a sticky port with no
 channel to gate it) returns `ok: false` before any audio, rather than running
 single-ended. No reference configured is a legitimate state: the report records
-`reference_latency: unavailable` and no causal bound is built.
+`reference_latency: unavailable`, and the flight time is withheld.
 
 **Arrival check (#359, schema v9).** `report.reference_stored_latency` is the
 τ `calibrate` has on file for the *reference* pair, looked up by the same
@@ -1604,8 +1603,7 @@ high-passed sample more than one corner period before the arrival is within
 20 dB of it); `BroadbandEarlier` (the broadband maximum is more
 than 2.0 ms earlier); `BroadbandLater` (the earliest broadband
 peak within 6 dB of the maximum, at or after `arrival − 2.0 ms`, is more
-than 2.0 ms later — marked); `Agrees`. The onset diagnostic
-searches before the arrival, not the broadband peak.
+than 2.0 ms later — marked); `Agrees`.
 
 `IrStats::distance_check` scores `arrival − (reference latency + offset)`
 (#544; `NoLatency` when the basis is withheld) against
@@ -1759,9 +1757,9 @@ move with capture noise — so a fixed threshold refused a correct loopback at
 a *different* port pair from `interface_latency`: a reader must never subtract
 it from the arrival as though it were the capture pair's own τ — τ is per
 channel pair; only together with `inter_pair_offset` does it give the
-capture pair's latency. It has two consumers: the flight time (from v12,
-#544, above) and the onset search's causal bound (`IrStats::causal_bound`,
-which adds a `measured` offset from v12). Both need a τ from the same client
+capture pair's latency. Its consumer is the flight time (from v12, #544,
+above); the onset search's causal bound that also read it was removed by
+#734. It needs a τ from the same client
 lifetime and stream epoch as the IR, because a stored τ re-picks by a
 multiple of the FireWire SYT interval on every device enumeration (#461), and
 was observed to re-pick within one enumeration and one daemon lifetime
@@ -1840,11 +1838,10 @@ than `plot_ir`.
 
 `report.position.distance_m` is the request's `distance_m`, recorded when
 supplied. It is an **input**, converted to seconds inside `ir_stats`, never a
-read-out: no ms → m figure returns (#391). It feeds two things. The causal
-bound limits only the onset diagnostic's search, which since #537 runs before
-the band-limited arrival; it never moves the arrival itself. And since #537
-it bounds the flight time from below (`IrStats::distance_check`, above):
-earlier than `d/c − ε` withholds the flight time. There is no upper bound
+read-out: no ms → m figure returns (#391). Since #537 it bounds the flight
+time from below (`IrStats::distance_check`, above): earlier than `d/c − ε`
+withholds the flight time. (The onset search's causal bound it also fed was
+removed by #734.) There is no upper bound
 (#552): the excess over `d/c` is reported, not judged. From v7,
 `position` may be present carrying only `distance_m`.
 

@@ -181,13 +181,11 @@ fn metre_figure_guard_catches_a_derived_distance_and_admits_the_typed_one() {
     );
     assert!(metre_figures("  distance      not given").is_empty());
     assert!(metre_figures(
-        "                       no causal bound — distance not given (token: 1m)"
+        "  distance      not given \u{2014} flight time not checked (token: 1m)"
     )
     .is_empty());
     assert_eq!(
-        metre_figures(
-            "                       bound from ref latency + 0.05 m, c 343.0 m/s assumed"
-        ),
+        metre_figures("  distance   0.05 m"),
         vec!["0.05".to_string()]
     );
 }
@@ -315,15 +313,21 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
-    // #346 AC4 / #378: the onset rule must still reach the terminal in
-    // its own labelled block, and the onset-to-arrival distance must say it
-    // is not used. Row 2 under `arrival` names the band-limited peak rule
-    // (#537); this run has no distance, and row 3 of the onset block says so.
-    assert!(
-        stdout.contains("onset         at sample ")
-            && stdout.contains("(AIC change-point pick, 10.0 ms window)"),
-        "printed summary missing the onset rule line (AC4):\n{stdout}"
-    );
+    // #734: one truth for the arrival — no onset block, no causal-bound
+    // row, no edge-guard row. Row 2 under `arrival` names the band-limited
+    // peak rule (#537).
+    for gone in [
+        "  onset ",
+        "AIC change-point",
+        "causal bound",
+        "cm earlier",
+        "before arrival, not used for flight time",
+    ] {
+        assert!(
+            !stdout.contains(gone),
+            "the removed onset read-out printed {gone:?} (#734):\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains("from peak of IR high-passed at 2 kHz (zero-phase)"),
         "arrival row 2 must name the band-limited peak rule (#346 AC4, #537):\n{stdout}"
@@ -355,24 +359,6 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "an agreeing cross-check prints no check row (#537):\n{stdout}"
     );
     assert!(
-        !stdout.contains("5 cm earlier"),
-        "no edge-guard row, pass or fail, may print without a causal bound:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("(search span), pick"),
-        "printed summary missing the window-start clause (AC4):\n{stdout}"
-    );
-    // #460 AC3: no bound applies on this rig (no reference, no distance),
-    // and row 3 names both missing inputs. The pre-#460 clause named neither.
-    assert!(
-        stdout.contains("no causal bound \u{2014} no distance, ref latency unavailable"),
-        "onset row 3 must name the missing inputs (#460 AC3):\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("no geometry known"),
-        "the pre-#460 clause must not survive:\n{stdout}"
-    );
-    assert!(
         stdout.contains("  distance   not given"),
         "the header must state that no distance was given (#460):\n{stdout}"
     );
@@ -381,12 +367,6 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "  ref latency   unavailable \u{2014} no reference configured (ac setup reference)"
         ),
         "the ref latency line is always printed (#460):\n{stdout}"
-    );
-    assert!(
-        // 84 on the corrected inverse (#733; 118 before). A noiseless
-        // loopback's onset should sit on the arrival — #734.
-        stdout.contains("84 samples before arrival, not used for flight time"),
-        "onset-to-arrival distance must print as not used (#378, #537):\n{stdout}"
     );
     assert!(
         !stdout.contains("onset-derived"),
@@ -672,11 +652,10 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
 }
 
 /// #460 UX frame 1 through the real binary: a typed distance and a configured
-/// reference pair print the header lines, onset row 3 built from the bound's
-/// own inputs, and the `ref latency` line. The #391 guard admits exactly the
-/// typed distance and nothing derived.
+/// reference pair print the header lines and the `ref latency` line. The #391
+/// guard admits exactly the typed distance and nothing derived.
 #[test]
-fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
+fn plot_ir_prints_the_distance_the_reference_and_its_ports() {
     let rig = Rig::start_with(serde_json::json!({
         "reference_channel": 1,
         "reference_output_channel": 2,
@@ -689,8 +668,6 @@ fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
         "  output     fake:playback_0",
         "  ref out    fake:playback_2",
         "  ref in     fake:capture_1",
-        "(causal bound), pick",
-        "bound from ref latency + 0.05 m, c 343.0 m/s assumed",
         "  ref latency    0.4167 ms  (20 samples, same capture)",
         "                SNR ",
         ", noiseless ",

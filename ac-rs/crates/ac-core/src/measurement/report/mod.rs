@@ -61,8 +61,8 @@ pub(crate) use ir_stats::band_limited_arrival;
 pub use ir_stats::{
     arrival_cross_check_tolerance_samples, arrival_snr_low_reason, pre_impulse_snr_scope,
     ArrivalCheck, ArrivalCrossCheck, ArrivalSource, DistanceCheck, DistanceWindow, IrStats,
-    IrVerdict, LatencyBasis, LiveOffset, OnsetStanding, PreImpulseAnchor, PreImpulseSnrScope,
-    ScoredSweepParam, WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
+    IrVerdict, LatencyBasis, LiveOffset, PreImpulseAnchor, PreImpulseSnrScope, ScoredSweepParam,
+    WithheldBasis, ARRIVAL_BROADBAND_COMPARABLE_DB, ARRIVAL_CROSS_CHECK_BASIS,
     ARRIVAL_CROSS_CHECK_TOLERANCE_S, ARRIVAL_EARLIER_COMPARABLE_DB, ARRIVAL_LOBE_MARGIN_MIN_DB,
     ARRIVAL_SNR_BASIS, ARRIVAL_SNR_MIN_DB, ARRIVAL_SNR_UNMEASURED_REASON,
     DISTANCE_SPEED_OF_SOUND_REL_TOL, DISTANCE_TAPE_TOLERANCE_M, PRE_IMPULSE_SNR_CHECKS_CHAIN,
@@ -114,8 +114,9 @@ pub use provenance::{
 /// - v6: optional capture `backend`; v1-v5 reports decode with it absent.
 /// - v7: optional `reference_latency: ReferenceLatency` records τ of the
 ///   *reference* loopback pair, read from a reference leg captured in the
-///   same run (#460). It feeds only the onset search's causal bound and is
-///   never subtracted from the arrival (`interface_latency` is the capture
+///   same run (#460). At v7 it fed only the onset search's causal bound
+///   (removed by #734; from v12 the flight time subtracts it with
+///   `inter_pair_offset`) and was never subtracted from the arrival on its own (`interface_latency` is the capture
 ///   pair's own τ). A stored τ cannot stand in for it: it re-picks by a
 ///   multiple of the FireWire SYT interval on every device enumeration
 ///   (#461). Also from v7, `position` may be present with only
@@ -258,7 +259,7 @@ pub struct MeasurementReport {
     /// or why no valid reading exists. τ of a *different* pair than
     /// `interface_latency`: never subtract it from the arrival on its own.
     /// From v12 (#544) [`IrStats::flight_time_s`] subtracts it together
-    /// with `inter_pair_offset`, and the causal bound reads it as before.
+    /// with `inter_pair_offset`.
     /// `plot_ir` always records it —
     /// `unavailable` with a reason when no reference is configured — so
     /// `None` means a report written before v7, or a producer that captures

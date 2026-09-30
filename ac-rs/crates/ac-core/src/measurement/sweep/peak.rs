@@ -15,23 +15,13 @@
 //! falls on the delay whatever `f1_hz`/`f2_hz`/window are — the band only
 //! changes the *width* of the pulse's skirt, not where its centre sits —
 //! so calibrate's short-ESS τ sweep and a `plot_ir` capture with a
-//! different band and window agree on the peak index. An onset
-//! ([`crate::measurement::sweep::estimate_onset`]) is a threshold/change-
-//! point read off that same skirt, and the skirt's width scales with
-//! `1/bandwidth`, so an onset does *not* cancel across bands the way the
-//! peak does (issue #351; measured as −0.093 m, about 13 samples, on a
-//! zero-path fake loopback with mismatched bands, before this module
-//! existed). See this file's band-invariance test, which measures both
-//! claims on a real Farina deconvolution rather than asserting them.
-//!
-//! Pairing rule, so a later change does not reopen this: an onset-derived
-//! arrival may only be differenced against a τ picked by the *same*
-//! onset rule from the *same* capture's reference leg (#460) — never
-//! against a stored `calibrate` τ, which was measured under a different
-//! sweep and cannot be guaranteed to share the onset's skirt width. A
-//! [`ir_peak`] result may always be differenced against another
-//! [`ir_peak`] result, from any capture, because the band-invariance
-//! above is what makes that pairing cancel.
+//! different band and window agree on the peak index. A threshold or
+//! change-point read off that skirt would not: its width scales with
+//! `1/bandwidth` (#351 measured −0.093 m, about 13 samples, on a zero-path
+//! fake loopback with mismatched bands). That is one reason the #346 onset
+//! estimator was removed (#734): the arrival has one definition, a peak.
+//! This file's band-invariance test measures the peak's half of the claim
+//! on a real Farina deconvolution.
 //!
 //! A zero-phase band-limited peak ([`crate::measurement::sweep::band_limited_peak`],
 //! #537) pairs like a peak: high-passing a centred pulse with zero phase
@@ -85,9 +75,7 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 pub(crate) mod tests {
     use super::*;
     use crate::measurement::sweep::{
-        deconvolve_full, estimate_onset, extract_irs, inverse_sweep, log_sweep, BoundInputs,
-        CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, SweepParams,
-        WindowLimit,
+        deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
     };
 
     #[test]
@@ -127,18 +115,11 @@ pub(crate) mod tests {
     }
 
     /// #351 acceptance (AC6's record): the shared picker's offset from the
-    /// gate centre does not depend on the sweep's band or window, while
-    /// `estimate_onset`'s does — the "test against the rejected
-    /// implementation" for this module's pairing rule, measured on a real
-    /// `log_sweep` → integer-sample delay → `deconvolve_full` →
+    /// gate centre does not depend on the sweep's band or window, measured
+    /// on a real `log_sweep` → integer-sample delay → `deconvolve_full` →
     /// `extract_irs` capture rather than a hand-built fixture.
-    ///
-    /// If the onset offsets stop differing here, the #351 rationale
-    /// (matching estimators alone does not make τ and an onset-derived
-    /// arrival cancel) no longer holds on this fixture — report that back
-    /// rather than loosening the assertion.
     #[test]
-    fn ir_peak_offset_is_band_invariant_while_onset_offset_is_not() {
+    fn ir_peak_offset_is_band_invariant() {
         let sr = 48_000u32;
         let delay = 1_000usize;
         let window_len = 2_048usize;
@@ -161,8 +142,8 @@ pub(crate) mod tests {
             sample_rate: sr,
         };
 
-        let (peak_offset_a, onset_offset_a) = peak_and_onset_offset(&p_a, delay, window_len);
-        let (peak_offset_b, onset_offset_b) = peak_and_onset_offset(&p_b, delay, window_len);
+        let peak_offset_a = peak_offset(&p_a, delay, window_len);
+        let peak_offset_b = peak_offset(&p_b, delay, window_len);
 
         assert_eq!(
             peak_offset_a, delay as i64,
@@ -177,13 +158,6 @@ pub(crate) mod tests {
             "the shared peak picker must agree across different sweep bands \
              — this is why calibrate's τ and an IR's arrival cancel in a \
              subtraction"
-        );
-
-        assert_ne!(
-            onset_offset_a, onset_offset_b,
-            "the onset picker's offset must differ across sweep bands, or \
-             this fixture no longer demonstrates why matching estimators \
-             alone would not have fixed #351"
         );
     }
 
@@ -222,9 +196,9 @@ pub(crate) mod tests {
     }
 
     /// Build a pure-delay capture at `params` (`y(n) = x(n − delay)`),
-    /// deconvolve it, and return `(peak_offset, onset_offset)`, each the
-    /// signed sample offset from the gate centre.
-    fn peak_and_onset_offset(params: &SweepParams, delay: usize, window_len: usize) -> (i64, i64) {
+    /// deconvolve it, and return the peak's signed offset from the gate
+    /// centre.
+    fn peak_offset(params: &SweepParams, delay: usize, window_len: usize) -> i64 {
         let x = log_sweep(params).unwrap();
         let mut y = vec![0.0_f32; x.len() + delay];
         y[delay..].copy_from_slice(&x);
@@ -232,82 +206,7 @@ pub(crate) mod tests {
         let full = deconvolve_full(&y, &xi);
         let irs = extract_irs(&full, params, 1, window_len).unwrap();
         let (peak_index, _) = ir_peak(&irs.linear);
-        let centre = window_len / 2;
-
-        let unbounded = CausalBound::Unavailable(MissingBoundInput::Both {
-            reference_reason: String::new(),
-        });
-        let onset = estimate_onset(
-            &irs.linear,
-            peak_index,
-            params.sample_rate,
-            1e-9,
-            &unbounded,
-        );
-        (
-            peak_index as i64 - centre as i64,
-            onset.index as i64 - centre as i64,
-        )
-    }
-
-    /// #346 architect revisions 2 to 4: estimator and guard properties of
-    /// the bounded onset. A two-way DUT — a smaller full-band component at `t0`
-    /// plus a larger low-passed one at `t0 + G` — whose magnitude peak
-    /// lands late, captured at both of the band-invariance test's sweep
-    /// bands, with the causal bound one hand-tape error (5 cm) before `t0`.
-    ///
-    /// (i) Against the rejected rule: in both bands the bounded onset is
-    /// closer to `t0` than the peak is.
-    /// (ii) The bounded onset's offset differs between the two bands by at
-    /// most one sample — the same integer-rounding budget as #351's
-    /// hardware budget. Any future design that differences an onset
-    /// against a peak-picked τ would need this; no such pairing is licensed
-    /// today (this module's pairing rule). If it fails, report it back, do
-    /// not loosen it.
-    /// (iii) The edge guard passes band A's pick. Band B is deliberately
-    /// not asserted: its pick is right (`t0 + 1`) but the re-pick over the
-    /// window started 5 cm earlier lands at `t0 − 1`, a 2-sample move, so
-    /// the guard refuses it and the onset standing is `EdgeFollowing`. That is
-    /// a known false refusal (architect revision 3 probe), not a reason to
-    /// widen [`crate::measurement::sweep::EDGE_GUARD_TOLERANCE_SAMPLES`]:
-    /// a tolerance of 2 also passes a 12-samples-late pick.
-    #[test]
-    fn bounded_onset_on_a_two_way_dut_beats_the_peak_and_is_band_invariant() {
-        let a = two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW);
-        let b = two_way_bounded(&band_b(48_000), &TWO_WAY_NARROW);
-        for (name, r) in [("A", &a), ("B", &b)] {
-            assert!(
-                r.peak - TWO_WAY_T0 >= 10,
-                "test setup, config {name}: the peak must land at least 10 samples \
-                 after t0, got {}",
-                r.peak - TWO_WAY_T0
-            );
-            assert!(
-                (r.onset - TWO_WAY_T0).abs() < (r.peak - TWO_WAY_T0).abs(),
-                "config {name}: bounded onset {} must be closer to t0 {TWO_WAY_T0} than \
-                 the peak {}",
-                r.onset,
-                r.peak
-            );
-            assert!(
-                r.bound_binds(),
-                "config {name}: the bound must set the window start"
-            );
-        }
-        assert!(
-            (a.onset - b.onset).abs() <= 1,
-            "bounded onset offset moved {} samples between bands (A {}, B {}) — the \
-             bounded onset is not band-invariant to one sample",
-            (a.onset - b.onset).abs(),
-            a.onset,
-            b.onset
-        );
-        assert_eq!(
-            a.edge_guard(),
-            Some(EdgeGuard::Passed),
-            "band A's pick {} is right and must pass the edge guard",
-            a.onset
-        );
+        peak_index as i64 - (window_len / 2) as i64
     }
 
     /// #537 architect revision 3, item 5: #346's two-way DUT, in both bands
@@ -359,7 +258,7 @@ pub(crate) mod tests {
             ("B rig-like", band_b, 96_000, &TWO_WAY_RIG_LIKE, false, true),
         ] {
             let p = band(sr);
-            let r = two_way_bounded(&p, shape);
+            let r = two_way(&p, shape);
             let peak = (r.centre as i64 + r.peak) as usize;
             let a = band_limited_arrival(&r.ir, p.sample_rate, p.f2_hz, peak);
             let arrival = a.arrival_index as i64 - r.centre as i64 - TWO_WAY_T0;
@@ -385,57 +284,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// #734 (open): on the corrected inverse (#733) the #346 edge guard no
-    /// longer does what it was built for. It passes a late pick on the loud
-    /// rig-like shape and refuses a right one on the realistic shape. The
-    /// onset is a readout — no flight time is derived from it — so this is
-    /// recorded, not fixed, here. When #734 re-derives the guard these
-    /// assertions flip; update them from its design, not by loosening.
-    #[test]
-    fn edge_guard_on_the_corrected_kernel_is_open() {
-        let loud = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE_LOUD);
-        assert!(loud.bound_binds(), "the 5 cm bound sets the window start");
-        assert!(
-            loud.bound_index < loud.centre + TWO_WAY_T0 as usize,
-            "the bound sits before t0"
-        );
-        assert!(
-            loud.onset - TWO_WAY_T0 >= 10,
-            "loud onset t0 {:+}",
-            loud.onset - TWO_WAY_T0
-        );
-        assert_eq!(
-            loud.edge_guard(),
-            Some(EdgeGuard::Passed),
-            "#734: late pick passed"
-        );
-
-        let realistic = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE);
-        assert!(
-            (realistic.onset - TWO_WAY_T0).abs() <= 1,
-            "realistic onset t0 {:+}",
-            realistic.onset - TWO_WAY_T0
-        );
-        assert!(
-            matches!(realistic.edge_guard(), Some(EdgeGuard::Failed { .. })),
-            "#734: right pick refused, got {:?}",
-            realistic.edge_guard()
-        );
-    }
-
-    /// #734 (open), narrow shapes: the bounded pick lands 8 samples late in
-    /// both bands; the guard passes it in band A and refuses it in band B.
-    #[test]
-    fn extension_guard_on_the_corrected_kernel_is_open() {
-        let a = two_way_bounded(&band_a(48_000), &TWO_WAY_NARROW);
-        let b = two_way_bounded(&band_b(48_000), &TWO_WAY_NARROW);
-        assert_eq!(a.onset - TWO_WAY_T0, 8);
-        assert_eq!(b.onset - TWO_WAY_T0, 8);
-        assert_eq!(a.edge_guard(), Some(EdgeGuard::Passed));
-        assert!(matches!(b.edge_guard(), Some(EdgeGuard::Failed { .. })));
-    }
-
-    /// `t0` of [`two_way_bounded`]'s full-band component, as an offset
+    /// `t0` of [`two_way`]'s full-band component, as an offset
     /// from the gate centre.
     pub(crate) const TWO_WAY_T0: i64 = 1_000;
 
@@ -475,13 +324,13 @@ pub(crate) mod tests {
     /// arrival only through the inverse filter's reversed envelope (~40 dB
     /// of low-band boost). These shapes set it to twice the arrival's
     /// per-sample peak, so the broadband peak lands late on its own merit —
-    /// what the estimator tests below exist to exercise.
+    /// what the arrival test below needs to refuse.
     const TWO_WAY_NARROW: TwoWayShape = TwoWayShape {
         g: 8,
         taps: 9,
         low_over_high: Some(2.0),
     };
-    /// Rig-like group delay at 96 kHz (onset-to-peak gap ≥ 23 samples),
+    /// Rig-like group delay at 96 kHz (G = 24 samples),
     /// loud low component as [`TWO_WAY_NARROW`].
     const TWO_WAY_RIG_LIKE_LOUD: TwoWayShape = TwoWayShape {
         g: 24,
@@ -502,41 +351,16 @@ pub(crate) mod tests {
         pub(crate) ir: Vec<f64>,
         /// Gate centre index in `ir`.
         pub(crate) centre: usize,
-        /// Enforced causal bound, absolute index in `ir`.
-        bound_index: usize,
-        estimate: OnsetEstimate,
-        /// Offsets from the gate centre, signed samples.
+        /// The broadband peak's offset from the gate centre, signed samples.
         peak: i64,
-        onset: i64,
-    }
-
-    impl TwoWay {
-        fn bound_binds(&self) -> bool {
-            matches!(
-                self.estimate.pick,
-                OnsetPick::Picked {
-                    limit: WindowLimit::CausalBound,
-                    ..
-                }
-            )
-        }
-
-        fn edge_guard(&self) -> Option<EdgeGuard> {
-            match self.estimate.pick {
-                OnsetPick::Picked { edge_guard, .. } => edge_guard,
-                OnsetPick::Declined => None,
-            }
-        }
     }
 
     /// Capture a two-way DUT at `params`: `0.3·x(n − t0)` plus
     /// `LP(x)(n − t0 − G)`, where `LP` is a `taps`-long causal boxcar
-    /// (linear phase, `(taps − 1)/2` samples of its own delay), then run the
-    /// bounded onset picker with the bound 5 cm of flight at 343 m/s before
-    /// `t0` (7 samples at 48 kHz, 14 at 96 kHz).
-    pub(crate) fn two_way_bounded(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
+    /// (linear phase, `(taps − 1)/2` samples of its own delay), and return
+    /// its windowed linear IR.
+    pub(crate) fn two_way(params: &SweepParams, shape: &TwoWayShape) -> TwoWay {
         const HIGH_GAIN: f32 = 0.3;
-        const C: f64 = 343.0;
         let window_len = 4_096usize;
         let TwoWayShape {
             g,
@@ -566,27 +390,10 @@ pub(crate) mod tests {
         let irs = extract_irs(&full, params, 1, window_len).unwrap();
         let (peak_index, _) = ir_peak(&irs.linear);
         let centre = window_len / 2;
-
-        // ±5 cm hand tape (#346 architect revision 2).
-        let tape_samples = (0.05 / C * params.sample_rate as f64).round() as usize;
-        let bound_index = centre + t0 - tape_samples;
-        let bound = CausalBound::Enforced {
-            index: bound_index,
-            inputs: BoundInputs {
-                reference_tau_s: 0.0,
-                distance_m: 1.0,
-                speed_of_sound_m_s: C,
-                temperature_c: None,
-            },
-        };
-        let estimate = estimate_onset(&irs.linear, peak_index, params.sample_rate, 1e-9, &bound);
         TwoWay {
             peak: peak_index as i64 - centre as i64,
-            onset: estimate.index as i64 - centre as i64,
             ir: irs.linear,
             centre,
-            bound_index,
-            estimate,
         }
     }
 }

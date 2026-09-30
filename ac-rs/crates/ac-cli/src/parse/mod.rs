@@ -164,8 +164,8 @@ fn parse_window(s: &str) -> Result<u32, ()> {
         .ok_or(())
 }
 
-/// Accepts `"<N>m"` — `plot ir`'s source-to-receiver distance in metres, the
-/// input to the onset search's causal bound (#460). A marker is required: a
+/// Accepts `"<N>m"` — `plot ir`'s source-to-receiver distance in metres, which
+/// the flight time is checked against (#460, #537). A marker is required: a
 /// bare number is dBFS. `mm`, `cm` and `1ms` do not leave a number before the
 /// final `m`, so they are `Ok(None)` here and end as an unrecognised token
 /// rather than being read as a distance. A value that does parse but is not
@@ -399,7 +399,8 @@ pub enum CommandKind {
         n_harmonics: Option<u32>,
         window_len: Option<u32>,
         tail_s: Option<f64>,
-        /// Source-to-receiver distance, metres (#460 causal bound).
+        /// Source-to-receiver distance, metres: the flight time is checked
+        /// against it (#460, #537).
         distance_m: Option<f64>,
         /// `sti` (#724): also compute the IEC 60268-16 STI.
         sti: bool,
@@ -819,7 +820,7 @@ Units:  20hz 1khz              frequency
         10ppd 26steps          sweep density
         6bpo 3bands            fractional-octave bins-per-octave
         5harm 4096win          plot ir gate params: n_harmonics, window_len
-        1.5m                   plot ir source-to-mic distance (causal bound)
+        1.5m                   plot ir source-to-mic distance (flight-time check)
         show                   also open GPU view window (abbrev: sh)
 
 Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) pr(obe) te(st)
