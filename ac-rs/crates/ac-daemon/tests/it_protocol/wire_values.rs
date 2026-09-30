@@ -430,6 +430,8 @@ fn setup_refuses_malformed_scalar_keys_and_applies_nothing() {
         ("dmm_host", json!(42), STRING_OR_NULL),
         ("dmm_host", json!(true), STRING_OR_NULL),
         ("dmm_host", json!([]), STRING_OR_NULL),
+        ("report_dir", json!(7), STRING_OR_NULL),
+        ("snapshot_spool_dir", json!(false), STRING_OR_NULL),
     ];
     for (key, bad, domain) in cases {
         let mut update = json!({

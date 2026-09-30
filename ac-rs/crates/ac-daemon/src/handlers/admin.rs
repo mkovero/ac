@@ -174,6 +174,14 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     // #472: the report directory is validated before anything else in the
     // update is applied, so a refusal leaves the whole config as it was —
     // "setting not changed" is true for every key in the command.
+    // #593: a non-string path is refused as one, with what was received —
+    // not validated as the empty path it used to be read as.
+    for key in ["report_dir", "snapshot_spool_dir"] {
+        if let Err(e) = wire::opt_nullable_string(update, key) {
+            return json!({"ok": false,
+                "error": e.refusal("setup rejected", &[("config", "unchanged")])});
+        }
+    }
     let report_dir_update: Option<Option<std::path::PathBuf>> = match update.get("report_dir") {
         None => None,
         Some(Value::Null) => Some(None),
