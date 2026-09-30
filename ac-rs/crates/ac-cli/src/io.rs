@@ -244,13 +244,13 @@ pub fn summary_lines(
 
     let worst_thd = valid
         .iter()
-        .filter_map(|r| f64_of(r, "thd_pct"))
+        .filter_map(|r| thd_measured(r))
         .fold(0.0_f64, f64::max);
     let worst_thdn = valid
         .iter()
         .filter_map(|r| f64_of(r, "thdn_pct"))
         .fold(0.0_f64, f64::max);
-    let thds: Vec<f64> = valid.iter().filter_map(|r| f64_of(r, "thd_pct")).collect();
+    let thds: Vec<f64> = valid.iter().filter_map(|r| thd_measured(r)).collect();
     let avg_thd = if thds.is_empty() {
         0.0
     } else {
@@ -422,6 +422,22 @@ pub fn print_freq_header(have_cal: bool, verbose: bool) {
     }
 }
 
+/// A point's THD, `None` when no harmonic was measurable (#627): every
+/// harmonic above Nyquist leaves `harmonic_levels` empty, and a THD of 0 %
+/// there would read as no distortion rather than as not measured — the `-`
+/// rule the harmonic table already follows (#132). A frame without the
+/// field (an older daemon) keeps its `thd_pct`.
+fn thd_measured(frame: &serde_json::Value) -> Option<f64> {
+    let none_measurable = frame
+        .get("harmonic_levels")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.is_empty());
+    if none_measurable {
+        return None;
+    }
+    f64_of(frame, "thd_pct")
+}
+
 /// One table row plus, when the point is clipped or AC-coupled, a
 /// `warning` line of its own under it. Columns match
 /// [`freq_header_lines`] for the same `have_cal` / `verbose`; a value the
@@ -430,7 +446,7 @@ pub fn freq_row_lines(frame: &serde_json::Value, have_cal: bool, verbose: bool) 
     let freq = f64_of(frame, "freq_hz")
         .or_else(|| f64_of(frame, "fundamental_hz"))
         .unwrap_or(0.0);
-    let thd = f64_of(frame, "thd_pct").unwrap_or(0.0);
+    let thd = thd_measured(frame).map_or_else(|| "-".into(), |v| format!("{v:.4}"));
     let thdn = f64_of(frame, "thdn_pct").unwrap_or(0.0);
     let fmt = |key: &str, f: &dyn Fn(f64) -> String| {
         f64_of(frame, key).map(f).unwrap_or_else(|| "-".into())
@@ -442,14 +458,14 @@ pub fn freq_row_lines(frame: &serde_json::Value, have_cal: bool, verbose: bool) 
         let odbu = fmt("out_dbu", &|v| format!("{v:+.2}"));
         let idbu = fmt("in_dbu", &|v| format!("{v:+.2}"));
         let gain = fmt("gain_db", &|v| format!("{v:+.2}"));
-        let mut row = format!("  {freq:>8.0}{odbu:>10}{idbu:>10}{gain:>9}{thd:>11.4}{thdn:>11.4}");
+        let mut row = format!("  {freq:>8.0}{odbu:>10}{idbu:>10}{gain:>9}{thd:>11}{thdn:>11.4}");
         if verbose {
             row.push_str(&format!("{fund:>9}{noise:>9}"));
         }
         row
     } else {
         let drive = fmt("drive_db", &|v| format!("{v:.1}"));
-        let mut row = format!("  {freq:>10.0}{drive:>10}{thd:>11.4}{thdn:>11.4}");
+        let mut row = format!("  {freq:>10.0}{drive:>10}{thd:>11}{thdn:>11.4}");
         if verbose {
             row.push_str(&format!("{fund:>12}{noise:>12}"));
         }
@@ -600,6 +616,24 @@ mod tests {
 
     fn cols(line: &str) -> usize {
         line.chars().count()
+    }
+
+    /// #627: a point with no harmonic below Nyquist prints THD as `-`, in
+    /// the same column, and stays out of the summary's THD figures.
+    #[test]
+    fn a_point_with_no_measurable_harmonic_prints_a_dash_not_zero() {
+        let mut p = uncal_point(20_000.0, -0.0, -90.0, 0.2);
+        p["harmonic_levels"] = json!([]);
+        p["thdn_pct"] = json!(1.0);
+        let row = &freq_row_lines(&p, false, false)[0];
+        assert!(
+            !row.contains("-0.0000") && row.contains("  -     1.0000"),
+            "{row}"
+        );
+        let with = uncal_point(20_000.0, 1.0, -90.0, 0.2);
+        assert_eq!(cols(row), cols(&freq_row_lines(&with, false, false)[0]));
+        assert_eq!(thd_measured(&p), None);
+        assert_eq!(thd_measured(&with), Some(1.0));
     }
 
     fn uncal_point(freq: f64, thd: f64, noise: f64, capture: f64) -> Value {

@@ -2078,7 +2078,7 @@ names the audio backend serving the monitor, as in the `spectrum` frame.
 **DATA** — terminal after `stop`:
 ```json
 // topic: done
-{ "cmd": "monitor_spectrum" }
+{ "cmd": "monitor_spectrum", "backend": <string> }  // the backend that served it
 ```
 
 ---
