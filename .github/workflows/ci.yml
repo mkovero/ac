@@ -1,0 +1,71 @@
+# The machine gate (#201): fmt, clippy and the headless test suite on every
+# PR and every push to main. A machine cannot forget to run a check; that is
+# its whole value here. It agrees with the local gate, it does not replace
+# review.
+#
+# What a green run does NOT cover — do not read more into it:
+# - The `#[ignore]`d real-adapter suites (`ac-view` `it_transfer_snapshots`
+#   wgpu pixel diffs, `it_stimulus_live` real-daemon timing). They need the
+#   GPU box and stay a manual run. Never add `-- --ignored` here: a gate that
+#   is red on tests passing on the box trains everyone to ignore it.
+# - Audio routing and anything the fake backend cannot observe (#203/#204):
+#   whether a daemon's output is actually connected to hardware is verified
+#   on the rig, not here.
+# - Rig measurements of any kind.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # `ac-rs/.cargo/config.toml` builds for the host CPU and links with mold.
+  # RUSTFLAGS replaces those flags wholesale: portable codegen, system linker.
+  RUSTFLAGS: "-C target-cpu=x86-64"
+  # The ac-view tests locate the daemon binary through CARGO_TARGET_DIR.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/ac-rs/target
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ac-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libasound2-dev libjack-jackd2-dev \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev mesa-vulkan-drivers
+
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ac-rs
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The binaries first: the ac-view and ac-cli integration tests spawn the
+      # daemon they find under CARGO_TARGET_DIR.
+      - name: build
+        run: cargo build --workspace
+
+      - name: test
+        run: cargo test --workspace --no-fail-fast
