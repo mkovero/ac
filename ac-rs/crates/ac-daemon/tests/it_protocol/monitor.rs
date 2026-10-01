@@ -724,6 +724,7 @@ const SPECTRUM_ENVELOPE_KEYS: &[&str] = &[
     "freqs",
     "mic_correction",
     "n_channels",
+    "peak_dbfs",
     "spectrum",
     "spl_offset_db",
     "sr",
@@ -896,5 +897,68 @@ fn live_monitor_frames_round_trip_through_the_shared_types() {
         assert_eq!(loudness["wire_version"], json!(WIRE_VERSION), "{loudness}");
         assert_lossless::<SpectrumFrame>(&spectrum, &[]);
         assert_lossless::<LoudnessFrame>(&loudness, &[]);
+    }
+}
+
+/// `columns` sets the spectrum's column count and `scope: false` drops the
+/// scope frames — what ac-view's monitor asks for, to keep eight channels
+/// at 20 Hz to a stream a remote client keeps up with.
+#[test]
+fn monitor_spectrum_columns_and_scope_options() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "channels": [0],
+        "interval": MONITOR_TEST_INTERVAL_S,
+        "columns": 1024,
+        "scope": false,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["columns"], json!(1024));
+    assert_eq!(r["scope"], json!(false));
+    let mut spectra = 0;
+    let mut scopes = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && spectra < 3 {
+        let Some((topic, v)) = c.recv_pub(2_000) else {
+            break;
+        };
+        if topic != "data" {
+            continue;
+        }
+        match v["type"].as_str() {
+            Some("visualize/spectrum") => {
+                spectra += 1;
+                assert_eq!(v["freqs"].as_array().map(Vec::len), Some(1024), "freqs");
+                assert_eq!(
+                    v["spectrum"].as_array().map(Vec::len),
+                    Some(1024),
+                    "spectrum"
+                );
+            }
+            Some("visualize/scope") => scopes += 1,
+            _ => {}
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    assert_eq!(spectra, 3, "no spectrum frames");
+    assert_eq!(scopes, 0, "scope frames published with scope: false");
+
+    // Out of range or the wrong type: refused, nothing started.
+    for (field, value) in [
+        ("columns", json!(10)),
+        ("columns", json!(8192)),
+        ("columns", json!("1024")),
+        ("scope", json!("no")),
+    ] {
+        let mut req = json!({"cmd": "monitor_spectrum", "channels": [0]});
+        req[field] = value.clone();
+        let r = c.call(req);
+        assert_eq!(r["ok"], json!(false), "{field}={value} accepted: {r}");
+        assert!(
+            r["error"].as_str().is_some_and(|e| e.contains(field)),
+            "{field}={value}: refusal does not name the field: {r}"
+        );
     }
 }

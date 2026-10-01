@@ -490,6 +490,7 @@ mod tests {
             mic_correction: "none".into(),
             xruns: 7,
             backend: "fake".into(),
+            peak_dbfs: None,
             freq_hz: Some(997.0),
             peaks: Some(vec![[997.0, -20.5]]),
             fundamental_dbfs: Some(-20.5),

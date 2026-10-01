@@ -236,7 +236,7 @@ not judged: only an arrival earlier than d/c allows is refused. See `ac-rs/ZMQ.m
 | `plot` | Point-by-point THD vs frequency; `plot level` for THD vs level; `plot ir` for a Farina log-sweep impulse response + report. Writes CSV/report to the session directory |
 | `sweep` | Deprecated alias for `generate level` / `generate frequency` / `plot ir` — prints a warning, not a second spelling |
 | `transfer` | Launch the `ac-view` transfer view — H1 magnitude, phase, coherence |
-| `monitor` | Live spectrum in `ac-view`; `--tui` for the terminal readout. `monitor cwt` / `cqt` / `reassigned` switch the daemon analysis mode and use the terminal readout |
+| `monitor` | Live spectrum, input meter and level/tone readout per channel in `ac-view`, about 20 updates a second, no reference or output needed; `--tui` for the terminal readout. `monitor cwt` / `cqt` / `reassigned` switch the daemon analysis mode and use the terminal readout |
 | `test` | Built-in self-tests — `test software`, `test hardware [dmm]`, `test dut [compare] [level]` |
 | `report` | Render a `MeasurementReport` JSON to HTML or PDF |
 | `probe` | Auto-detect analog ports and loopback pairs (DMM + capture scan) |

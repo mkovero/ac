@@ -37,9 +37,9 @@ pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config) {
         // `--tui` keeps the ratatui terminal monitor.
         super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
     } else {
-        // Default: the ac-view spectrum window (M4d-CLI). Explicit channel
-        // spec maps its first entry onto the measurement leg.
-        super::spawn_ac_view(cfg, false, channels.first().map(std::slice::from_ref));
+        // Default: the ac-view live input monitor, on every channel asked
+        // for (it used to take only the first, silently).
+        super::spawn_ac_view(cfg, false, Some(&channels));
     }
 }
 

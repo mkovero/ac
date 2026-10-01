@@ -444,7 +444,7 @@ pub enum CommandKind {
         interval: f64,
         channels: Option<Vec<u32>>,
         /// `--tui` keeps the ratatui terminal monitor; default spawns the
-        /// `ac-view` spectrum window (M4d-CLI #185).
+        /// `ac-view` live input monitor on every listed channel.
         tui: bool,
     },
     /// `ac transfer` — launch the `ac-view` transfer view (#185). The

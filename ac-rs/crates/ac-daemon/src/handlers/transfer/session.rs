@@ -13,9 +13,10 @@ use serde_json::Value;
 use ac_core::shared::calibration::Calibration;
 
 use super::analysis::{analyse_pair, AnalysisKey, PairAnalysis};
-use super::frame::{build_pair_messages, raw_peak_dbfs, FrameStatics, TickInputs};
+use super::frame::{build_pair_messages, FrameStatics, TickInputs};
 use super::pair::{Lock, PairCtx, PairState};
 use super::window::{drain_to_block_lattice, Window};
+use ac_core::shared::conversions::raw_peak_dbfs;
 
 /// Retry interval for a start-up Find that had no peak — see
 /// [`PairState::next_attempt`].

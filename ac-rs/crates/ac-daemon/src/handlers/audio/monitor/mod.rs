@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS;
 use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
@@ -90,6 +91,9 @@ impl Drop for MonitorActiveGuard {
 fn dbfs_to_amplitude(dbfs: f64) -> f64 {
     10f64.powf(dbfs / 20.0)
 }
+
+/// Fewest spectrum columns a request may ask for.
+const MIN_COLUMNS: usize = 64;
 
 /// The documented `fft_n` domain refusal (same text as `set_monitor_params`).
 const FFT_N_DOMAIN_ERROR: &str = "fft_n must be power of 2 in [256, 131072]";
@@ -189,6 +193,22 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     if !(interval > 0.0 && interval <= 60.0) {
         return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
     }
+    // A display that draws ~1000 px wide needs far fewer than the default
+    // 4096 columns; at 8 channels × 20 Hz the default spectrum alone was
+    // 22 MB/s of JSON on the rig, more than a remote client kept up with.
+    let columns = match wire::opt_u32(cmd, "columns") {
+        Ok(v) => v.map_or(DEFAULT_WIRE_COLUMNS, |c| c as usize),
+        Err(e) => return monitor_refusal(&e),
+    };
+    if !(MIN_COLUMNS..=DEFAULT_WIRE_COLUMNS).contains(&columns) {
+        return json!({"ok": false, "error": format!(
+            "columns must be in [{MIN_COLUMNS}, {DEFAULT_WIRE_COLUMNS}]"
+        )});
+    }
+    let scope = match wire::opt_bool(cmd, "scope") {
+        Ok(v) => v.unwrap_or(true),
+        Err(e) => return monitor_refusal(&e),
+    };
     if !fft_n.is_power_of_two() || !(256..=131_072).contains(&fft_n) {
         return json!({"ok": false, "error": FFT_N_DOMAIN_ERROR});
     }
@@ -347,7 +367,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // `visualize/scope` frame, so every frame has its own identity; a
         // tick's channels pair by their shared `timestamp` instead (#666).
         // Wraps on u64 overflow.
-        let scope_frame_idx = std::cell::Cell::new(0u64);
+        let scope_frame_idx = std::sync::atomic::AtomicU64::new(0);
 
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
@@ -514,6 +534,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // wasted work on both sides.
                 tick_secs: cur_interval.clamp(0.016, 0.100),
                 capture_ts_ns: None,
+                columns,
+                scope,
             };
 
             // #666: every channel's audio for this tick, captured together (`capture_together`).
@@ -551,452 +573,305 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 together = Some(bufs);
             }
 
-            for (idx, ch) in channel_states.iter_mut().enumerate() {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let channel = ch.channel;
-                let captured = together.as_mut().map(|b| std::mem::take(&mut b[idx]));
-                if mode == Mode::Cwt {
-                    let xruns_total = match capture_into_ring(
-                        &mut *eng,
-                        captured,
-                        ch,
-                        &ctx,
-                        RingKind::Cwt,
-                        ring_cap,
-                        CWT_MIN_FILL,
-                    ) {
-                        RingTick::Ready { xruns } => xruns,
-                        RingTick::NotReady => continue,
-                        RingTick::Failed => return,
-                    };
-                    let t0 = std::time::Instant::now();
-                    let buf = ch.cwt_ring.make_contiguous();
-                    ac_core::visualize::cwt::morlet_cwt_into(
-                        buf,
-                        sr,
-                        &cwt_scales,
-                        cwt_sigma,
-                        &mut cwt_mags,
-                    );
-                    log_transform_time(
-                        &mut cwt_log_counter,
-                        "cwt",
-                        channel,
-                        t0,
-                        buf.len(),
-                        cwt_scales.len(),
-                    );
-                    let (ts_ns, mc_tag) = emit_ring_frames(
-                        ch,
-                        &ctx,
-                        "visualize/cwt",
-                        &cwt_freqs,
-                        &mut cwt_mags,
-                        &[],
-                        xruns_total,
-                    );
-                    // Optional fractional-octave aggregation of the same
-                    // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
-                    // extra DSP cost when enabled.
-                    if let Some(bpo) = *ioct_bpo_shared.lock().unwrap() {
-                        let (band_centres, mut band_levels) =
-                            ac_core::visualize::fractional_octave::cwt_to_fractional_octave(
-                                &cwt_mags,
-                                &cwt_freqs,
-                                bpo as usize,
-                                ac_core::visualize::cwt::DEFAULT_F_MIN,
-                                ac_core::visualize::cwt::default_f_max(sr),
-                            );
-                        // Per-band frequency weighting (off/A/C/Z). Off
-                        // and Z share the identity curve; applying is a
-                        // no-op then, but we still tag the frame so the
-                        // UI can distinguish "weighting explicitly Z"
-                        // from "no weighting picked".
-                        let weighting_tag = band_weighting_shared.lock().unwrap().clone();
-                        let weighting_curve = WeightingCurve::from_tag(&weighting_tag);
-                        if let Some(curve) = weighting_curve {
-                            if !matches!(curve, WeightingCurve::Z) {
-                                for (level, &fc) in band_levels.iter_mut().zip(band_centres.iter())
-                                {
-                                    *level += curve.db_offset(fc as f64) as f32;
-                                }
-                            }
-                        }
-                        let frac_frame = json!({
-                            "type":           "visualize/fractional_octave",
-                            "cmd":            "monitor_spectrum",
-                            "channel":        channel,
-                            "n_channels":     n_channels,
-                            "sr":             sr,
-                            "bpo":            bpo,
-                            "weighting":      weighting_tag,
-                            "freqs":          band_centres,
-                            "spectrum":       band_levels.clone(),
-                            "spl_offset_db":  ch.spl_offset,
-                            "mic_correction": mc_tag,
-                            "timestamp":      ts_ns,
-                            "xruns":          xruns_total,
-                            "backend":        backend,
+            let fft_tick = FftTick {
+                fft_n: cur_fft_n,
+                lf_fft_n: cur_lf_fft_n,
+                lf_enabled,
+                lf_every,
+                crossover_hz: cur_crossover_hz,
+            };
+            // Several channels in FFT mode: each channel's tick touches only
+            // its own state, so they run in parallel. Serially, eight
+            // channels at 96 kHz took ~110 ms a tick on the rig, halving a
+            // 50 ms monitor's frame rate. Frames still publish in the serial
+            // order: scope frames first (their `frame_idx` rises in publish
+            // order), then each channel's buffered frames, channel by channel.
+            let mut parallel_done = false;
+            if mode == Mode::Fft && !stop.load(Ordering::Relaxed) {
+                if let Some(bufs) = together.take() {
+                    use rayon::prelude::*;
+                    let xruns_total = eng.xruns();
+                    for (ch, new) in channel_states.iter().zip(&bufs) {
+                        emit_scope_frame(ch, &ctx, new, xruns_total);
+                    }
+                    let outboxes: Vec<_> = (0..channel_states.len())
+                        .map(|_| crossbeam_channel::unbounded::<Vec<u8>>())
+                        .collect();
+                    let ctx = &ctx;
+                    let fft_tick = &fft_tick;
+                    channel_states
+                        .par_iter_mut()
+                        .zip(bufs.into_par_iter())
+                        .zip(outboxes.par_iter())
+                        .for_each(|((ch, new), (tx, _))| {
+                            let own = TickCtx { pub_tx: tx, ..*ctx };
+                            fft_channel_tick(ch, &new, xruns_total, &own, fft_tick)
                         });
-                        send_pub(&pub_tx, "data", &frac_frame);
-
-                        if cur_ti_mode != "off" {
-                            let n_bands = band_levels.len();
-                            let slot = &mut ch.integrator;
-                            // Re-init if the band count changed (e.g. live
-                            // ioct_bpo toggle) or if this channel hasn't
-                            // been primed yet.
-                            if slot
-                                .as_ref()
-                                .map(|i| i.n_bands() != n_bands)
-                                .unwrap_or(true)
-                            {
-                                *slot = Integrator::for_mode(&cur_ti_mode, n_bands);
-                                ch.last_frac_ts = None;
-                            }
-                            if let Some(integ) = slot.as_mut() {
-                                let now = std::time::Instant::now();
-                                let dt = ch
-                                    .last_frac_ts
-                                    .map(|t| now.duration_since(t).as_secs_f64())
-                                    .unwrap_or(cur_interval)
-                                    .max(1e-6);
-                                ch.last_frac_ts = Some(now);
-                                let levels_f64: Vec<f64> =
-                                    band_levels.iter().map(|&v| v as f64).collect();
-                                let integrated = integ.update(&levels_f64, dt);
-                                let tau_s: Option<f64> = match cur_ti_mode.as_str() {
-                                    "fast" => Some(TAU_FAST_S),
-                                    "slow" => Some(TAU_SLOW_S),
-                                    _ => None,
-                                };
-                                let dur_s = integ.duration_s();
-                                let leq_frame = json!({
-                                    "type":           "visualize/fractional_octave_leq",
-                                    "cmd":            "monitor_spectrum",
-                                    "channel":        channel,
-                                    "n_channels":     n_channels,
-                                    "sr":             sr,
-                                    "bpo":            bpo,
-                                    "weighting":      weighting_tag,
-                                    "mode":           cur_ti_mode,
-                                    "tau_s":          tau_s,
-                                    "duration_s":     if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
-                                    "freqs":          band_centres,
-                                    "spectrum":       integrated,
-                                    "spl_offset_db":  ch.spl_offset,
-                                    "mic_correction": mc_tag,
-                                    "timestamp":      ts_ns,
-                                    "xruns":          xruns_total,
-                                    "backend":        backend,
-                                });
-                                send_pub(&pub_tx, "data", &leq_frame);
-                            }
+                    // Stop is checked between channels, as on the serial
+                    // path: a stop during the tick publishes nothing more.
+                    for (_, rx) in &outboxes {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        for msg in rx.try_iter() {
+                            let _ = pub_tx.send(msg);
                         }
                     }
-                    continue;
+                    parallel_done = true;
                 }
-                if mode == Mode::Cqt {
-                    // The kernel for the lowest bin needs the full ring, so
-                    // ticks are skipped until it has filled that far; the
-                    // bins above it produce earlier, but a partial column
-                    // would confuse the waterfall.
-                    let xruns_total = match capture_into_ring(
-                        &mut *eng,
-                        captured,
-                        ch,
-                        &ctx,
-                        RingKind::Cqt,
-                        cqt_ring_cap,
-                        cqt_kernels.max_kernel_len(),
-                    ) {
-                        RingTick::Ready { xruns } => xruns,
-                        RingTick::NotReady => continue,
-                        RingTick::Failed => return,
-                    };
-                    let t0 = std::time::Instant::now();
-                    let buf = ch.cqt_ring.make_contiguous();
-                    ac_core::visualize::cqt::cqt_into(buf, &cqt_kernels, &mut cqt_mags);
-                    log_transform_time(
-                        &mut cqt_log_counter,
-                        "cqt",
-                        channel,
-                        t0,
-                        buf.len(),
-                        cqt_freqs.len(),
-                    );
-                    emit_ring_frames(
-                        ch,
-                        &ctx,
-                        "visualize/cqt",
-                        &cqt_freqs,
-                        &mut cqt_mags,
-                        &[("bpo", json!(cqt_bpo))],
-                        xruns_total,
-                    );
-                    continue;
-                }
-                if mode == Mode::Reassigned {
-                    let xruns_total = match capture_into_ring(
-                        &mut *eng,
-                        captured,
-                        ch,
-                        &ctx,
-                        RingKind::Reassigned,
-                        reass_n,
-                        reass_n,
-                    ) {
-                        RingTick::Ready { xruns } => xruns,
-                        RingTick::NotReady => continue,
-                        RingTick::Failed => return,
-                    };
-                    let t0 = std::time::Instant::now();
-                    let buf = ch.reass_ring.make_contiguous();
-                    ac_core::visualize::reassigned::reassigned_into(
-                        buf,
-                        &reass_kernels,
-                        &mut reass_mags,
-                    );
-                    log_transform_time(
-                        &mut reass_log_counter,
-                        "reassigned",
-                        channel,
-                        t0,
-                        buf.len(),
-                        reass_freqs_out.len(),
-                    );
-                    emit_ring_frames(
-                        ch,
-                        &ctx,
-                        "visualize/reassigned",
-                        &reass_freqs_out,
-                        &mut reass_mags,
-                        &[],
-                        xruns_total,
-                    );
-                    continue;
-                }
-
-                // FFT path. Each channel has its own sliding ring so refresh
-                // cadence (`cur_interval`) is decoupled from FFT window length
-                // (`cur_fft_n`). A single channel drains with
-                // `capture_available` (non-clearing on JACK, falls back to
-                // capture_block elsewhere); several arrive from the tick's
-                // joint capture above, a whole interval each (#666).
-                let captured = match captured {
-                    Some(buf) => Ok(buf),
-                    None => eng.capture_available(capture_budget_samples(cur_interval, sr)),
-                };
-                let Some(new) = capture_or_report(captured, &pub_tx, channel) else {
-                    return;
-                };
-                // `eng.xruns()` is already a cumulative count for this
-                // engine session (see `jack_backend.rs`'s
-                // `SharedState::xruns`), so this assigns rather than
-                // accumulates — summing it across per-tick, per-channel
-                // reads would multiply a handful of real xruns into
-                // thousands over a long monitor session.
-                let xruns_total = eng.xruns();
-                // Loudness runs on the raw capture, independent of the
-                // FFT-N sliding ring.
-                push_loudness_with_optional_fir(
-                    &mut ch.loudness,
-                    &mut ch.loudness_fir,
-                    ctx.mic_corr_enabled,
-                    &new,
-                );
-                emit_scope_frame(ch, &ctx, &new, xruns_total);
-                // Resolved before the ring borrow below: `MicCorrection`
-                // borrows only `ch.mic_curve`, so it stays valid while
-                // `samples` holds `ch.fft_ring` mutably.
-                let mc = MicCorrection::new(ch.mic_curve.as_ref(), &ctx);
-                let dbu_offset = dbu_offset_db(ch.cal.as_ref());
-                let voltage_check = ch.voltage_check.clone();
-                let spl_offset = ch.spl_offset;
-                let ring = &mut ch.fft_ring;
-                ring.extend(new.iter());
-                while ring.len() > cur_fft_n as usize {
-                    ring.pop_front();
-                }
-                if ring.len() < 256 {
-                    continue;
-                }
-                let samples = ring.make_contiguous();
-
-                // Dual-resolution LF path (#142): keep a longer ring fed by the
-                // same capture and recompute its long-N spectrum on the LF
-                // cadence. The cached LF half-spectrum is merged below the
-                // crossover; above it the live `r.spectrum` is untouched.
-                if lf_enabled {
-                    ch.lf.push_and_maybe_recompute(
-                        &new,
-                        cur_lf_fft_n,
-                        sr,
-                        lf_every,
-                        std::time::Instant::now(),
-                    );
-                } else if ch.lf.is_stale() {
-                    // LF band disabled (live N caught up to LF N) — drop stale
-                    // state so a later re-enable rebuilds from fresh capture.
-                    ch.lf.clear();
-                }
-                let lf_spec_for_merge: Option<&[f64]> = if lf_enabled {
-                    ch.lf.spec_cache.as_deref()
-                } else {
-                    None
-                };
-
-                {
-                    let analyze_result =
-                        ac_core::measurement::thd::analyze(samples, sr, ch.current_freq, 10);
-                    let mc_tag = mc.tag();
-                    // The envelope both branches share; the THD branch
-                    // fills the tone readouts on top. Built as the shared
-                    // `ac_core::wire::SpectrumFrame` (#112): the no-THD
-                    // branch leaves those readouts `None`, which the type
-                    // omits from the wire rather than writing `null`.
-                    let mut frame = ac_core::wire::SpectrumFrame {
-                        frame_type: "visualize/spectrum".to_string(),
-                        cmd: "monitor_spectrum".to_string(),
-                        wire_version: None,
-                        channel,
-                        n_channels,
-                        sr,
-                        freqs: Vec::new(),
-                        spectrum: Vec::new(),
-                        dbu_offset_db: dbu_offset,
-                        voltage_check,
-                        spl_offset_db: spl_offset,
-                        mic_correction: mc_tag.to_string(),
-                        xruns: xruns_total,
-                        backend: backend.to_string(),
-                        freq_hz: None,
-                        peaks: None,
-                        fundamental_dbfs: None,
-                        thd_pct: None,
-                        thdn_pct: None,
-                        in_dbu: None,
-                        clipping: None,
-                    };
-                    match analyze_result {
-                        Ok(r) => {
-                            ch.current_freq = r.fundamental_hz;
-                            let in_dbu = ch
-                                .cal
-                                .as_ref()
-                                .and_then(|c| c.in_vrms(r.linear_rms))
-                                .map(ac_core::shared::conversions::vrms_to_dbu);
-                            // Parabolic-interpolated peaks on the linear FFT
-                            // (before column aggregation), so the cursor can
-                            // show scallop-corrected dBFS on hover. Threshold
-                            // 80 dB below the strongest bin keeps noise-floor
-                            // bumps out; n_max=64 covers a busy harmonic
-                            // spectrum without bloating the wire frame.
-                            let raw_n = r.spectrum.len();
-                            let raw_freqs: Vec<f64> = (0..raw_n)
-                                .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
-                                .collect();
-                            let peak_thr = r.fundamental_dbfs as f32 - 80.0;
-                            // Every peak above the threshold, uncapped, so the
-                            // corrected top 64 (#600) can include one the curve
-                            // lifts past the raw ranking (Codex recheck).
-                            let mut peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
-                                &r.spectrum,
-                                &raw_freqs,
-                                usize::MAX,
-                                peak_thr,
-                            );
-                            // Below the crossover the long-N LF spectrum gives
-                            // finer peak positions; splice LF peaks under the
-                            // crossover with HF peaks above it (#142).
-                            if let Some(lf) = lf_spec_for_merge {
-                                let cx = cur_crossover_hz;
-                                let lf_n = lf.len();
-                                let lf_freqs: Vec<f64> = (0..lf_n)
-                                    .map(|k| {
-                                        k as f64 * sr as f64 / (2.0 * (lf_n - 1).max(1) as f64)
-                                    })
-                                    .collect();
-                                let mut lf_peaks =
-                                    ac_core::visualize::spectrum::find_interpolated_peaks(
-                                        lf,
-                                        &lf_freqs,
-                                        usize::MAX,
-                                        peak_thr,
-                                    );
-                                peaks.retain(|p| p.freq_hz >= cx);
-                                lf_peaks.retain(|p| p.freq_hz < cx);
-                                peaks.append(&mut lf_peaks);
-                            }
-                            // #600: each peak corrected at its own frequency
-                            // before the strongest-first order and the cap.
-                            let curve = mc.curve.filter(|_| mc.enabled);
-                            if let Some(c) = curve {
-                                for p in peaks.iter_mut() {
-                                    p.dbfs -= c.correction_at(p.freq_hz);
+            }
+            if !parallel_done {
+                for (idx, ch) in channel_states.iter_mut().enumerate() {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let channel = ch.channel;
+                    let captured = together.as_mut().map(|b| std::mem::take(&mut b[idx]));
+                    if mode == Mode::Cwt {
+                        let xruns_total = match capture_into_ring(
+                            &mut *eng,
+                            captured,
+                            ch,
+                            &ctx,
+                            RingKind::Cwt,
+                            ring_cap,
+                            CWT_MIN_FILL,
+                        ) {
+                            RingTick::Ready { xruns } => xruns,
+                            RingTick::NotReady => continue,
+                            RingTick::Failed => return,
+                        };
+                        let t0 = std::time::Instant::now();
+                        let buf = ch.cwt_ring.make_contiguous();
+                        ac_core::visualize::cwt::morlet_cwt_into(
+                            buf,
+                            sr,
+                            &cwt_scales,
+                            cwt_sigma,
+                            &mut cwt_mags,
+                        );
+                        log_transform_time(
+                            &mut cwt_log_counter,
+                            "cwt",
+                            channel,
+                            t0,
+                            buf.len(),
+                            cwt_scales.len(),
+                        );
+                        let (ts_ns, mc_tag) = emit_ring_frames(
+                            ch,
+                            &ctx,
+                            "visualize/cwt",
+                            &cwt_freqs,
+                            &mut cwt_mags,
+                            &[],
+                            xruns_total,
+                        );
+                        // Optional fractional-octave aggregation of the same
+                        // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
+                        // extra DSP cost when enabled.
+                        if let Some(bpo) = *ioct_bpo_shared.lock().unwrap() {
+                            let (band_centres, mut band_levels) =
+                                ac_core::visualize::fractional_octave::cwt_to_fractional_octave(
+                                    &cwt_mags,
+                                    &cwt_freqs,
+                                    bpo as usize,
+                                    ac_core::visualize::cwt::DEFAULT_F_MIN,
+                                    ac_core::visualize::cwt::default_f_max(sr),
+                                );
+                            // Per-band frequency weighting (off/A/C/Z). Off
+                            // and Z share the identity curve; applying is a
+                            // no-op then, but we still tag the frame so the
+                            // UI can distinguish "weighting explicitly Z"
+                            // from "no weighting picked".
+                            let weighting_tag = band_weighting_shared.lock().unwrap().clone();
+                            let weighting_curve = WeightingCurve::from_tag(&weighting_tag);
+                            if let Some(curve) = weighting_curve {
+                                if !matches!(curve, WeightingCurve::Z) {
+                                    for (level, &fc) in
+                                        band_levels.iter_mut().zip(band_centres.iter())
+                                    {
+                                        *level += curve.db_offset(fc as f64) as f32;
+                                    }
                                 }
                             }
-                            peaks.sort_by(|a, b| {
-                                b.dbfs
-                                    .partial_cmp(&a.dbfs)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            let frac_frame = json!({
+                                "type":           "visualize/fractional_octave",
+                                "cmd":            "monitor_spectrum",
+                                "channel":        channel,
+                                "n_channels":     n_channels,
+                                "sr":             sr,
+                                "bpo":            bpo,
+                                "weighting":      weighting_tag,
+                                "freqs":          band_centres,
+                                "spectrum":       band_levels.clone(),
+                                "spl_offset_db":  ch.spl_offset,
+                                "mic_correction": mc_tag,
+                                "timestamp":      ts_ns,
+                                "xruns":          xruns_total,
+                                "backend":        backend,
                             });
-                            peaks.truncate(64);
-                            let (spec, freqs) = spectrum_columns(
-                                &r.spectrum,
-                                lf_spec_for_merge,
-                                cur_crossover_hz,
-                                mc,
-                                &ctx,
-                            );
-                            // THD analysis succeeded, so the frame carries
-                            // the tone readouts on top of the envelope.
-                            frame.freqs = freqs;
-                            frame.spectrum = spec;
-                            frame.freq_hz = Some(r.fundamental_hz);
-                            // #600: with the mic curve on, the tone readouts
-                            // are corrected like the columns they sit on, by
-                            // the same function `plot` uses — one truth for
-                            // the frame, not a corrected spectrum beside a raw
-                            // fundamental and THD.
-                            let (fundamental_dbfs, thd_pct) = curve
-                                .map_or((r.fundamental_dbfs, r.thd_pct), |c| {
-                                    crate::handlers::mic::corrected_tone(c, &r)
-                                });
-                            frame.peaks = Some(
-                                peaks
-                                    .iter()
-                                    .map(|p| [f64::from(p.freq_hz), f64::from(p.dbfs)])
-                                    .collect(),
-                            );
-                            frame.fundamental_dbfs = Some(fundamental_dbfs);
-                            // #627: no harmonic below Nyquist is not 0 %.
-                            frame.thd_pct = (!r.harmonic_levels.is_empty()).then_some(thd_pct);
-                            frame.thdn_pct = Some(r.thdn_pct);
-                            frame.in_dbu = Some(in_dbu);
-                            frame.clipping = Some(r.clipping);
+                            send_pub(&pub_tx, "data", &frac_frame);
+
+                            if cur_ti_mode != "off" {
+                                let n_bands = band_levels.len();
+                                let slot = &mut ch.integrator;
+                                // Re-init if the band count changed (e.g. live
+                                // ioct_bpo toggle) or if this channel hasn't
+                                // been primed yet.
+                                if slot
+                                    .as_ref()
+                                    .map(|i| i.n_bands() != n_bands)
+                                    .unwrap_or(true)
+                                {
+                                    *slot = Integrator::for_mode(&cur_ti_mode, n_bands);
+                                    ch.last_frac_ts = None;
+                                }
+                                if let Some(integ) = slot.as_mut() {
+                                    let now = std::time::Instant::now();
+                                    let dt = ch
+                                        .last_frac_ts
+                                        .map(|t| now.duration_since(t).as_secs_f64())
+                                        .unwrap_or(cur_interval)
+                                        .max(1e-6);
+                                    ch.last_frac_ts = Some(now);
+                                    let levels_f64: Vec<f64> =
+                                        band_levels.iter().map(|&v| v as f64).collect();
+                                    let integrated = integ.update(&levels_f64, dt);
+                                    let tau_s: Option<f64> = match cur_ti_mode.as_str() {
+                                        "fast" => Some(TAU_FAST_S),
+                                        "slow" => Some(TAU_SLOW_S),
+                                        _ => None,
+                                    };
+                                    let dur_s = integ.duration_s();
+                                    let leq_frame = json!({
+                                        "type":           "visualize/fractional_octave_leq",
+                                        "cmd":            "monitor_spectrum",
+                                        "channel":        channel,
+                                        "n_channels":     n_channels,
+                                        "sr":             sr,
+                                        "bpo":            bpo,
+                                        "weighting":      weighting_tag,
+                                        "mode":           cur_ti_mode,
+                                        "tau_s":          tau_s,
+                                        "duration_s":     if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
+                                        "freqs":          band_centres,
+                                        "spectrum":       integrated,
+                                        "spl_offset_db":  ch.spl_offset,
+                                        "mic_correction": mc_tag,
+                                        "timestamp":      ts_ns,
+                                        "xruns":          xruns_total,
+                                        "backend":        backend,
+                                    });
+                                    send_pub(&pub_tx, "data", &leq_frame);
+                                }
+                            }
                         }
-                        // No resolvable fundamental — emit the plain
-                        // spectrum with none of the tone readouts.
-                        Err(_) => {
-                            let (raw, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
-                            let (spec, freqs) = spectrum_columns(
-                                &raw,
-                                lf_spec_for_merge,
-                                cur_crossover_hz,
-                                mc,
-                                &ctx,
-                            );
-                            frame.freqs = freqs;
-                            frame.spectrum = spec;
-                        }
+                        continue;
                     }
-                    if let Ok(frame) = serde_json::to_value(&frame) {
-                        send_pub(&pub_tx, "data", &frame);
+                    if mode == Mode::Cqt {
+                        // The kernel for the lowest bin needs the full ring, so
+                        // ticks are skipped until it has filled that far; the
+                        // bins above it produce earlier, but a partial column
+                        // would confuse the waterfall.
+                        let xruns_total = match capture_into_ring(
+                            &mut *eng,
+                            captured,
+                            ch,
+                            &ctx,
+                            RingKind::Cqt,
+                            cqt_ring_cap,
+                            cqt_kernels.max_kernel_len(),
+                        ) {
+                            RingTick::Ready { xruns } => xruns,
+                            RingTick::NotReady => continue,
+                            RingTick::Failed => return,
+                        };
+                        let t0 = std::time::Instant::now();
+                        let buf = ch.cqt_ring.make_contiguous();
+                        ac_core::visualize::cqt::cqt_into(buf, &cqt_kernels, &mut cqt_mags);
+                        log_transform_time(
+                            &mut cqt_log_counter,
+                            "cqt",
+                            channel,
+                            t0,
+                            buf.len(),
+                            cqt_freqs.len(),
+                        );
+                        emit_ring_frames(
+                            ch,
+                            &ctx,
+                            "visualize/cqt",
+                            &cqt_freqs,
+                            &mut cqt_mags,
+                            &[("bpo", json!(cqt_bpo))],
+                            xruns_total,
+                        );
+                        continue;
                     }
-                    emit_loudness_frame(ch, &ctx, mc_tag, now_ns(), xruns_total);
+                    if mode == Mode::Reassigned {
+                        let xruns_total = match capture_into_ring(
+                            &mut *eng,
+                            captured,
+                            ch,
+                            &ctx,
+                            RingKind::Reassigned,
+                            reass_n,
+                            reass_n,
+                        ) {
+                            RingTick::Ready { xruns } => xruns,
+                            RingTick::NotReady => continue,
+                            RingTick::Failed => return,
+                        };
+                        let t0 = std::time::Instant::now();
+                        let buf = ch.reass_ring.make_contiguous();
+                        ac_core::visualize::reassigned::reassigned_into(
+                            buf,
+                            &reass_kernels,
+                            &mut reass_mags,
+                        );
+                        log_transform_time(
+                            &mut reass_log_counter,
+                            "reassigned",
+                            channel,
+                            t0,
+                            buf.len(),
+                            reass_freqs_out.len(),
+                        );
+                        emit_ring_frames(
+                            ch,
+                            &ctx,
+                            "visualize/reassigned",
+                            &reass_freqs_out,
+                            &mut reass_mags,
+                            &[],
+                            xruns_total,
+                        );
+                        continue;
+                    }
+
+                    // FFT path. Each channel has its own sliding ring so refresh
+                    // cadence (`cur_interval`) is decoupled from FFT window length
+                    // (`cur_fft_n`). A single channel drains with
+                    // `capture_available` (non-clearing on JACK, falls back to
+                    // capture_block elsewhere); several arrive from the tick's
+                    // joint capture above, a whole interval each (#666).
+                    let captured = match captured {
+                        Some(buf) => Ok(buf),
+                        None => eng.capture_available(capture_budget_samples(cur_interval, sr)),
+                    };
+                    let Some(new) = capture_or_report(captured, &pub_tx, channel) else {
+                        return;
+                    };
+                    // `eng.xruns()` is already a cumulative count for this
+                    // engine session (see `jack_backend.rs`'s
+                    // `SharedState::xruns`), so this assigns rather than
+                    // accumulates — summing it across per-tick, per-channel
+                    // reads would multiply a handful of real xruns into
+                    // thousands over a long monitor session.
+                    let xruns_total = eng.xruns();
+                    emit_scope_frame(ch, &ctx, &new, xruns_total);
+                    fft_channel_tick(ch, &new, xruns_total, &ctx, &fft_tick);
                 }
             }
             // Pace the FFT mode to the requested interval; the
@@ -1032,8 +907,215 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         "crossover_hz":    crossover_hz,
         "lf_avg_tau_ms":   LF_AVG_TAU_S * 1000.0,
         "lf_overlap_pct":  LF_OVERLAP * 100.0,
+        "columns":         columns,
+        "scope":           scope,
         "backend":         backend,
     })
+}
+
+/// FFT-mode values one tick shares across its channels.
+struct FftTick {
+    fft_n: u32,
+    lf_fft_n: u32,
+    lf_enabled: bool,
+    lf_every: u32,
+    crossover_hz: f32,
+}
+
+/// One channel's FFT-mode tick on `new`, the audio it captured this tick:
+/// loudness, the sliding FFT ring and LF band, and the `visualize/spectrum`
+/// and `measurement/loudness` frames. Touches only `ch`, so a multi-channel
+/// tick runs its channels in parallel. The caller emits the channel's scope
+/// frame first: its `frame_idx` must rise in publish order.
+fn fft_channel_tick(
+    ch: &mut ChannelState,
+    new: &[f32],
+    xruns_total: u32,
+    ctx: &TickCtx,
+    p: &FftTick,
+) {
+    let (sr, n_channels, backend) = (ctx.sr, ctx.n_channels, ctx.backend);
+    let channel = ch.channel;
+    // Loudness runs on the raw capture, independent of the
+    // FFT-N sliding ring.
+    push_loudness_with_optional_fir(
+        &mut ch.loudness,
+        &mut ch.loudness_fir,
+        ctx.mic_corr_enabled,
+        new,
+    );
+    // Resolved before the ring borrow below: `MicCorrection`
+    // borrows only `ch.mic_curve`, so it stays valid while
+    // `samples` holds `ch.fft_ring` mutably.
+    let mc = MicCorrection::new(ch.mic_curve.as_ref(), ctx);
+    let dbu_offset = dbu_offset_db(ch.cal.as_ref());
+    let voltage_check = ch.voltage_check.clone();
+    let spl_offset = ch.spl_offset;
+    let ring = &mut ch.fft_ring;
+    ring.extend(new.iter());
+    while ring.len() > p.fft_n as usize {
+        ring.pop_front();
+    }
+    if ring.len() < 256 {
+        return;
+    }
+    let samples = ring.make_contiguous();
+
+    // Dual-resolution LF path (#142): keep a longer ring fed by the
+    // same capture and recompute its long-N spectrum on the LF
+    // cadence. The cached LF half-spectrum is merged below the
+    // crossover; above it the live `r.spectrum` is untouched.
+    if p.lf_enabled {
+        ch.lf
+            .push_and_maybe_recompute(new, p.lf_fft_n, sr, p.lf_every, std::time::Instant::now());
+    } else if ch.lf.is_stale() {
+        // LF band disabled (live N caught up to LF N) — drop stale
+        // state so a later re-enable rebuilds from fresh capture.
+        ch.lf.clear();
+    }
+    let lf_spec_for_merge: Option<&[f64]> = if p.lf_enabled {
+        ch.lf.spec_cache.as_deref()
+    } else {
+        None
+    };
+
+    {
+        let analyze_result = ac_core::measurement::thd::analyze(samples, sr, ch.current_freq, 10);
+        let mc_tag = mc.tag();
+        // The envelope both branches share; the THD branch
+        // fills the tone readouts on top. Built as the shared
+        // `ac_core::wire::SpectrumFrame` (#112): the no-THD
+        // branch leaves those readouts `None`, which the type
+        // omits from the wire rather than writing `null`.
+        let mut frame = ac_core::wire::SpectrumFrame {
+            frame_type: "visualize/spectrum".to_string(),
+            cmd: "monitor_spectrum".to_string(),
+            wire_version: None,
+            channel,
+            n_channels,
+            sr,
+            freqs: Vec::new(),
+            spectrum: Vec::new(),
+            dbu_offset_db: dbu_offset,
+            voltage_check,
+            spl_offset_db: spl_offset,
+            mic_correction: mc_tag.to_string(),
+            xruns: xruns_total,
+            backend: backend.to_string(),
+            peak_dbfs: ac_core::shared::conversions::raw_peak_dbfs(new),
+            freq_hz: None,
+            peaks: None,
+            fundamental_dbfs: None,
+            thd_pct: None,
+            thdn_pct: None,
+            in_dbu: None,
+            clipping: None,
+        };
+        match analyze_result {
+            Ok(r) => {
+                ch.current_freq = r.fundamental_hz;
+                let in_dbu = ch
+                    .cal
+                    .as_ref()
+                    .and_then(|c| c.in_vrms(r.linear_rms))
+                    .map(ac_core::shared::conversions::vrms_to_dbu);
+                // Parabolic-interpolated peaks on the linear FFT
+                // (before column aggregation), so the cursor can
+                // show scallop-corrected dBFS on hover. Threshold
+                // 80 dB below the strongest bin keeps noise-floor
+                // bumps out; n_max=64 covers a busy harmonic
+                // spectrum without bloating the wire frame.
+                let raw_n = r.spectrum.len();
+                let raw_freqs: Vec<f64> = (0..raw_n)
+                    .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
+                    .collect();
+                let peak_thr = r.fundamental_dbfs as f32 - 80.0;
+                // Every peak above the threshold, uncapped, so the
+                // corrected top 64 (#600) can include one the curve
+                // lifts past the raw ranking (Codex recheck).
+                let mut peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
+                    &r.spectrum,
+                    &raw_freqs,
+                    usize::MAX,
+                    peak_thr,
+                );
+                // Below the crossover the long-N LF spectrum gives
+                // finer peak positions; splice LF peaks under the
+                // crossover with HF peaks above it (#142).
+                if let Some(lf) = lf_spec_for_merge {
+                    let cx = p.crossover_hz;
+                    let lf_n = lf.len();
+                    let lf_freqs: Vec<f64> = (0..lf_n)
+                        .map(|k| k as f64 * sr as f64 / (2.0 * (lf_n - 1).max(1) as f64))
+                        .collect();
+                    let mut lf_peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
+                        lf,
+                        &lf_freqs,
+                        usize::MAX,
+                        peak_thr,
+                    );
+                    peaks.retain(|p| p.freq_hz >= cx);
+                    lf_peaks.retain(|p| p.freq_hz < cx);
+                    peaks.append(&mut lf_peaks);
+                }
+                // #600: each peak corrected at its own frequency
+                // before the strongest-first order and the cap.
+                let curve = mc.curve.filter(|_| mc.enabled);
+                if let Some(c) = curve {
+                    for p in peaks.iter_mut() {
+                        p.dbfs -= c.correction_at(p.freq_hz);
+                    }
+                }
+                peaks.sort_by(|a, b| {
+                    b.dbfs
+                        .partial_cmp(&a.dbfs)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                peaks.truncate(64);
+                let (spec, freqs) =
+                    spectrum_columns(&r.spectrum, lf_spec_for_merge, p.crossover_hz, mc, ctx);
+                // THD analysis succeeded, so the frame carries
+                // the tone readouts on top of the envelope.
+                frame.freqs = freqs;
+                frame.spectrum = spec;
+                frame.freq_hz = Some(r.fundamental_hz);
+                // #600: with the mic curve on, the tone readouts
+                // are corrected like the columns they sit on, by
+                // the same function `plot` uses — one truth for
+                // the frame, not a corrected spectrum beside a raw
+                // fundamental and THD.
+                let (fundamental_dbfs, thd_pct) = curve
+                    .map_or((r.fundamental_dbfs, r.thd_pct), |c| {
+                        crate::handlers::mic::corrected_tone(c, &r)
+                    });
+                frame.peaks = Some(
+                    peaks
+                        .iter()
+                        .map(|p| [f64::from(p.freq_hz), f64::from(p.dbfs)])
+                        .collect(),
+                );
+                frame.fundamental_dbfs = Some(fundamental_dbfs);
+                // #627: no harmonic below Nyquist is not 0 %.
+                frame.thd_pct = (!r.harmonic_levels.is_empty()).then_some(thd_pct);
+                frame.thdn_pct = Some(r.thdn_pct);
+                frame.in_dbu = Some(in_dbu);
+                frame.clipping = Some(r.clipping);
+            }
+            // No resolvable fundamental — emit the plain
+            // spectrum with none of the tone readouts.
+            Err(_) => {
+                let (raw, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
+                let (spec, freqs) =
+                    spectrum_columns(&raw, lf_spec_for_merge, p.crossover_hz, mc, ctx);
+                frame.freqs = freqs;
+                frame.spectrum = spec;
+            }
+        }
+        if let Ok(frame) = serde_json::to_value(&frame) {
+            send_pub(ctx.pub_tx, "data", &frame);
+        }
+        emit_loudness_frame(ch, ctx, mc_tag, now_ns(), xruns_total);
+    }
 }
 
 #[cfg(test)]

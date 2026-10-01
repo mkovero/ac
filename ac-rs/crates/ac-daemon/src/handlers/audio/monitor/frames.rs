@@ -1,8 +1,6 @@
 //! The wire frames the monitor publishes, and the per-tick values every
 //! frame in one channel iteration shares.
 
-use std::cell::Cell;
-
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
@@ -76,9 +74,15 @@ pub(super) const SCOPE_CAPTURE_MODE: &str = "simultaneous";
 /// the tick, the key a consumer pairs them by — or now on a single
 /// channel.
 pub(super) fn emit_scope_frame(ch: &ChannelState, ctx: &TickCtx, samples: &[f32], xruns: u32) {
+    if !ctx.scope {
+        return;
+    }
     let ts_ns = ctx.capture_ts_ns.unwrap_or_else(now_ns);
-    let frame_idx = ctx.scope_frame_idx.get().wrapping_add(1);
-    ctx.scope_frame_idx.set(frame_idx);
+    // fetch_add wraps on overflow, as the counter always has.
+    let frame_idx = ctx
+        .scope_frame_idx
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
     let tail = if samples.len() > SCOPE_MAX_SAMPLES {
         &samples[samples.len() - SCOPE_MAX_SAMPLES..]
     } else {
@@ -121,7 +125,7 @@ pub(super) struct TickCtx<'a> {
     /// Worker-lifetime scope-frame counter, advanced by
     /// [`emit_scope_frame`] once per emitted frame. Lives outside the
     /// per-tick context so it keeps counting across ticks.
-    pub(super) scope_frame_idx: &'a Cell<u64>,
+    pub(super) scope_frame_idx: &'a std::sync::atomic::AtomicU64,
     /// Snapshot of the global mic-correction toggle, read once per tick.
     pub(super) mic_corr_enabled: bool,
     /// Capture-block duration for the ring-buffered modes, already
@@ -131,6 +135,10 @@ pub(super) struct TickCtx<'a> {
     /// `timestamp` all of the tick's scope frames share. `None` before the
     /// capture, and on a single channel, which takes its own.
     pub(super) capture_ts_ns: Option<u64>,
+    /// Log-spaced columns per `visualize/spectrum` frame (request `columns`).
+    pub(super) columns: usize,
+    /// Whether `visualize/scope` frames are published (request `scope`).
+    pub(super) scope: bool,
 }
 
 /// Mic-correct `mags` in place, then emit the mode's `visualize/*` frame
@@ -214,14 +222,14 @@ pub(super) fn spectrum_columns(
             crossover_hz as f64,
             20.0,
             (sr_f / 2.0).max(21.0),
-            ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+            ctx.columns,
         ),
         None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
             spec,
             sr_f,
             20.0,
             (sr_f / 2.0).max(21.0),
-            ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+            ctx.columns,
         ),
     };
     mc.apply_linear_f64(&freqs, &mut columns);

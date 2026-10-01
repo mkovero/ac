@@ -696,11 +696,13 @@ const COMMANDS: &[Command] = &[
         fields: &[
             "amplitude",
             "channels",
+            "columns",
             "fake_noise_dbfs",
             "fake_tones",
             "fft_n",
             "freq_hz",
             "interval",
+            "scope",
         ],
         run: handlers::monitor_spectrum,
     },

@@ -116,6 +116,44 @@ impl EmaIntegrator {
         self.state_pow.iter().map(|&p| pow_to_db(p)).collect()
     }
 
+    /// [`update`] for a caller that already holds amplitudes: one-sided
+    /// linear amplitudes in, smoothed amplitudes out, the same values
+    /// `update` gives on `20·log10(a)` converted back with `10^(db/20)`.
+    ///
+    /// The state is power either way, so the dB round trip only costs four
+    /// transcendental calls per band; on the monitor's 32769-bin LF band
+    /// that was most of each channel's tick on the rig.
+    ///
+    /// [`update`]: EmaIntegrator::update
+    pub fn update_amplitude(&mut self, amps: &[f64], dt_s: f64) -> Vec<f64> {
+        assert_eq!(amps.len(), self.state_pow.len());
+        assert!(dt_s > 0.0, "dt_s must be positive");
+        let floor_amp = 10.0_f64.powf(MIN_DBFS / 20.0);
+        // `update` reads its input in dB, where a zero amplitude is -inf
+        // and powers back to 0, and floors its output at MIN_DBFS.
+        let out = |p: f64| {
+            if p.is_nan() || p <= 0.0 {
+                floor_amp
+            } else {
+                p.sqrt().max(floor_amp)
+            }
+        };
+        if !self.primed {
+            for (s, &a) in self.state_pow.iter_mut().zip(amps) {
+                *s = a * a;
+            }
+            self.primed = true;
+            // `update` returns its primed input verbatim, so the dB value
+            // of a zero amplitude (-inf) comes back as 0.
+            return amps.to_vec();
+        }
+        let alpha = (-dt_s / self.tau_s).exp();
+        for (s, &a) in self.state_pow.iter_mut().zip(amps) {
+            *s = *s * alpha + a * a * (1.0 - alpha);
+        }
+        self.state_pow.iter().map(|&p| out(p)).collect()
+    }
+
     /// Zero the internal state. The next [`update`] re-primes from its
     /// input, matching fresh-construction semantics.
     ///
@@ -453,5 +491,43 @@ mod tests {
         assert!(approx(out[0], -10.0, 1e-3));
         assert!(approx(out[1], -20.0, 1e-3));
         assert!(approx(out[2], -30.0, 1e-3));
+    }
+
+    /// `update_amplitude` is `update` without the dB round trip: the same
+    /// smoothed amplitudes, primed tick included, zeros included.
+    #[test]
+    fn update_amplitude_matches_update_through_db() {
+        let n = 64;
+        let frames: Vec<Vec<f64>> = (0..12)
+            .map(|k| {
+                (0..n)
+                    .map(|i| {
+                        if (i + k) % 17 == 0 {
+                            0.0
+                        } else {
+                            (((i * 31 + k * 7) % 97) as f64 + 1.0) * 1e-4
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut via_db = EmaIntegrator::new(0.25, n);
+        let mut direct = EmaIntegrator::new(0.25, n);
+        for (k, amps) in frames.iter().enumerate() {
+            let dt = 0.05 + 0.01 * k as f64;
+            let db: Vec<f64> = amps.iter().map(|&a| 20.0 * a.log10()).collect();
+            let want: Vec<f64> = via_db
+                .update(&db, dt)
+                .iter()
+                .map(|&d| 10f64.powf(d / 20.0))
+                .collect();
+            let got = direct.update_amplitude(amps, dt);
+            for (w, g) in want.iter().zip(&got) {
+                assert!(
+                    (w - g).abs() <= 1e-12 * w.abs().max(1e-10),
+                    "tick {k}: via dB {w}, direct {g}"
+                );
+            }
+        }
     }
 }

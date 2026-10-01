@@ -15,13 +15,15 @@ use realfft::{RealFftPlanner, RealToComplex};
 thread_local! {
     static REAL_FFT_PLANS: RefCell<HashMap<usize, Arc<dyn RealToComplex<f64>>>> =
         RefCell::new(HashMap::new());
-    static HANN_CACHE: RefCell<HannCache> = RefCell::new(HannCache::default());
+    /// Keyed by length, like the plans: one entry per N would rebuild the
+    /// window on every call of a thread that alternates sizes, as a
+    /// monitor channel does between its 8192-point THD FFT and its
+    /// 65536-point LF band (73k cosines a tick per channel).
+    static HANN_CACHE: RefCell<HashMap<usize, HannWindow>> = RefCell::new(HashMap::new());
     static AXES_CACHE: RefCell<AxesCache> = RefCell::new(AxesCache::default());
 }
 
-#[derive(Default)]
-struct HannCache {
-    n: usize,
+struct HannWindow {
     win: Vec<f64>,
     wc: f64,
 }
@@ -62,18 +64,15 @@ pub(crate) fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
 /// scallop, with the residual ≈1.8 dB tracking exactly to this constant.)
 pub(crate) fn with_hann_window<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) -> R {
     HANN_CACHE.with(|cell| {
-        let mut c = cell.borrow_mut();
-        if c.n != n {
-            c.win.clear();
-            c.win.reserve(n);
-            for i in 0..n {
-                c.win
-                    .push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
-            }
-            c.wc = c.win.iter().sum::<f64>() / n as f64;
-            c.n = n;
-        }
-        f(&c.win, c.wc)
+        let mut cache = cell.borrow_mut();
+        let w = cache.entry(n).or_insert_with(|| {
+            let win: Vec<f64> = (0..n)
+                .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()))
+                .collect();
+            let wc = win.iter().sum::<f64>() / n as f64;
+            HannWindow { win, wc }
+        });
+        f(&w.win, w.wc)
     })
 }
 
