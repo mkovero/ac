@@ -13,6 +13,7 @@ pub mod file_list;
 pub mod fonts;
 pub mod geometry;
 pub mod keys;
+pub mod monitor_view;
 pub mod offset_entry;
 pub mod range;
 pub mod report_flow;

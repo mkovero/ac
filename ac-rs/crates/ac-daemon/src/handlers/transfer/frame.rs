@@ -21,19 +21,6 @@ use crate::handlers::mic;
 use super::analysis::PairAnalysis;
 use super::pair::{PairCtx, PairState};
 
-/// `20·log10(max|sample|)` over one capture block, or `None` for
-/// digital silence (which would be `-inf`, unrepresentable in JSON).
-///
-/// Takes raw capture samples. There is no calibrated variant of this on
-/// purpose: a voltage-calibrated frame must not move the input meters.
-pub(super) fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
-    let peak = block.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
-    if peak <= 0.0 {
-        return None;
-    }
-    Some(20.0 * (peak as f64).log10())
-}
-
 /// Frame inputs that are fixed for the worker's whole life.
 ///
 /// Split from [`TickInputs`] on exactly that axis: anything here is

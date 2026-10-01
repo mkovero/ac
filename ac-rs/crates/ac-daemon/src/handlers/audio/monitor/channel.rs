@@ -272,17 +272,14 @@ impl LfState {
             .unwrap_or(nominal_hop_s)
             .max(1e-6);
         self.ema_last_ts = Some(now);
-        let raw_db: Vec<f64> = spec.iter().map(|&a| 20.0 * a.log10()).collect();
-        let smoothed_db = self
-            .ema
-            .as_mut()
-            .expect("ensure_ema just populated it")
-            .update(&raw_db, dt);
+        // In amplitude, not through dB and back: the same values, without
+        // four transcendental calls per bin (most of a channel's tick on the
+        // rig at 96 kHz).
         self.spec_cache = Some(
-            smoothed_db
-                .iter()
-                .map(|&db| 10f64.powf(db / 20.0))
-                .collect(),
+            self.ema
+                .as_mut()
+                .expect("ensure_ema just populated it")
+                .update_amplitude(&spec, dt),
         );
         self.ticks_since_recompute = 0;
     }

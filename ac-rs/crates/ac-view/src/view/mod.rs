@@ -20,7 +20,7 @@
 //! this directory, see `computes_nothing::tests::source_files`).
 
 mod ir;
-mod paint;
+pub(crate) mod paint;
 pub mod palette;
 mod spectrum;
 mod state;

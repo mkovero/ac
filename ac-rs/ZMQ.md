@@ -331,6 +331,9 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "mic_correction":   "on" | "off" | "none",   // mic frequency-response state
   "xruns":            <int>,
   "backend":          "jack" | "cpal" | "fake",
+  "peak_dbfs":        <float> | null, // raw sample peak of this tick's fresh capture
+                                      // (input meter); null on digital silence. Same
+                                      // function as transfer_stream's meas_peak_dbfs
 
   // THD branch only. When THD analysis resolves no fundamental these seven
   // keys are ABSENT — not null — and the frame carries the plain spectrum.
@@ -2029,9 +2032,12 @@ overflow) and each channel's ring receives the whole tick (#666).
   "interval":   <float>,     // tick cadence (seconds), default 0.2
   "fft_n":      <int>,       // capture window = FFT N, power of 2 in [256, 131072]
                               // default: nearest pow2 of sr*interval (preserves legacy)
-  "channels":   [<int>, ...] // optional; input channel indices to monitor
+  "channels":   [<int>, ...],// optional; input channel indices to monitor
                               // defaults to [config.input_channel]
                               // at most 64 entries, none repeated
+  "columns":    <int>,       // optional; log-spaced columns per spectrum frame,
+                              // 64–4096, default 4096
+  "scope":      <bool>       // optional; publish visualize/scope frames, default true
 }
 ```
 
@@ -2082,6 +2088,8 @@ monitors one channel, `jack` up to 17.
   "crossover_hz": <float>,          // LF/HF split frequency (daemon-owned constant)
   "lf_avg_tau_ms": <float>,         // ms — LF power-domain EMA time constant (see below)
   "lf_overlap_pct": <float>,        // % — LF FFT window overlap (see below)
+  "columns":      <int>,            // spectrum columns per frame, as requested or 4096
+  "scope":        <bool>,           // whether scope frames are published
   "backend":      "jack" | "cpal" | "fake"
 }
 ```
@@ -4136,9 +4144,9 @@ objects (`fake_tones[i]`, `fake_correlated_pair`, `fake_ring`).
 
 ```json
 { "ok": false,
-  "error": "monitor_spectrum: field 'interval_ms' not recognised — command not run\n         reads   amplitude  channels  fake_noise_dbfs  fake_tones  fft_n\n                 freq_hz  interval",
+  "error": "monitor_spectrum: field 'interval_ms' not recognised — command not run\n         reads   amplitude  channels  columns  fake_noise_dbfs  fake_tones\n                 fft_n  freq_hz  interval  scope",
   "unrecognised_fields": ["interval_ms"],
-  "accepted_fields": ["amplitude", "channels", "fake_noise_dbfs", "fake_tones", "fft_n", "freq_hz", "interval"] }
+  "accepted_fields": ["amplitude", "channels", "columns", "fake_noise_dbfs", "fake_tones", "fft_n", "freq_hz", "interval", "scope"] }
 ```
 
 | key | meaning |
@@ -4155,8 +4163,8 @@ at column 17, are separated by two spaces, and wrap at 80 columns with a
 ```text
 monitor_spectrum: 2 fields not recognised — command not run
          fields  chan  interval_ms
-         reads   amplitude  channels  fake_noise_dbfs  fake_tones  fft_n
-                 freq_hz  interval
+         reads   amplitude  channels  columns  fake_noise_dbfs  fake_tones
+                 fft_n  freq_hz  interval  scope
 ```
 
 Unrecognised names are listed alphabetically, not in request order. In

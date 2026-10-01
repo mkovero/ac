@@ -781,6 +781,27 @@ impl MeterState {
             clip_latch,
         }
     }
+
+    /// Read the meter at `now_s` showing `peak_dbfs`, without folding that
+    /// peak in: the hold and clip latch age, but are not re-armed. For a
+    /// caller that repaints between frames and must not replay the last
+    /// frame's peak as if it had arrived again.
+    pub fn read(&self, peak_dbfs: Option<f64>, now_s: f64) -> Meter {
+        let height = meter_height(peak_dbfs);
+        let hold = if now_s - self.hold_set_at_s >= PEAK_HOLD_S {
+            height
+        } else {
+            self.hold.max(height)
+        };
+        let clip_latch = self
+            .latched_at_s
+            .is_some_and(|t| now_s - t < CLIP_LATCH_HOLD_S);
+        Meter {
+            height,
+            hold,
+            clip_latch,
+        }
+    }
 }
 
 /// Everything the transfer view draws, with no numeric work left for the

@@ -34,6 +34,7 @@
 pub mod dbfs;
 pub mod fault;
 pub mod ir;
+pub mod monitor;
 pub mod readout;
 pub mod scene;
 pub mod sweep_ir;
@@ -44,6 +45,7 @@ pub mod tween;
 
 pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use ir::{ArrivalMarker, IrInput, IrScene, IrView, IR_HEADER, IR_HEADER_ARRIVAL};
+pub use monitor::{MonitorChannel, MonitorScene, MonitorState};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use sweep_ir::{SweepIrFault, SweepIrScene};
 pub use ticks::{Axis, Tick};

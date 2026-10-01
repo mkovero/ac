@@ -200,7 +200,6 @@ pub(super) fn log_transform_time(
 
 #[cfg(test)]
 mod ring_contiguity_tests {
-    use std::cell::Cell;
 
     use super::{capture_into_ring, RingTick};
     use crate::audio::fake::FakeEngine;
@@ -269,7 +268,7 @@ mod ring_contiguity_tests {
         };
         let mut ch = ChannelState::new(0, None, None, SR, TONE_HZ, &caps);
         let (pub_tx, _pub_rx) = crossbeam_channel::unbounded();
-        let scope_frame_idx = Cell::new(0);
+        let scope_frame_idx = std::sync::atomic::AtomicU64::new(0);
         let ctx = TickCtx {
             pub_tx: &pub_tx,
             n_channels: 1,
@@ -279,6 +278,8 @@ mod ring_contiguity_tests {
             mic_corr_enabled: false,
             tick_secs: TICK_SECS,
             capture_ts_ns: None,
+            columns: ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+            scope: true,
         };
 
         // Enough ticks to fill the ring and then slide it a few more times,

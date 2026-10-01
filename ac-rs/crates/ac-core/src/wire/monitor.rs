@@ -64,6 +64,12 @@ pub struct SpectrumFrame {
     /// The engine that produced the frame.
     #[serde(default)]
     pub backend: String,
+    /// Raw sample peak of this tick's fresh capture, dBFS — the input
+    /// meter reading, by [`crate::shared::conversions::raw_peak_dbfs`].
+    /// `None` (wire `null`) for digital silence, or absent on an older
+    /// daemon; the two read the same.
+    #[serde(default)]
+    pub peak_dbfs: Option<f64>,
 
     // ---- THD branch only: absent when no fundamental was resolved ----
     /// Auto-detected dominant frequency, Hz.
@@ -165,7 +171,7 @@ mod tests {
             "type": "visualize/spectrum", "cmd": "monitor_spectrum", "channel": 0,
             "n_channels": 1, "sr": 48000, "freqs": [100.0], "spectrum": [0.5],
             "dbu_offset_db": null, "voltage_check": null, "spl_offset_db": null,
-            "mic_correction": "none", "xruns": 0, "backend": "fake"
+            "mic_correction": "none", "xruns": 0, "backend": "fake", "peak_dbfs": -6.0
         });
         assert_eq!(round_trip::<SpectrumFrame>(&v), v);
     }
@@ -176,7 +182,7 @@ mod tests {
             "type": "visualize/spectrum", "cmd": "monitor_spectrum", "channel": 0,
             "n_channels": 1, "sr": 48000, "freqs": [100.0], "spectrum": [0.5],
             "dbu_offset_db": null, "voltage_check": null, "spl_offset_db": null,
-            "mic_correction": "none", "xruns": 0, "backend": "fake",
+            "mic_correction": "none", "xruns": 0, "backend": "fake", "peak_dbfs": null,
             "freq_hz": 1000.0, "peaks": [[1000.0, -20.0]], "fundamental_dbfs": -20.0,
             "thd_pct": 0.01, "thdn_pct": 0.02, "in_dbu": null, "clipping": false
         });

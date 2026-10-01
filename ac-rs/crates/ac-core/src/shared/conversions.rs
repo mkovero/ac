@@ -10,6 +10,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Initialised to DBU_REF_VRMS; f64::to_bits is const since Rust 1.58.
 static DBU_REF_BITS: AtomicU64 = AtomicU64::new(DBU_REF_VRMS.to_bits());
 
+/// `20·log10(max|sample|)` over one capture block, or `None` for
+/// digital silence (which would be `-inf`, unrepresentable in JSON).
+/// The input-meter reading on both live streams: `transfer_stream`'s
+/// `meas_peak_dbfs`/`ref_peak_dbfs` and `monitor_spectrum`'s `peak_dbfs`.
+///
+/// Takes raw capture samples. There is no calibrated variant of this on
+/// purpose: a voltage-calibrated frame must not move the input meters.
+pub fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
+    let peak = block.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+    if peak <= 0.0 {
+        return None;
+    }
+    Some(20.0 * (peak as f64).log10())
+}
+
 /// Override the 0 dBu reference voltage.  Call once at startup after
 /// loading config; safe to call from any thread.
 pub fn set_dbu_ref(vrms: f64) {
