@@ -1,3 +1,14 @@
+> [!IMPORTANT]
+> **This repository is deprecated and archived.** Development continues in
+> **[ac2](https://github.com/mkovero/ac2)** — an open-source (MIT) clean-slate rewrite focused on
+> live PA tuning, for Linux, macOS and Windows.
+>
+> ac2 keeps `ac`'s proven ideas (MTW transfer function, smoothing, delay finder, scene/view
+> split, keyboard-first UI) and re-implements them without the legacy. What moved where and
+> what was left behind is listed in ac2's
+> [PLAN.md §1](https://github.com/mkovero/ac2/blob/main/PLAN.md#1-relation-to-ac).
+> Lab-bench features (THD, AES17 noise, DMM/GPIO, reports) are not carried over.
+
 # ac — audio measurement
 
 Bench measurement stack for audio: a positional CLI, a ZMQ measurement
